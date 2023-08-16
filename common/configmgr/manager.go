@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/gobee/types"
@@ -80,7 +81,8 @@ type ConfigManager struct {
 	updateInProgress *sync.RWMutex
 	// After the initial configuration is set, the rules defined by
 	// UpdateAllowed() will be enforced.
-	initialCfgSet bool
+	initialCfgSet   bool
+	decodeHookFuncs []mapstructure.DecodeHookFuncType
 }
 
 // New creates a new ConfigManager that is setup to parse configuration based on
@@ -89,9 +91,12 @@ type ConfigManager struct {
 // know anything about the actual application configuration, accepting instead
 // the Configurable interface which is used to unmarshal the provided
 // configuration sources into the specific type that represents the applications
-// configuration. If it fails to initialize the configuration it immediately
-// returns an error to prevent the app from starting with bad configuration.
-func New(flags *pflag.FlagSet, envVarPrefix string, config Configurable) (*ConfigManager, error) {
+// configuration. It optionally accepts one or more custom decode hook functions
+// that can be used to fully customize how Viper unmarshals the configuration
+// into the provided Configurable. If it fails to initialize the configuration
+// it immediately returns an error to prevent the app from starting with bad
+// configuration.
+func New(flags *pflag.FlagSet, envVarPrefix string, config Configurable, decodeHookFuncs ...mapstructure.DecodeHookFuncType) (*ConfigManager, error) {
 
 	var mutex sync.RWMutex
 
@@ -102,6 +107,7 @@ func New(flags *pflag.FlagSet, envVarPrefix string, config Configurable) (*Confi
 		updateSignal:     make(chan os.Signal, 1),
 		updateInProgress: &mutex,
 		initialCfgSet:    false,
+		decodeHookFuncs:  decodeHookFuncs,
 	}
 
 	err := cfgMgr.updateConfiguration()
@@ -343,10 +349,17 @@ func (cm *ConfigManager) updateConfiguration() error {
 		fmt.Printf("Dumping final merged configuration from Viper: \n\n%s\n\n", v.AllSettings())
 	}
 
+	// Optionally handle decoding custom formats.
+	// Adapted from: https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/.
+	var decoderOpts []viper.DecoderConfigOption
+	for _, hookFunc := range cm.decodeHookFuncs {
+		decoderOpts = append(decoderOpts, viper.DecodeHook(hookFunc))
+	}
+
 	// Get everything out of our temporary Viper store and unmarshall it into a
-	// new empty instance of our configurable.
+	// new empty instance of our configurable using decoderOpts if provided.
 	newConfig := cm.currentConfig.NewEmptyInstance()
-	if err := v.Unmarshal(newConfig); err != nil {
+	if err := v.Unmarshal(newConfig, decoderOpts...); err != nil {
 		return fmt.Errorf("rejecting configuration update: unable to parse configuration (check if the configuration valid): %w", err)
 	}
 
