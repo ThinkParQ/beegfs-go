@@ -180,6 +180,11 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 		return err
 	}
 
+	// If developer logging is enabled ignore the provided log level and set it to debug.
+	if newLogConfig.Developer {
+		newLevel = zapcore.DebugLevel
+	}
+
 	if lm.level.Level() != newLevel {
 		lm.level.SetLevel(newLevel)
 		log.Log(lm.level.Level(), "set log level", zap.Any("logLevel", lm.level.Level()))
