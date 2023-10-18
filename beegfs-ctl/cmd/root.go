@@ -1,11 +1,12 @@
 package cmd
 
 import (
-	"fmt"
+	"context"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-ctl/cmd/node"
+	"github.com/thinkparq/beegfs-ctl/internal"
 )
 
 var rootCmd = &cobra.Command{
@@ -13,9 +14,7 @@ var rootCmd = &cobra.Command{
 	Short: "The BeeGFS commandline control tool",
 	Long: `The BeeGFS commandline control tool blablablabla ablablablabalablabl
 	blabla`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Hello World")
-	},
+	SilenceUsage: true,
 }
 
 func init() {
@@ -23,8 +22,10 @@ func init() {
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, internal.CtxConfigKey{}, &internal.Config{ManagementAddr: "127.0.0.1:8010"})
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
 }

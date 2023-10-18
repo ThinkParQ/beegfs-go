@@ -1,12 +1,38 @@
 package internal
 
-// import "github.com/thinkparq/gobee/msg"
+import (
+	"context"
+	"fmt"
 
-type Node struct {
-	NodeID   uint32
-	NodeType uint8
+	"github.com/thinkparq/protobuf/go/beegfs"
+)
+
+// Get the complete list of nodes from the mananagement
+func GetNodeList(ctx context.Context) (*beegfs.GetNodeListResp, error) {
+	mgmtd, err := ManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := mgmtd.GetNodeList(ctx, &beegfs.GetNodeListReq{})
+	if err != nil {
+		return nil, fmt.Errorf("Requesting node list failed: %w\n", err)
+	}
+
+	return res, nil
 }
 
-func GetNodes() ([]Node, error) {
-	return []Node{{NodeID: 123, NodeType: 1}, {NodeID: 124, NodeType: 2}}, nil
+// Get info for the specified node from the management
+func GetNodeInfo(ctx context.Context, alias string) (*beegfs.GetNodeInfoResp, error) {
+	mgmtd, err := ManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := mgmtd.GetNodeInfo(ctx, &beegfs.GetNodeInfoReq{Id: &beegfs.GetNodeInfoReq_Alias{Alias: alias}})
+	if err != nil {
+		return nil, fmt.Errorf("Requesting node info failed: %w\n", err)
+	}
+
+	return res, nil
 }
