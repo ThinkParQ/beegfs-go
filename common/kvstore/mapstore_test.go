@@ -2,11 +2,16 @@ package kvstore
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
+)
+
+const (
+	benchmarkCacheSize = 1
 )
 
 func TestCreateAndGetEntry(t *testing.T) {
@@ -48,6 +53,34 @@ func TestCreateAndGetEntry(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 
 	// Repeated calls to delete an already deleted key are idempotent (no error):
+	err = ms.DeleteEntry("k1")
+	assert.NoError(t, err)
+
+	// Simulate deleting an entry that existed when we tried to take a lock,
+	// but the last lock holder already deleted it.
+	ms.cache["k1"] = &MSEntry[int]{
+		Value: map[string]int{
+			"innerKey1": 1,
+			"innerKey2": 2,
+		},
+		mu:        sync.Mutex{},
+		isDeleted: true,
+		isCached:  false,
+	}
+	err = ms.DeleteEntry("k1")
+	assert.NoError(t, err)
+
+	// Simulate deleting an entry that was cached when we tried to take a lock,
+	// but the last lock holder evicted it from the cache.
+	ms.cache["k1"] = &MSEntry[int]{
+		Value: map[string]int{
+			"innerKey1": 1,
+			"innerKey2": 2,
+		},
+		mu:        sync.Mutex{},
+		isDeleted: false,
+		isCached:  false,
+	}
 	err = ms.DeleteEntry("k1")
 	assert.NoError(t, err)
 }
@@ -121,4 +154,340 @@ func TestGetAndLockEntry(t *testing.T) {
 
 	// Sleep a bit to ensure the other goroutine gets a chance to finish:
 	time.Sleep(1 * time.Second)
+}
+
+type TestWorkResult struct {
+	RequestID  string
+	Status     int32
+	Message    string
+	AssignedTo string
+}
+
+var testWorkResult = TestWorkResult{
+	RequestID:  "1",
+	Status:     1,
+	Message:    "the quick brown fox jumped over the lazy dog",
+	AssignedTo: "node-xxx",
+}
+
+func BenchmarkCreateAndLockEntry(b *testing.B) {
+
+	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	requestID := 0
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+	b.StopTimer()
+}
+
+func BenchmarkGetAndLockEntry(b *testing.B) {
+
+	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	// We'll modify the request ID to ensure entries are actually updated.
+	requestID := 0
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.GetAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+	b.StopTimer()
+}
+
+func BenchmarkDeleteEntry(b *testing.B) {
+
+	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	// We'll modify the request ID to ensure entries are actually updated.
+	requestID := 0
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.GetAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := ms.DeleteEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+	}
+	b.StopTimer()
+}
+
+func BenchmarkConcurrent2GetEntry(b *testing.B) {
+	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	doneCh := make(chan bool, 2)
+	errCh := make(chan error, 2)
+	// We'll modify the request ID to ensure entries are actually updated.
+	requestID := 0
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
+		assert.NoError(b, err)
+		requestID += 1
+		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Value[testWorkResult.RequestID] = testWorkResult
+		err = release()
+		assert.NoError(b, err)
+	}
+
+	getFunc := func() {
+		for i := 0; i < b.N; i++ {
+			entry, release, err := ms.GetAndLockEntry(fmt.Sprint(i))
+			if err != nil {
+				errCh <- fmt.Errorf("unable to GetAndLockEntry: %w", err)
+				return
+			}
+			requestID += 1
+			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Value[testWorkResult.RequestID] = testWorkResult
+			err = release()
+			if err != nil {
+				errCh <- fmt.Errorf("unable to release entry: %w", err)
+				return
+			}
+		}
+		doneCh <- true
+	}
+
+	b.ResetTimer()
+	go getFunc()
+	go getFunc()
+	completed := 0
+	for completed < 2 {
+		select {
+		case err := <-errCh:
+			b.Fatalf("Received error: %v", err)
+		case <-doneCh:
+			completed++
+		}
+	}
+	b.StopTimer()
+}
+
+func BenchmarkConcurrentCreateGetDelete(b *testing.B) {
+	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	doneCh := make(chan bool, 2)
+	errCh := make(chan error, 2)
+
+	// First we have a leader function going ahead and creating new entries:
+	createFunc := func() {
+		// We'll modify the request ID to ensure entries are actually updated.
+		requestID := 0
+
+		var testWorkResult = TestWorkResult{
+			RequestID:  "1",
+			Status:     1,
+			Message:    "the quick brown fox jumped over the lazy dog",
+			AssignedTo: "node-xxx",
+		}
+
+		for i := 0; i < b.N; i++ {
+			entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
+			if err != nil {
+				errCh <- fmt.Errorf("unable to CreateAndLockEntry: %w", err)
+				return
+			}
+			requestID += 1
+			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Value[testWorkResult.RequestID] = testWorkResult
+			err = release()
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
+		doneCh <- true
+	}
+
+	// Then we have a follower function trailing behind and deleting those entries.
+	// We first get the entry so we can verify it actually exists before deleting it.
+	// This is because delete doesn't return an error if the entry doesn't exist.
+	deleteFunc := func() {
+		for i := 0; i < b.N; i++ {
+			// If the entry doesn't exist yet sleep a bit to give create time to get ahead.
+		retryLoop:
+			for {
+				_, release, err := ms.GetAndLockEntry(fmt.Sprint(i))
+				if err == badger.ErrKeyNotFound || err == ErrEntryAlreadyDeleted {
+					time.Sleep(10 * time.Millisecond)
+					continue retryLoop
+				}
+				if err != nil {
+					errCh <- fmt.Errorf("unable to GetAndLockEntry: %w", err)
+					return
+				}
+				err = release()
+				if err != nil {
+					errCh <- err
+					return
+				}
+				err = ms.DeleteEntry(fmt.Sprint(i))
+				if err != nil {
+					errCh <- fmt.Errorf("unable to delete entry: %w", err)
+					return
+				}
+				break
+			}
+		}
+		doneCh <- true
+	}
+
+	b.ResetTimer()
+	go createFunc()
+	go deleteFunc()
+	completed := 0
+	for completed < 2 {
+		select {
+		case err := <-errCh:
+			b.Fatalf("Received error: %v", err)
+		case <-doneCh:
+			completed++
+		}
+	}
+	b.StopTimer()
+}
+
+func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
+	ms1, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	ms2, closeDB2, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer closeDB2()
+
+	doneCh := make(chan bool, 4)
+	errCh := make(chan error, 4)
+
+	// First we have a leader function going ahead and creating new entries:
+	createFunc := func(db *MapStore[TestWorkResult]) {
+		// We'll modify the request ID to ensure entries are actually updated.
+		requestID := 0
+
+		var testWorkResult = TestWorkResult{
+			RequestID:  "1",
+			Status:     1,
+			Message:    "the quick brown fox jumped over the lazy dog",
+			AssignedTo: "node-xxx",
+		}
+
+		for i := 0; i < b.N; i++ {
+			entry, release, err := db.CreateAndLockEntry(fmt.Sprint(i))
+			if err != nil {
+				errCh <- fmt.Errorf("unable to CreateAndLockEntry: %w", err)
+				return
+			}
+			requestID += 1
+			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Value[testWorkResult.RequestID] = testWorkResult
+			err = release()
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
+		doneCh <- true
+	}
+
+	// Then we have a follower function trailing behind and deleting those entries.
+	// We first get the entry so we can verify it actually exists before deleting it.
+	// This is because delete doesn't return an error if the entry doesn't exist.
+	deleteFunc := func(db *MapStore[TestWorkResult]) {
+		for i := 0; i < b.N; i++ {
+			// If the entry doesn't exist yet sleep a bit to give create time to get ahead.
+		retryLoop:
+			for {
+				_, release, err := db.GetAndLockEntry(fmt.Sprint(i))
+				if err == badger.ErrKeyNotFound || err == ErrEntryAlreadyDeleted {
+					time.Sleep(10 * time.Millisecond)
+					continue retryLoop
+				}
+				if err != nil {
+					errCh <- fmt.Errorf("unable to GetAndLockEntry: %w", err)
+					return
+				}
+				err = release()
+				if err != nil {
+					errCh <- err
+					return
+				}
+				err = db.DeleteEntry(fmt.Sprint(i))
+				if err != nil {
+					errCh <- fmt.Errorf("unable to delete entry: %w", err)
+					return
+				}
+				break
+			}
+		}
+		doneCh <- true
+	}
+
+	b.ResetTimer()
+	go createFunc(ms1)
+	go deleteFunc(ms1)
+	go createFunc(ms2)
+	go deleteFunc(ms2)
+	completed := 0
+	for completed < 4 {
+		select {
+		case err := <-errCh:
+			b.Fatalf("Received error: %v", err)
+		case <-doneCh:
+			completed++
+		}
+	}
+	b.StopTimer()
 }
