@@ -2,6 +2,8 @@ package kvstore
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +24,9 @@ func TestCreateAndGetEntry(t *testing.T) {
 
 	entry, release, err := ms.CreateAndLockEntry("k1")
 	assert.NoError(t, err)
+	entry.Metadata = map[string]string{
+		"path": "/foo/bar",
+	}
 	entry.Value = map[string]int{
 		"innerKey1": 1,
 		"innerKey2": 2,
@@ -35,11 +40,15 @@ func TestCreateAndGetEntry(t *testing.T) {
 	// Verify we can get the entry:
 	entry, release, err = ms.GetAndLockEntry("k1")
 	assert.NoError(t, err)
-	expectedMap := map[string]int{
+	expectedMetaMap := map[string]string{
+		"path": "/foo/bar",
+	}
+	expectedValueMap := map[string]int{
 		"innerKey1": 1,
 		"innerKey2": 2,
 	}
-	assert.Equal(t, expectedMap, entry.Value)
+	assert.Equal(t, expectedMetaMap, entry.Metadata)
+	assert.Equal(t, expectedValueMap, entry.Value)
 	assert.NoError(t, release())
 
 	// Verify we can delete the entry:
@@ -58,7 +67,10 @@ func TestCreateAndGetEntry(t *testing.T) {
 
 	// Simulate deleting an entry that existed when we tried to take a lock,
 	// but the last lock holder already deleted it.
-	ms.cache["k1"] = &MSEntry[int]{
+	ms.cache["k1"] = &CacheEntry[int]{
+		Metadata: map[string]string{
+			"path": "/foo/bar",
+		},
 		Value: map[string]int{
 			"innerKey1": 1,
 			"innerKey2": 2,
@@ -72,7 +84,10 @@ func TestCreateAndGetEntry(t *testing.T) {
 
 	// Simulate deleting an entry that was cached when we tried to take a lock,
 	// but the last lock holder evicted it from the cache.
-	ms.cache["k1"] = &MSEntry[int]{
+	ms.cache["k1"] = &CacheEntry[int]{
+		Metadata: map[string]string{
+			"path": "/foo/bar",
+		},
 		Value: map[string]int{
 			"innerKey1": 1,
 			"innerKey2": 2,
@@ -83,6 +98,73 @@ func TestCreateAndGetEntry(t *testing.T) {
 	}
 	err = ms.DeleteEntry("k1")
 	assert.NoError(t, err)
+}
+
+func TestGetEntry(t *testing.T) {
+	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	assert.NoError(t, err)
+	defer closeDB()
+
+	entry, release, err := ms.CreateAndLockEntry("k1")
+	assert.NoError(t, err)
+	entry.Metadata = map[string]string{
+		"path": "/foo/bar",
+	}
+	entry.Value = map[string]int{
+		"innerKey1": 1,
+		"innerKey2": 2,
+	}
+	assert.NoError(t, release())
+
+	readOnlyEntry, err := ms.GetEntry("k1")
+	assert.NoError(t, err)
+	expectedMetaMap := map[string]string{
+		"path": "/foo/bar",
+	}
+	expectedValueMap := map[string]int{
+		"innerKey1": 1,
+		"innerKey2": 2,
+	}
+	assert.Equal(t, expectedMetaMap, readOnlyEntry.Metadata)
+	assert.Equal(t, expectedValueMap, readOnlyEntry.Value)
+}
+
+func TestGetEntries(t *testing.T) {
+	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	assert.NoError(t, err)
+	defer closeDB()
+
+	var expectedOrder []string
+
+	for i := 0; i <= 100; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprintf("/foo/%d", i))
+		assert.NoError(t, err)
+		entry.Metadata = map[string]string{
+			"path": fmt.Sprintf("/foo/%d", i),
+		}
+		entry.Value = map[string]int{
+			"innerKey1": i,
+		}
+		assert.NoError(t, release())
+		expectedOrder = append(expectedOrder, fmt.Sprint(i))
+	}
+
+	sort.Strings(expectedOrder)
+
+	entries, err := ms.GetEntries("/foo")
+	assert.NoError(t, err)
+
+	for key, entry := range entries {
+		assert.Equal(t, "/foo/"+expectedOrder[key], entry.Key)
+		assert.Equal(t, "/foo/"+expectedOrder[key], entry.Entry.Metadata["path"])
+		expectedVal, err := strconv.Atoi(expectedOrder[key])
+		assert.NoError(t, err)
+		assert.Equal(t, expectedVal, entry.Entry.Value["innerKey1"])
+	}
+
+	entries, err = ms.GetEntries("/bar")
+	assert.NoError(t, err)
+	assert.Len(t, entries, 0)
 }
 
 func TestAutomaticCacheEviction(t *testing.T) {
@@ -109,6 +191,12 @@ func TestAutomaticCacheEviction(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, map[string]int{fmt.Sprintf("innerKey%d_1", i): 1, fmt.Sprintf("innerKey%d_2", i): 2}, entry.Value)
 	}
+
+	// Verify we can get an entry we know isn't cached:
+	entry, release, err := ms.GetAndLockEntry("4")
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]int{"innerKey4_1": 1, "innerKey4_2": 2}, entry.Value)
+	assert.NoError(t, release())
 }
 
 func TestGetAndLockEntry(t *testing.T) {
@@ -184,6 +272,7 @@ func BenchmarkCreateAndLockEntry(b *testing.B) {
 		assert.NoError(b, err)
 		requestID += 1
 		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Metadata["path"] = "/foo/bar"
 		entry.Value[testWorkResult.RequestID] = testWorkResult
 		err = release()
 		assert.NoError(b, err)
@@ -205,6 +294,7 @@ func BenchmarkGetAndLockEntry(b *testing.B) {
 		assert.NoError(b, err)
 		requestID += 1
 		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Metadata["path"] = "/foo/bar"
 		entry.Value[testWorkResult.RequestID] = testWorkResult
 		err = release()
 		assert.NoError(b, err)
@@ -216,6 +306,7 @@ func BenchmarkGetAndLockEntry(b *testing.B) {
 		assert.NoError(b, err)
 		requestID += 1
 		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Metadata["path"] = "/foo/bar"
 		entry.Value[testWorkResult.RequestID] = testWorkResult
 		err = release()
 		assert.NoError(b, err)
@@ -237,16 +328,7 @@ func BenchmarkDeleteEntry(b *testing.B) {
 		assert.NoError(b, err)
 		requestID += 1
 		testWorkResult.RequestID = fmt.Sprint(requestID)
-		entry.Value[testWorkResult.RequestID] = testWorkResult
-		err = release()
-		assert.NoError(b, err)
-	}
-
-	for i := 0; i < b.N; i++ {
-		entry, release, err := ms.GetAndLockEntry(fmt.Sprint(i))
-		assert.NoError(b, err)
-		requestID += 1
-		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Metadata["path"] = "/foo/bar"
 		entry.Value[testWorkResult.RequestID] = testWorkResult
 		err = release()
 		assert.NoError(b, err)
@@ -275,6 +357,7 @@ func BenchmarkConcurrent2GetEntry(b *testing.B) {
 		assert.NoError(b, err)
 		requestID += 1
 		testWorkResult.RequestID = fmt.Sprint(requestID)
+		entry.Metadata["path"] = "/foo/bar"
 		entry.Value[testWorkResult.RequestID] = testWorkResult
 		err = release()
 		assert.NoError(b, err)
@@ -289,6 +372,7 @@ func BenchmarkConcurrent2GetEntry(b *testing.B) {
 			}
 			requestID += 1
 			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Metadata["path"] = "/foo/bar"
 			entry.Value[testWorkResult.RequestID] = testWorkResult
 			err = release()
 			if err != nil {
@@ -342,6 +426,7 @@ func BenchmarkConcurrentCreateGetDelete(b *testing.B) {
 			}
 			requestID += 1
 			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Metadata["path"] = "/foo/bar"
 			entry.Value[testWorkResult.RequestID] = testWorkResult
 			err = release()
 			if err != nil {
@@ -432,6 +517,7 @@ func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
 			}
 			requestID += 1
 			testWorkResult.RequestID = fmt.Sprint(requestID)
+			entry.Metadata["path"] = "/foo/bar"
 			entry.Value[testWorkResult.RequestID] = testWorkResult
 			err = release()
 			if err != nil {
@@ -489,5 +575,55 @@ func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
 			completed++
 		}
 	}
+	b.StopTimer()
+}
+
+func BenchmarkGetEntry(b *testing.B) {
+	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprintf("/foo/%d", i))
+		assert.NoError(b, err)
+		entry.Metadata = map[string]string{
+			"path": fmt.Sprintf("/foo/%d", i),
+		}
+		entry.Value = map[string]int{
+			"innerKey1": i,
+		}
+		assert.NoError(b, release())
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		entry, err := ms.GetEntry("/foo/" + strconv.Itoa(i))
+		assert.NoError(b, err)
+		assert.Equal(b, i, entry.Value["innerKey1"])
+	}
+	b.StopTimer()
+}
+
+func BenchmarkGetEntries(b *testing.B) {
+	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	assert.NoError(b, err)
+	defer closeDB()
+
+	for i := 0; i < b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry(fmt.Sprintf("/foo/%d", i))
+		assert.NoError(b, err)
+		entry.Metadata = map[string]string{
+			"path": fmt.Sprintf("/foo/%d", i),
+		}
+		entry.Value = map[string]int{
+			"innerKey1": i,
+		}
+		assert.NoError(b, release())
+	}
+
+	b.ResetTimer()
+	entries, err := ms.GetEntries("/foo")
+	assert.NoError(b, err)
+	assert.Len(b, entries, b.N)
 	b.StopTimer()
 }

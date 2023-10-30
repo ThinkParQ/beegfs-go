@@ -11,11 +11,18 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
-// MSEntry represents an in-memory entry in the MapStore.
-type MSEntry[T any] struct {
+// CacheEntry represents an in-memory entry in the MapStore.
+type CacheEntry[T any] struct {
+	// Metadata can optionally store arbitrary details about the entry. One use
+	// case is storing additional information needed to look up details about
+	// this entry in another MapStore. For example if one MapStore tracks
+	// map[fsPath]Job and other tracks map[jobID]jobResults the latter could
+	// store fsPath as metadata allowing reverse lookups of a Job based on the
+	// jobID.
+	Metadata map[string]string
 	// Store a map of strings to generic types in BadgerDB. This provides
 	// callers flexibility when using the MapStore. For example an entry with
-	// the key "/path" may want value to store a map[JobID]Job indicating all
+	// the key "/path" may want value to store a map[jobID]Job indicating all
 	// jobs running for that /path.
 	Value map[string]T
 	// The mutex should be locked when reading or writing to a particular entry.
@@ -40,6 +47,21 @@ type MSEntry[T any] struct {
 	isCached bool
 }
 
+// BadgerItem represents a key/value pair that is stored on-disk using BadgerDB.
+// It is typically used when directly returning multiple Badger entries.
+type BadgerItem[T any] struct {
+	Key   string
+	Entry *BadgerEntry[T]
+}
+
+// BadgerEntry is what is stored on-disk using BadgerDB for a particular entry.
+// It is the on-disk equivalent of a cache entry. It is used when
+// encoding/decoding the contents of an entry from BadgerDB.
+type BadgerEntry[T any] struct {
+	Metadata map[string]string
+	Value    map[string]T
+}
+
 // MapStore is an in memory representation of a map[string]map[string]T that
 // handles automatically loading and unloading entries as needed from BadgerDB
 // into memory to keep overall memory utilization in check.
@@ -56,8 +78,14 @@ type MapStore[T any] struct {
 	// cache size is kept in check by immediately evicting new entries if the
 	// maximum cache size is exceeded. This logic is because the oldest or least
 	// recently used items in the cache are actually most likely to be needed
-	// sooner since they represent the longest running jobs.
-	cache map[string]*MSEntry[T]
+	// sooner since they represent the longest running jobs. IMPORTANT: The
+	// cache is less about speeding up performance and mostly about providing
+	// additional ordering guarantees not provided directly by Badger. Notably
+	// we ensure multiple goroutines can update the same entry and the results
+	// from both goroutines will be reflected in the DB. The read only
+	// "GetEntry" methods provide the fastest access to the MapStore by avoiding
+	// locking at the cost of returning slightly outdated results.
+	cache map[string]*CacheEntry[T]
 	// cacheCapacity indicates the maximum number of entries in the cache.
 	// Note the actual cache size can be slightly higher than this additional
 	// cache space is allocated as needed for entries actively being accessed.
@@ -81,7 +109,7 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], f
 
 	return &MapStore[T]{
 		mu:            sync.RWMutex{},
-		cache:         make(map[string]*MSEntry[T]),
+		cache:         make(map[string]*CacheEntry[T]),
 		cacheCapacity: cacheCapacity,
 		db:            db,
 	}, func() { db.Close() }, nil
@@ -118,7 +146,7 @@ func newMapStoreForTesting[T any](tempDBPathBase string, cacheCapacity int) (*Ma
 // using it. Once the lock is released the caller SHOULD NOT reuse the pointer
 // to the entry and best practice would be to immediately set it to nil to
 // prevent reuse and ensure it can be garbage collected.
-func (s *MapStore[T]) CreateAndLockEntry(key string) (*MSEntry[T], func() error, error) {
+func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func() error, error) {
 
 	// First verify the in-memory MapStore and database don't already
 	// have an entry for key. If they do refuse to create a new entry.
@@ -142,8 +170,9 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*MSEntry[T], func() error,
 		return nil, nil, fmt.Errorf("%w: (probably the caller is not setup to prevent race conditions)", ErrEntryAlreadyExistsInDB)
 	}
 
-	newEntry := &MSEntry[T]{
+	newEntry := &CacheEntry[T]{
 		mu:        sync.Mutex{},
+		Metadata:  make(map[string]string),
 		Value:     make(map[string]T),
 		isDeleted: false,
 		isCached:  true,
@@ -166,10 +195,10 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*MSEntry[T], func() error,
 // caller SHOULD NOT reuse the pointer to the entry and best practice would be
 // to immediately set it to nil to prevent reuse and ensure it can be garbage
 // collected.
-func (s *MapStore[T]) GetAndLockEntry(key string) (*MSEntry[T], func() error, error) {
+func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func() error, error) {
 
 	// First see if there if there is already an entry in the cache for key:
-	var entry *MSEntry[T]
+	var entry *CacheEntry[T]
 	for {
 		s.mu.RLock()
 		var ok bool
@@ -216,6 +245,76 @@ func (s *MapStore[T]) GetAndLockEntry(key string) (*MSEntry[T], func() error, er
 		return s.GetAndLockEntry(key)
 	}
 	return entry, s.commitAndReleaseEntry(key, entry), nil
+}
+
+// GetEntry is used for read only access to the database. It returns a copy of
+// the entry specified by key, or a badger.ErrKeyNotFound if it does not exist.
+// It avoids lock contention by bypassing the cache and always reading directly
+// from the database. It is thread-safe because Badger provides transactional
+// guarantees, however it can return out-of-date results if writes happens after
+// the transaction to get the entry was already created.
+func (s *MapStore[T]) GetEntry(key string) (*BadgerEntry[T], error) {
+
+	var entryToGet = &BadgerEntry[T]{}
+
+	if err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+		err = item.Value(func(val []byte) error {
+			dec := gob.NewDecoder(bytes.NewReader(val))
+			err := dec.Decode(&entryToGet)
+			return err
+		})
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return entryToGet, nil
+}
+
+// GetEntries is used for read only access to the database. It returns a copy of
+// all entries whose keys match the specified prefix. Entries are returned in
+// byte-wise lexicographical sorted order using a slice of BadgerItems. Each
+// item contain the key and contents of a single entry. If no entries match it
+// will return an empty slice. An error will only returned if there was a
+// problem reading from the database. It is thread-safe because Badger provides
+// transactional guarantees, however it can return out-of-date results if writes
+// happens after the transaction to get the entry was already created.
+func (s *MapStore[T]) GetEntries(keyPrefix string) ([]*BadgerItem[T], error) {
+
+	badgerItems := make([]*BadgerItem[T], 0)
+
+	if err := s.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		prefix := []byte(keyPrefix)
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			err := item.Value(func(val []byte) error {
+				var entryToGet = &BadgerEntry[T]{}
+				dec := gob.NewDecoder(bytes.NewReader(val))
+				err := dec.Decode(&entryToGet)
+				if err != nil {
+					return err
+				}
+				badgerItem := &BadgerItem[T]{
+					Key:   string(item.KeyCopy(nil)),
+					Entry: entryToGet,
+				}
+				badgerItems = append(badgerItems, badgerItem)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return badgerItems, nil
 }
 
 // DeleteEntry removes the entry for the specified key from the map. To ensure
@@ -288,7 +387,7 @@ func (s *MapStore[T]) DeleteEntry(key string) error {
 // release the lock. This ensures the caller is always granted exclusive access
 // to the newly loaded entry. If the entry is not found in the database then an
 // badger.ErrKeyNotFound error will be returned.
-func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() error, error) {
+func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func() error, error) {
 
 	for {
 		// First lock the MapStore then double check the entry isn't already cached
@@ -313,7 +412,7 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() er
 		}
 		break
 	}
-	newEntry := &MSEntry[T]{
+	newEntry := &CacheEntry[T]{
 		mu:        sync.Mutex{},
 		isDeleted: false,
 		isCached:  true,
@@ -324,7 +423,7 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() er
 	// Reading from the DB could be expensive, we don't want to leave the mutex locked.
 	s.mu.Unlock()
 
-	var value = make(map[string]T)
+	var entryToGet = &BadgerEntry[T]{}
 
 	if err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
@@ -333,7 +432,7 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() er
 		}
 		err = item.Value(func(val []byte) error {
 			dec := gob.NewDecoder(bytes.NewReader(val))
-			err := dec.Decode(&value)
+			err := dec.Decode(&entryToGet)
 			return err
 		})
 		return err
@@ -356,7 +455,8 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() er
 		return nil, nil, err
 	}
 
-	newEntry.Value = value
+	newEntry.Metadata = entryToGet.Metadata
+	newEntry.Value = entryToGet.Value
 	return newEntry, s.commitAndReleaseEntry(key, newEntry), nil
 }
 
@@ -364,7 +464,7 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*MSEntry[T], func() er
 // in-memory entry to the database then release the lock on the entry. If the
 // cache is at capacity and no other goroutines are waiting on this entry it
 // will automatically evict the entry from the cache once the DB is updated.
-func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *MSEntry[T]) func() error {
+func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *CacheEntry[T]) func() error {
 
 	return func() error {
 		defer entry.mu.Unlock()
@@ -372,7 +472,12 @@ func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *MSEntry[T]) func(
 		var valueBuf bytes.Buffer
 		enc := gob.NewEncoder(&valueBuf)
 
-		if err := enc.Encode(entry.Value); err != nil {
+		entryToStore := BadgerEntry[T]{
+			Metadata: entry.Metadata,
+			Value:    entry.Value,
+		}
+
+		if err := enc.Encode(entryToStore); err != nil {
 			return err
 		}
 
