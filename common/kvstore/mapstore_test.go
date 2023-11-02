@@ -2,6 +2,7 @@ package kvstore
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -10,17 +11,43 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
 	benchmarkCacheSize = 1
+	badgerTestDir      = "/tmp"
 )
+
+// Helper function to create a temporary path for testing under the provided
+// path. Returns the full path that should be used for BadgerDB and a function
+// that should be called (usually with defer) to cleanup after the test. Will
+// fail the test if the cleanup function encounters any errors
+func tempPathForTesting(path string) (string, func(t require.TestingT), error) {
+	tempDBPath, err := os.MkdirTemp(path, "mapStoreTestMode")
+	if err != nil {
+		return "", nil, err
+	}
+
+	cleanup := func(t require.TestingT) {
+		require.NoError(t, os.RemoveAll(tempDBPath), "error cleaning up after test")
+	}
+
+	return tempDBPath, cleanup, nil
+
+}
 
 func TestCreateAndGetEntry(t *testing.T) {
 
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
 	assert.NoError(t, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
 
 	entry, release, err := ms.CreateAndLockEntry("k1")
 	assert.NoError(t, err)
@@ -100,10 +127,81 @@ func TestCreateAndGetEntry(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestGetEntry(t *testing.T) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+func TestGetEntryAndUpdateFlag(t *testing.T) {
+
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
 	assert.NoError(t, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	entry, release, err := ms.CreateAndLockEntry("k1")
+	assert.NoError(t, err)
+	entry.Metadata = map[string]string{
+		"path": "/foo/bar",
+	}
+	entry.Value = map[string]int{
+		"innerKey1": 1,
+		"innerKey2": 2,
+	}
+
+	assert.NoError(t, release(UpdateOnly))
+	// If we call release with the UpdateOnly flag we should still hold the lock
+	// on the entry (so trying the lock should fail):
+	assert.False(t, entry.mu.TryLock())
+	// A subsequent release should not return an error:
+	assert.NoError(t, release())
+	// And now the entry is unlocked:
+	assert.True(t, entry.mu.TryLock())
+}
+
+func TestGetEntryAndDeleteFlag(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	entry, release, err := ms.CreateAndLockEntry("k1")
+	assert.NoError(t, err)
+	entry.Metadata = map[string]string{
+		"path": "/foo/bar",
+	}
+	entry.Value = map[string]int{
+		"innerKey1": 1,
+		"innerKey2": 2,
+	}
+
+	assert.NoError(t, release())
+
+	// Get the entry but set the delete flag when releasing:
+	_, release, err = ms.GetAndLockEntry("k1")
+	assert.NoError(t, err)
+	assert.NoError(t, release([]CommitFlag{DeleteEntry}...))
+
+	// Verify the entry was fully deleted from the cache+DB and we get the correct error:
+	_, _, err = ms.GetAndLockEntry("k1")
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+}
+
+func TestGetEntry(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
 
 	entry, release, err := ms.CreateAndLockEntry("k1")
 	assert.NoError(t, err)
@@ -130,9 +228,15 @@ func TestGetEntry(t *testing.T) {
 }
 
 func TestGetEntries(t *testing.T) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
 	assert.NoError(t, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
 
 	var expectedOrder []string
 
@@ -168,9 +272,15 @@ func TestGetEntries(t *testing.T) {
 }
 
 func TestAutomaticCacheEviction(t *testing.T) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 3)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 3)
 	assert.NoError(t, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
 
 	for i := 0; i <= 5; i++ {
 		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
@@ -200,9 +310,15 @@ func TestAutomaticCacheEviction(t *testing.T) {
 }
 
 func TestGetAndLockEntry(t *testing.T) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 1)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 1)
 	assert.NoError(t, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
 
 	// First fill up the database:
 	_, release, err := ms.CreateAndLockEntry("foo")
@@ -259,10 +375,15 @@ var testWorkResult = TestWorkResult{
 }
 
 func BenchmarkCreateAndLockEntry(b *testing.B) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
 
-	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	requestID := 0
 
@@ -281,10 +402,15 @@ func BenchmarkCreateAndLockEntry(b *testing.B) {
 }
 
 func BenchmarkGetAndLockEntry(b *testing.B) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
 
-	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	// We'll modify the request ID to ensure entries are actually updated.
 	requestID := 0
@@ -315,10 +441,15 @@ func BenchmarkGetAndLockEntry(b *testing.B) {
 }
 
 func BenchmarkDeleteEntry(b *testing.B) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
 
-	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	// We'll modify the request ID to ensure entries are actually updated.
 	requestID := 0
@@ -343,9 +474,15 @@ func BenchmarkDeleteEntry(b *testing.B) {
 }
 
 func BenchmarkConcurrent2GetEntry(b *testing.B) {
-	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	doneCh := make(chan bool, 2)
 	errCh := make(chan error, 2)
@@ -399,9 +536,15 @@ func BenchmarkConcurrent2GetEntry(b *testing.B) {
 }
 
 func BenchmarkConcurrentCreateGetDelete(b *testing.B) {
-	ms, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	doneCh := make(chan bool, 2)
 	errCh := make(chan error, 2)
@@ -486,13 +629,25 @@ func BenchmarkConcurrentCreateGetDelete(b *testing.B) {
 }
 
 func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
-	ms1, closeDB, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
-	assert.NoError(b, err)
-	defer closeDB()
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
 
-	ms2, closeDB2, err := newMapStoreForTesting[TestWorkResult]("/tmp", benchmarkCacheSize)
+	ms1, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
-	defer closeDB2()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
+
+	path2, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms2, closeDB2, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path2), benchmarkCacheSize)
+	assert.NoError(b, err)
+	defer func() {
+		assert.NoError(b, closeDB2())
+	}()
 
 	doneCh := make(chan bool, 4)
 	errCh := make(chan error, 4)
@@ -579,9 +734,15 @@ func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
 }
 
 func BenchmarkGetEntry(b *testing.B) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	for i := 0; i < b.N; i++ {
 		entry, release, err := ms.CreateAndLockEntry(fmt.Sprintf("/foo/%d", i))
@@ -605,9 +766,15 @@ func BenchmarkGetEntry(b *testing.B) {
 }
 
 func BenchmarkGetEntries(b *testing.B) {
-	ms, closeDB, err := newMapStoreForTesting[int]("/tmp", 10)
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
 	assert.NoError(b, err)
-	defer closeDB()
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
 
 	for i := 0; i < b.N; i++ {
 		entry, release, err := ms.CreateAndLockEntry(fmt.Sprintf("/foo/%d", i))

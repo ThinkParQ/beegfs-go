@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -98,13 +97,20 @@ type MapStore[T any] struct {
 }
 
 // NewMapStore attempts to initialize a MapStore backed by a database at dbPath.
-// It returns an pointer to the MapStore and a function that should be called
-// to close the database when the MapStore is no longer needed.
-func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], func(), error) {
+// It returns an pointer to the MapStore and a function that should be called to
+// close the database when the MapStore is no longer needed. Optionally testMode
+// can be set which will use the provided directory as a base (for example /tmp)
+// and generate a unique sub-directory that will be automatically cleaned up
+// when the function to close the DB is called.
+func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], func() error, error) {
 
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	closeFunc := func() error {
+		return db.Close()
 	}
 
 	return &MapStore[T]{
@@ -112,30 +118,7 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], f
 		cache:         make(map[string]*CacheEntry[T]),
 		cacheCapacity: cacheCapacity,
 		db:            db,
-	}, func() { db.Close() }, nil
-}
-
-// newMapStoreForTesting creates a new MapStore with a database at
-// tempDBPathBase (e.g., `/tmp`) under a unique directory allowing it to be
-// called simultaneously from multiple goroutines. It returns a pointer to the
-// MapStore and a function that should be called to both close the database and
-// cleanup the temporary directory structure when the test completes.
-func newMapStoreForTesting[T any](tempDBPathBase string, cacheCapacity int) (*MapStore[T], func(), error) {
-
-	tempDBPath, err := os.MkdirTemp(tempDBPathBase, "mapstoretests")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	opts := badger.DefaultOptions(tempDBPath)
-	opts.Logger = nil
-
-	mapStore, closeMapStore, err := NewMapStore[T](opts, cacheCapacity)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return mapStore, func() { closeMapStore(); os.RemoveAll(tempDBPath) }, nil
+	}, closeFunc, nil
 }
 
 // CreateAndLockEntry() creates a new entry in the MapStore for the provided
@@ -464,6 +447,16 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func()
 // in-memory entry to the database then release the lock on the entry. If the
 // cache is at capacity and no other goroutines are waiting on this entry it
 // will automatically evict the entry from the cache once the DB is updated.
+// IMPORTANT: Ensure to actually check the error and not silently discard it,
+// for example by calling this using a defer without extra handling.
+// For example this is a common way to handle this:
+//
+//	defer func() {
+//		err := commitAndReleaseEntry()
+//		if err != nil {
+//			log.Error("unable to release entry", zap.Error(err))
+//		}
+//	}()
 func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *CacheEntry[T]) func() error {
 
 	return func() error {
