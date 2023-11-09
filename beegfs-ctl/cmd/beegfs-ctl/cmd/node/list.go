@@ -1,0 +1,96 @@
+package node
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
+)
+
+// NOTE
+//
+// This file is meant as an example to create your own commands. Please follow the general
+// structure, but do not copy the excessive generic comments. Only write meaningful, command specific
+// comments.
+
+// Creates new list nodes command. Run when the command line tools structure is built.
+func newListCmd() *cobra.Command {
+	// In this case, cfg correspond perfectly with the command implementations config struct, so
+	// we just use it directly to store cfg. If this was not the case, e.g. the passed cfg might
+	// need some transformation, a separate struct can be used.
+	cfg := &node.GetNodeList_Config{}
+
+	cmd := &cobra.Command{
+		// The long form of the command
+		Use: "list",
+		// The short description of the command
+		Short: "List BeeGFS nodes",
+		// Called when the command is actually run
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Forward execution to its own function
+			return runListCmd(cmd, cfg)
+		},
+
+		// There are a lot more optional argument to give here if needed, look up the documentation.
+	}
+
+	// Add flags to the command
+	cmd.Flags().BoolVar(&cfg.IncludeAddrs, "withAddrs", false, "Also request the list of network addresses/interfaces the node should be reachable on")
+	cmd.Flags().BoolVar(&cfg.CheckReachability, "checkReachability", false, "Checks each node for being alive and responding to requests (from the local machine)")
+
+	return cmd
+}
+
+// Execute the list subcommand. This function is meant to process the user input, call the actual
+// command handler and process its result (e.g. format the output). The actual command handling code
+// shall be put under pkg/ctl with its own interface and called from here. This strict separation
+// allows the implementation of potential alternative frontends later.
+func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config) error {
+	// Execute the actual command work
+	nodes, err := node.GetNodeList(cmd.Context(), *cfg)
+	if err != nil {
+		return err
+	}
+
+	// Create a new tabwriter with fixed settings for spacings and so on. This should be usually
+	// used for table like output
+	w := cmdfmt.NewTableWriter(os.Stdout)
+	// The returned Writer must be flushed to actually output anything. We do so after we are done
+	// writing to it.
+	defer w.Flush()
+
+	// Print the tables header. Columns must end with a tabstop \t, including the last one.
+	fmt.Fprint(&w, "NodeID\tType\tAlias\tPort (BeeMsg)\tPort (gRPC)\t")
+	if cfg.CheckReachability {
+		fmt.Fprint(&w, "Reachable on\t")
+	}
+	if cfg.IncludeAddrs {
+		fmt.Fprint(&w, "Addresses\t")
+	}
+	fmt.Fprint(&w, "\n")
+
+	// Print node list
+	for _, node := range nodes {
+		// Print a line corresponding to the columns above
+		fmt.Fprintf(&w, "%d\t%s\t%s\t%d\t%s\t", node.Id, node.Type, node.Alias, node.BeemsgPort, "-")
+
+		// If checking nodes for reachability, print the address where the node was responding
+		if cfg.CheckReachability {
+			fmt.Fprintf(&w, "%s\t", node.ReachableOn)
+		}
+
+		// If we requested the nic list for each node, print the available addresses, separated by ,
+		if cfg.IncludeAddrs {
+			for _, n := range node.Addrs {
+				fmt.Fprintf(&w, "%s, ", n)
+			}
+			fmt.Fprint(&w, "\t")
+		}
+
+		fmt.Fprint(&w, "\n")
+	}
+
+	return nil
+}

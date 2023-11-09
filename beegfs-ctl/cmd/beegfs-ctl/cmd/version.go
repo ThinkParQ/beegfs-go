@@ -10,10 +10,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Prints the tools version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Hello World")
+		// TODO
+		fmt.Println("TODO")
 	},
-}
-
-func init() {
-	rootCmd.AddCommand(versionCmd)
 }
