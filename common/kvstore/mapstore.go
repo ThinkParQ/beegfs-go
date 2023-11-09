@@ -96,6 +96,22 @@ type MapStore[T any] struct {
 	db *badger.DB
 }
 
+// One or more CommitFlags can optionally be used to modify the behavior of
+// commitEntry(). Supported flags are defined as typed constants.
+type CommitFlag int
+
+const (
+	// Including the DeleteEntry flag when calling commitEntry() will
+	// delete the entry from BadgerDB and the cache before releasing the lock.
+	DeleteEntry CommitFlag = iota
+	// Including the UpdateOnly flag when calling commitEntry() will
+	// update the entry in BadgerDB, but not release the lock. This allows the
+	// caller to commit incremental updates to stable storage without giving
+	// up exclusive access to the entry. This is especially useful if other
+	// processes may use the read only GetEntry or GetEntries methods.
+	UpdateOnly
+)
+
 // NewMapStore attempts to initialize a MapStore backed by a database at dbPath.
 // It returns an pointer to the MapStore and a function that should be called to
 // close the database when the MapStore is no longer needed. Optionally testMode
@@ -129,15 +145,15 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], f
 // using it. Once the lock is released the caller SHOULD NOT reuse the pointer
 // to the entry and best practice would be to immediately set it to nil to
 // prevent reuse and ensure it can be garbage collected.
-func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func() error, error) {
+func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
 
 	// First verify the in-memory MapStore and database don't already
 	// have an entry for key. If they do refuse to create a new entry.
-	_, commitAndReleaseEntry, err := s.lockAndLoadEntryFromDB(key)
+	_, commitEntry, err := s.lockAndLoadEntryFromDB(key)
 	if err != nil && err != badger.ErrKeyNotFound {
 		return nil, nil, err // An unknown error occurred.
 	} else if err == nil {
-		commitAndReleaseEntry() // If we got a valid entry we must release it.
+		commitEntry() // If we got a valid entry we must release it.
 		return nil, nil, ErrEntryAlreadyExistsInDB
 	}
 
@@ -166,7 +182,7 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func() err
 	newEntry.mu.Lock()
 	s.cache[key] = newEntry
 
-	return newEntry, s.commitAndReleaseEntry(key, newEntry), nil
+	return newEntry, s.commitEntry(key, newEntry), nil
 }
 
 // GetAndLockEntry is used to get access to the MapStore entry for key. It first
@@ -178,7 +194,7 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func() err
 // caller SHOULD NOT reuse the pointer to the entry and best practice would be
 // to immediately set it to nil to prevent reuse and ensure it can be garbage
 // collected.
-func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func() error, error) {
+func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
 
 	// First see if there if there is already an entry in the cache for key:
 	var entry *CacheEntry[T]
@@ -189,7 +205,7 @@ func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func() error,
 		s.mu.RUnlock()
 		if !ok {
 			// If its not in the cache, see if we can load it from the database:
-			entry, commitAndReleaseEntry, err := s.lockAndLoadEntryFromDB(key)
+			entry, commitEntry, err := s.lockAndLoadEntryFromDB(key)
 			if err == ErrEntryAlreadyExistsInCache {
 				// It is possible another goroutine was trying to access this
 				// entry and loaded it into the cache before we could. Check
@@ -198,12 +214,12 @@ func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func() error,
 			} else if err != nil {
 				return nil, nil, err
 			}
-			return entry, commitAndReleaseEntry, nil
+			return entry, commitEntry, nil
 		}
 		break
 	}
 
-	// If another goroutine is accessing the entry, when it calls commitAndReleaseEntry()
+	// If another goroutine is accessing the entry, when it calls commitEntry()
 	// the entry may be evicted from the cache if we're over the cacheCapacity. To try and
 	// avoid having to reload the entry from disk before trying to lock, we can signal our
 	// intent to other goroutines by incrementing keepCached.
@@ -220,14 +236,15 @@ func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func() error,
 		return nil, nil, ErrEntryAlreadyDeleted
 	} else if !entry.isCached {
 		entry.mu.Unlock()
-		// TODO: Is it safe to use recursion here to retry getting the entry if there was a
-		// race condition and the entry was evicted from the cache before we could get at it?
-		// Likely under normal use this should never cause a problem unless there were two or
-		// more goroutines constantly trying to get the same entry (which probably indicates
-		// an upstream bug anyway) and the cache is at capacity.
+		// Use recursion here to retry getting the entry if there was a race
+		// condition and the entry was evicted from the cache before we could
+		// get at it. Likely under normal use this should never cause a problem
+		// unless there were two or more goroutines constantly trying to get the
+		// same entry (which probably indicates an upstream bug anyway) and the
+		// cache is at capacity.
 		return s.GetAndLockEntry(key)
 	}
-	return entry, s.commitAndReleaseEntry(key, entry), nil
+	return entry, s.commitEntry(key, entry), nil
 }
 
 // GetEntry is used for read only access to the database. It returns a copy of
@@ -307,10 +324,17 @@ func (s *MapStore[T]) GetEntries(keyPrefix string) ([]*BadgerItem[T], error) {
 // deleted flag on the entry informing other goroutines that may be trying to
 // lock the entry that it is no longer valid. It is idempotent so if delete is
 // called against an entry that was already deleted it will not return an error.
+//
+// Note for workflows that call GetAndLockEntry() to inspect and verify the
+// entry is safe to delete before calling DeleteEntry() the entry must be
+// released before calling DeleteEntry() or a deadlock will occur. Generally the
+// better option is to instead call commitEntry() with the DeleteEntry
+// CommitFlag set to delete the entry before releasing the lock ensuring nothing
+// else is able to modify the entry potentially resulting in data loss.
 func (s *MapStore[T]) DeleteEntry(key string) error {
 
 	// Note we can't reuse GetAndLockEntry() or lockAndLoadEntryFromDB() here
-	// otherwise the entry would just be recreated when commitAndReleaseEntry()
+	// otherwise the entry would just be recreated when commitEntry()
 	// was called.
 	deleteEntryFromDBFunc := func() error {
 		return s.db.Update(func(txn *badger.Txn) error {
@@ -370,7 +394,7 @@ func (s *MapStore[T]) DeleteEntry(key string) error {
 // release the lock. This ensures the caller is always granted exclusive access
 // to the newly loaded entry. If the entry is not found in the database then an
 // badger.ErrKeyNotFound error will be returned.
-func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func() error, error) {
+func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
 
 	for {
 		// First lock the MapStore then double check the entry isn't already cached
@@ -440,27 +464,87 @@ func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func()
 
 	newEntry.Metadata = entryToGet.Metadata
 	newEntry.Value = entryToGet.Value
-	return newEntry, s.commitAndReleaseEntry(key, newEntry), nil
+	return newEntry, s.commitEntry(key, newEntry), nil
 }
 
-// commitAndReleaseEntry is used to commit the value of an already locked
-// in-memory entry to the database then release the lock on the entry. If the
-// cache is at capacity and no other goroutines are waiting on this entry it
-// will automatically evict the entry from the cache once the DB is updated.
+// commitEntry is used to commit the value of an already locked in-memory entry
+// to the database. The behavior of commitEntry() can be adjusted by
+// providing one or more CommitFlags, for example to indicate the entry should
+// be deleted before releasing the lock. By default it commits then releases the
+// lock on the entry, but the caller can choose to only update the database and
+// keep the entry locked with the UpdateOnly flag. If commit is called after the
+// lock is released it will return an error.
+//
+// If the entry is released, the cache is at capacity and no other goroutines
+// are waiting on this entry it will automatically evict the entry from the
+// cache once the DB is updated.
+//
 // IMPORTANT: Ensure to actually check the error and not silently discard it,
-// for example by calling this using a defer without extra handling.
-// For example this is a common way to handle this:
+// for example by calling this using a defer without extra handling. For example
+// this is a common way to handle this:
 //
 //	defer func() {
-//		err := commitAndReleaseEntry()
-//		if err != nil {
-//			log.Error("unable to release entry", zap.Error(err))
-//		}
+//	    err := commitEntry()
+//	    if err != nil {
+//	        log.Error("unable to release entry", zap.Error(err))
+//	    }
 //	}()
-func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *CacheEntry[T]) func() error {
+func (s *MapStore[T]) commitEntry(key string, entry *CacheEntry[T]) func(flags ...CommitFlag) error {
 
-	return func() error {
-		defer entry.mu.Unlock()
+	lockReleased := false
+
+	return func(flags ...CommitFlag) error {
+
+		if lockReleased {
+			return ErrEntryLockAlreadyReleased
+		}
+
+		deleteEntry := false
+		updateOnly := false
+		for _, f := range flags {
+			switch f {
+			case DeleteEntry:
+				deleteEntry = true
+			case UpdateOnly:
+				updateOnly = true
+			}
+		}
+
+		if deleteEntry && updateOnly {
+			return fmt.Errorf("invalid combination of release flags specified, retry operation with corrected flags (cannot both delete and only update an entry)")
+		}
+
+		if !updateOnly {
+			// If there was some reason we want to allow the caller to retry the
+			// commit if there was an error, we could consider only setting this
+			// to true after a successful commit.
+			lockReleased = true
+			defer entry.mu.Unlock()
+		}
+
+		if deleteEntry {
+
+			if err := s.db.Update(func(txn *badger.Txn) error {
+				err := txn.Delete([]byte(key))
+				return err
+			}); err != nil {
+				return fmt.Errorf("unable to delete entry from DB, the cached entry may no longer match the database entry: %w", err)
+			}
+
+			entry.isDeleted = true
+			// This is unlikely, but it is possible whoever held the lock last on the
+			// entry evicted it from cache already. If this is the case we get a slight
+			// performance gain by not having to take a global lock and delete the entry
+			// from cache.
+			if !entry.isCached {
+				return nil
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			delete(s.cache, key)
+			entry.isCached = false
+			return nil
+		}
 
 		var valueBuf bytes.Buffer
 		enc := gob.NewEncoder(&valueBuf)
@@ -481,7 +565,7 @@ func (s *MapStore[T]) commitAndReleaseEntry(key string, entry *CacheEntry[T]) fu
 			return err
 		}
 
-		if len(s.cache) > s.cacheCapacity && entry.keepCached.Load() == 0 {
+		if !updateOnly && len(s.cache) > s.cacheCapacity && entry.keepCached.Load() == 0 {
 			entry.isCached = false
 			s.mu.Lock()
 			defer s.mu.Unlock()

@@ -214,6 +214,9 @@ func TestGetEntry(t *testing.T) {
 	}
 	assert.NoError(t, release())
 
+	// If we call release a second time we should get an error.
+	assert.ErrorIs(t, ErrEntryLockAlreadyReleased, release())
+
 	readOnlyEntry, err := ms.GetEntry("k1")
 	assert.NoError(t, err)
 	expectedMetaMap := map[string]string{
