@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.17.0
+	github.com/thinkparq/gobee v0.0.0-20230905202909-056f717280de
 	github.com/thinkparq/protobuf v0.0.0-20231106073835-d3d7f9e76aa7
 	google.golang.org/grpc v1.58.2
 )
@@ -24,7 +25,6 @@ require (
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/thinkparq/bee-remote v0.0.0-20230410182923-35922b590aff // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/net v0.15.0 // indirect
