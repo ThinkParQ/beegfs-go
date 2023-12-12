@@ -20,3 +20,7 @@ func Init(cmd *cobra.Command) {
 	//
 	// See here: https://github.com/ThinkParQ/beegfs-ctl/issues/5
 }
+
+func Cleanup() {
+	config.Cleanup()
+}

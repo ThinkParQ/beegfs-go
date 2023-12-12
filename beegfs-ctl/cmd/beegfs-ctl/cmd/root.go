@@ -28,13 +28,16 @@ cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est la
 	// Initialize global config
 	// Can be accessed at config.Config and passed to the ctl API
 	config.Init(cmd)
+	defer config.Cleanup()
 
 	// Add subcommands
 	cmd.AddCommand(versionCmd)
 	cmd.AddCommand(node.NewNodeCmd())
 
 	// Parse the given parameters and execute the selected command
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	err := cmd.ExecuteContext(context.Background())
+
+	if err != nil {
 		os.Exit(1)
 	}
 }

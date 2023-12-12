@@ -74,8 +74,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
-	s := beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)
-	nodeStore = &s
+	nodeStore := beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)
 
 	c, err := ManagementClient()
 	if err != nil {
@@ -119,4 +118,14 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	}
 
 	return nodeStore, nil
+}
+
+// Resets the global state and frees resources
+func Cleanup() {
+	if nodeStore != nil {
+		nodeStore.Cleanup()
+	}
+
+	globalConfig = Config{}
+	nodeStore = nil
 }
