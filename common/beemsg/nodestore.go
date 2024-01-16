@@ -25,6 +25,9 @@ type NodeStore struct {
 	// For selecting nodes by nodeID and type
 	uidByNodeId map[nodeIdAndType]int64
 
+	// The meta node which has the root inode
+	metaRootNode *Node
+
 	// Settings
 	connTimeout time.Duration
 	authSecret  int64
@@ -76,6 +79,37 @@ func (store *NodeStore) AddNode(node *Node) error {
 	store.uidByNodeId[nodeIdAndType{id: node.Id, typ: node.Type}] = node.Uid
 
 	return nil
+}
+
+// Set the meta root node.
+//
+// Must be a meta node present in the store.
+func (store *NodeStore) SetMetaRootNode(node *Node) error {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	// Make sure it is a meta node
+	if node.Type != Meta {
+		return fmt.Errorf("{node} is not a meta node")
+	}
+
+	// Make sure it is in the store
+	for _, v := range store.nodesByUid {
+		if node == v {
+			store.metaRootNode = node
+			return nil
+		}
+	}
+
+	return fmt.Errorf("{node} could not be found in store")
+}
+
+// Get the meta root node
+func (store *NodeStore) GetMetaRootNode() *Node {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	return store.metaRootNode
 }
 
 // Get a node by its UID

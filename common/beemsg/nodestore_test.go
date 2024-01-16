@@ -61,3 +61,26 @@ func TestAddAndGet(t *testing.T) {
 	_, err = store.getUidByAlias("invalid")
 	assert.Error(t, err)
 }
+
+func TestMetaRootNode(t *testing.T) {
+	store := NewNodeStore(1*time.Second, 0)
+	defer store.Cleanup()
+
+	assert.Nil(t, store.GetMetaRootNode(), "expect nil when no meta node set")
+
+	node1001 := &Node{Uid: 1001, Id: 1, Type: Meta, Alias: "meta1"}
+	nodeStorage := &Node{Uid: 2001, Id: 1, Type: Storage, Alias: "storage2"}
+
+	err := store.SetMetaRootNode(node1001)
+	assert.Error(t, err, "expect error for node not in store")
+
+	store.AddNode(nodeStorage)
+	err = store.SetMetaRootNode(nodeStorage)
+	assert.Error(t, err, "expect error for non meta node")
+
+	store.AddNode(node1001)
+	err = store.SetMetaRootNode(node1001)
+	assert.NoError(t, err)
+
+	assert.Equal(t, node1001, store.GetMetaRootNode())
+}
