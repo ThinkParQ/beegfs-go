@@ -78,7 +78,7 @@ type ConfigManager struct {
 	// updateInProgress is used to lock the configuration while an update is
 	// in progress. Without this spamming SIGHUP requests may result in
 	// unpredictable behavior.
-	updateInProgress *sync.RWMutex
+	updateInProgress sync.RWMutex
 	// After the initial configuration is set, the rules defined by
 	// UpdateAllowed() will be enforced.
 	initialCfgSet   bool
@@ -98,16 +98,13 @@ type ConfigManager struct {
 // configuration.
 func New(flags *pflag.FlagSet, envVarPrefix string, config Configurable, decodeHookFuncs ...mapstructure.DecodeHookFuncType) (*ConfigManager, error) {
 
-	var mutex sync.RWMutex
-
 	cfgMgr := &ConfigManager{
-		initialFlags:     flags,
-		envVarPrefix:     envVarPrefix,
-		currentConfig:    config,
-		updateSignal:     make(chan os.Signal, 1),
-		updateInProgress: &mutex,
-		initialCfgSet:    false,
-		decodeHookFuncs:  decodeHookFuncs,
+		initialFlags:    flags,
+		envVarPrefix:    envVarPrefix,
+		currentConfig:   config,
+		updateSignal:    make(chan os.Signal, 1),
+		initialCfgSet:   false,
+		decodeHookFuncs: decodeHookFuncs,
 	}
 
 	err := cfgMgr.updateConfiguration()
@@ -328,6 +325,8 @@ func (cm *ConfigManager) updateConfiguration() error {
 		if err := vFile.ReadInConfig(); err != nil {
 			if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 				return fmt.Errorf("rejecting configuration update: configuration file at '%s' was not found (check it exists and permissions are set correctly)", v.GetString("cfgFile"))
+			} else if _, ok := err.(viper.ConfigParseError); ok {
+				return fmt.Errorf("rejecting configuration update: error parsing configuration file at '%s': %w", v.GetString("cfgFile"), err)
 			}
 			return fmt.Errorf("rejecting configuration update: an unknown error occurred reading config file '%s' (check permissions): %w", v.GetString("cfgFile"), err)
 		}
