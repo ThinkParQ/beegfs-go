@@ -29,9 +29,12 @@ type Header struct {
 
 func NewHeader(msgID uint16) Header {
 	return Header{
-		MsgLen:    0xFFFFFFFF,
-		MsgPrefix: MsgPrefix,
-		MsgID:     msgID,
+		// MsgLen and MsgFeatureFlags are supposed to be overwritten after the body of the message
+		// has been serialized using the functions below.
+		MsgLen:          0xFFFFFFFF,
+		MsgFeatureFlags: 0xFFFF,
+		MsgPrefix:       MsgPrefix,
+		MsgID:           msgID,
 	}
 }
 
@@ -61,6 +64,7 @@ func (t *Header) Deserialize(sd *ser.SerDes) {
 	ser.DeserializeInt(sd, &t.MsgSeqDone)
 }
 
+// Sets the MsgLen field in the serialized header
 func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	// ensure this is actually a serialized header
 	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
@@ -68,6 +72,18 @@ func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	}
 
 	binary.LittleEndian.PutUint32(serHeader[0:4], msgLen)
+
+	return nil
+}
+
+// Sets the MsgFeatureFlags field in the serialized header
+func overwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
+	// ensure this is actually a serialized header
+	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
+		return fmt.Errorf("invalid header")
+	}
+
+	binary.LittleEndian.PutUint16(serHeader[4:6], msgFeatureFlags)
 
 	return nil
 }

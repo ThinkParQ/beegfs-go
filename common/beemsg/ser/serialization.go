@@ -17,9 +17,14 @@ type SerDes struct {
 	Errors          types.MultiError
 }
 
-// Create new (de-)serializer
-func NewSerDes(s []byte) SerDes {
-	return SerDes{Buf: *bytes.NewBuffer(s)}
+// Create new Serializer
+func NewSerializer() SerDes {
+	return SerDes{}
+}
+
+// Create new deserializer
+func NewDeserializer(s []byte, msgFeatureFlags uint16) SerDes {
+	return SerDes{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
 }
 
 // SERIALIZER

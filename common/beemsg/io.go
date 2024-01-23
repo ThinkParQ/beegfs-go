@@ -33,7 +33,7 @@ func goWithContext(ctx context.Context, f func() error) error {
 func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 	header := NewHeader(in.MsgId())
 
-	ser := ser.SerDes{}
+	ser := ser.NewSerializer()
 	header.Serialize(&ser)
 	in.Serialize(&ser)
 
@@ -44,6 +44,12 @@ func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 	// The actual serialized message length is only known after serialization of the body, so we
 	// overwrite the serialized header value with the actual length here
 	if err := overwriteMsgLen(ser.Buf.Bytes(), uint32(ser.Buf.Len())); err != nil {
+		return err
+	}
+
+	// MsgFeatureFlags is defined during serialization, therefore we overwrite the serialized header
+	// value here
+	if err := overwriteMsgFeatureFlags(ser.Buf.Bytes(), ser.MsgFeatureFlags); err != nil {
 		return err
 	}
 
@@ -78,7 +84,7 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 		return fmt.Errorf("reading msg failed: %w", err)
 	}
 
-	desHeader := ser.NewSerDes(bufHeader)
+	desHeader := ser.NewDeserializer(bufHeader, 0)
 	header.Deserialize(&desHeader)
 
 	if len(desHeader.Errors.Errors) > 0 {
@@ -101,7 +107,7 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 		return fmt.Errorf("reading msg failed: %w", err)
 	}
 
-	desMsg := ser.NewSerDes(bufMsg)
+	desMsg := ser.NewDeserializer(bufMsg, header.MsgFeatureFlags)
 	out.Deserialize(&desMsg)
 
 	if len(desMsg.Errors.Errors) > 0 {

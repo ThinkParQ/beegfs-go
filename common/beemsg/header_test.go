@@ -47,3 +47,20 @@ func TestOverwriteMsgLen(t *testing.T) {
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1234, binary.LittleEndian.Uint32(buf[0:4]))
 }
+
+func TestOverwriteMsgFeatureFlags(t *testing.T) {
+	// Invalid buffer (no header)
+	err := overwriteMsgFeatureFlags(make([]byte, 10), 1234)
+	assert.Error(t, err)
+
+	buf := make([]byte, HeaderLen)
+	err = overwriteMsgFeatureFlags(buf, 1234)
+	assert.Error(t, err)
+
+	// set the correct prefix
+	binary.LittleEndian.PutUint64(buf[8:16], MsgPrefix)
+
+	err = overwriteMsgFeatureFlags(buf, 1234)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[4:6]))
+}

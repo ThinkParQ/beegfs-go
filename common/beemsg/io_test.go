@@ -14,6 +14,9 @@ import (
 type testMsg struct {
 	fieldA uint32
 	fieldB []byte
+
+	// helper field for testing MsgFeatureFlags being correctly processed
+	flags uint16
 }
 
 func (msg *testMsg) MsgId() uint16 {
@@ -23,16 +26,20 @@ func (msg *testMsg) MsgId() uint16 {
 func (msg *testMsg) Serialize(sd *ser.SerDes) {
 	ser.SerializeInt(sd, msg.fieldA)
 	ser.SerializeCStr(sd, msg.fieldB, 0)
+
+	sd.MsgFeatureFlags = msg.flags
 }
 
 func (msg *testMsg) Deserialize(sd *ser.SerDes) {
 	ser.DeserializeInt(sd, &msg.fieldA)
 	ser.DeserializeCStr(sd, &msg.fieldB, 0)
+
+	msg.flags = sd.MsgFeatureFlags
 }
 
 // Test writing a message to a io.Writer and reading it from a io.Reader
 func TestReadWrite(t *testing.T) {
-	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}}
+	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}, flags: 50000}
 	buf := bytes.Buffer{}
 	out := testMsg{}
 	ctx := context.Background()
