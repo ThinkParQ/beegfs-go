@@ -61,12 +61,15 @@ func SerializeCStr(ser *SerDes, value []byte, alignTo uint) {
 	}
 
 	if alignTo != 0 {
-		padding := (uint(len(value)) + 1) % alignTo
+		// Total amount of bytes written for this CStr modulo alignTo - results in the number
+		// of pad bytes to skip due to alignment
+		padding := (uint(len(value)) + 4 + 1) % alignTo
+
 		if padding != 0 {
+			// Yes, this does actually not achieve alignment - but we have to mimic the C++ code
 			Zeroes(ser, alignTo-padding)
 		}
 	}
-
 }
 
 type seqSerializer struct {
@@ -171,8 +174,12 @@ func DeserializeCStr(des *SerDes, into *[]byte, alignTo uint) {
 	}
 
 	if alignTo != 0 {
-		padding := (uint(len) + 1) % alignTo
+		// Total amount of bytes read for this CStr modulo alignTo - results in the number
+		// of pad bytes to skip due to alignment
+		padding := (uint(len) + 4 + 1) % alignTo
+
 		if padding != 0 {
+			// Yes, this does actually not achieve alignment - but we have to mimic the C++ code
 			Skip(des, alignTo-padding)
 		}
 	}

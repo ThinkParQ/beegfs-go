@@ -67,6 +67,7 @@ func TestCStr(t *testing.T) {
 	SerializeCStr(&sd, []byte("Hello Go!"), 0)
 	SerializeCStr(&sd, []byte("Hello Go again!"), 4)
 	SerializeCStr(&sd, []byte("Hello Go again and again!"), 5)
+	SerializeCStr(&sd, []byte("Hello Go again and again!"), 8)
 
 	out := []byte{}
 
@@ -76,8 +77,33 @@ func TestCStr(t *testing.T) {
 	assert.Equal(t, []byte("Hello Go again!"), out)
 	DeserializeCStr(&sd, &out, 5)
 	assert.Equal(t, []byte("Hello Go again and again!"), out)
+	DeserializeCStr(&sd, &out, 8)
+	assert.Equal(t, []byte("Hello Go again and again!"), out)
 
 	assert.Empty(t, sd.Errors)
+}
+
+// Explicitly test the
+func TestCStrAlignment(t *testing.T) {
+	s1 := NewSerializer()
+	SerializeCStr(&s1, []byte{}, 1)
+	assert.Equal(t, 5, s1.Buf.Len())
+
+	s2 := NewSerializer()
+	SerializeCStr(&s2, []byte{}, 2)
+	assert.Equal(t, 6, s2.Buf.Len())
+
+	s3 := NewSerializer()
+	SerializeCStr(&s3, []byte("aa"), 7)
+	assert.Equal(t, 7, s3.Buf.Len())
+
+	s4 := NewSerializer()
+	SerializeCStr(&s4, []byte("aaa"), 7)
+	assert.Equal(t, 14, s4.Buf.Len())
+
+	s5 := NewSerializer()
+	SerializeCStr(&s5, []byte("aaaa"), 4)
+	assert.Equal(t, 12, s5.Buf.Len())
 }
 
 func TestNestedSeq(t *testing.T) {
