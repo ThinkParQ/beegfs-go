@@ -38,30 +38,30 @@ func NewHeader(msgID uint16) Header {
 	}
 }
 
-func (t *Header) Serialize(sd *beeserde.SerDes) {
-	beeserde.SerializeInt(sd, t.MsgLen)
-	beeserde.SerializeInt(sd, t.MsgFeatureFlags)
-	beeserde.SerializeInt(sd, t.MsgCompatFeatureFlags)
-	beeserde.SerializeInt(sd, t.MsgFlags)
-	beeserde.SerializeInt(sd, t.MsgPrefix)
-	beeserde.SerializeInt(sd, t.MsgID)
-	beeserde.SerializeInt(sd, t.MsgTargetID)
-	beeserde.SerializeInt(sd, t.MsgUserID)
-	beeserde.SerializeInt(sd, t.MsgSeq)
-	beeserde.SerializeInt(sd, t.MsgSeqDone)
+func (t *Header) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, t.MsgLen)
+	beeserde.SerializeInt(s, t.MsgFeatureFlags)
+	beeserde.SerializeInt(s, t.MsgCompatFeatureFlags)
+	beeserde.SerializeInt(s, t.MsgFlags)
+	beeserde.SerializeInt(s, t.MsgPrefix)
+	beeserde.SerializeInt(s, t.MsgID)
+	beeserde.SerializeInt(s, t.MsgTargetID)
+	beeserde.SerializeInt(s, t.MsgUserID)
+	beeserde.SerializeInt(s, t.MsgSeq)
+	beeserde.SerializeInt(s, t.MsgSeqDone)
 }
 
-func (t *Header) Deserialize(sd *beeserde.SerDes) {
-	beeserde.DeserializeInt(sd, &t.MsgLen)
-	beeserde.DeserializeInt(sd, &t.MsgFeatureFlags)
-	beeserde.DeserializeInt(sd, &t.MsgCompatFeatureFlags)
-	beeserde.DeserializeInt(sd, &t.MsgFlags)
-	beeserde.DeserializeInt(sd, &t.MsgPrefix)
-	beeserde.DeserializeInt(sd, &t.MsgID)
-	beeserde.DeserializeInt(sd, &t.MsgTargetID)
-	beeserde.DeserializeInt(sd, &t.MsgUserID)
-	beeserde.DeserializeInt(sd, &t.MsgSeq)
-	beeserde.DeserializeInt(sd, &t.MsgSeqDone)
+func (t *Header) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &t.MsgLen)
+	beeserde.DeserializeInt(d, &t.MsgFeatureFlags)
+	beeserde.DeserializeInt(d, &t.MsgCompatFeatureFlags)
+	beeserde.DeserializeInt(d, &t.MsgFlags)
+	beeserde.DeserializeInt(d, &t.MsgPrefix)
+	beeserde.DeserializeInt(d, &t.MsgID)
+	beeserde.DeserializeInt(d, &t.MsgTargetID)
+	beeserde.DeserializeInt(d, &t.MsgUserID)
+	beeserde.DeserializeInt(d, &t.MsgSeq)
+	beeserde.DeserializeInt(d, &t.MsgSeqDone)
 }
 
 // Sets the MsgLen field in the serialized header

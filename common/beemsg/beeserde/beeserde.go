@@ -9,22 +9,17 @@ import (
 	"github.com/thinkparq/gobee/types"
 )
 
-// Passed to the (de-)serialization methods. Contains the serialization buffer and additional
+// Passed to the serialization methods. Contains the serialization buffer and additional
 // information needed for some messages.
-type SerDes struct {
+type Serializer struct {
 	Buf             bytes.Buffer
 	MsgFeatureFlags uint16
 	Errors          types.MultiError
 }
 
-// Create new Serializer
-func NewSerializer() SerDes {
-	return SerDes{}
-}
-
-// Create new deserializer
-func NewDeserializer(s []byte, msgFeatureFlags uint16) SerDes {
-	return SerDes{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
+// Create new serializer
+func NewSerializer() Serializer {
+	return Serializer{}
 }
 
 // SERIALIZER
@@ -34,25 +29,25 @@ type Serializable interface {
 	// Defines how to serialize the type.
 	// Must match its deserialization procedure. Might be defined in other
 	// locations, e.g. the C++ or Rust codebase.
-	Serialize(*SerDes)
+	Serialize(*Serializer)
 }
 
 // Serializes a primitive integer value in little endian order.
-func SerializeInt(ser *SerDes, value any) {
+func SerializeInt(ser *Serializer, value any) {
 	if err := binary.Write(&ser.Buf, binary.LittleEndian, value); err != nil {
 		ser.Errors.Errors = append(ser.Errors.Errors, err)
 	}
 }
 
 // Serializes a raw slice of bytes
-func SerializeBytes(ser *SerDes, value []byte) {
+func SerializeBytes(ser *Serializer, value []byte) {
 	if _, err := ser.Buf.Write(value); err != nil {
 		ser.Errors.Errors = append(ser.Errors.Errors, err)
 	}
 }
 
 // Serializes a slice of bytes into a C string
-func SerializeCStr(ser *SerDes, value []byte, alignTo uint) {
+func SerializeCStr(ser *Serializer, value []byte, alignTo uint) {
 	SerializeInt(ser, uint32(len(value)))
 	SerializeBytes(ser, value)
 
@@ -77,7 +72,7 @@ type seqSerializer struct {
 	countPos   int
 }
 
-func (t *seqSerializer) begin(ser *SerDes, includeTotalSize bool) {
+func (t *seqSerializer) begin(ser *Serializer, includeTotalSize bool) {
 	t.initialPos = ser.Buf.Len()
 
 	if includeTotalSize {
@@ -88,7 +83,7 @@ func (t *seqSerializer) begin(ser *SerDes, includeTotalSize bool) {
 	SerializeInt(ser, uint32(0xFFFFFFFF))
 }
 
-func (t *seqSerializer) finish(ser *SerDes, count int) {
+func (t *seqSerializer) finish(ser *Serializer, count int) {
 	b := ser.Buf.Bytes()
 
 	if t.initialPos != t.countPos {
@@ -100,7 +95,7 @@ func (t *seqSerializer) finish(ser *SerDes, count int) {
 }
 
 // Serializes a slice of any data into a Seq
-func SerializeSeq[T any](ser *SerDes, value []T, includeTotalSize bool, f func(T)) {
+func SerializeSeq[T any](ser *Serializer, value []T, includeTotalSize bool, f func(T)) {
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
@@ -112,7 +107,7 @@ func SerializeSeq[T any](ser *SerDes, value []T, includeTotalSize bool, f func(T
 }
 
 // Serializes map of any data into a Map
-func SerializeMap[K comparable, V any](ser *SerDes, value map[K]V, includeTotalSize bool, fKey func(K), fValue func(V)) {
+func SerializeMap[K comparable, V any](ser *Serializer, value map[K]V, includeTotalSize bool, fKey func(K), fValue func(V)) {
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
@@ -125,7 +120,7 @@ func SerializeMap[K comparable, V any](ser *SerDes, value map[K]V, includeTotalS
 }
 
 // Fills in n zeroes
-func Zeroes(ser *SerDes, n uint) {
+func Zeroes(ser *Serializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if err := ser.Buf.WriteByte(0); err != nil {
 			ser.Errors.Errors = append(ser.Errors.Errors, err)
@@ -135,16 +130,29 @@ func Zeroes(ser *SerDes, n uint) {
 
 // DESERIALIZER
 
+// Passed to the deserialization methods. Contains the serialization buffer and additional
+// information needed for some messages.
+type Deserializer struct {
+	Buf             bytes.Buffer
+	MsgFeatureFlags uint16
+	Errors          types.MultiError
+}
+
+// Create new serializer
+func NewDeserializer(s []byte, msgFeatureFlags uint16) Deserializer {
+	return Deserializer{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
+}
+
 // A BeeGFS deserializable type
 type Deserializable interface {
 	// Defines how to deserialize the type.
 	// Must match its serialization procedure. Might be defined in other
 	// locations, e.g. the C++ or Rust codebase.
-	Deserialize(*SerDes)
+	Deserialize(*Deserializer)
 }
 
 // Deserializes a primitive integer value in little endian order.
-func DeserializeInt(des *SerDes, into any) {
+func DeserializeInt(des *Deserializer, into any) {
 	if reflect.ValueOf(into).Type().Kind() != reflect.Pointer {
 		des.Errors.Errors = append(des.Errors.Errors, fmt.Errorf("attempt to deserialize int into non-pointer"))
 	}
@@ -155,14 +163,14 @@ func DeserializeInt(des *SerDes, into any) {
 }
 
 // Deserializes into a slice of bytes
-func DeserializeBytes(des *SerDes, into *[]byte) {
+func DeserializeBytes(des *Deserializer, into *[]byte) {
 	if _, err := des.Buf.Read(*into); err != nil {
 		des.Errors.Errors = append(des.Errors.Errors, err)
 	}
 }
 
 // Deserializes a C string into a slice of bytes
-func DeserializeCStr(des *SerDes, into *[]byte, alignTo uint) {
+func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
 	var len uint32
 	DeserializeInt(des, &len)
 
@@ -185,7 +193,7 @@ func DeserializeCStr(des *SerDes, into *[]byte, alignTo uint) {
 	}
 }
 
-func deserializeSeqLen(des *SerDes, includeTotalSize bool) uint32 {
+func deserializeSeqLen(des *Deserializer, includeTotalSize bool) uint32 {
 	if includeTotalSize {
 		Skip(des, 4)
 	}
@@ -197,7 +205,7 @@ func deserializeSeqLen(des *SerDes, includeTotalSize bool) uint32 {
 }
 
 // Deserializes a Seq of any data into a slice
-func DeserializeSeq[T any](des *SerDes, into *[]T, includeTotalSize bool, f func(*T)) {
+func DeserializeSeq[T any](des *Deserializer, into *[]T, includeTotalSize bool, f func(*T)) {
 	len := deserializeSeqLen(des, includeTotalSize)
 
 	for i := 0; i < int(len); i++ {
@@ -208,7 +216,7 @@ func DeserializeSeq[T any](des *SerDes, into *[]T, includeTotalSize bool, f func
 }
 
 // Deserializes a Seq of any data into a slice
-func DeserializeMap[K comparable, V any](des *SerDes, into *map[K]V, includeTotalSize bool, fKey func(*K), fValue func(*V)) {
+func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, includeTotalSize bool, fKey func(*K), fValue func(*V)) {
 	len := deserializeSeqLen(des, includeTotalSize)
 
 	for i := 0; i < int(len); i++ {
@@ -221,7 +229,7 @@ func DeserializeMap[K comparable, V any](des *SerDes, into *map[K]V, includeTota
 }
 
 // Skips n bytes
-func Skip(des *SerDes, n uint) {
+func Skip(des *Deserializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if _, err := des.Buf.ReadByte(); err != nil {
 			des.Errors.Errors = append(des.Errors.Errors, err)

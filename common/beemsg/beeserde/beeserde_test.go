@@ -17,30 +17,30 @@ type ints struct {
 	i64 int64
 }
 
-func (t *ints) Serialize(sd *SerDes) {
-	SerializeInt(sd, t.u8)
-	SerializeInt(sd, t.u16)
-	SerializeInt(sd, t.u32)
-	SerializeInt(sd, t.u64)
-	SerializeInt(sd, t.i8)
-	SerializeInt(sd, t.i16)
-	SerializeInt(sd, t.i32)
-	SerializeInt(sd, t.i64)
+func (t *ints) Serialize(s *Serializer) {
+	SerializeInt(s, t.u8)
+	SerializeInt(s, t.u16)
+	SerializeInt(s, t.u32)
+	SerializeInt(s, t.u64)
+	SerializeInt(s, t.i8)
+	SerializeInt(s, t.i16)
+	SerializeInt(s, t.i32)
+	SerializeInt(s, t.i64)
 }
 
-func (t *ints) Deserialize(sd *SerDes) {
-	DeserializeInt(sd, &t.u8)
-	DeserializeInt(sd, &t.u16)
-	DeserializeInt(sd, &t.u32)
-	DeserializeInt(sd, &t.u64)
-	DeserializeInt(sd, &t.i8)
-	DeserializeInt(sd, &t.i16)
-	DeserializeInt(sd, &t.i32)
-	DeserializeInt(sd, &t.i64)
+func (t *ints) Deserialize(d *Deserializer) {
+	DeserializeInt(d, &t.u8)
+	DeserializeInt(d, &t.u16)
+	DeserializeInt(d, &t.u32)
+	DeserializeInt(d, &t.u64)
+	DeserializeInt(d, &t.i8)
+	DeserializeInt(d, &t.i16)
+	DeserializeInt(d, &t.i32)
+	DeserializeInt(d, &t.i64)
 }
 
 func TestInt(t *testing.T) {
-	sd := SerDes{}
+	s := NewSerializer()
 
 	in := ints{
 		u8:  1,
@@ -52,35 +52,38 @@ func TestInt(t *testing.T) {
 		i32: 7,
 		i64: 8,
 	}
-	in.Serialize(&sd)
+	in.Serialize(&s)
+	assert.Empty(t, s.Errors)
 
+	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := ints{}
-	out.Deserialize(&sd)
+	out.Deserialize(&d)
 
-	assert.Empty(t, sd.Errors)
+	assert.Empty(t, d.Errors)
 	assert.Equal(t, in, out)
 }
 
 func TestCStr(t *testing.T) {
-	sd := SerDes{}
+	s := NewSerializer()
 
-	SerializeCStr(&sd, []byte("Hello Go!"), 0)
-	SerializeCStr(&sd, []byte("Hello Go again!"), 4)
-	SerializeCStr(&sd, []byte("Hello Go again and again!"), 5)
-	SerializeCStr(&sd, []byte("Hello Go again and again!"), 8)
+	SerializeCStr(&s, []byte("Hello Go!"), 0)
+	SerializeCStr(&s, []byte("Hello Go again!"), 4)
+	SerializeCStr(&s, []byte("Hello Go again and again!"), 5)
+	SerializeCStr(&s, []byte("Hello Go again and again!"), 8)
+	assert.Empty(t, s.Errors)
 
 	out := []byte{}
-
-	DeserializeCStr(&sd, &out, 0)
+	d := NewDeserializer(s.Buf.Bytes(), 0)
+	DeserializeCStr(&d, &out, 0)
 	assert.Equal(t, []byte("Hello Go!"), out)
-	DeserializeCStr(&sd, &out, 4)
+	DeserializeCStr(&d, &out, 4)
 	assert.Equal(t, []byte("Hello Go again!"), out)
-	DeserializeCStr(&sd, &out, 5)
+	DeserializeCStr(&d, &out, 5)
 	assert.Equal(t, []byte("Hello Go again and again!"), out)
-	DeserializeCStr(&sd, &out, 8)
+	DeserializeCStr(&d, &out, 8)
 	assert.Equal(t, []byte("Hello Go again and again!"), out)
 
-	assert.Empty(t, sd.Errors)
+	assert.Empty(t, d.Errors)
 }
 
 // Explicitly test the
@@ -107,28 +110,30 @@ func TestCStrAlignment(t *testing.T) {
 }
 
 func TestNestedSeq(t *testing.T) {
-	sd := SerDes{}
+	s := NewSerializer()
 
 	in := [][]uint32{{1, 2, 3}, {4, 5, 6, 7, 8}, {0xFFFFFFFE, 0xFFFFFFFF}}
-	SerializeSeq[[]uint32](&sd, in, true, func(in []uint32) {
-		SerializeSeq[uint32](&sd, in, false, func(in uint32) {
-			SerializeInt(&sd, in)
+	SerializeSeq[[]uint32](&s, in, true, func(in []uint32) {
+		SerializeSeq[uint32](&s, in, false, func(in uint32) {
+			SerializeInt(&s, in)
 		})
 	})
+	assert.Empty(t, s.Errors)
 
+	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := [][]uint32{}
-	DeserializeSeq[[]uint32](&sd, &out, true, func(out *[]uint32) {
-		DeserializeSeq[uint32](&sd, out, false, func(out *uint32) {
-			DeserializeInt(&sd, out)
+	DeserializeSeq[[]uint32](&d, &out, true, func(out *[]uint32) {
+		DeserializeSeq[uint32](&d, out, false, func(out *uint32) {
+			DeserializeInt(&d, out)
 		})
 	})
 
-	assert.Empty(t, sd.Errors)
+	assert.Empty(t, d.Errors)
 	assert.Equal(t, in, out)
 }
 
 func TestNestedMap(t *testing.T) {
-	sd := SerDes{}
+	s := NewSerializer()
 
 	in := map[int8]map[uint16]uint64{
 		-10: {
@@ -141,37 +146,38 @@ func TestNestedMap(t *testing.T) {
 		},
 	}
 
-	SerializeMap[int8, map[uint16]uint64](&sd, in, true, func(in int8) {
-		SerializeInt(&sd, in)
+	SerializeMap[int8, map[uint16]uint64](&s, in, true, func(in int8) {
+		SerializeInt(&s, in)
 	}, func(in map[uint16]uint64) {
-		SerializeMap[uint16, uint64](&sd, in, false, func(in uint16) {
-			SerializeInt(&sd, in)
+		SerializeMap[uint16, uint64](&s, in, false, func(in uint16) {
+			SerializeInt(&s, in)
 		}, func(in uint64) {
-			SerializeInt(&sd, in)
+			SerializeInt(&s, in)
 		})
 	})
+	assert.Empty(t, s.Errors)
 
+	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := map[int8]map[uint16]uint64{}
-
-	DeserializeMap[int8, map[uint16]uint64](&sd, &out, true, func(out *int8) {
-		DeserializeInt(&sd, out)
+	DeserializeMap[int8, map[uint16]uint64](&d, &out, true, func(out *int8) {
+		DeserializeInt(&d, out)
 	}, func(out *map[uint16]uint64) {
 		*out = map[uint16]uint64{}
 
-		DeserializeMap[uint16, uint64](&sd, out, false, func(out *uint16) {
-			DeserializeInt(&sd, out)
+		DeserializeMap[uint16, uint64](&d, out, false, func(out *uint16) {
+			DeserializeInt(&d, out)
 		}, func(out *uint64) {
-			DeserializeInt(&sd, out)
+			DeserializeInt(&d, out)
 		})
 	})
 
-	assert.Empty(t, sd.Errors)
+	assert.Empty(t, d.Errors)
 	assert.Equal(t, in, out)
 }
 
 func TestErrorOnNonPointerDeserialization(t *testing.T) {
-	sd := SerDes{}
-	DeserializeInt(&sd, uint32(0))
+	d := NewDeserializer([]byte{1, 2, 3, 4}, 0)
+	DeserializeInt(&d, uint32(0))
 
-	assert.Error(t, &sd.Errors)
+	assert.Error(t, &d.Errors)
 }

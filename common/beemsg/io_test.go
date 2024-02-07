@@ -23,18 +23,18 @@ func (msg *testMsg) MsgId() uint16 {
 	return 12345
 }
 
-func (msg *testMsg) Serialize(sd *beeserde.SerDes) {
-	beeserde.SerializeInt(sd, msg.fieldA)
-	beeserde.SerializeCStr(sd, msg.fieldB, 0)
+func (msg *testMsg) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, msg.fieldA)
+	beeserde.SerializeCStr(s, msg.fieldB, 0)
 
-	sd.MsgFeatureFlags = msg.flags
+	s.MsgFeatureFlags = msg.flags
 }
 
-func (msg *testMsg) Deserialize(sd *beeserde.SerDes) {
-	beeserde.DeserializeInt(sd, &msg.fieldA)
-	beeserde.DeserializeCStr(sd, &msg.fieldB, 0)
+func (msg *testMsg) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &msg.fieldA)
+	beeserde.DeserializeCStr(d, &msg.fieldB, 0)
 
-	msg.flags = sd.MsgFeatureFlags
+	msg.flags = d.MsgFeatureFlags
 }
 
 // Test writing a message to a io.Writer and reading it from a io.Reader

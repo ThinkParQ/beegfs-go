@@ -22,11 +22,12 @@ func TestHeaderSerialization(t *testing.T) {
 		MsgSeqDone:            10,
 	}
 
-	sd := beeserde.SerDes{}
-	header.Serialize(&sd)
+	s := beeserde.NewSerializer()
+	header.Serialize(&s)
 
+	d := beeserde.NewDeserializer(s.Buf.Bytes(), 0)
 	desHeader := Header{}
-	desHeader.Deserialize(&sd)
+	desHeader.Deserialize(&d)
 
 	assert.Equal(t, header, desHeader)
 }

@@ -12,12 +12,12 @@ func (m *AuthenticateChannel) MsgId() uint16 {
 	return 4007
 }
 
-func (m *AuthenticateChannel) Serialize(sd *beeserde.SerDes) {
-	beeserde.SerializeInt(sd, m.AuthSecret)
+func (m *AuthenticateChannel) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.AuthSecret)
 }
 
-func (m *AuthenticateChannel) Deserialize(sd *beeserde.SerDes) {
-	beeserde.DeserializeInt(sd, &m.AuthSecret)
+func (m *AuthenticateChannel) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.AuthSecret)
 }
 
 type HeartbeatRequest struct {
@@ -27,10 +27,10 @@ func (m *HeartbeatRequest) MsgId() uint16 {
 	return 1019
 }
 
-func (m *HeartbeatRequest) Serialize(sd *beeserde.SerDes) {
+func (m *HeartbeatRequest) Serialize(s *beeserde.Serializer) {
 }
 
-func (m *HeartbeatRequest) Deserialize(sd *beeserde.SerDes) {
+func (m *HeartbeatRequest) Deserialize(d *beeserde.Deserializer) {
 }
 
 type Heartbeat struct {
@@ -51,19 +51,19 @@ func (m *Heartbeat) MsgId() uint16 {
 	return 1020
 }
 
-func (m *Heartbeat) Deserialize(sd *beeserde.SerDes) {
-	beeserde.DeserializeInt(sd, &m.InstanceVersion)
-	beeserde.DeserializeInt(sd, &m.NicListVersion)
-	beeserde.DeserializeInt(sd, &m.NodeType)
-	beeserde.DeserializeCStr(sd, &m.NodeAlias, 0)
-	beeserde.DeserializeCStr(sd, &m.AckId, 4)
-	beeserde.DeserializeInt(sd, &m.NodeNumId)
-	beeserde.DeserializeInt(sd, &m.RootNumId)
-	beeserde.DeserializeInt(sd, &m.IsRootMirrored)
-	beeserde.DeserializeInt(sd, &m.Port)
-	beeserde.DeserializeInt(sd, &m.PortUnused)
-	beeserde.DeserializeSeq[Nic](sd, &m.NicList, false, func(out *Nic) {
-		out.Deserialize(sd)
+func (m *Heartbeat) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.InstanceVersion)
+	beeserde.DeserializeInt(d, &m.NicListVersion)
+	beeserde.DeserializeInt(d, &m.NodeType)
+	beeserde.DeserializeCStr(d, &m.NodeAlias, 0)
+	beeserde.DeserializeCStr(d, &m.AckId, 4)
+	beeserde.DeserializeInt(d, &m.NodeNumId)
+	beeserde.DeserializeInt(d, &m.RootNumId)
+	beeserde.DeserializeInt(d, &m.IsRootMirrored)
+	beeserde.DeserializeInt(d, &m.Port)
+	beeserde.DeserializeInt(d, &m.PortUnused)
+	beeserde.DeserializeSeq[Nic](d, &m.NicList, false, func(out *Nic) {
+		out.Deserialize(d)
 	})
 
 }
@@ -74,12 +74,12 @@ type Nic struct {
 	nicType uint8
 }
 
-func (t *Nic) Deserialize(des *beeserde.SerDes) {
-	beeserde.DeserializeInt(des, &t.ipv4)
+func (t *Nic) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &t.ipv4)
 
 	t.alias = make([]byte, 16)
-	beeserde.DeserializeBytes(des, &t.alias)
+	beeserde.DeserializeBytes(d, &t.alias)
 
-	beeserde.DeserializeInt(des, &t.nicType)
-	beeserde.Skip(des, 3)
+	beeserde.DeserializeInt(d, &t.nicType)
+	beeserde.Skip(d, 3)
 }
