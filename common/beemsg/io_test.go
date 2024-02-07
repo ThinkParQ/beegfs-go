@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beemsg/ser"
+	"github.com/thinkparq/gobee/beemsg/beeserde"
 )
 
 type testMsg struct {
@@ -23,16 +23,16 @@ func (msg *testMsg) MsgId() uint16 {
 	return 12345
 }
 
-func (msg *testMsg) Serialize(sd *ser.SerDes) {
-	ser.SerializeInt(sd, msg.fieldA)
-	ser.SerializeCStr(sd, msg.fieldB, 0)
+func (msg *testMsg) Serialize(sd *beeserde.SerDes) {
+	beeserde.SerializeInt(sd, msg.fieldA)
+	beeserde.SerializeCStr(sd, msg.fieldB, 0)
 
 	sd.MsgFeatureFlags = msg.flags
 }
 
-func (msg *testMsg) Deserialize(sd *ser.SerDes) {
-	ser.DeserializeInt(sd, &msg.fieldA)
-	ser.DeserializeCStr(sd, &msg.fieldB, 0)
+func (msg *testMsg) Deserialize(sd *beeserde.SerDes) {
+	beeserde.DeserializeInt(sd, &msg.fieldA)
+	beeserde.DeserializeCStr(sd, &msg.fieldB, 0)
 
 	msg.flags = sd.MsgFeatureFlags
 }

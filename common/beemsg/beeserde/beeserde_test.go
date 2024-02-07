@@ -1,4 +1,4 @@
-package ser
+package beeserde
 
 import (
 	"testing"

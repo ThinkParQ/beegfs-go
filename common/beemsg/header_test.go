@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beemsg/ser"
+	"github.com/thinkparq/gobee/beemsg/beeserde"
 )
 
 func TestHeaderSerialization(t *testing.T) {
@@ -22,7 +22,7 @@ func TestHeaderSerialization(t *testing.T) {
 		MsgSeqDone:            10,
 	}
 
-	sd := ser.SerDes{}
+	sd := beeserde.SerDes{}
 	header.Serialize(&sd)
 
 	desHeader := Header{}

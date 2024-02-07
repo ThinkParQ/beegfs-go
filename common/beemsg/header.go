@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/thinkparq/gobee/beemsg/ser"
+	"github.com/thinkparq/gobee/beemsg/beeserde"
 )
 
 const (
@@ -38,30 +38,30 @@ func NewHeader(msgID uint16) Header {
 	}
 }
 
-func (t *Header) Serialize(sd *ser.SerDes) {
-	ser.SerializeInt(sd, t.MsgLen)
-	ser.SerializeInt(sd, t.MsgFeatureFlags)
-	ser.SerializeInt(sd, t.MsgCompatFeatureFlags)
-	ser.SerializeInt(sd, t.MsgFlags)
-	ser.SerializeInt(sd, t.MsgPrefix)
-	ser.SerializeInt(sd, t.MsgID)
-	ser.SerializeInt(sd, t.MsgTargetID)
-	ser.SerializeInt(sd, t.MsgUserID)
-	ser.SerializeInt(sd, t.MsgSeq)
-	ser.SerializeInt(sd, t.MsgSeqDone)
+func (t *Header) Serialize(sd *beeserde.SerDes) {
+	beeserde.SerializeInt(sd, t.MsgLen)
+	beeserde.SerializeInt(sd, t.MsgFeatureFlags)
+	beeserde.SerializeInt(sd, t.MsgCompatFeatureFlags)
+	beeserde.SerializeInt(sd, t.MsgFlags)
+	beeserde.SerializeInt(sd, t.MsgPrefix)
+	beeserde.SerializeInt(sd, t.MsgID)
+	beeserde.SerializeInt(sd, t.MsgTargetID)
+	beeserde.SerializeInt(sd, t.MsgUserID)
+	beeserde.SerializeInt(sd, t.MsgSeq)
+	beeserde.SerializeInt(sd, t.MsgSeqDone)
 }
 
-func (t *Header) Deserialize(sd *ser.SerDes) {
-	ser.DeserializeInt(sd, &t.MsgLen)
-	ser.DeserializeInt(sd, &t.MsgFeatureFlags)
-	ser.DeserializeInt(sd, &t.MsgCompatFeatureFlags)
-	ser.DeserializeInt(sd, &t.MsgFlags)
-	ser.DeserializeInt(sd, &t.MsgPrefix)
-	ser.DeserializeInt(sd, &t.MsgID)
-	ser.DeserializeInt(sd, &t.MsgTargetID)
-	ser.DeserializeInt(sd, &t.MsgUserID)
-	ser.DeserializeInt(sd, &t.MsgSeq)
-	ser.DeserializeInt(sd, &t.MsgSeqDone)
+func (t *Header) Deserialize(sd *beeserde.SerDes) {
+	beeserde.DeserializeInt(sd, &t.MsgLen)
+	beeserde.DeserializeInt(sd, &t.MsgFeatureFlags)
+	beeserde.DeserializeInt(sd, &t.MsgCompatFeatureFlags)
+	beeserde.DeserializeInt(sd, &t.MsgFlags)
+	beeserde.DeserializeInt(sd, &t.MsgPrefix)
+	beeserde.DeserializeInt(sd, &t.MsgID)
+	beeserde.DeserializeInt(sd, &t.MsgTargetID)
+	beeserde.DeserializeInt(sd, &t.MsgUserID)
+	beeserde.DeserializeInt(sd, &t.MsgSeq)
+	beeserde.DeserializeInt(sd, &t.MsgSeqDone)
 }
 
 // Sets the MsgLen field in the serialized header

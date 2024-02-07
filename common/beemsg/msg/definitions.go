@@ -1,6 +1,6 @@
 package msg
 
-import "github.com/thinkparq/gobee/beemsg/ser"
+import "github.com/thinkparq/gobee/beemsg/beeserde"
 
 // Authenticates a TCP connection. Must be sent before sending any other messages. beemsg.NodeStore
 // handles this automatically, no extra action needed.
@@ -12,12 +12,12 @@ func (m *AuthenticateChannel) MsgId() uint16 {
 	return 4007
 }
 
-func (m *AuthenticateChannel) Serialize(sd *ser.SerDes) {
-	ser.SerializeInt(sd, m.AuthSecret)
+func (m *AuthenticateChannel) Serialize(sd *beeserde.SerDes) {
+	beeserde.SerializeInt(sd, m.AuthSecret)
 }
 
-func (m *AuthenticateChannel) Deserialize(sd *ser.SerDes) {
-	ser.DeserializeInt(sd, &m.AuthSecret)
+func (m *AuthenticateChannel) Deserialize(sd *beeserde.SerDes) {
+	beeserde.DeserializeInt(sd, &m.AuthSecret)
 }
 
 type HeartbeatRequest struct {
@@ -27,10 +27,10 @@ func (m *HeartbeatRequest) MsgId() uint16 {
 	return 1019
 }
 
-func (m *HeartbeatRequest) Serialize(sd *ser.SerDes) {
+func (m *HeartbeatRequest) Serialize(sd *beeserde.SerDes) {
 }
 
-func (m *HeartbeatRequest) Deserialize(sd *ser.SerDes) {
+func (m *HeartbeatRequest) Deserialize(sd *beeserde.SerDes) {
 }
 
 type Heartbeat struct {
@@ -51,18 +51,18 @@ func (m *Heartbeat) MsgId() uint16 {
 	return 1020
 }
 
-func (m *Heartbeat) Deserialize(sd *ser.SerDes) {
-	ser.DeserializeInt(sd, &m.InstanceVersion)
-	ser.DeserializeInt(sd, &m.NicListVersion)
-	ser.DeserializeInt(sd, &m.NodeType)
-	ser.DeserializeCStr(sd, &m.NodeAlias, 0)
-	ser.DeserializeCStr(sd, &m.AckId, 4)
-	ser.DeserializeInt(sd, &m.NodeNumId)
-	ser.DeserializeInt(sd, &m.RootNumId)
-	ser.DeserializeInt(sd, &m.IsRootMirrored)
-	ser.DeserializeInt(sd, &m.Port)
-	ser.DeserializeInt(sd, &m.PortUnused)
-	ser.DeserializeSeq[Nic](sd, &m.NicList, false, func(out *Nic) {
+func (m *Heartbeat) Deserialize(sd *beeserde.SerDes) {
+	beeserde.DeserializeInt(sd, &m.InstanceVersion)
+	beeserde.DeserializeInt(sd, &m.NicListVersion)
+	beeserde.DeserializeInt(sd, &m.NodeType)
+	beeserde.DeserializeCStr(sd, &m.NodeAlias, 0)
+	beeserde.DeserializeCStr(sd, &m.AckId, 4)
+	beeserde.DeserializeInt(sd, &m.NodeNumId)
+	beeserde.DeserializeInt(sd, &m.RootNumId)
+	beeserde.DeserializeInt(sd, &m.IsRootMirrored)
+	beeserde.DeserializeInt(sd, &m.Port)
+	beeserde.DeserializeInt(sd, &m.PortUnused)
+	beeserde.DeserializeSeq[Nic](sd, &m.NicList, false, func(out *Nic) {
 		out.Deserialize(sd)
 	})
 
@@ -74,67 +74,12 @@ type Nic struct {
 	nicType uint8
 }
 
-func (t *Nic) Deserialize(des *ser.SerDes) {
-	ser.DeserializeInt(des, &t.ipv4)
+func (t *Nic) Deserialize(des *beeserde.SerDes) {
+	beeserde.DeserializeInt(des, &t.ipv4)
 
 	t.alias = make([]byte, 16)
-	ser.DeserializeBytes(des, &t.alias)
+	beeserde.DeserializeBytes(des, &t.alias)
 
-	ser.DeserializeInt(des, &t.nicType)
-	ser.Skip(des, 3)
+	beeserde.DeserializeInt(des, &t.nicType)
+	beeserde.Skip(des, 3)
 }
-
-//	type GetNodes struct {
-//		NodeType uint32
-//	}
-//
-//	func (t *GetNodes) ID() uint16 {
-//		return 1017
-//	}
-//
-//	func (t *GetNodes) Serialize(sd *ser.SerDes) {
-//		ser.SerializeInt(sd, t.NodeType)
-//	}
-//
-//	func (t *GetNodes) Deserialize(sd *ser.SerDes) {
-//		ser.DeserializeInt(sd, &t.NodeType)
-//	}
-//
-//	type GetNodesResp struct {
-//		nodes          []Node
-//		rootNodeID     uint32
-//		isRootMirrored uint8
-//	}
-//
-//	func (t *GetNodesResp) Deserialize(sd *ser.SerDes) {
-//		ser.DeserializeSeq[Node](sd, &t.nodes, false, func(out *Node) {
-//			out.Deserialize(sd)
-//		})
-//		ser.DeserializeInt(sd, &t.rootNodeID)
-//		ser.DeserializeInt(sd, &t.isRootMirrored)
-//	}
-//
-//	type Node struct {
-//		alias    []byte
-//		nics     []Nic
-//		nodeID   uint32
-//		portUdp  uint16
-//		portTcp  uint16
-//		nodeType uint8
-//	}
-//
-//	func (t *Node) Deserialize(des *ser.SerDes) {
-//		ser.DeserializeCStr(des, &t.alias, 0)
-//		ser.DeserializeSeq[Nic](des, &t.nics, false, func(out *Nic) {
-//			out.Deserialize(des)
-//		})
-//		ser.DeserializeInt(des, &t.nodeID)
-//		ser.DeserializeInt(des, &t.portUdp)
-//		ser.DeserializeInt(des, &t.portTcp)
-//		ser.DeserializeInt(des, &t.nodeType)
-//	}
-
-//
-// func (t *GetNodesResp) ID() uint16 {
-// 	return 1018
-// }

@@ -1,6 +1,6 @@
 package msg
 
-import "github.com/thinkparq/gobee/beemsg/ser"
+import "github.com/thinkparq/gobee/beemsg/beeserde"
 
 // A BeeGFS message
 type Msg interface {
@@ -12,11 +12,11 @@ type Msg interface {
 // A BeeGFS message that is also serializable
 type SerializableMsg interface {
 	Msg
-	ser.Serializable
+	beeserde.Serializable
 }
 
 // A BeeGFS message that is also deserializable
 type DeserializableMsg interface {
 	Msg
-	ser.Deserializable
+	beeserde.Deserializable
 }
