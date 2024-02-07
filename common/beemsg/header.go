@@ -11,20 +11,33 @@ import (
 
 const (
 	HeaderLen = 40
+	// Fixed value for identifying BeeMsges. In theory, this has some kind of version modifier (thus
+	// the + 0), but it is unused
 	MsgPrefix = (0x42474653 << 32) + 0
 )
 
+// The BeeMsg header
 type Header struct {
-	MsgLen                uint32
-	MsgFeatureFlags       uint16
+	// The total message length, including the header
+	MsgLen uint32
+	// Controls (de-)serialization in some messages. Usage depends on the concrete message.
+	MsgFeatureFlags uint16
+	// Unused
 	MsgCompatFeatureFlags uint8
-	MsgFlags              uint8
-	MsgPrefix             uint64
-	MsgID                 uint16
-	MsgTargetID           uint16
-	MsgUserID             uint32
-	MsgSeq                uint64
-	MsgSeqDone            uint64
+	// Mainly mirroring related use
+	MsgFlags uint8
+	// Fixed value that identifies BeeMsges (see const MsgPrefix)
+	MsgPrefix uint64
+	// The unique ID of the BeeMsg as defined in NetMessageTypes.h
+	MsgID uint16
+	// Contains the storage target ID in (some?) file system operations
+	MsgTargetID uint16
+	// Contains system user ID in (some?) file system operations
+	MsgUserID uint32
+	// Mirroring related: Syncs communication between primary and secondary
+	MsgSeq uint64
+	// Mirroring related: Syncs communication between primary and secondary
+	MsgSeqDone uint64
 }
 
 func NewHeader(msgID uint16) Header {

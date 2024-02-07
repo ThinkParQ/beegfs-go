@@ -1,3 +1,5 @@
+// beeserde provides the Go implementation of the BeeSerde Serializer, mainly used for
+// (de-)serializing BeeMsges.
 package beeserde
 
 import (
@@ -9,44 +11,65 @@ import (
 	"github.com/thinkparq/gobee/types"
 )
 
-// Passed to the serialization methods. Contains the serialization buffer and additional
-// information needed for some messages.
+// SERIALIZER
+
+// Represents the serialization state and is passed to the Serialize() methods. Contains the target
+// buffer for serialization and additional information needed for some messages.
 type Serializer struct {
-	Buf             bytes.Buffer
+	// The buffer where the serialized data goes into
+	Buf bytes.Buffer
+	// Some BeeMsges use a field with the same name on the header to control the serialization
+	// process, e.g. conditionally serialize some data. This field allows a message
+	// serialization definition to provide the expected value depending on the actually serialized
+	// data. This field should only be overwritten from an implementation of Serializable for an
+	// actual message, never from inner types. When constructing a BeeMsg, this field is expected
+	// to be read out after the call to Serialize() and be put into the BeeMsg header.
 	MsgFeatureFlags uint16
-	Errors          types.MultiError
+	// Any errors during serialization go in here. This field must be checked after a call to
+	// Serialize(), otherwise potential errors might go through unnoticed.
+	Errors types.MultiError
 }
 
-// Create new serializer
+// Creates a new serializer
 func NewSerializer() Serializer {
 	return Serializer{}
 }
 
-// SERIALIZER
-
-// A BeeGFS serializable type
+// A BeeSerde serializable type, mainly intended for BeeMsg communication
 type Serializable interface {
-	// Defines how to serialize the type.
-	// Must match its deserialization procedure. Might be defined in other
-	// locations, e.g. the C++ or Rust codebase.
+	// Defines how to serialize the message or type.
+	// Must match its deserialization procedure. If the type is used as a BeeMsg (or an inner value
+	// of one), it must match the definions defined in other locations, e.g. the C++ or Rust codebase.
+	// Note that failing to match the other languages definition can potentially go through undetected
+	// and might cause undefined behavior (or cause crashes, if you are lucky). The correctness can
+	// currently only be tested manually, so be very cautios.
 	Serialize(*Serializer)
 }
 
-// Serializes a primitive integer value in little endian order.
+// Serializes a primitive integer value into an "Int". An "Int" is one of the on-the-wire types of
+// BeeSerde and represents integer types as well as bool. This function accepts any value, but must
+// be used with integers. The caller must explicitly provide the exact integer type (e.g. uint16,
+// int32 - NOT int or uint).
 func SerializeInt(ser *Serializer, value any) {
 	if err := binary.Write(&ser.Buf, binary.LittleEndian, value); err != nil {
 		ser.Errors.Errors = append(ser.Errors.Errors, err)
 	}
 }
 
-// Serializes a raw slice of bytes
+// Serializes a raw slice of bytes. This can be used to implement any special serialization logic
+// and is used by other Serialize functions. Note that it does NOT serialize size information,
+// so to read out the correct amount of bytes on the deserializing side, the size has to be known
+// beforehand.
 func SerializeBytes(ser *Serializer, value []byte) {
 	if _, err := ser.Buf.Write(value); err != nil {
 		ser.Errors.Errors = append(ser.Errors.Errors, err)
 	}
 }
 
-// Serializes a slice of bytes into a C string
+// Serializes a slice of bytes into a "CStr". A "CStr" is one of the on-the-wire types of BeeSerde
+// and contains a field of size information, the raw bytes and one null byte at the end. The
+// alignTo argument conditionally adds some zero bytes at the end and must match the deserialization
+// definition (it is usually 0 or 4).
 func SerializeCStr(ser *Serializer, value []byte, alignTo uint) {
 	SerializeInt(ser, uint32(len(value)))
 	SerializeBytes(ser, value)
@@ -56,70 +79,95 @@ func SerializeCStr(ser *Serializer, value []byte, alignTo uint) {
 	}
 
 	if alignTo != 0 {
-		// Total amount of bytes written for this CStr modulo alignTo - results in the number
-		// of pad bytes to skip due to alignment
+		// Total amount of bytes written for this CStr (data + length field + null byte) modulo
+		// alignTo - results in the number of excess bytes beyond the alignment point
 		padding := (uint(len(value)) + 4 + 1) % alignTo
 
 		if padding != 0 {
-			// Yes, this does actually not achieve alignment - but we have to mimic the C++ code
 			Zeroes(ser, alignTo-padding)
 		}
 	}
 }
 
+// Helper type for serializing sequences.
 type seqSerializer struct {
+	// Stores where the serialized sequence begins
 	initialPos int
-	countPos   int
+	// Stores where the number of elements in the sequence are stored
+	countPos int
 }
 
+// Begin sequence serialization
 func (t *seqSerializer) begin(ser *Serializer, includeTotalSize bool) {
 	t.initialPos = ser.Buf.Len()
 
+	// If the total Size shall be included, put a placeholder
 	if includeTotalSize {
 		SerializeInt(ser, uint32(0xFFFFFFFF))
 	}
 
 	t.countPos = ser.Buf.Len()
+	// Put a placeholder for the number of elements in the sequence
 	SerializeInt(ser, uint32(0xFFFFFFFF))
 }
 
+// Finish sequence serialization
 func (t *seqSerializer) finish(ser *Serializer, count int) {
 	b := ser.Buf.Bytes()
 
+	// If the total size shall be included, overwrite the placeholder with the actual amount of
+	// written bytes
 	if t.initialPos != t.countPos {
 		written := len(b) - t.initialPos
 		binary.LittleEndian.PutUint32(b[t.initialPos:t.initialPos+4], uint32(written))
 	}
 
+	// Overwrite the number of elements placeholder
 	binary.LittleEndian.PutUint32(b[t.countPos:t.countPos+4], uint32(count))
 }
 
-// Serializes a slice of any data into a Seq
+// Serializes a slice of any data into a "Seq". A "Seq" is one of the on-the-wire types of BeeSerde
+// and represents any sequence container type like vectors, lists, and so on. The includeTotalSize
+// argument defines whether the total size of the serialized sequence should be included. This has
+// no real use and is usually false (for C++ vectors and lists), but one cannot rely on that. When
+// defining an existing BeeMsg, the C++ code has to be thoroughly checked on whether this must be
+// set or not. The function f defines how to serialize each element of the sequence. By calling
+// SerializeSeq from within there, nested sequences can be serialized.
 func SerializeSeq[T any](ser *Serializer, value []T, includeTotalSize bool, f func(T)) {
+	// Setup the sequence helper
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
+	// Serialize the inner elements
 	for _, e := range value {
 		f(e)
 	}
 
+	// Overwrite the placeholders
 	ss.finish(ser, len(value))
 }
 
-// Serializes map of any data into a Map
+// Serializes map of any data into a "Map". A "Map" is one of the on-the-wire types of BeeSerde
+// and represents all kinds of key-value collections like HashMaps. The includeTotalSize argument
+// defines whether the total size of the serialized map should be included. This has no real use
+// and is usually true (for C++ std::map), but one cannot rely on that. When defining an existing
+// BeeMsg, the C++ code has to be thoroughly checked on whether this must be set or not.
 func SerializeMap[K comparable, V any](ser *Serializer, value map[K]V, includeTotalSize bool, fKey func(K), fValue func(V)) {
+	// Map serialization is built on top of sequence serialization 	// Setup the sequence helper
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
+	// Serialize the inner elements
 	for k, v := range value {
 		fKey(k)
 		fValue(v)
 	}
 
+	// Overwrite the placeholders
 	ss.finish(ser, len(value))
 }
 
-// Fills in n zeroes
+// Serializes n zero bytes. Sometimes used for padding or just for a fixed amount.
 func Zeroes(ser *Serializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if err := ser.Buf.WriteByte(0); err != nil {
@@ -133,26 +181,43 @@ func Zeroes(ser *Serializer, n uint) {
 // Passed to the deserialization methods. Contains the serialization buffer and additional
 // information needed for some messages.
 type Deserializer struct {
-	Buf             bytes.Buffer
+	// The buffer containing the to-be-deserialized data
+	Buf bytes.Buffer
+	// Some BeeMsges use a field with the same name on the header to control the deserialization
+	// process, e.g. conditionally deserialize some data. This field can be accessed from
+	// deserialization definition and be used to deserialize the message correctly.
+	// When constructing a BeeMsg, this field is expected to be set before the call to
+	// Deserialize() from the respective field from the received header.
 	MsgFeatureFlags uint16
-	Errors          types.MultiError
+	// Error during deserialization go in here. This field must be checked after a call to
+	// <Msg>.Deserialize(), otherwise potential errors might go through unnoticed.
+	Errors types.MultiError
 }
 
-// Create new serializer
+// Creates new serializer
 func NewDeserializer(s []byte, msgFeatureFlags uint16) Deserializer {
 	return Deserializer{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
 }
 
-// A BeeGFS deserializable type
+// A BeeSerde deserializable type, mainly intended for BeeMsg communication
 type Deserializable interface {
-	// Defines how to deserialize the type.
-	// Must match its serialization procedure. Might be defined in other
-	// locations, e.g. the C++ or Rust codebase.
+	// Defines how to deserialize the message or type.
+	// Must match its serialization procedure. If the type is used as a BeeMsg (or an inner value
+	// of one), it must match the definions defined in other locations, e.g. the C++ or Rust codebase.
+	// Note that failing to match the other languages definition can potentially go through undetected
+	// and might cause undefined behavior (or cause crashes, if you are lucky). The correctness can
+	// currently only be tested manually, so be very cautios.
 	Deserialize(*Deserializer)
 }
 
-// Deserializes a primitive integer value in little endian order.
+// Deserializes into a primitive integer value from an "Int". An "Int" is one of the on-the-wire
+// types of BeeSerde and represents integer types as well as bool. This function accepts any value,
+// but must be used with integers. The caller must explicitly provide the exact integer type (e.g.
+// uint16, int32 - NOT int or uint).
 func DeserializeInt(des *Deserializer, into any) {
+	// A caller could accidentally pass in a value instead of a pointer, in which case the
+	// deserialized data would just be lost. Therefore, we check here that we actually got a
+	// pointer.
 	if reflect.ValueOf(into).Type().Kind() != reflect.Pointer {
 		des.Errors.Errors = append(des.Errors.Errors, fmt.Errorf("attempt to deserialize int into non-pointer"))
 	}
@@ -162,14 +227,21 @@ func DeserializeInt(des *Deserializer, into any) {
 	}
 }
 
-// Deserializes into a slice of bytes
+// Deserializes a raw slice of bytes of length len(into). This can be used to implement any special
+// deserialization logic and is used by other Deserialize functions. Note that into must be set to
+// the correct length beforehand and the source buffer must contain enough data to completely fill
+// it.
 func DeserializeBytes(des *Deserializer, into *[]byte) {
 	if _, err := des.Buf.Read(*into); err != nil {
 		des.Errors.Errors = append(des.Errors.Errors, err)
 	}
 }
 
-// Deserializes a C string into a slice of bytes
+// Deserializes into a slice of bytes from a "CStr". A "CStr" is one of the on-the-wire types of
+// BeeSerde and contains a field of size information, the raw bytes and one null byte at the end.
+// into must point to a valid byte structure and will be initialized/resized from within this
+// function. The alignTo argument conditionally expects some zero bytes at the end and must match
+// the serialization definition (it is usually 0 or 4).
 func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
 	var len uint32
 	DeserializeInt(des, &len)
@@ -182,18 +254,19 @@ func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
 	}
 
 	if alignTo != 0 {
-		// Total amount of bytes read for this CStr modulo alignTo - results in the number
-		// of pad bytes to skip due to alignment
+		// Total amount of bytes read for this CStr (data + length field + null byte) modulo
+		// alignTo - results in the number of excess bytes beyond the alignment point
 		padding := (uint(len) + 4 + 1) % alignTo
 
 		if padding != 0 {
-			// Yes, this does actually not achieve alignment - but we have to mimic the C++ code
 			Skip(des, alignTo-padding)
 		}
 	}
 }
 
+// Helper function to retrieve the length of a "Seq"
 func deserializeSeqLen(des *Deserializer, includeTotalSize bool) uint32 {
+	// If the total size is included, just throw it away. We don't need it.
 	if includeTotalSize {
 		Skip(des, 4)
 	}
@@ -204,10 +277,19 @@ func deserializeSeqLen(des *Deserializer, includeTotalSize bool) uint32 {
 	return len
 }
 
-// Deserializes a Seq of any data into a slice
+// Deserializes into a slice of any data from a "Seq". A "Seq" is one of the on-the-wire types
+// of BeeSerde and represents any sequence container type like vectors, lists, and so on. The
+// includeTotalSize argument defines whether the total size of the serialized sequence is included.
+// This has no real use and is usually false (for C++ vectors and lists), but one cannot rely on
+// that. When defining an existing BeeMsg, the C++ code has to be thoroughly checked on whether this
+// must be set or not. The function f defines how to deserialize each element of the sequence. By
+// calling DeserializeSeq from within there, nested sequences can be deserialized.
 func DeserializeSeq[T any](des *Deserializer, into *[]T, includeTotalSize bool, f func(*T)) {
+	// A "Seq" is made of an optional size field, a length field and then all the elements in order
+
 	len := deserializeSeqLen(des, includeTotalSize)
 
+	// Deserialize the elements of the sequence
 	for i := 0; i < int(len); i++ {
 		var v T
 		f(&v)
@@ -215,8 +297,15 @@ func DeserializeSeq[T any](des *Deserializer, into *[]T, includeTotalSize bool, 
 	}
 }
 
-// Deserializes a Seq of any data into a slice
+// Deserializes into a map of any data from a "Map". A "Map" is one of the on-the-wire types of
+// BeeSerde and represents all kinds of key-value collections like HashMaps. The includeTotalSize
+// argument defines whether the total size of the serialized map is included. This has no real use
+// and is usually true (for C++ std::map), but one cannot rely on that. When defining an existing
+// BeeMsg, the C++ code has to be thoroughly checked on whether this must be set or not.
 func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, includeTotalSize bool, fKey func(*K), fValue func(*V)) {
+	// A "Map" is made of an optional size field, a length field and then its key-value pairs (key
+	// first, then value)
+
 	len := deserializeSeqLen(des, includeTotalSize)
 
 	for i := 0; i < int(len); i++ {
@@ -228,7 +317,7 @@ func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, inclu
 	}
 }
 
-// Skips n bytes
+// Skips n bytes. Sometimes used for padding or ignoring fields.
 func Skip(des *Deserializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if _, err := des.Buf.ReadByte(); err != nil {
