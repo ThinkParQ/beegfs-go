@@ -19,11 +19,16 @@ type CacheEntry[T any] struct {
 	// store fsPath as metadata allowing reverse lookups of a Job based on the
 	// jobID.
 	Metadata map[string]string
-	// Store a map of strings to generic types in BadgerDB. This provides
-	// callers flexibility when using the MapStore. For example an entry with
-	// the key "/path" may want value to store a map[jobID]Job indicating all
-	// jobs running for that /path.
-	Value map[string]T
+	// Store any generic type in BadgerDB. If `T` is a reference type that
+	// requires initialization (such as a map or a slice) then it is up to the
+	// caller to initialize the Value field of the entry immediately after
+	// calling `CreateAndLockEntry()`.
+	//
+	// Example:
+	//	entry, _, _ := mapStore.CreateAndLockEntry("key1")
+	//	entry.Value = make(map[string]string)
+	//	entry.Value["innerKey1"] = "innerValue1"
+	Value T
 	// The mutex should be locked when reading or writing to a particular entry.
 	mu sync.Mutex
 	// The isDeleted flag should be checked immediately after a goroutine locks an
@@ -58,7 +63,7 @@ type BadgerItem[T any] struct {
 // encoding/decoding the contents of an entry from BadgerDB.
 type BadgerEntry[T any] struct {
 	Metadata map[string]string
-	Value    map[string]T
+	Value    T
 }
 
 // MapStore is an in memory representation of a map[string]map[string]T that
@@ -172,7 +177,6 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags
 	newEntry := &CacheEntry[T]{
 		mu:        sync.Mutex{},
 		Metadata:  make(map[string]string),
-		Value:     make(map[string]T),
 		isDeleted: false,
 		isCached:  true,
 	}
@@ -511,7 +515,7 @@ func (s *MapStore[T]) commitEntry(key string, entry *CacheEntry[T]) func(flags .
 		}
 
 		if deleteEntry && updateOnly {
-			return fmt.Errorf("invalid combination of release flags specified, retry operation with corrected flags (cannot both delete and only update an entry)")
+			return fmt.Errorf("invalid combination of commit flags specified, retry operation with corrected flags (cannot both delete and only update an entry)")
 		}
 
 		if !updateOnly {

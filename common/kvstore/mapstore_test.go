@@ -94,7 +94,7 @@ func TestCreateAndGetEntry(t *testing.T) {
 
 	// Simulate deleting an entry that existed when we tried to take a lock,
 	// but the last lock holder already deleted it.
-	ms.cache["k1"] = &CacheEntry[int]{
+	ms.cache["k1"] = &CacheEntry[map[string]int]{
 		Metadata: map[string]string{
 			"path": "/foo/bar",
 		},
@@ -111,7 +111,7 @@ func TestCreateAndGetEntry(t *testing.T) {
 
 	// Simulate deleting an entry that was cached when we tried to take a lock,
 	// but the last lock holder evicted it from the cache.
-	ms.cache["k1"] = &CacheEntry[int]{
+	ms.cache["k1"] = &CacheEntry[map[string]int]{
 		Metadata: map[string]string{
 			"path": "/foo/bar",
 		},
@@ -656,7 +656,7 @@ func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
 	errCh := make(chan error, 4)
 
 	// First we have a leader function going ahead and creating new entries:
-	createFunc := func(db *MapStore[TestWorkResult]) {
+	createFunc := func(db *MapStore[map[string]TestWorkResult]) {
 		// We'll modify the request ID to ensure entries are actually updated.
 		requestID := 0
 
@@ -689,7 +689,7 @@ func BenchmarkConcurrentCreateGetDeleteWithTwoDBs(b *testing.B) {
 	// Then we have a follower function trailing behind and deleting those entries.
 	// We first get the entry so we can verify it actually exists before deleting it.
 	// This is because delete doesn't return an error if the entry doesn't exist.
-	deleteFunc := func(db *MapStore[TestWorkResult]) {
+	deleteFunc := func(db *MapStore[map[string]TestWorkResult]) {
 		for i := 0; i < b.N; i++ {
 			// If the entry doesn't exist yet sleep a bit to give create time to get ahead.
 		retryLoop:
