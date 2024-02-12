@@ -36,29 +36,29 @@ func TestAddAndGet(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, n)
 
-	uid, err := store.getUidByNodeId(1, Meta)
+	uid, err := store.GetUidByNodeId(1, Meta)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1001, uid)
 
-	uid, err = store.getUidByNodeId(1, Storage)
+	uid, err = store.GetUidByNodeId(1, Storage)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1011, uid)
 
-	_, err = store.getUidByNodeId(9999, Storage)
+	_, err = store.GetUidByNodeId(9999, Storage)
 	assert.Error(t, err)
 
-	_, err = store.getUidByNodeId(1, Invalid)
+	_, err = store.GetUidByNodeId(1, Invalid)
 	assert.Error(t, err)
 
-	uid, err = store.getUidByAlias("meta1")
+	uid, err = store.GetUidByAlias("meta1")
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1001, uid)
 
-	uid, err = store.getUidByAlias("storage1")
+	uid, err = store.GetUidByAlias("storage1")
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1011, uid)
 
-	_, err = store.getUidByAlias("invalid")
+	_, err = store.GetUidByAlias("invalid")
 	assert.Error(t, err)
 }
 

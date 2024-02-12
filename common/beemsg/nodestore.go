@@ -136,7 +136,7 @@ func (store *NodeStore) getNodeAndConns(uid int64) (*Node, *NodeConns, error) {
 }
 
 // Get a node by its alias
-func (store *NodeStore) getUidByAlias(alias string) (int64, error) {
+func (store *NodeStore) GetUidByAlias(alias string) (int64, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
@@ -148,7 +148,7 @@ func (store *NodeStore) getUidByAlias(alias string) (int64, error) {
 }
 
 // Get a node by its node ID and type
-func (store *NodeStore) getUidByNodeId(nodeId uint32, nodeType NodeType) (int64, error) {
+func (store *NodeStore) GetUidByNodeId(nodeId uint32, nodeType NodeType) (int64, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
@@ -159,6 +159,8 @@ func (store *NodeStore) getUidByNodeId(nodeId uint32, nodeType NodeType) (int64,
 	return 0, fmt.Errorf("node with nodeID %d and nodeType %s not found", nodeId, nodeType)
 }
 
+const tcpErrorMsg = "TCP request to %s failed: %w"
+
 // Make a TCP request to a node by its UID
 func (store *NodeStore) RequestByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 	node, conns, err := store.getNodeAndConns(uid)
@@ -166,12 +168,17 @@ func (store *NodeStore) RequestByUid(ctx context.Context, uid int64, req msg.Ser
 		return err
 	}
 
-	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
+	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	if err != nil {
+		return fmt.Errorf(tcpErrorMsg, node, err)
+	}
+
+	return nil
 }
 
 // Make a TCP request to a node by its Alias
 func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.getUidByAlias(alias)
+	uid, err := store.GetUidByAlias(alias)
 	if err != nil {
 		return err
 	}
@@ -181,12 +188,17 @@ func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req ms
 		return err
 	}
 
-	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
+	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	if err != nil {
+		return fmt.Errorf(tcpErrorMsg, node, err)
+	}
+
+	return nil
 }
 
 // Make a TCP request to a node by its NodeID and NodeType
 func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId uint32, nodeType NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.getUidByNodeId(nodeId, nodeType)
+	uid, err := store.GetUidByNodeId(nodeId, nodeType)
 	if err != nil {
 		return err
 	}
@@ -196,8 +208,15 @@ func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId uint32, node
 		return err
 	}
 
-	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
+	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	if err != nil {
+		return fmt.Errorf(tcpErrorMsg, node, err)
+	}
+
+	return nil
 }
+
+const udpErrorMsg = "UDP request to %s failed: %w"
 
 // Make a UDP request to a node by its UID and waits for a response if resp is not nil
 func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
@@ -206,12 +225,17 @@ func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid int64, req msg.
 		return err
 	}
 
-	return node.requestUDP(ctx, req, resp)
+	err = RequestUDP(ctx, node.Addrs, req, resp)
+	if err != nil {
+		return fmt.Errorf(udpErrorMsg, node, err)
+	}
+
+	return nil
 }
 
 // Make a UDP request to a node by its alias and waits for a response if resp is not nil
 func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.getUidByAlias(alias)
+	uid, err := store.GetUidByAlias(alias)
 	if err != nil {
 		return err
 	}
@@ -221,12 +245,17 @@ func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req
 		return err
 	}
 
-	return node.requestUDP(ctx, req, resp)
+	err = RequestUDP(ctx, node.Addrs, req, resp)
+	if err != nil {
+		return fmt.Errorf(udpErrorMsg, node, err)
+	}
+
+	return nil
 }
 
 // Make a UDP request to a node by its NodeId and NodeType and waits for a response if resp is not nil
 func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId uint32, nodeType NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.getUidByNodeId(nodeId, nodeType)
+	uid, err := store.GetUidByNodeId(nodeId, nodeType)
 	if err != nil {
 		return err
 	}
@@ -236,5 +265,10 @@ func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId uint32, n
 		return err
 	}
 
-	return node.requestUDP(ctx, req, resp)
+	err = RequestUDP(ctx, node.Addrs, req, resp)
+	if err != nil {
+		return fmt.Errorf(udpErrorMsg, node, err)
+	}
+
+	return nil
 }
