@@ -115,16 +115,17 @@ func TestRequestTCP(t *testing.T) {
 		resp := &testMsg{}
 
 		node := &Node{Addrs: []string{"thishostdoesntexist", addr}}
+		conns := NewNodeConns()
 
 		// Make the request
-		err = node.requestTCP(ctx, 0, 100*time.Millisecond, req, resp)
+		err = node.requestTCP(ctx, conns, 0, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 
 		req.fieldA = 2345
 
 		// Make another request. The connection should have been stored and should be reused
-		err = node.requestTCP(ctx, 0, 100*time.Millisecond, req, resp)
+		err = node.requestTCP(ctx, conns, 0, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 

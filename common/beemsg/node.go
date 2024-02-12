@@ -57,32 +57,20 @@ type Node struct {
 	Type  NodeType
 	Alias string
 	Addrs []string
-
-	// The (thread safe) connection queue
-	conns queue
 }
 
 func (node *Node) String() string {
 	return fmt.Sprintf("Node{Id: %d, Type: %s, Alias: %s}", node.Id, node.Type, node.Alias)
 }
 
-func (node *Node) cleanUp() {
-	for {
-		conn, ok := node.conns.tryGet().(net.Conn)
-		if !ok {
-			break
-		}
-
-		conn.Close()
-	}
-}
-
 // Makes a BeeMsg request using a TCP connection from the queue or opens a new one
-func (node *Node) requestTCP(ctx context.Context, authSecret int64, timeout time.Duration, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+func (node *Node) requestTCP(ctx context.Context, conns *NodeConns, authSecret int64, timeout time.Duration,
+	req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+
 	// Loop through established connections from the store until one works
 	for {
-		conn, ok := node.conns.tryGet().(net.Conn)
-		if !ok {
+		conn := conns.TryGet()
+		if conn == nil {
 			break
 		}
 
@@ -90,11 +78,11 @@ func (node *Node) requestTCP(ctx context.Context, authSecret int64, timeout time
 		err := WriteRead(ctx, conn, req, resp)
 		if err == nil {
 			// Request successful, push connection back to store
-			node.conns.put(conn)
+			conns.Put(conn)
 			return nil
 		}
 
-		// If the request was not succesful (e.g. due to closed connection, we just try the next
+		// If the request was not successful (e.g. due to closed connection, we just try the next
 		// one and do not push it back to the store)
 		conn.Close()
 	}
@@ -104,7 +92,7 @@ func (node *Node) requestTCP(ctx context.Context, authSecret int64, timeout time
 	//
 	// This allows for an "infinite" amount of connections to be opened, which is fine
 	// for the current use case. If a connection limit must be implemented (a.k.a waiting for
-	// existing connections to become availabe), this should probably happen here.
+	// existing connections to become available), this should probably happen here.
 
 	conn, err := node.connect(ctx, authSecret, timeout)
 	if err != nil {
@@ -118,7 +106,7 @@ func (node *Node) requestTCP(ctx context.Context, authSecret int64, timeout time
 	}
 
 	// Request successful, push connection to store
-	node.conns.put(conn)
+	conns.Put(conn)
 	return nil
 }
 

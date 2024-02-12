@@ -28,11 +28,11 @@ func TestAddAndGet(t *testing.T) {
 	err = store.AddNode(&Node{Id: 1, Type: Meta})
 	assert.Error(t, err)
 
-	n, err := store.getNode(1001)
+	n, _, err := store.getNodeAndConns(1001)
 	assert.NoError(t, err)
 	assert.Equal(t, node1001, n)
 
-	n, err = store.getNode(9999)
+	n, _, err = store.getNodeAndConns(9999)
 	assert.Error(t, err)
 	assert.Nil(t, n)
 

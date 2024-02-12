@@ -28,6 +28,9 @@ type NodeStore struct {
 	// The meta node which has the root inode
 	metaRootNode *Node
 
+	// The pointers to the connection stores
+	connsByUid map[int64]*NodeConns
+
 	// Settings
 	connTimeout time.Duration
 	authSecret  int64
@@ -44,6 +47,7 @@ func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeSt
 		nodesByUid:  make(map[int64]*Node),
 		uidByAlias:  make(map[string]int64),
 		uidByNodeId: make(map[nodeIdAndType]int64),
+		connsByUid:  make(map[int64]*NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
 		authSecret:  authenticationSecret,
@@ -52,8 +56,8 @@ func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeSt
 
 // Frees resources (e.g. tcp connections)
 func (store *NodeStore) Cleanup() {
-	for _, n := range store.nodesByUid {
-		n.cleanUp()
+	for _, conns := range store.connsByUid {
+		conns.CleanUp()
 	}
 }
 
@@ -74,9 +78,14 @@ func (store *NodeStore) AddNode(node *Node) error {
 		return fmt.Errorf("node id %d and type %s already in store", node.Id, node.Type)
 	}
 
+	if _, ok := store.connsByUid[node.Uid]; ok {
+		return fmt.Errorf("node uid %d already in conns store", node.Uid)
+	}
+
 	store.nodesByUid[node.Uid] = node
 	store.uidByAlias[node.Alias] = node.Uid
 	store.uidByNodeId[nodeIdAndType{id: node.Id, typ: node.Type}] = node.Uid
+	store.connsByUid[node.Uid] = NewNodeConns()
 
 	return nil
 }
@@ -113,15 +122,17 @@ func (store *NodeStore) GetMetaRootNode() *Node {
 }
 
 // Get a node by its UID
-func (store *NodeStore) getNode(uid int64) (*Node, error) {
+func (store *NodeStore) getNodeAndConns(uid int64) (*Node, *NodeConns, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
-	if node, ok := store.nodesByUid[uid]; ok {
-		return node, nil
+	node, ok1 := store.nodesByUid[uid]
+	conns, ok2 := store.connsByUid[uid]
+	if !ok1 || !ok2 {
+		return nil, nil, fmt.Errorf("node with UID %d not found", uid)
 	}
 
-	return nil, fmt.Errorf("node with UID %d not found", uid)
+	return node, conns, nil
 }
 
 // Get a node by its alias
@@ -150,12 +161,12 @@ func (store *NodeStore) getUidByNodeId(nodeId uint32, nodeType NodeType) (int64,
 
 // Make a TCP request to a node by its UID
 func (store *NodeStore) RequestByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	node, err := store.getNode(uid)
+	node, conns, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
 
-	return node.requestTCP(ctx, store.authSecret, store.connTimeout, req, resp)
+	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
 }
 
 // Make a TCP request to a node by its Alias
@@ -165,12 +176,12 @@ func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req ms
 		return err
 	}
 
-	node, err := store.getNode(uid)
+	node, conns, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
 
-	return node.requestTCP(ctx, store.authSecret, store.connTimeout, req, resp)
+	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
 }
 
 // Make a TCP request to a node by its NodeID and NodeType
@@ -180,17 +191,17 @@ func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId uint32, node
 		return err
 	}
 
-	node, err := store.getNode(uid)
+	node, conns, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
 
-	return node.requestTCP(ctx, store.authSecret, store.connTimeout, req, resp)
+	return node.requestTCP(ctx, conns, store.authSecret, store.connTimeout, req, resp)
 }
 
 // Make a UDP request to a node by its UID and waits for a response if resp is not nil
 func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	node, err := store.getNode(uid)
+	node, _, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
@@ -205,7 +216,7 @@ func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req
 		return err
 	}
 
-	node, err := store.getNode(uid)
+	node, _, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
@@ -220,7 +231,7 @@ func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId uint32, n
 		return err
 	}
 
-	node, err := store.getNode(uid)
+	node, _, err := store.getNodeAndConns(uid)
 	if err != nil {
 		return err
 	}
