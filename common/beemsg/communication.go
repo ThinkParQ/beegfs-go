@@ -15,8 +15,11 @@ const (
 	MaxDatagramSize = 65507
 )
 
-// Sends a message to the node via UDP and optionally waits for a response if resp is not `nil`
-func RequestUDP(ctx context.Context, addrs []string, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+// Sends a BeeMsg to all given addrs via UDP and receives a response into resp if that is not set
+// to nil. This function is meant to be used with multiple addresses of a single node, therefore it
+// will only receive one response on the same socket and discard the rest of them.
+func RequestUDP(ctx context.Context, addrs []string,
+	req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
 	if err != nil {
 		return fmt.Errorf("creating UDP socket failed: %w", err)
@@ -73,7 +76,11 @@ func RequestUDP(ctx context.Context, addrs []string, req msg.SerializableMsg, re
 	return nil
 }
 
-// Makes a BeeMsg request using a TCP connection from the connection queue or opens a new one
+// Sends a BeeMsg to one of the given node addresses and receives a response into resp if
+// that is not set to nil. The function tries to reuse existing connections from the NodeConns queue
+// first. If  there are none or none of them worked, a new connection is opened. After successfully
+// sending and optionally receiving a BeeMsg, the connection is pushed into the queue for reuse.
+// Setting authSecret to 0 disables authentication.
 func RequestTCP(ctx context.Context, addrs []string, conns *NodeConns, authSecret int64,
 	timeout time.Duration, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 
@@ -98,11 +105,9 @@ func RequestTCP(ctx context.Context, addrs []string, conns *NodeConns, authSecre
 	}
 
 	// No established connection left in store. If we are not yet over the connection limit,
-	// establish a new one.
-	//
-	// This allows for an "infinite" amount of connections to be opened, which is fine
-	// for the current use case. If a connection limit must be implemented (a.k.a waiting for
-	// existing connections to become available), this should probably happen here.
+	// establish a new one. This allows for an "infinite" amount of connections to be opened,
+	// which is fine for the current use case. If a connection limit must be implemented (a.k.a
+	// waiting for existing connections to become available), this should probably happen here.
 
 	conn, err := ConnectTCP(ctx, addrs, authSecret, timeout)
 	if err != nil {
@@ -125,8 +130,8 @@ type connResult struct {
 	err  error
 }
 
-// Connects to a node by TCP, trying the provided addresses in order. Setting authSecret to 0
-// disables authentication.
+// Connects to a one of the given node addresses by TCP, trying the provided addresses in order.
+// Setting authSecret to 0 disables authentication.
 func ConnectTCP(ctx context.Context, addrs []string, authSecret int64, timeout time.Duration) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no addresses provided")

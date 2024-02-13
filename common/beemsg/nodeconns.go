@@ -15,7 +15,7 @@ func NewNodeConns() *NodeConns {
 }
 
 // Tries to pop an element from the front of the queue and converts it to a net.Conn.
-// Returns nil  if the queue is empty.
+// Returns nil if the queue is empty.
 func (nc *NodeConns) TryGet() net.Conn {
 	e := nc.conns.tryGet()
 	if e == nil {
@@ -26,10 +26,13 @@ func (nc *NodeConns) TryGet() net.Conn {
 	return e.(net.Conn)
 }
 
+// Puts a connection to the back of the queue
 func (nc *NodeConns) Put(conn net.Conn) {
 	nc.conns.put(conn)
 }
 
+// Empties the queue and closes all connections. The user must ensure that this is called when the
+// queue is no longer needed.
 func (nc *NodeConns) CleanUp() {
 	for {
 		conn := nc.TryGet()

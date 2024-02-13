@@ -29,7 +29,8 @@ func goWithContext(ctx context.Context, f func() error) error {
 	}
 }
 
-// Writes a msg to a io.Writer
+// Serializes and assembles a complete on-the-wire BeeMsg and writes it to an io.Writer, usually a
+// stream or a socket.
 func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 	header := NewHeader(in.MsgId())
 
@@ -64,7 +65,8 @@ func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 	return nil
 }
 
-// Reads a specific msg from a io.Reader
+// Reads and disassembles a complete on-the-wire BeeMsg from an io.Reader, usually a stream or
+// socket.
 func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error {
 	// Check that the deserialization target is a pointer
 	if reflect.ValueOf(out).Type().Kind() != reflect.Pointer {
@@ -117,14 +119,16 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 	return nil
 }
 
-// Writes a msg to a ReadWriter and optionally reads the response if resp is not nil
-func WriteRead(ctx context.Context, rw io.ReadWriter, msg msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	if err := WriteTo(ctx, rw, msg); err != nil {
+// Serializes and assembles a complete on-the-wire BeeMsg and writes it to an io.ReadWriter, usually
+// a stream or a socket. Afterwards the response is read and disassembled into the type of out,
+// unless it is set to nil - in this case the reading is skipped.
+func WriteRead(ctx context.Context, rw io.ReadWriter, in msg.SerializableMsg, out msg.DeserializableMsg) error {
+	if err := WriteTo(ctx, rw, in); err != nil {
 		return err
 	}
 
-	if resp != nil {
-		return ReadFrom(ctx, rw, resp)
+	if out != nil {
+		return ReadFrom(ctx, rw, out)
 	}
 
 	return nil

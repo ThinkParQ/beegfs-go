@@ -45,10 +45,14 @@ func NodeTypeFromString(s string) NodeType {
 
 // The node stores entries
 type Node struct {
-	Uid   int64
-	Id    uint32
-	Type  NodeType
+	// The nodes unique EntityID
+	Uid int64
+	// The nodes NodeID
+	Id   uint32
+	Type NodeType
+	// The nodes alias - formerly known as "node string ID"
 	Alias string
+	// IP addresses and ports of this node
 	Addrs []string
 }
 

@@ -77,7 +77,8 @@ func (t *Header) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &t.MsgSeqDone)
 }
 
-// Sets the MsgLen field in the serialized header
+// Sets the MsgLen field in the serialized header. Necessary because the actual size of the body
+// is only known after it has been serialized - but the header has to go into the buffer first.
 func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	// ensure this is actually a serialized header
 	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
@@ -89,7 +90,9 @@ func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	return nil
 }
 
-// Sets the MsgFeatureFlags field in the serialized header
+// Sets the MsgFeatureFlags field in the serialized header. Necessary because the actual value of
+// the field is only known after the body has been serialized - but the header has to go into the
+// buffer first.
 func overwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
 	// ensure this is actually a serialized header
 	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
