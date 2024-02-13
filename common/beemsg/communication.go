@@ -30,8 +30,7 @@ func RequestUDP(ctx context.Context, addrs []string,
 	defer conn.Close()
 
 	// Serialize message into buffer for multiple sends
-	reqBytes := bytes.Buffer{}
-	err = WriteTo(ctx, &reqBytes, req)
+	reqBytes, err := AssembleBeeMsg(req)
 	if err != nil {
 		return err
 	}
@@ -46,7 +45,7 @@ func RequestUDP(ctx context.Context, addrs []string,
 			continue
 		}
 
-		conn.WriteTo(reqBytes.Bytes(), addr)
+		conn.WriteTo(reqBytes, addr)
 		if err != nil {
 			errs.Errors = append(errs.Errors, err)
 		}

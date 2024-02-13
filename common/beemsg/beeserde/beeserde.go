@@ -30,9 +30,16 @@ type Serializer struct {
 	Errors types.MultiError
 }
 
-// Creates a new serializer
-func NewSerializer() Serializer {
+// Creates a new serializer that serializes into a new byte slice which can be accessed afterwards
+// using Serializer.Buf.Bytes().
+func NewSerializerWithSlice() Serializer {
 	return Serializer{}
+}
+
+// Creates a new serializer that serializes into the provided byte slice. The slice must not be
+// touched until serialization is finished.
+func NewSerializer(b []byte) Serializer {
+	return Serializer{Buf: *bytes.NewBuffer(b)}
 }
 
 // A BeeSerde serializable type, mainly intended for BeeMsg communication
@@ -194,7 +201,7 @@ type Deserializer struct {
 	Errors types.MultiError
 }
 
-// Creates new serializer
+// Creates a new deserializer
 func NewDeserializer(s []byte, msgFeatureFlags uint16) Deserializer {
 	return Deserializer{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
 }

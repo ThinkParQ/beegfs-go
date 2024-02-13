@@ -22,7 +22,7 @@ func TestHeaderSerialization(t *testing.T) {
 		MsgSeqDone:            10,
 	}
 
-	s := beeserde.NewSerializer()
+	s := beeserde.NewSerializerWithSlice()
 	header.Serialize(&s)
 
 	d := beeserde.NewDeserializer(s.Buf.Bytes(), 0)
@@ -34,34 +34,34 @@ func TestHeaderSerialization(t *testing.T) {
 
 func TestOverwriteMsgLen(t *testing.T) {
 	// Invalid buffer (no header)
-	err := overwriteMsgLen(make([]byte, 10), 1234)
+	err := OverwriteMsgLen(make([]byte, 10), 1234)
 	assert.Error(t, err)
 
 	buf := make([]byte, HeaderLen)
-	err = overwriteMsgLen(buf, 1234)
+	err = OverwriteMsgLen(buf, 1234)
 	assert.Error(t, err)
 
 	// set the correct prefix
 	binary.LittleEndian.PutUint64(buf[8:16], MsgPrefix)
 
-	err = overwriteMsgLen(buf, 1234)
+	err = OverwriteMsgLen(buf, 1234)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1234, binary.LittleEndian.Uint32(buf[0:4]))
 }
 
 func TestOverwriteMsgFeatureFlags(t *testing.T) {
 	// Invalid buffer (no header)
-	err := overwriteMsgFeatureFlags(make([]byte, 10), 1234)
+	err := OverwriteMsgFeatureFlags(make([]byte, 10), 1234)
 	assert.Error(t, err)
 
 	buf := make([]byte, HeaderLen)
-	err = overwriteMsgFeatureFlags(buf, 1234)
+	err = OverwriteMsgFeatureFlags(buf, 1234)
 	assert.Error(t, err)
 
 	// set the correct prefix
 	binary.LittleEndian.PutUint64(buf[8:16], MsgPrefix)
 
-	err = overwriteMsgFeatureFlags(buf, 1234)
+	err = OverwriteMsgFeatureFlags(buf, 1234)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[4:6]))
 }

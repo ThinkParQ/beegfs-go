@@ -40,6 +40,8 @@ type Header struct {
 	MsgSeqDone uint64
 }
 
+// Returns a new BeeMsg header with the given msgID. The MsgLen and MsgFeatureFlags fields
+// are filled with 0xFF as a placeholder and meant to be overwritten after serialization using the provided methods.
 func NewHeader(msgID uint16) Header {
 	return Header{
 		// MsgLen and MsgFeatureFlags are supposed to be overwritten after the body of the message
@@ -77,11 +79,26 @@ func (t *Header) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &t.MsgSeqDone)
 }
 
-// Sets the MsgLen field in the serialized header. Necessary because the actual size of the body
-// is only known after it has been serialized - but the header has to go into the buffer first.
-func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
-	// ensure this is actually a serialized header
-	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
+// Checks the given slice for being a serialized BeeMsg header
+func IsSerializedHeader(serHeader []byte) bool {
+	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint64(serHeader[8:16]) == MsgPrefix
+}
+
+// Retrieves the MsgLen field from a serialized header. Returns an error if the byte slice
+// is not a valid BeeMsg header.
+func ExtractMsgLen(serHeader []byte) (uint32, error) {
+	if !IsSerializedHeader(serHeader) {
+		return 0, fmt.Errorf("invalid header")
+	}
+
+	return binary.LittleEndian.Uint32(serHeader[0:4]), nil
+}
+
+// Sets the MsgLen fields value in the serialized header. Necessary because the actual size of the
+// body is only known after it has been serialized - but the header has to go into the buffer first.
+// Returns an error if the byte slice is not a valid BeeMsg header.
+func OverwriteMsgLen(serHeader []byte, msgLen uint32) error {
+	if !IsSerializedHeader(serHeader) {
 		return fmt.Errorf("invalid header")
 	}
 
@@ -90,12 +107,11 @@ func overwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	return nil
 }
 
-// Sets the MsgFeatureFlags field in the serialized header. Necessary because the actual value of
-// the field is only known after the body has been serialized - but the header has to go into the
-// buffer first.
-func overwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
-	// ensure this is actually a serialized header
-	if len(serHeader) < HeaderLen || binary.LittleEndian.Uint64(serHeader[8:16]) != MsgPrefix {
+// Sets the MsgFeatureFlags fields value in the serialized header. Necessary because the actual
+// value of the field is only known after the body has been serialized - but the header has to go
+// into the buffer first. Returns an error if the byte slice is not a valid BeeMsg header.
+func OverwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
+	if !IsSerializedHeader(serHeader) {
 		return fmt.Errorf("invalid header")
 	}
 

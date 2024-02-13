@@ -37,6 +37,15 @@ func (msg *testMsg) Deserialize(d *beeserde.Deserializer) {
 	msg.flags = d.MsgFeatureFlags
 }
 
+func TestAssembleBeeMsg(t *testing.T) {
+	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}, flags: 50000}
+	b, err := AssembleBeeMsg(&in)
+	assert.NoError(t, err)
+
+	assert.GreaterOrEqual(t, len(b), 50)
+	assert.True(t, IsSerializedHeader(b[0:HeaderLen]))
+}
+
 // Test writing a message to a io.Writer and reading it from a io.Reader
 func TestReadWrite(t *testing.T) {
 	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}, flags: 50000}
