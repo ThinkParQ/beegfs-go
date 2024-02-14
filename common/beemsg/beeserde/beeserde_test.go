@@ -53,13 +53,13 @@ func TestInt(t *testing.T) {
 		i64: 8,
 	}
 	in.Serialize(&s)
-	assert.Empty(t, s.Errors)
+	assert.NoError(t, s.Finish())
 
 	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := ints{}
 	out.Deserialize(&d)
 
-	assert.Empty(t, d.Errors)
+	assert.NoError(t, d.Finish())
 	assert.Equal(t, in, out)
 }
 
@@ -70,7 +70,7 @@ func TestCStr(t *testing.T) {
 	SerializeCStr(&s, []byte("Hello Go again!"), 4)
 	SerializeCStr(&s, []byte("Hello Go again and again!"), 5)
 	SerializeCStr(&s, []byte("Hello Go again and again!"), 8)
-	assert.Empty(t, s.Errors)
+	assert.NoError(t, s.Finish())
 
 	out := []byte{}
 	d := NewDeserializer(s.Buf.Bytes(), 0)
@@ -83,7 +83,7 @@ func TestCStr(t *testing.T) {
 	DeserializeCStr(&d, &out, 8)
 	assert.Equal(t, []byte("Hello Go again and again!"), out)
 
-	assert.Empty(t, d.Errors)
+	assert.NoError(t, d.Finish())
 }
 
 // Explicitly test the
@@ -118,7 +118,7 @@ func TestNestedSeq(t *testing.T) {
 			SerializeInt(&s, in)
 		})
 	})
-	assert.Empty(t, s.Errors)
+	assert.NoError(t, s.Finish())
 
 	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := [][]uint32{}
@@ -128,7 +128,7 @@ func TestNestedSeq(t *testing.T) {
 		})
 	})
 
-	assert.Empty(t, d.Errors)
+	assert.NoError(t, d.Finish())
 	assert.Equal(t, in, out)
 }
 
@@ -155,7 +155,7 @@ func TestNestedMap(t *testing.T) {
 			SerializeInt(&s, in)
 		})
 	})
-	assert.Empty(t, s.Errors)
+	assert.NoError(t, s.Finish())
 
 	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := map[int8]map[uint16]uint64{}
@@ -171,7 +171,7 @@ func TestNestedMap(t *testing.T) {
 		})
 	})
 
-	assert.Empty(t, d.Errors)
+	assert.NoError(t, d.Finish())
 	assert.Equal(t, in, out)
 }
 
@@ -179,5 +179,5 @@ func TestErrorOnNonPointerDeserialization(t *testing.T) {
 	d := NewDeserializer([]byte{1, 2, 3, 4}, 0)
 	DeserializeInt(&d, uint32(0))
 
-	assert.Error(t, &d.Errors)
+	assert.Error(t, d.Finish())
 }

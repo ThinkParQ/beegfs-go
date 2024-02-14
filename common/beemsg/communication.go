@@ -116,7 +116,7 @@ func RequestTCP(ctx context.Context, addrs []string, conns *NodeConns, authSecre
 	err = WriteRead(ctx, conn, req, resp)
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("request failed: %w", err)
+		return err
 	}
 
 	// Request successful, push connection to store

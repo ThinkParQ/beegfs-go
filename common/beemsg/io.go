@@ -38,10 +38,15 @@ func AssembleBeeMsg(in msg.SerializableMsg) ([]byte, error) {
 
 	ser := beeserde.NewSerializer(buf)
 	header.Serialize(&ser)
-	in.Serialize(&ser)
+	err := ser.Finish()
+	if err != nil {
+		return nil, fmt.Errorf("BeeMsg header serialization failed: %w", err)
+	}
 
-	if len(ser.Errors.Errors) > 0 {
-		return nil, fmt.Errorf("message serialization failed: %w", &ser.Errors)
+	in.Serialize(&ser)
+	err = ser.Finish()
+	if err != nil {
+		return nil, fmt.Errorf("BeeMsg body serialization failed: %w", err)
 	}
 
 	// The actual serialized message length is only known after serialization of the body, so we
@@ -71,8 +76,9 @@ func DisassembleBeeMsg(bufHeader []byte, bufBody []byte, out msg.DeserializableM
 	desHeader := beeserde.NewDeserializer(bufHeader, 0)
 	header.Deserialize(&desHeader)
 
-	if len(desHeader.Errors.Errors) > 0 {
-		return fmt.Errorf("BeeMsg header deserialization failed: %w", &desHeader.Errors)
+	err := desHeader.Finish()
+	if err != nil {
+		return fmt.Errorf("BeeMsg header deserialization failed: %w", err)
 	}
 
 	// Ensure we read the expected message
@@ -83,8 +89,9 @@ func DisassembleBeeMsg(bufHeader []byte, bufBody []byte, out msg.DeserializableM
 	desBody := beeserde.NewDeserializer(bufBody, header.MsgFeatureFlags)
 	out.Deserialize(&desBody)
 
-	if len(desBody.Errors.Errors) > 0 {
-		return fmt.Errorf("BeeMsg deserialization failed: %w", &desHeader.Errors)
+	err = desBody.Finish()
+	if err != nil {
+		return fmt.Errorf("BeeMsg body deserialization failed: %w", err)
 	}
 
 	return nil

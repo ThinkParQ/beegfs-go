@@ -7,8 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
-
-	"github.com/thinkparq/gobee/types"
 )
 
 // SERIALIZER
@@ -25,9 +23,9 @@ type Serializer struct {
 	// actual message, never from inner types. When constructing a BeeMsg, this field is expected
 	// to be read out after the call to Serialize() and be put into the BeeMsg header.
 	MsgFeatureFlags uint16
-	// Any errors during serialization go in here. This field must be checked after a call to
-	// Serialize(), otherwise potential errors might go through unnoticed.
-	Errors types.MultiError
+	// Any error during serialization goes in here. This field must be checked after a call to
+	// Serialize(), otherwise a potential error might go through unnoticed.
+	err error
 }
 
 // Creates a new serializer that serializes into a new byte slice which can be accessed afterwards
@@ -53,13 +51,26 @@ type Serializable interface {
 	Serialize(*Serializer)
 }
 
+// To be called after serialization is done - checks that there was no error.
+func (des *Serializer) Finish() error {
+	if des.err != nil {
+		return des.err
+	}
+
+	return nil
+}
+
 // Serializes a primitive integer value into an "Int". An "Int" is one of the on-the-wire types of
 // BeeSerde and represents integer types as well as bool. This function accepts any value, but must
 // be used with integers. The caller must explicitly provide the exact integer type (e.g. uint16,
 // int32 - NOT int or uint).
 func SerializeInt(ser *Serializer, value any) {
+	if ser.err != nil {
+		return
+	}
+
 	if err := binary.Write(&ser.Buf, binary.LittleEndian, value); err != nil {
-		ser.Errors.Errors = append(ser.Errors.Errors, err)
+		ser.err = err
 	}
 }
 
@@ -68,8 +79,12 @@ func SerializeInt(ser *Serializer, value any) {
 // so to read out the correct amount of bytes on the deserializing side, the size has to be known
 // beforehand.
 func SerializeBytes(ser *Serializer, value []byte) {
+	if ser.err != nil {
+		return
+	}
+
 	if _, err := ser.Buf.Write(value); err != nil {
-		ser.Errors.Errors = append(ser.Errors.Errors, err)
+		ser.err = err
 	}
 }
 
@@ -78,11 +93,15 @@ func SerializeBytes(ser *Serializer, value []byte) {
 // alignTo argument conditionally adds some zero bytes at the end and must match the deserialization
 // definition (it is usually 0 or 4).
 func SerializeCStr(ser *Serializer, value []byte, alignTo uint) {
+	if ser.err != nil {
+		return
+	}
+
 	SerializeInt(ser, uint32(len(value)))
 	SerializeBytes(ser, value)
 
 	if err := ser.Buf.WriteByte(0); err != nil {
-		ser.Errors.Errors = append(ser.Errors.Errors, err)
+		ser.err = err
 	}
 
 	if alignTo != 0 {
@@ -141,12 +160,20 @@ func (t *seqSerializer) finish(ser *Serializer, count int) {
 // set or not. The function f defines how to serialize each element of the sequence. By calling
 // SerializeSeq from within there, nested sequences can be serialized.
 func SerializeSeq[T any](ser *Serializer, value []T, includeTotalSize bool, f func(T)) {
+	if ser.err != nil {
+		return
+	}
+
 	// Setup the sequence helper
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
 	// Serialize the inner elements
 	for _, e := range value {
+		if ser.err != nil {
+			return
+		}
+
 		f(e)
 	}
 
@@ -160,12 +187,20 @@ func SerializeSeq[T any](ser *Serializer, value []T, includeTotalSize bool, f fu
 // and is usually true (for C++ std::map), but one cannot rely on that. When defining an existing
 // BeeMsg, the C++ code has to be thoroughly checked on whether this must be set or not.
 func SerializeMap[K comparable, V any](ser *Serializer, value map[K]V, includeTotalSize bool, fKey func(K), fValue func(V)) {
+	if ser.err != nil {
+		return
+	}
+
 	// Map serialization is built on top of sequence serialization 	// Setup the sequence helper
 	ss := seqSerializer{}
 	ss.begin(ser, includeTotalSize)
 
 	// Serialize the inner elements
 	for k, v := range value {
+		if ser.err != nil {
+			return
+		}
+
 		fKey(k)
 		fValue(v)
 	}
@@ -176,9 +211,13 @@ func SerializeMap[K comparable, V any](ser *Serializer, value map[K]V, includeTo
 
 // Serializes n zero bytes. Sometimes used for padding or just for a fixed amount.
 func Zeroes(ser *Serializer, n uint) {
+	if ser.err != nil {
+		return
+	}
+
 	for i := uint(0); i < n; i++ {
 		if err := ser.Buf.WriteByte(0); err != nil {
-			ser.Errors.Errors = append(ser.Errors.Errors, err)
+			ser.err = err
 		}
 	}
 }
@@ -196,9 +235,11 @@ type Deserializer struct {
 	// When constructing a BeeMsg, this field is expected to be set before the call to
 	// Deserialize() from the respective field from the received header.
 	MsgFeatureFlags uint16
-	// Error during deserialization go in here. This field must be checked after a call to
+	// Error during deserialization goes in here. This field must be checked after a call to
 	// <Msg>.Deserialize(), otherwise potential errors might go through unnoticed.
-	Errors types.MultiError
+	// If this is set, all following calls to any method will just do nothing to prevent "infinite"
+	// loops.
+	err error
 }
 
 // Creates a new deserializer
@@ -217,20 +258,38 @@ type Deserializable interface {
 	Deserialize(*Deserializer)
 }
 
+// To be called after deserialization is done - checks if the whole buffer and only the whole
+// buffer has been consumed and that there was no error.
+func (des *Deserializer) Finish() error {
+	if des.err != nil {
+		return des.err
+	}
+
+	if des.Buf.Len() != 0 {
+		return fmt.Errorf("did not consume the whole buffer, %d bytes are left", des.Buf.Len())
+	}
+
+	return nil
+}
+
 // Deserializes into a primitive integer value from an "Int". An "Int" is one of the on-the-wire
 // types of BeeSerde and represents integer types as well as bool. This function accepts any value,
 // but must be used with integers. The caller must explicitly provide the exact integer type (e.g.
 // uint16, int32 - NOT int or uint).
 func DeserializeInt(des *Deserializer, into any) {
+	if des.err != nil {
+		return
+	}
+
 	// A caller could accidentally pass in a value instead of a pointer, in which case the
 	// deserialized data would just be lost. Therefore, we check here that we actually got a
 	// pointer.
 	if reflect.ValueOf(into).Type().Kind() != reflect.Pointer {
-		des.Errors.Errors = append(des.Errors.Errors, fmt.Errorf("attempt to deserialize int into non-pointer"))
+		des.err = fmt.Errorf("attempt to deserialize int into non-pointer")
 	}
 
 	if err := binary.Read(&des.Buf, binary.LittleEndian, into); err != nil {
-		des.Errors.Errors = append(des.Errors.Errors, err)
+		des.err = err
 	}
 }
 
@@ -239,8 +298,12 @@ func DeserializeInt(des *Deserializer, into any) {
 // the correct length beforehand and the source buffer must contain enough data to completely fill
 // it.
 func DeserializeBytes(des *Deserializer, into *[]byte) {
+	if des.err != nil {
+		return
+	}
+
 	if _, err := des.Buf.Read(*into); err != nil {
-		des.Errors.Errors = append(des.Errors.Errors, err)
+		des.err = err
 	}
 }
 
@@ -250,6 +313,10 @@ func DeserializeBytes(des *Deserializer, into *[]byte) {
 // function. The alignTo argument conditionally expects some zero bytes at the end and must match
 // the serialization definition (it is usually 0 or 4).
 func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
+	if des.err != nil {
+		return
+	}
+
 	var len uint32
 	DeserializeInt(des, &len)
 
@@ -257,7 +324,7 @@ func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
 	DeserializeBytes(des, into)
 
 	if _, err := des.Buf.ReadByte(); err != nil {
-		des.Errors.Errors = append(des.Errors.Errors, err)
+		des.err = err
 	}
 
 	if alignTo != 0 {
@@ -294,10 +361,18 @@ func deserializeSeqLen(des *Deserializer, includeTotalSize bool) uint32 {
 func DeserializeSeq[T any](des *Deserializer, into *[]T, includeTotalSize bool, f func(*T)) {
 	// A "Seq" is made of an optional size field, a length field and then all the elements in order
 
-	len := deserializeSeqLen(des, includeTotalSize)
+	if des.err != nil {
+		return
+	}
+
+	l := deserializeSeqLen(des, includeTotalSize)
 
 	// Deserialize the elements of the sequence
-	for i := 0; i < int(len); i++ {
+	for i := 0; i < int(l); i++ {
+		if des.err != nil {
+			return
+		}
+
 		var v T
 		f(&v)
 		*into = append(*into, v)
@@ -313,9 +388,17 @@ func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, inclu
 	// A "Map" is made of an optional size field, a length field and then its key-value pairs (key
 	// first, then value)
 
-	len := deserializeSeqLen(des, includeTotalSize)
+	if des.err != nil {
+		return
+	}
 
-	for i := 0; i < int(len); i++ {
+	l := deserializeSeqLen(des, includeTotalSize)
+
+	for i := 0; i < int(l); i++ {
+		if des.err != nil {
+			return
+		}
+
 		var key K
 		var value V
 		fKey(&key)
@@ -328,7 +411,7 @@ func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, inclu
 func Skip(des *Deserializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if _, err := des.Buf.ReadByte(); err != nil {
-			des.Errors.Errors = append(des.Errors.Errors, err)
+			des.err = err
 		}
 	}
 }
