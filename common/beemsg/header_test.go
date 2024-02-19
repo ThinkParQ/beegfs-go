@@ -22,7 +22,7 @@ func TestHeaderSerialization(t *testing.T) {
 		MsgSeqDone:            10,
 	}
 
-	s := beeserde.NewSerializerWithSlice()
+	s := beeserde.NewSerializer([]byte{})
 	header.Serialize(&s)
 
 	d := beeserde.NewDeserializer(s.Buf.Bytes(), 0)

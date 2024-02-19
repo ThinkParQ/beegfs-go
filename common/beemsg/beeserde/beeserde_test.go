@@ -40,7 +40,7 @@ func (t *ints) Deserialize(d *Deserializer) {
 }
 
 func TestInt(t *testing.T) {
-	s := NewSerializerWithSlice()
+	s := NewSerializer([]byte{})
 
 	in := ints{
 		u8:  1,
@@ -64,7 +64,7 @@ func TestInt(t *testing.T) {
 }
 
 func TestCStr(t *testing.T) {
-	s := NewSerializerWithSlice()
+	s := NewSerializer([]byte{})
 
 	SerializeCStr(&s, []byte("Hello Go!"), 0)
 	SerializeCStr(&s, []byte("Hello Go again!"), 4)
@@ -88,29 +88,29 @@ func TestCStr(t *testing.T) {
 
 // Explicitly test the
 func TestCStrAlignment(t *testing.T) {
-	s1 := NewSerializerWithSlice()
+	s1 := NewSerializer([]byte{})
 	SerializeCStr(&s1, []byte{}, 1)
 	assert.Equal(t, 5, s1.Buf.Len())
 
-	s2 := NewSerializerWithSlice()
+	s2 := NewSerializer([]byte{})
 	SerializeCStr(&s2, []byte{}, 2)
 	assert.Equal(t, 6, s2.Buf.Len())
 
-	s3 := NewSerializerWithSlice()
+	s3 := NewSerializer([]byte{})
 	SerializeCStr(&s3, []byte("aa"), 7)
 	assert.Equal(t, 7, s3.Buf.Len())
 
-	s4 := NewSerializerWithSlice()
+	s4 := NewSerializer([]byte{})
 	SerializeCStr(&s4, []byte("aaa"), 7)
 	assert.Equal(t, 14, s4.Buf.Len())
 
-	s5 := NewSerializerWithSlice()
+	s5 := NewSerializer([]byte{})
 	SerializeCStr(&s5, []byte("aaaa"), 4)
 	assert.Equal(t, 12, s5.Buf.Len())
 }
 
 func TestNestedSeq(t *testing.T) {
-	s := NewSerializerWithSlice()
+	s := NewSerializer([]byte{})
 
 	in := [][]uint32{{1, 2, 3}, {4, 5, 6, 7, 8}, {0xFFFFFFFE, 0xFFFFFFFF}}
 	SerializeSeq[[]uint32](&s, in, true, func(in []uint32) {
@@ -133,7 +133,7 @@ func TestNestedSeq(t *testing.T) {
 }
 
 func TestNestedMap(t *testing.T) {
-	s := NewSerializerWithSlice()
+	s := NewSerializer([]byte{})
 
 	in := map[int8]map[uint16]uint64{
 		-10: {

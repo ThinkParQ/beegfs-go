@@ -23,19 +23,15 @@ type Serializer struct {
 	// actual message, never from inner types. When constructing a BeeMsg, this field is expected
 	// to be read out after the call to Serialize() and be put into the BeeMsg header.
 	MsgFeatureFlags uint16
-	// Any error during serialization goes in here. This field must be checked after a call to
-	// Serialize(), otherwise a potential error might go through unnoticed.
+	// Any error during serialization goes in here. This field must be checked after using the
+	// serializer by calling Serializer.Finish(), otherwise errors might go through unnoticed.
+	// If this is set, all following operations will do nothing.
 	err error
 }
 
-// Creates a new serializer that serializes into a new byte slice which can be accessed afterwards
-// using Serializer.Buf.Bytes().
-func NewSerializerWithSlice() Serializer {
-	return Serializer{}
-}
-
 // Creates a new serializer that serializes into the provided byte slice. The slice must not be
-// touched until serialization is finished.
+// touched until serialization is finished. The user must call Serializer.Finish() when done to
+// check for errors during serialization.
 func NewSerializer(b []byte) Serializer {
 	return Serializer{Buf: *bytes.NewBuffer(b)}
 }
@@ -218,6 +214,7 @@ func Zeroes(ser *Serializer, n uint) {
 	for i := uint(0); i < n; i++ {
 		if err := ser.Buf.WriteByte(0); err != nil {
 			ser.err = err
+			return
 		}
 	}
 }
@@ -235,14 +232,14 @@ type Deserializer struct {
 	// When constructing a BeeMsg, this field is expected to be set before the call to
 	// Deserialize() from the respective field from the received header.
 	MsgFeatureFlags uint16
-	// Error during deserialization goes in here. This field must be checked after a call to
-	// <Msg>.Deserialize(), otherwise potential errors might go through unnoticed.
-	// If this is set, all following calls to any method will just do nothing to prevent "infinite"
-	// loops.
+	// Any error during deserialization goes in here. This field must be checked after using the
+	// deserializer by calling Deserializer.Finish(), otherwise errors might go through unnoticed.
+	// If this is set, all following operations will do nothing to prevent "infinite" loops.
 	err error
 }
 
-// Creates a new deserializer
+// Creates a new deserializer using the given byte slice as input. The user must call
+// Deserializer.Finish() when done to check for errors during deserialization.
 func NewDeserializer(s []byte, msgFeatureFlags uint16) Deserializer {
 	return Deserializer{Buf: *bytes.NewBuffer(s), MsgFeatureFlags: msgFeatureFlags}
 }
@@ -409,9 +406,14 @@ func DeserializeMap[K comparable, V any](des *Deserializer, into *map[K]V, inclu
 
 // Skips n bytes. Sometimes used for padding or ignoring fields.
 func Skip(des *Deserializer, n uint) {
+	if des.err != nil {
+		return
+	}
+
 	for i := uint(0); i < n; i++ {
 		if _, err := des.Buf.ReadByte(); err != nil {
 			des.err = err
+			return
 		}
 	}
 }

@@ -133,6 +133,30 @@ func TestRequestTCP(t *testing.T) {
 
 }
 
+// Ensure RequestTCP can be cancelled
+func TestRequestTCPCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	listener, _ := net.ListenTCP("tcp", &net.TCPAddr{})
+	defer listener.Close()
+
+	addr := listener.Addr().String()
+	conns := NewNodeConns()
+
+	resCh := make(chan error, 1)
+	go func() {
+		cancel()
+		err := RequestTCP(ctx, []string{addr}, conns, 0, 12*time.Hour, &testMsg{}, &testMsg{})
+		resCh <- err
+	}()
+
+	select {
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout")
+	case err := <-resCh:
+		assert.Error(t, err)
+	}
+}
+
 // Test making UDP requests to a node and receiving a response. This also implicitly test establishing connections
 func TestRequestUDP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -169,5 +193,28 @@ func TestRequestUDP(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("timeout")
+	}
+}
+
+// Ensure RequestUDP can be cancelled
+func TestRequestUDPCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	listener, _ := net.ListenUDP("udp", &net.UDPAddr{})
+	defer listener.Close()
+
+	addr := listener.LocalAddr().String()
+
+	resCh := make(chan error, 1)
+	go func() {
+		cancel()
+		err := RequestUDP(ctx, []string{addr}, &testMsg{}, &testMsg{})
+		resCh <- err
+	}()
+
+	select {
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout")
+	case err := <-resCh:
+		assert.Error(t, err)
 	}
 }

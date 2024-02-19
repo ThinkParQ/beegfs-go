@@ -1,7 +1,6 @@
 package beemsg
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -20,12 +19,10 @@ const (
 // will only receive one response on the same socket and discard the rest of them.
 func RequestUDP(ctx context.Context, addrs []string,
 	req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
 	if err != nil {
 		return fmt.Errorf("creating UDP socket failed: %w", err)
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
 	}
 	defer conn.Close()
 
@@ -60,19 +57,42 @@ func RequestUDP(ctx context.Context, addrs []string,
 	// about the first - the rest is silently dropped with the socket
 	if resp != nil {
 		respBuf := make([]byte, MaxDatagramSize)
-		_, err := conn.Read(respBuf)
+
+		recvCh := recvResponse(conn, respBuf)
+
+		// Wait for receive or the context cancels
+		select {
+		case err = <-recvCh:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 		if err != nil {
 			return fmt.Errorf("reading UDP response failed: %w", err)
 		}
 
-		respBytes := bytes.NewBuffer(respBuf)
-		err = ReadFrom(ctx, respBytes, resp)
+		msgLen, err := ExtractMsgLen(respBuf[0:HeaderLen])
+		if err != nil {
+			return err
+		}
+
+		err = DisassembleBeeMsg(respBuf[0:HeaderLen], respBuf[HeaderLen:msgLen], resp)
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func recvResponse(conn *net.UDPConn, buf []byte) <-chan error {
+	ch := make(chan error, 1)
+
+	go func() {
+		_, err := conn.Read(buf)
+		ch <- err
+	}()
+
+	return ch
 }
 
 // Sends a BeeMsg to one of the given node addresses and receives a response into resp if
