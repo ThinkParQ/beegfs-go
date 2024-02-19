@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/gobee/beemsg/util"
 )
 
 // Key for selecting a node by nodeID and type
@@ -29,7 +30,7 @@ type NodeStore struct {
 	metaRootNode *Node
 
 	// The pointers to the connection stores
-	connsByUid map[int64]*NodeConns
+	connsByUid map[int64]*util.NodeConns
 
 	// Settings
 	connTimeout time.Duration
@@ -47,7 +48,7 @@ func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeSt
 		nodesByUid:  make(map[int64]*Node),
 		uidByAlias:  make(map[string]int64),
 		uidByNodeId: make(map[nodeIdAndType]int64),
-		connsByUid:  make(map[int64]*NodeConns),
+		connsByUid:  make(map[int64]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
 		authSecret:  authenticationSecret,
@@ -85,7 +86,7 @@ func (store *NodeStore) AddNode(node *Node) error {
 	store.nodesByUid[node.Uid] = node
 	store.uidByAlias[node.Alias] = node.Uid
 	store.uidByNodeId[nodeIdAndType{id: node.Id, typ: node.Type}] = node.Uid
-	store.connsByUid[node.Uid] = NewNodeConns()
+	store.connsByUid[node.Uid] = util.NewNodeConns()
 
 	return nil
 }
@@ -122,7 +123,7 @@ func (store *NodeStore) GetMetaRootNode() *Node {
 }
 
 // Get a node by its UID
-func (store *NodeStore) getNodeAndConns(uid int64) (*Node, *NodeConns, error) {
+func (store *NodeStore) getNodeAndConns(uid int64) (*Node, *util.NodeConns, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
@@ -168,7 +169,7 @@ func (store *NodeStore) RequestByUid(ctx context.Context, uid int64, req msg.Ser
 		return err
 	}
 
-	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
 	if err != nil {
 		return fmt.Errorf(tcpErrorMsg, node, err)
 	}
@@ -188,7 +189,7 @@ func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req ms
 		return err
 	}
 
-	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
 	if err != nil {
 		return fmt.Errorf(tcpErrorMsg, node, err)
 	}
@@ -208,7 +209,7 @@ func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId uint32, node
 		return err
 	}
 
-	err = RequestTCP(ctx, node.Addrs, conns, store.authSecret, store.connTimeout, req, resp)
+	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
 	if err != nil {
 		return fmt.Errorf(tcpErrorMsg, node, err)
 	}
@@ -225,7 +226,7 @@ func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid int64, req msg.
 		return err
 	}
 
-	err = RequestUDP(ctx, node.Addrs, req, resp)
+	err = util.RequestUDP(ctx, node.Addrs, req, resp)
 	if err != nil {
 		return fmt.Errorf(udpErrorMsg, node, err)
 	}
@@ -245,7 +246,7 @@ func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req
 		return err
 	}
 
-	err = RequestUDP(ctx, node.Addrs, req, resp)
+	err = util.RequestUDP(ctx, node.Addrs, req, resp)
 	if err != nil {
 		return fmt.Errorf(udpErrorMsg, node, err)
 	}
@@ -265,7 +266,7 @@ func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId uint32, n
 		return err
 	}
 
-	err = RequestUDP(ctx, node.Addrs, req, resp)
+	err = util.RequestUDP(ctx, node.Addrs, req, resp)
 	if err != nil {
 		return fmt.Errorf(udpErrorMsg, node, err)
 	}

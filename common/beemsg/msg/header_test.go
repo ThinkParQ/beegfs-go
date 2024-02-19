@@ -1,4 +1,4 @@
-package beemsg
+package msg
 
 import (
 	"encoding/binary"

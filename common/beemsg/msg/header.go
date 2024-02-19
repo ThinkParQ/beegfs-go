@@ -1,4 +1,4 @@
-package beemsg
+package msg
 
 // The BeeMsg header definition
 

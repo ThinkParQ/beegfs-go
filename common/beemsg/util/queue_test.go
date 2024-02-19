@@ -1,4 +1,4 @@
-package beemsg
+package util
 
 import (
 	"testing"

@@ -1,4 +1,4 @@
-package beemsg
+package util
 
 import (
 	"context"
@@ -110,14 +110,14 @@ func TestRequestTCP(t *testing.T) {
 		conns := NewNodeConns()
 
 		// Make the request
-		err = RequestTCP(ctx, addrs, conns, 0, 100*time.Millisecond, req, resp)
+		err = conns.RequestTCP(ctx, addrs, 0, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 
 		req.fieldA = 2345
 
 		// Make another request. The connection should have been stored and should be reused
-		err = RequestTCP(ctx, addrs, conns, 0, 100*time.Millisecond, req, resp)
+		err = conns.RequestTCP(ctx, addrs, 0, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 
@@ -145,7 +145,7 @@ func TestRequestTCPCancel(t *testing.T) {
 	resCh := make(chan error, 1)
 	go func() {
 		cancel()
-		err := RequestTCP(ctx, []string{addr}, conns, 0, 12*time.Hour, &testMsg{}, &testMsg{})
+		err := conns.RequestTCP(ctx, []string{addr}, 0, 12*time.Hour, &testMsg{}, &testMsg{})
 		resCh <- err
 	}()
 

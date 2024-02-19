@@ -1,4 +1,4 @@
-package beemsg
+package util
 
 import (
 	"bytes"
@@ -35,33 +35,6 @@ func (msg *testMsg) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeCStr(d, &msg.fieldB, 0)
 
 	msg.flags = d.MsgFeatureFlags
-}
-
-func TestAssembleBeeMsg(t *testing.T) {
-	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}, flags: 50000}
-	b, err := AssembleBeeMsg(&in)
-	assert.NoError(t, err)
-
-	assert.GreaterOrEqual(t, len(b), 50)
-	assert.True(t, IsSerializedHeader(b[0:HeaderLen]))
-
-	// Test for correctness
-	out := testMsg{}
-	err = DisassembleBeeMsg(b[0:HeaderLen], b[HeaderLen:], &out)
-	assert.NoError(t, err)
-	assert.Equal(t, in, out)
-
-	// Test that a non-fitting input buffer causes an error
-
-	// Lengthen the buffer
-	b = append(b, 0)
-	err = DisassembleBeeMsg(b[0:HeaderLen], b[HeaderLen:], &out)
-	assert.Error(t, err)
-
-	// Shorten the buffer
-	b = b[0:50]
-	err = DisassembleBeeMsg(b[0:HeaderLen], b[HeaderLen:], &out)
-	assert.Error(t, err)
 }
 
 // Test writing a message to a io.Writer and reading it from a io.Reader

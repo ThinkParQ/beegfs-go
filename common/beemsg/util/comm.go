@@ -1,4 +1,4 @@
-package beemsg
+package util
 
 import (
 	"context"
@@ -70,12 +70,12 @@ func RequestUDP(ctx context.Context, addrs []string,
 			return fmt.Errorf("reading UDP response failed: %w", err)
 		}
 
-		msgLen, err := ExtractMsgLen(respBuf[0:HeaderLen])
+		msgLen, err := msg.ExtractMsgLen(respBuf[0:msg.HeaderLen])
 		if err != nil {
 			return err
 		}
 
-		err = DisassembleBeeMsg(respBuf[0:HeaderLen], respBuf[HeaderLen:msgLen], resp)
+		err = DisassembleBeeMsg(respBuf[0:msg.HeaderLen], respBuf[msg.HeaderLen:msgLen], resp)
 		if err != nil {
 			return err
 		}
@@ -93,55 +93,6 @@ func recvResponse(conn *net.UDPConn, buf []byte) <-chan error {
 	}()
 
 	return ch
-}
-
-// Sends a BeeMsg to one of the given node addresses and receives a response into resp if
-// that is not set to nil. The function tries to reuse existing connections from the NodeConns queue
-// first. If  there are none or none of them worked, a new connection is opened. After successfully
-// sending and optionally receiving a BeeMsg, the connection is pushed into the queue for reuse.
-// Setting authSecret to 0 disables authentication.
-func RequestTCP(ctx context.Context, addrs []string, conns *NodeConns, authSecret int64,
-	timeout time.Duration, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-
-	// Loop through established connections in the connection queue until one works
-	for {
-		conn := conns.TryGet()
-		if conn == nil {
-			break
-		}
-
-		// found an established connection, try making a request
-		err := WriteRead(ctx, conn, req, resp)
-		if err == nil {
-			// Request successful, push connection back to store
-			conns.Put(conn)
-			return nil
-		}
-
-		// If the request was not successful (e.g. due to closed connection, we just try the next
-		// one and do not push it back to the store)
-		conn.Close()
-	}
-
-	// No established connection left in store. If we are not yet over the connection limit,
-	// establish a new one. This allows for an "infinite" amount of connections to be opened,
-	// which is fine for the current use case. If a connection limit must be implemented (a.k.a
-	// waiting for existing connections to become available), this should probably happen here.
-
-	conn, err := ConnectTCP(ctx, addrs, authSecret, timeout)
-	if err != nil {
-		return err
-	}
-
-	err = WriteRead(ctx, conn, req, resp)
-	if err != nil {
-		conn.Close()
-		return err
-	}
-
-	// Request successful, push connection to store
-	conns.Put(conn)
-	return nil
 }
 
 type connResult struct {
