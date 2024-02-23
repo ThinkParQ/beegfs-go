@@ -11,13 +11,18 @@ import (
 
 // Defines all the global flags and binds them to the backends config singleton
 func Init(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVar(&config.Get().ManagementAddr, "mgmtdAddr", "127.0.0.1:8010", "The gRPC network address and port of the management node")
+	cmd.PersistentFlags().StringVar(&config.Get().ManagementAddr, "mgmtdAddr", "127.0.0.1:8010",
+		"The gRPC network address and port of the management node")
 	viper.BindEnv("mgmtdAddr", "BEEGFS_MGMTD_ADDR")
 	viper.BindPFlag("mgmtdAddr", cmd.PersistentFlags().Lookup("mgmtdAddr"))
 
-	// TODO connTimeout and authenticationSecret need custom action to parse them (connTimeout is a
-	// time.Duration and cannot be parsed and authenticationSecret must be loaded from file)
-	//
+	cmd.PersistentFlags().BoolVar(&config.Get().Debug, "debug", false,
+		"Prints some additional info that is normally hidden, depending on the command.")
+	cmd.PersistentFlags().MarkHidden("debug")
+	viper.BindEnv("debug", "BEEGFS_DEBUG")
+	viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
+
+	// TODO authenticationSecret need custom action to parse it (must be loaded from file)
 	// See here: https://github.com/ThinkParQ/beegfs-ctl/issues/5
 }
 

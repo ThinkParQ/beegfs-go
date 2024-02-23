@@ -25,6 +25,10 @@ type Config struct {
 	// The authentication secret to use for BeeMsg communication. 0 means authentication is
 	// disabled.
 	AuthenticationSecret int64
+
+	// Tells the command to print additional, normally hidden info. An example would be the entity
+	// UIDs which currently are only used internally and hidden to avoid user confusion.
+	Debug bool
 }
 
 // Returns a pointer to the global config singleton
