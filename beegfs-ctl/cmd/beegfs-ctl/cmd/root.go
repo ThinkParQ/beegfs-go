@@ -2,15 +2,15 @@ package cmd
 
 import (
 	"context"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/config"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 )
 
 // Main entry point of the tool
-func Execute() {
+func Execute() int {
 	// The root command
 	cmd := &cobra.Command{
 		Use:   "beegfs-ctl",
@@ -38,6 +38,15 @@ cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est la
 	err := cmd.ExecuteContext(context.Background())
 
 	if err != nil {
-		os.Exit(1)
+		// If the command returned a util.CtlError with an included exit code, use this to exit the
+		// program
+		ctlError, ok := err.(util.CtlError)
+		if ok {
+			return ctlError.GetExitCode()
+		}
+
+		return 1
 	}
+
+	return 0
 }

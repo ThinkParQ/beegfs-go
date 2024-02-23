@@ -1,7 +1,11 @@
 package main
 
-import "github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd"
+import (
+	"os"
+
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	os.Exit(cmd.Execute())
 }
