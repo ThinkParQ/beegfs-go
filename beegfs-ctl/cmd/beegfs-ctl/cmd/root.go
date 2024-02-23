@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/config"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
@@ -24,6 +26,12 @@ voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occa
 cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.`,
 		SilenceUsage: true,
 	}
+
+	// Normalize flags to lowercase - makes the program accept case insensitive flags
+	cmd.SetGlobalNormalizationFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
+		lowercaseFlagName := strings.ToLower(name)
+		return pflag.NormalizedName(lowercaseFlagName)
+	})
 
 	// Initialize global config
 	// Can be accessed at config.Config and passed to the ctl API
