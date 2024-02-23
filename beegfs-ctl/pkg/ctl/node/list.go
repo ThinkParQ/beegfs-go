@@ -2,11 +2,15 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
-	"sync"
+	"os"
+	"time"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/gobee/beemsg/util"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 )
 
@@ -19,10 +23,21 @@ import (
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
 type GetNodeList_Config struct {
-	// Include the network addresses amd extra info for all the nodes in the response. Causes extra work on management
-	IncludeAddrs bool
+	// Include the network interface names and addresses and extra info for all the nodes in the
+	// response. Causes extra work on management.
+	WithNics bool
 	// Check all nodes for reachability
-	CheckReachability bool
+	ReachabilityCheck bool
+	// Waiting time for node responses. This defines how long the reachability check will take if
+	// at least one pinged nic does not respond.
+	ReachabilityTimeout time.Duration
+}
+
+type GetNodeList_Nic struct {
+	Name      string
+	Type      string
+	Addr      string
+	Reachable bool
 }
 
 // A GetNodeList result entry.
@@ -34,92 +49,162 @@ type GetNodeList_Node struct {
 	BeemsgPort uint16
 	// List of network addresses the node should be available on. Ordered as delivered from
 	// management (e.g. highest priority first)
-	Addrs []string
-	// Empty if Ping is false or node is unreachable. A string in the form addr:port if the node
-	// responded.
-	ReachableOn string
+	Nics []*GetNodeList_Nic
 }
 
 // Get the complete list of nodes from the mananagement
-func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]GetNodeList_Node, error) {
+func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_Node, error) {
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
 		return nil, err
 	}
 
 	// Send request to the management via gRPC.
-	res, err := mgmtd.GetNodeList(ctx, &pb.GetNodeListReq{IncludeNics: cfg.IncludeAddrs || cfg.CheckReachability})
+	res, err := mgmtd.GetNodeList(ctx, &pb.GetNodeListReq{IncludeNics: cfg.WithNics || cfg.ReachabilityCheck})
 	if err != nil {
 		return nil, fmt.Errorf("requesting node list failed: %w", err)
 	}
 
-	// Transform into result struct
-	var nodes []GetNodeList_Node
-	for _, e := range res.Nodes {
-		var addrs []string
-		for _, a := range e.Nics {
-			addrs = append(addrs, a.Addr)
+	// Result list of nodes
+	nodes := make([]*GetNodeList_Node, 0, len(res.Nodes))
+	// Maps net.Addr.String() to a GetNodeList_Nic pointer. Used for checkReachability
+	// To avoid too many reallocations, we assume three Nics per node on average
+	addrMap := make(map[string]*GetNodeList_Nic, len(res.Nodes)*2)
+
+	// Transform into result struct and fill the addrMap
+	for _, node := range res.Nodes {
+		nics := make([]*GetNodeList_Nic, 0, len(node.Nics))
+
+		for _, inic := range node.Nics {
+			nic := &GetNodeList_Nic{
+				Name: inic.Name,
+				Type: inic.Type.String(),
+				Addr: inic.Addr,
+			}
+			nics = append(nics, nic)
+
+			// Add addrMap entry for this Nic
+			addr := fmt.Sprintf("%s:%d", inic.Addr, node.BeemsgPort)
+			addrMap[addr] = nic
 		}
 
-		node := GetNodeList_Node{
-			Uid:         e.Uid,
-			Id:          e.NodeId,
-			Type:        e.Type.String(),
-			Alias:       e.Alias,
-			BeemsgPort:  uint16(e.BeemsgPort),
-			Addrs:       addrs,
-			ReachableOn: "",
+		node := &GetNodeList_Node{
+			Uid:        node.Uid,
+			Id:         node.NodeId,
+			Type:       node.Type.String(),
+			Alias:      node.Alias,
+			BeemsgPort: uint16(node.BeemsgPort),
+			Nics:       nics,
 		}
 		nodes = append(nodes, node)
 	}
 
-	// Check all nodes for reachability if requested
-	if cfg.CheckReachability {
-		var wg sync.WaitGroup
-		for i, node := range nodes {
-			wg.Add(1)
-
-			// For servers we want to show which of the nodes address was used for a TCP connection,
-			// so we want to try connect via TCP.
-			// Clients, on the other hand, are only reachable via UDP, so they need extra treatment.
-			// TODO use enum?
-			if node.Type == "CLIENT" {
-				go pingClient(&node)
-			} else {
-				// We share a pointer to the original struct, not the copy made for the for loop.
-				// This allows modification
-				go connectToServer(&wg, &nodes[i])
-			}
+	// Check all nics of all nodes for reachability if requested
+	if cfg.ReachabilityCheck {
+		// If the context has no deadline yet, we set it to the given timeout.
+		// Note that this ignores cfg.ReachabilityTimeout if there is already a deadline on
+		// the context.
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel func()
+			ctx, cancel = context.WithTimeout(ctx, cfg.ReachabilityTimeout)
+			defer cancel()
 		}
 
-		// Wait for all goroutines completion
-		wg.Wait()
+		err := checkReachability(ctx, addrMap)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return nodes, nil
 }
 
-// Tries to connect to a server node via TCP using the supplied network addresses in order.
-// TODO timeout, do we need to send an actual message?
-func connectToServer(wg *sync.WaitGroup, node *GetNodeList_Node) {
-	defer wg.Done()
+// Checks all of the given Nics for reachability by sending a HeartbeatRequest and waiting for
+// response. The result is directly written to the *GetNodeList_Nic.Reachable. The map may not be
+// touched until this function returns.
+func checkReachability(ctx context.Context, addrMap map[string]*GetNodeList_Nic) error {
+	// Create UDP socket - used for sending out the requests and collecting the response
+	sock, err := net.ListenUDP("udp", &net.UDPAddr{})
+	if err != nil {
+		return err
+	}
+	defer sock.Close()
 
-	for _, addr := range node.Addrs {
-		addrString := fmt.Sprintf("%s:%d", addr, node.BeemsgPort)
-		conn, err := net.Dial("tcp", addrString)
+	// Start the receiver goroutine. We run this concurrently to sending out requests to avoid
+	// too many pending responses (I don't know how big the kernel buffer for incoming datagrams is)
+	doneCh := recvDatagrams(sock, addrMap)
 
-		if err == nil {
-			defer conn.Close()
-			// Node is available, update the structs member accordingly
-			node.ReachableOn = addr
-			return
+	// Create the BeeMsg
+	buf, err := util.AssembleBeeMsg(&msg.HeartbeatRequest{})
+	if err != nil {
+		return err
+	}
+
+	// Send a request one by one. No concurrency here since we can only receive one response at a
+	// time anyway, so this wouldn't make too much sense.
+	for addr := range addrMap {
+		addr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			return err
 		}
+
+		// Write the BeeMsg
+		_, err = sock.WriteTo(buf, addr)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Wait till all responses have been received or we hit the context deadline
+	select {
+	case err = <-doneCh:
+		return err
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil
+		}
+		return ctx.Err()
 	}
 }
 
-// Sends a heartbeat msg to a client node via UDP and waits for a response
-// TODO broadcast to all addresses or not?, shared socket? probably need to wait for responses in a
-// separate goroutine and map them
-func pingClient(node *GetNodeList_Node) {
-	// TODO
+// Receive datagrams on the given socket. Set the corresponding *GetNodeList_Nic.Reachable to true
+// for each received one.
+func recvDatagrams(sock *net.UDPConn, addrMap map[string]*GetNodeList_Nic) <-chan error {
+	// This channel is just used to signal that the receiver is done
+	closeCh := make(chan error)
+
+	go func() {
+		defer close(closeCh)
+		buf := make([]byte, 0, util.MaxDatagramSize)
+
+		// check if all nodes in addrMap are marked as reachable
+		allReachable := func() bool {
+			for _, v := range addrMap {
+				if !v.Reachable {
+					return false
+				}
+			}
+			return true
+		}
+
+		// while we didn't get a response from each nic
+		for !allReachable() {
+			_, from, err := sock.ReadFrom(buf)
+			if err != nil {
+				// If the deadline is hit, this is not an error
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					break
+				}
+
+				closeCh <- fmt.Errorf("could not read response: %w", err)
+				return
+			}
+
+			addrMap[from.String()].Reachable = true
+		}
+
+		closeCh <- nil
+	}()
+
+	return closeCh
 }
