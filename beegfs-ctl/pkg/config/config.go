@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/thinkparq/gobee/beemsg"
+	"github.com/thinkparq/gobee/types/entity"
+	"github.com/thinkparq/gobee/types/nodetype"
 	"github.com/thinkparq/protobuf/go/beegfs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -101,22 +103,24 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 			addrs = append(addrs, fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort))
 		}
 
-		t := beemsg.Invalid
+		t := nodetype.Invalid
 		switch n.Type {
 		case beegfs.GetNodeListResp_Node_META:
-			t = beemsg.Meta
+			t = nodetype.Meta
 		case beegfs.GetNodeListResp_Node_STORAGE:
-			t = beemsg.Storage
+			t = nodetype.Storage
 		case beegfs.GetNodeListResp_Node_CLIENT:
-			t = beemsg.Client
+			t = nodetype.Client
 		}
 
 		// Add node to store
 		nodeStore.AddNode(&beemsg.Node{
-			Uid:   n.Uid,
-			Id:    n.NodeId,
-			Type:  t,
-			Alias: n.Alias,
+			Uid: entity.Uid(n.Uid),
+			Id: entity.IdType{
+				Id:   entity.Id(n.NodeId),
+				Type: t,
+			},
+			Alias: entity.Alias(n.Alias),
 			Addrs: addrs,
 		})
 	}

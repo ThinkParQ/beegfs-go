@@ -3,7 +3,6 @@ package node
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,6 +10,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
+	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // NOTE
@@ -24,7 +24,7 @@ type getNodeList_Config struct {
 	// Controls whether the app should exit with an error code if at least one node is not reachable
 	reachabilityError bool
 	// Filter the output by nodetype.
-	filterByNodeType string
+	filterByNodeType nodetype.NodeType
 }
 
 // Creates new list nodes command. Run when the command line tools structure is built.
@@ -50,7 +50,7 @@ func newListCmd() *cobra.Command {
 	}
 
 	// Add flags to the command
-	cmd.Flags().StringVar(&localCfg.filterByNodeType, "nodeType", "",
+	cmd.Flags().Var(nodetype.NewPFlag(&localCfg.filterByNodeType, nodetype.Meta, nodetype.Storage, nodetype.Client, nodetype.Management), "nodeType",
 		"Only show nodes of the given type")
 	cmd.Flags().BoolVar(&cfg.WithNics, "withNics", false,
 		"Also request the list of network addresses/interfaces the nodes report to management")
@@ -70,6 +70,7 @@ func newListCmd() *cobra.Command {
 // allows the implementation of potential alternative frontends later.
 func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config,
 	localCfg *getNodeList_Config) error {
+
 	// Execute the actual command work
 	nodes, err := node.GetNodeList(cmd.Context(), *cfg)
 	if err != nil {
@@ -98,8 +99,7 @@ func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config,
 	// Print and process node list
 	for _, node := range nodes {
 		// Respect filter
-		if localCfg.filterByNodeType != "" &&
-			!strings.EqualFold(node.Type, localCfg.filterByNodeType) {
+		if localCfg.filterByNodeType != nodetype.Invalid && node.IdType.Type != localCfg.filterByNodeType {
 			continue
 		}
 
@@ -107,7 +107,7 @@ func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config,
 		if config.Get().Debug {
 			fmt.Fprintf(&w, "%d\t", node.Uid)
 		}
-		fmt.Fprintf(&w, "%d\t%s\t%s\t", node.Id, node.Type, node.Alias)
+		fmt.Fprintf(&w, "%d\t%s\t%s\t", node.IdType.Id, node.IdType.Type.String(), node.Alias)
 
 		// If we requested the nic list for each node, print the available addresses, separated by ,
 		if cfg.WithNics || cfg.ReachabilityCheck {

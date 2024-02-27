@@ -11,6 +11,8 @@ import (
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
+	"github.com/thinkparq/gobee/types/entity"
+	"github.com/thinkparq/gobee/types/nodetype"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 )
 
@@ -42,10 +44,9 @@ type GetNodeList_Nic struct {
 
 // A GetNodeList result entry.
 type GetNodeList_Node struct {
-	Uid        int64
-	Id         uint32
-	Type       string
-	Alias      string
+	Uid        entity.Uid
+	IdType     entity.IdType
+	Alias      entity.Alias
 	BeemsgPort uint16
 	// List of network addresses the node should be available on. Ordered as delivered from
 	// management (e.g. highest priority first)
@@ -88,11 +89,23 @@ func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_No
 			addrMap[addr] = nic
 		}
 
+		var t nodetype.NodeType
+		switch node.Type {
+		case pb.GetNodeListResp_Node_META:
+			t = nodetype.Meta
+		case pb.GetNodeListResp_Node_STORAGE:
+			t = nodetype.Storage
+		case pb.GetNodeListResp_Node_CLIENT:
+			t = nodetype.Client
+		}
+
 		node := &GetNodeList_Node{
-			Uid:        node.Uid,
-			Id:         node.NodeId,
-			Type:       node.Type.String(),
-			Alias:      node.Alias,
+			Uid: entity.Uid(node.Uid),
+			IdType: entity.IdType{
+				Id:   entity.Id(node.NodeId),
+				Type: t,
+			},
+			Alias:      entity.Alias(node.Alias),
 			BeemsgPort: uint16(node.BeemsgPort),
 			Nics:       nics,
 		}
