@@ -2,60 +2,22 @@ package beemsg
 
 import (
 	"fmt"
-	"strings"
+
+	"github.com/thinkparq/gobee/types/entity"
 )
-
-// The BeeGFS nodetype "enum"
-type NodeType int
-
-const (
-	Invalid NodeType = iota
-	Meta
-	Storage
-	Client
-)
-
-// The string representation of NodeType
-func (nt NodeType) String() string {
-	switch nt {
-	case Meta:
-		return "Meta"
-	case Storage:
-		return "Storage"
-	case Client:
-		return "Client"
-	default:
-		return "Invalid"
-	}
-}
-
-// Creates NodeType from string (e.g. user input)
-func NodeTypeFromString(s string) NodeType {
-	switch strings.ToUpper(s) {
-	case "META":
-		return Meta
-	case "STORAGE":
-		return Storage
-	case "CLIENT":
-		return Client
-	}
-
-	return Invalid
-}
 
 // The node stores entries
 type Node struct {
 	// The nodes unique EntityID
-	Uid int64
-	// The nodes NodeID
-	Id   uint32
-	Type NodeType
+	Uid entity.Uid
+	// The nodes NodeID and type
+	Id entity.IdType
 	// The nodes alias - formerly known as "node string ID"
-	Alias string
+	Alias entity.Alias
 	// IP addresses and ports of this node
 	Addrs []string
 }
 
 func (node *Node) String() string {
-	return fmt.Sprintf("Node{Id: %d, Type: %s, Alias: %s}", node.Id, node.Type, node.Alias)
+	return fmt.Sprintf("Node{Alias: %s, Id: %s, Uid: %s}", node.Alias, node.Id, node.Uid)
 }

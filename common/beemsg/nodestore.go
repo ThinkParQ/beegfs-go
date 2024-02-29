@@ -8,29 +8,25 @@ import (
 
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
+	"github.com/thinkparq/gobee/types/entity"
+	"github.com/thinkparq/gobee/types/nodetype"
 )
-
-// Key for selecting a node by nodeID and type
-type nodeIdAndType struct {
-	id  uint32
-	typ NodeType
-}
 
 // The node store. Stores node objects and mappings to them as well as connection settings. All
 // exported methods are thread safe.
 type NodeStore struct {
 	// The pointers to the actual entries
-	nodesByUid map[int64]*Node
+	nodesByUid map[entity.Uid]*Node
 	// For selecting nodes by alias
-	uidByAlias map[string]int64
+	uidByAlias map[entity.Alias]entity.Uid
 	// For selecting nodes by nodeID and type
-	uidByNodeId map[nodeIdAndType]int64
+	uidByNodeId map[entity.IdType]entity.Uid
 
 	// The meta node which has the root inode
 	metaRootNode *Node
 
 	// The pointers to the connection stores
-	connsByUid map[int64]*util.NodeConns
+	connsByUid map[entity.Uid]*util.NodeConns
 
 	// Settings
 	connTimeout time.Duration
@@ -45,10 +41,10 @@ type NodeStore struct {
 // no longer required.
 func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeStore {
 	return &NodeStore{
-		nodesByUid:  make(map[int64]*Node),
-		uidByAlias:  make(map[string]int64),
-		uidByNodeId: make(map[nodeIdAndType]int64),
-		connsByUid:  make(map[int64]*util.NodeConns),
+		nodesByUid:  make(map[entity.Uid]*Node),
+		uidByAlias:  make(map[entity.Alias]entity.Uid),
+		uidByNodeId: make(map[entity.IdType]entity.Uid),
+		connsByUid:  make(map[entity.Uid]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
 		authSecret:  authenticationSecret,
@@ -68,24 +64,24 @@ func (store *NodeStore) AddNode(node *Node) error {
 	defer store.mutex.Unlock()
 
 	if _, ok := store.nodesByUid[node.Uid]; ok {
-		return fmt.Errorf("node uid %d already in store", node.Uid)
+		return fmt.Errorf("node %s already in store", node.Uid.String())
 	}
 
 	if _, ok := store.uidByAlias[node.Alias]; ok {
-		return fmt.Errorf("node alias %s already in store", node.Alias)
+		return fmt.Errorf("node %s already in store", node.Alias.String())
 	}
 
-	if _, ok := store.uidByNodeId[nodeIdAndType{id: node.Id, typ: node.Type}]; ok {
-		return fmt.Errorf("node id %d and type %s already in store", node.Id, node.Type)
+	if _, ok := store.uidByNodeId[node.Id]; ok {
+		return fmt.Errorf("node %s already in store", node.Id.String())
 	}
 
 	if _, ok := store.connsByUid[node.Uid]; ok {
-		return fmt.Errorf("node uid %d already in conns store", node.Uid)
+		return fmt.Errorf("node %s already in conns store", node.Uid.String())
 	}
 
 	store.nodesByUid[node.Uid] = node
 	store.uidByAlias[node.Alias] = node.Uid
-	store.uidByNodeId[nodeIdAndType{id: node.Id, typ: node.Type}] = node.Uid
+	store.uidByNodeId[node.Id] = node.Uid
 	store.connsByUid[node.Uid] = util.NewNodeConns()
 
 	return nil
@@ -99,7 +95,7 @@ func (store *NodeStore) SetMetaRootNode(node *Node) error {
 	defer store.mutex.Unlock()
 
 	// Make sure it is a meta node
-	if node.Type != Meta {
+	if node.Id.Type != nodetype.Meta {
 		return fmt.Errorf("{node} is not a meta node")
 	}
 
@@ -123,63 +119,57 @@ func (store *NodeStore) GetMetaRootNode() *Node {
 }
 
 // Get a node by its UID
-func (store *NodeStore) getNodeAndConns(uid int64) (*Node, *util.NodeConns, error) {
+func (store *NodeStore) getNodeAndConns(uid entity.Uid) (*Node, *util.NodeConns, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
 	node, ok1 := store.nodesByUid[uid]
 	conns, ok2 := store.connsByUid[uid]
 	if !ok1 || !ok2 {
-		return nil, nil, fmt.Errorf("node with UID %d not found", uid)
+		return nil, nil, fmt.Errorf("node '%s' not found", uid)
 	}
 
 	return node, conns, nil
 }
 
-// Get a node by its alias
-func (store *NodeStore) GetUidByAlias(alias string) (int64, error) {
+func (store *NodeStore) GetUid(id entity.EntityId) (entity.Uid, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
-	if uid, ok := store.uidByAlias[alias]; ok {
-		return uid, nil
+	switch v := id.(type) {
+	case entity.IdType:
+		if uid, ok := store.uidByNodeId[v]; ok {
+			return uid, nil
+		}
+	case entity.Alias:
+		if uid, ok := store.uidByAlias[v]; ok {
+			return uid, nil
+		}
+	case entity.Uid:
+		if n, ok := store.nodesByUid[v]; ok {
+			return n.Uid, nil
+		}
 	}
 
-	return 0, fmt.Errorf("node with alias %s not found", alias)
+	return 0, fmt.Errorf("node '%s' not found", id.String())
 }
 
-// Get a node by its node ID and type
-func (store *NodeStore) GetUidByNodeId(nodeId uint32, nodeType NodeType) (int64, error) {
-	store.mutex.RLock()
-	defer store.mutex.RUnlock()
+func (store *NodeStore) GetUidByNodeId(nodeId entity.Id, nodeType nodetype.NodeType) (entity.Uid, error) {
+	return store.GetUid(entity.IdType{
+		Id:   nodeId,
+		Type: nodeType,
+	})
+}
 
-	if uid, ok := store.uidByNodeId[nodeIdAndType{id: nodeId, typ: nodeType}]; ok {
-		return uid, nil
-	}
-
-	return 0, fmt.Errorf("node with nodeID %d and nodeType %s not found", nodeId, nodeType)
+func (store *NodeStore) GetUidByAlias(alias entity.Alias) (entity.Uid, error) {
+	return store.GetUid(alias)
 }
 
 const tcpErrorMsg = "TCP request to %s failed: %w"
 
 // Make a TCP request to a node by its UID
-func (store *NodeStore) RequestByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	node, conns, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
-
-	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
-	if err != nil {
-		return fmt.Errorf(tcpErrorMsg, node, err)
-	}
-
-	return nil
-}
-
-// Make a TCP request to a node by its Alias
-func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUidByAlias(alias)
+func (store *NodeStore) Request(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	uid, err := store.GetUid(id)
 	if err != nil {
 		return err
 	}
@@ -197,46 +187,26 @@ func (store *NodeStore) RequestByAlias(ctx context.Context, alias string, req ms
 	return nil
 }
 
-// Make a TCP request to a node by its NodeID and NodeType
-func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId uint32, nodeType NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUidByNodeId(nodeId, nodeType)
-	if err != nil {
-		return err
-	}
+func (store *NodeStore) RequestByUid(ctx context.Context, uid entity.Uid, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.Request(ctx, uid, req, resp)
+}
 
-	node, conns, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
+func (store *NodeStore) RequestByAlias(ctx context.Context, alias entity.Alias, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.Request(ctx, alias, req, resp)
+}
 
-	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
-	if err != nil {
-		return fmt.Errorf(tcpErrorMsg, node, err)
-	}
-
-	return nil
+func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId entity.Id, nodeType nodetype.NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.Request(ctx, entity.IdType{
+		Id:   nodeId,
+		Type: nodeType,
+	}, req, resp)
 }
 
 const udpErrorMsg = "UDP request to %s failed: %w"
 
 // Make a UDP request to a node by its UID and waits for a response if resp is not nil
-func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid int64, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	node, _, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
-
-	err = util.RequestUDP(ctx, node.Addrs, req, resp)
-	if err != nil {
-		return fmt.Errorf(udpErrorMsg, node, err)
-	}
-
-	return nil
-}
-
-// Make a UDP request to a node by its alias and waits for a response if resp is not nil
-func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUidByAlias(alias)
+func (store *NodeStore) RequestUdp(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	uid, err := store.GetUid(id)
 	if err != nil {
 		return err
 	}
@@ -254,22 +224,17 @@ func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias string, req
 	return nil
 }
 
-// Make a UDP request to a node by its NodeId and NodeType and waits for a response if resp is not nil
-func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId uint32, nodeType NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUidByNodeId(nodeId, nodeType)
-	if err != nil {
-		return err
-	}
+func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid entity.Uid, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.RequestUdp(ctx, uid, req, resp)
+}
 
-	node, _, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
+func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias entity.Alias, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.RequestUdp(ctx, alias, req, resp)
+}
 
-	err = util.RequestUDP(ctx, node.Addrs, req, resp)
-	if err != nil {
-		return fmt.Errorf(udpErrorMsg, node, err)
-	}
-
-	return nil
+func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId entity.Id, nodeType nodetype.NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	return store.RequestUdp(ctx, entity.IdType{
+		Id:   nodeId,
+		Type: nodeType,
+	}, req, resp)
 }
