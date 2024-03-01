@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -278,47 +279,138 @@ func (s *MapStore[T]) GetEntry(key string) (*BadgerEntry[T], error) {
 	return entryToGet, nil
 }
 
-// GetEntries is used for read only access to the database. It returns a copy of
-// all entries whose keys match the specified prefix. Entries are returned in
-// byte-wise lexicographical sorted order using a slice of BadgerItems. Each
-// item contain the key and contents of a single entry. If no entries match it
-// will return an empty slice. An error will only returned if there was a
-// problem reading from the database. It is thread-safe because Badger provides
-// transactional guarantees, however it can return out-of-date results if writes
-// happens after the transaction to get the entry was already created.
-func (s *MapStore[T]) GetEntries(keyPrefix string) ([]*BadgerItem[T], error) {
+type getEntriesConfig struct {
+	keyPrefix    string
+	startFromKey string
+	prefetchSize int
+}
+type getEntriesOpt func(*getEntriesConfig)
 
-	badgerItems := make([]*BadgerItem[T], 0)
+func WithKeyPrefix(s string) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.keyPrefix = s
+	}
+}
 
-	if err := s.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		prefix := []byte(keyPrefix)
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			item := it.Item()
-			err := item.Value(func(val []byte) error {
-				var entryToGet = &BadgerEntry[T]{}
-				dec := gob.NewDecoder(bytes.NewReader(val))
-				err := dec.Decode(&entryToGet)
-				if err != nil {
-					return err
-				}
-				badgerItem := &BadgerItem[T]{
-					Key:   string(item.KeyCopy(nil)),
-					Entry: entryToGet,
-				}
-				badgerItems = append(badgerItems, badgerItem)
-				return nil
-			})
-			if err != nil {
+func WithStartingKey(s string) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.startFromKey = s
+	}
+}
+
+func WithPrefetchSize(i int) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.prefetchSize = i
+	}
+}
+
+// GetEntries is used for read only access to the database. It is thread-safe because Badger
+// provides transactional guarantees, however it can return out-of-date results if writes happens
+// after GetEntries() is first called.
+//
+// It returns a function used iterate over items in BadgerDB in byte-wise lexicographical sorted
+// order until there are no more items in the DB, or no more items matching a KeyPrefix, then it
+// will return nil. If the caller is done iterating over items in the database before all matching
+// items have been returned, the cleanup function MUST be called to cleanup properly. The cleanup
+// function is always safe to call and will never return an error, best practice is to always call
+// it even if GetEntries() may have called it automatically because there were no remaining
+// entries.
+//
+// Options:
+//
+//   - WithKeyPrefix: Start from the first key matching the prefix, and only return keys matching the prefix.
+//   - WithStartingKey: Start from this key if present. Otherwise start from the next smallest key greater than this key.
+//   - WithPrefetchSize: Prefetch the value of the next N items (default: 100).
+//
+// Both WithKeyPrefix and WithStartingKey can be set, but then the starting key must also contain
+// the key prefix.
+//
+// Note: If your keys are sequence numbers (for example to return items in chronological order of
+// when they were created), ensure keys are zero padded to a fixed width to ensure the string
+// representations of the sequence numbers are return in order when sorted lexicographically.
+func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T], error), func(), error) {
+
+	cfg := &getEntriesConfig{
+		keyPrefix:    "",
+		startFromKey: "",
+		prefetchSize: 100,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	txn := s.db.NewTransaction(false)
+	badgerOpts := badger.DefaultIteratorOptions
+	badgerOpts.PrefetchSize = cfg.prefetchSize
+	it := txn.NewIterator(badgerOpts)
+
+	cleanup := func() {
+		it.Close()
+		txn.Discard()
+	}
+
+	// If StartFromKey is specified, then we use this as the seekToPrefix to initially seek to.
+	// If KeyPrefix was also specified, make sure StartFromKey has that prefix.
+	seekToPrefix := ""
+	if cfg.startFromKey != "" {
+		if !strings.HasPrefix(cfg.startFromKey, cfg.keyPrefix) {
+			return nil, cleanup, fmt.Errorf("invalid options: WithStartingKey does not have the prefix WithKeyPrefix")
+		}
+		seekToPrefix = cfg.startFromKey
+	} else if cfg.keyPrefix != "" {
+		seekToPrefix = cfg.keyPrefix
+	} else {
+		// Otherwise start from the zero-th position.
+		it.Rewind()
+	}
+
+	bytePrefix := []byte(cfg.keyPrefix)
+	if seekToPrefix != "" {
+		it.Seek([]byte(seekToPrefix))
+		// Seek returns the next smallest key greater than the prefix (if there were no matches). If
+		// we should only return keys matching a prefix, check the key we found matches.
+		if !it.ValidForPrefix([]byte(cfg.keyPrefix)) {
+			cleanup()
+			return nil, cleanup, nil
+		}
+	}
+
+	getNext := func() (*BadgerItem[T], error) {
+
+		// Checks the iterate is still valid and has the keyPrefix (if specified).
+		if !it.ValidForPrefix(bytePrefix) {
+			return nil, nil
+		}
+
+		item := it.Item()
+		var result *BadgerItem[T]
+		err := item.Value(func(val []byte) error {
+			result = &BadgerItem[T]{
+				Key: string(item.Key()),
+			}
+			dec := gob.NewDecoder(bytes.NewReader(val))
+			entry := &BadgerEntry[T]{}
+			if err := dec.Decode(entry); err != nil {
 				return err
 			}
+			result.Entry = entry
+			return nil
+		})
+		// TODO: Should we actually move to the next item if decoding fails?
+		it.Next()
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	}); err != nil {
-		return nil, err
+
+		return result, nil
 	}
-	return badgerItems, nil
+
+	if !it.Valid() {
+		cleanup()
+		return nil, cleanup, nil
+	}
+	return getNext, cleanup, nil
 }
 
 // DeleteEntry removes the entry for the specified key from the map. To ensure
