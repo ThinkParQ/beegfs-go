@@ -38,6 +38,31 @@ func tempPathForTesting(path string) (string, func(t require.TestingT), error) {
 
 }
 
+func TestReservedKeyPrefix(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[map[string]int](badger.DefaultOptions(path), 10)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	_, _, err = ms.CreateAndLockEntry(ReservedKeyPrefix + "hello")
+	assert.ErrorIs(t, err, ErrEntryIllegalKey)
+
+	_, _, err = ms.GetAndLockEntry(ReservedKeyPrefix + "_world")
+	assert.ErrorIs(t, err, ErrEntryIllegalKey)
+
+	_, err = ms.GetEntry(ReservedKeyPrefix + "from")
+	assert.ErrorIs(t, err, ErrEntryIllegalKey)
+
+	err = ms.DeleteEntry(ReservedKeyPrefix + "beegfs")
+	assert.ErrorIs(t, err, ErrEntryIllegalKey)
+
+}
+
 func TestCreateAndGetEntry(t *testing.T) {
 
 	path, cleanup, err := tempPathForTesting(badgerTestDir)
@@ -126,6 +151,39 @@ func TestCreateAndGetEntry(t *testing.T) {
 	}
 	err = ms.DeleteEntry("k1")
 	assert.NoError(t, err)
+}
+
+func TestCreateAndGetEntryAutoGenKey(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	ms, closeDB, err := NewMapStore[int](badger.DefaultOptions(path), 10)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	for i := 0; i <= 10; i++ {
+		entry, release, err := ms.CreateAndLockEntry("")
+		require.NoError(t, err)
+		entry.Value = i
+		require.NoError(t, release())
+	}
+
+	getNext, cleanupIterator, err := ms.GetEntries()
+	require.NoError(t, err)
+	defer cleanupIterator()
+
+	for i := 0; i <= 10; i++ {
+		entry, err := getNext()
+		require.NoError(t, err)
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		assert.Equal(t, expectedKey, entry.Key)
+		assert.Equal(t, i, entry.Entry.Value)
+		assert.Equal(t, expectedKey, entry.Entry.Metadata["mapstore_generated_pk"])
+	}
+
 }
 
 func TestGetEntryAndUpdateFlag(t *testing.T) {
@@ -455,7 +513,7 @@ func BenchmarkCreateAndLockEntry(b *testing.B) {
 	require.NoError(b, err, "error during test setup")
 	defer cleanup(b)
 
-	ms, closeDB, err := NewMapStore[map[string]TestWorkResult](badger.DefaultOptions(path), benchmarkCacheSize)
+	ms, closeDB, err := NewMapStore[int](badger.DefaultOptions(path), benchmarkCacheSize)
 	assert.NoError(b, err)
 	defer func() {
 		assert.NoError(b, closeDB())
@@ -468,13 +526,52 @@ func BenchmarkCreateAndLockEntry(b *testing.B) {
 		entry, release, err := ms.CreateAndLockEntry(fmt.Sprint(i))
 		assert.NoError(b, err)
 		requestID += 1
-		testWorkResult.RequestID = fmt.Sprint(requestID)
 		entry.Metadata["path"] = "/foo/bar"
-		entry.Value[testWorkResult.RequestID] = testWorkResult
+		entry.Value = requestID
 		err = release()
 		assert.NoError(b, err)
 	}
 	b.StopTimer()
+}
+
+func BenchmarkCreateAndGetEntryAutoGenKey(b *testing.B) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(b, err, "error during test setup")
+	defer cleanup(b)
+
+	ms, closeDB, err := NewMapStore[int](badger.DefaultOptions(path), 10)
+	assert.NoError(b, err)
+	defer func() {
+		assert.NoError(b, closeDB())
+	}()
+
+	requestID := 0
+
+	b.ResetTimer()
+	for i := 0; i <= b.N; i++ {
+		entry, release, err := ms.CreateAndLockEntry("")
+		require.NoError(b, err)
+		requestID += 1
+		entry.Metadata["path"] = "/foo/bar"
+		entry.Value = requestID
+		require.NoError(b, release())
+	}
+	b.StopTimer()
+
+	// Verify entries were created as expected.
+	getNext, cleanupIterator, err := ms.GetEntries()
+	require.NoError(b, err)
+	defer cleanupIterator()
+
+	for i := 0; i <= b.N; i++ {
+		entry, err := getNext()
+		require.NoError(b, err)
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		assert.Equal(b, expectedKey, entry.Key)
+		assert.Equal(b, i+1, entry.Entry.Value)
+		assert.Equal(b, expectedKey, entry.Entry.Metadata["mapstore_generated_pk"])
+	}
+
 }
 
 func BenchmarkGetAndLockEntry(b *testing.B) {

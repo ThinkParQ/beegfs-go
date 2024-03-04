@@ -25,4 +25,5 @@ var (
 	// in the caller can be addressed.
 	ErrEntryLockAlreadyReleased = errors.New("commit was called a against an entry whose lock was already released (this indicates a bug in the caller)")
 	// In addition to these errors, badger.ErrKeyNotFound is used to indicate when a key is not found in cache or database.
+	ErrEntryIllegalKey = errors.New("illegal key for entry: may not start with '" + ReservedKeyPrefix + "'")
 )
