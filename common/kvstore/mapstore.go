@@ -4,20 +4,34 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/thinkparq/gobee/types"
+)
+
+const (
+	// Errors will be returned when trying to create or get entries that match `ReservedKeyPrefix`.
+	// IMPORTANT: Changing this is not backwards compatible.
+	ReservedKeyPrefix = "mapstore_"
 )
 
 // CacheEntry represents an in-memory entry in the MapStore.
 type CacheEntry[T any] struct {
-	// Metadata can optionally store arbitrary details about the entry. One use
-	// case is storing additional information needed to look up details about
-	// this entry in another MapStore. For example if one MapStore tracks
-	// map[fsPath]Job and other tracks map[jobID]jobResults the latter could
-	// store fsPath as metadata allowing reverse lookups of a Job based on the
-	// jobID.
+	// Metadata can optionally store arbitrary details about the entry. One use case is storing
+	// additional information needed to look up details about this entry in another MapStore. For
+	// example if one MapStore tracks map[fsPath]Job and other tracks map[jobID]jobResults the
+	// latter could store fsPath as metadata allowing reverse lookups of a Job based on the jobID.
+	//
+	// Metadata may also be used to store automatically generated fields, such as
+	// `mapstore_generated_pk`, which is populated if a key was automatically generated when
+	// creating an entry.
+	//
+	// IMPORTANT: Metadata keys prefixed with the reserved key prefix "mapstore_" are reserved for
+	// internal use and behavior is indeterminate if these keys are written to or modified.
 	Metadata map[string]string
 	// Store any generic type in BadgerDB. If `T` is a reference type that
 	// requires initialization (such as a map or a slice) then it is up to the
@@ -99,6 +113,12 @@ type MapStore[T any] struct {
 	// familiar with what guarantees this provides in the context of Badger:
 	// https://dgraph.io/docs/badger/get-started/#transactions
 	db *badger.DB
+	// If the caller desires when creating DB entries can generate unique monotonically increasing
+	// uint64 keys. As keys are strings in BadgerDB, by default we encode strings using base36 with
+	// a fixed width allowing the caller to iterate over entries in the order they were written.
+	// This behavior can be customized through the `WithPK` options.
+	pkSeqGenerator *badger.Sequence
+	config         *mapStoreConfig
 }
 
 // One or more CommitFlags can optionally be used to modify the behavior of
@@ -117,40 +137,134 @@ const (
 	UpdateOnly
 )
 
+type mapStoreConfig struct {
+	pkSeqBandwidth uint64
+	pkSeqWidth     int
+	pkSeqBase      int
+}
+type mapStoreOpt func(*mapStoreConfig)
+
+// See the BadgerDB documentation on Monotonically increasing integers.
+// https://dgraph.io/docs/badger/get-started/#monotonically-increasing-integers
+func WithPKBandwidth(bw uint64) mapStoreOpt {
+	return func(cfg *mapStoreConfig) {
+		cfg.pkSeqBandwidth = bw
+	}
+}
+
+// Automatically generated keys are zero-padded to this many characters. This allows the caller to
+// use GetEntries to iterate over entries in the order they were created. Don't set the width
+// smaller than what is needed to store the maximum key that may be generated, otherwise entries
+// cannot be returned in the order they were created. Setting this too large will use unnecessary
+// space. The default width of 13 allows a uint64 key to be stored in base36.
+func WithPKWidth(width int) mapStoreOpt {
+	return func(cfg *mapStoreConfig) {
+		cfg.pkSeqWidth = width
+	}
+}
+
+// By default automatically generated keys are stored in base36 to reduce the amount of space they
+// consume on-disk. This could be set to any base (i.e., 10, 64), but if returning entries in the
+// order they were created is important use a base that naturally maintains byte-wise
+// lexicographical sorted order such as base10 or base36.
+func WithPKBase(base int) mapStoreOpt {
+	return func(cfg *mapStoreConfig) {
+		cfg.pkSeqWidth = base
+	}
+}
+
 // NewMapStore attempts to initialize a MapStore backed by a database at dbPath.
 // It returns an pointer to the MapStore and a function that should be called to
-// close the database when the MapStore is no longer needed. Optionally testMode
-// can be set which will use the provided directory as a base (for example /tmp)
-// and generate a unique sub-directory that will be automatically cleaned up
-// when the function to close the DB is called.
-func NewMapStore[T any](opts badger.Options, cacheCapacity int) (*MapStore[T], func() error, error) {
+// close the database when the MapStore is no longer needed.
+func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapStoreOpt) (*MapStore[T], func() error, error) {
+
+	cfg := &mapStoreConfig{
+		pkSeqBandwidth: 1000,
+		pkSeqWidth:     13,
+		pkSeqBase:      36,
+	}
+
+	for _, opt := range msOpts {
+		opt(cfg)
+	}
 
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	// Badger will actually create an entry in the DB that matches this key. At best this is
+	// confusing to users and at worst breaks methods like GetEntries. To avoid having to use a
+	// separate DB for generating sequence we have established a ReservedKeyPrefix used to create
+	// entries for internal use that are ignored by the facing methods.
+	seq, err := db.GetSequence([]byte(ReservedKeyPrefix+"pk_seq_gen"), cfg.pkSeqBandwidth)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	closeFunc := func() error {
-		return db.Close()
+		multiErr := types.MultiError{}
+		if err := seq.Release(); err != nil {
+			multiErr.Errors = append(multiErr.Errors, err)
+		}
+		if err := db.Close(); err != nil {
+			multiErr.Errors = append(multiErr.Errors, err)
+		}
+		if len(multiErr.Errors) != 0 {
+			return &multiErr
+		}
+		return nil
 	}
 
 	return &MapStore[T]{
-		mu:            sync.RWMutex{},
-		cache:         make(map[string]*CacheEntry[T]),
-		cacheCapacity: cacheCapacity,
-		db:            db,
+		mu:             sync.RWMutex{},
+		cache:          make(map[string]*CacheEntry[T]),
+		cacheCapacity:  cacheCapacity,
+		db:             db,
+		pkSeqGenerator: seq,
+		config:         cfg,
 	}, closeFunc, nil
 }
 
-// CreateAndLockEntry() creates a new entry in the MapStore for the provided
-// key. If the provided key already has an entry it returns an error. Otherwise
-// it creates an entry, locks it, adds it to the in-memory cache then returns
-// the pointer to the new entry and a function that must be used to commit
-// changes to the database and release the lock when the caller is finished
-// using it. Once the lock is released the caller SHOULD NOT reuse the pointer
-// to the entry and best practice would be to immediately set it to nil to
-// prevent reuse and ensure it can be garbage collected.
+func (s *MapStore[T]) generateNextPK() (string, error) {
+	seq, err := s.pkSeqGenerator.Next()
+	if err != nil {
+		return "", fmt.Errorf("unable to generate next PK sequence: %w", err)
+	}
+	return fmt.Sprintf("%0*s", s.config.pkSeqWidth, strconv.FormatInt(int64(seq), s.config.pkSeqBase)), nil
+}
+
+// CreateAndLockEntry() creates a new entry in the MapStore for the provided key. If the provided
+// key already has an entry it returns an error. Otherwise it creates an entry, locks it, adds it to
+// the in-memory cache then returns the pointer to the new entry and a function that must be used to
+// commit changes to the database and release the lock when the caller is finished using it. Once
+// the lock is released the caller SHOULD NOT reuse the pointer to the entry and best practice would
+// be to immediately set it to nil to prevent reuse and ensure it can be garbage collected.
+//
+// If the caller does not provide a key (i.e., key == "") then a unique monotonically increasing key
+// (i.e., PK) will be automatically generated and also added to the Metadata map as
+// mapstore_generated_pk. Generated keys are based on a uint64 (which also determines the max key)
+// but stored as a string and guaranteed to be unique and in increasing byte-wise lexicographical
+// sorted order. If a crash occurs there may be gaps in the key sequence based on the
+// WithPKBandwidth setting, but keys are always guaranteed to be unique and in order. Note it is
+// allowed for callers to use a mix of generated and user specified keys in the same DB. If there is
+// a collision with an existing key when creating an entry an error will be returned.
+//
+// IMPORTANT: All keys prefixed with "mapstore_" are reserved for internal use ONLY. Attempts to
+// create or get entries with this key prefix will return an error.
 func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
+
+	generatedPK := false
+	if key == "" {
+		var err error
+		key, err = s.generateNextPK()
+		if err != nil {
+			return nil, nil, err
+		}
+		generatedPK = true
+	} else if strings.HasPrefix(key, ReservedKeyPrefix) {
+		return nil, nil, ErrEntryIllegalKey
+	}
 
 	// First verify the in-memory MapStore and database don't already
 	// have an entry for key. If they do refuse to create a new entry.
@@ -174,9 +288,14 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags
 		return nil, nil, fmt.Errorf("%w: (probably the caller is not setup to prevent race conditions)", ErrEntryAlreadyExistsInDB)
 	}
 
+	metadata := make(map[string]string)
+	if generatedPK {
+		metadata[ReservedKeyPrefix+"generated_pk"] = key
+	}
+
 	newEntry := &CacheEntry[T]{
 		mu:        sync.Mutex{},
-		Metadata:  make(map[string]string),
+		Metadata:  metadata,
 		isDeleted: false,
 		isCached:  true,
 	}
@@ -199,6 +318,10 @@ func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags
 // to immediately set it to nil to prevent reuse and ensure it can be garbage
 // collected.
 func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
+
+	if strings.HasPrefix(key, ReservedKeyPrefix) {
+		return nil, nil, ErrEntryIllegalKey
+	}
 
 	// First see if there if there is already an entry in the cache for key:
 	var entry *CacheEntry[T]
@@ -259,6 +382,10 @@ func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func(flags ..
 // the transaction to get the entry was already created.
 func (s *MapStore[T]) GetEntry(key string) (*BadgerEntry[T], error) {
 
+	if strings.HasPrefix(key, ReservedKeyPrefix) {
+		return nil, ErrEntryIllegalKey
+	}
+
 	var entryToGet = &BadgerEntry[T]{}
 
 	if err := s.db.View(func(txn *badger.Txn) error {
@@ -278,47 +405,156 @@ func (s *MapStore[T]) GetEntry(key string) (*BadgerEntry[T], error) {
 	return entryToGet, nil
 }
 
-// GetEntries is used for read only access to the database. It returns a copy of
-// all entries whose keys match the specified prefix. Entries are returned in
-// byte-wise lexicographical sorted order using a slice of BadgerItems. Each
-// item contain the key and contents of a single entry. If no entries match it
-// will return an empty slice. An error will only returned if there was a
-// problem reading from the database. It is thread-safe because Badger provides
-// transactional guarantees, however it can return out-of-date results if writes
-// happens after the transaction to get the entry was already created.
-func (s *MapStore[T]) GetEntries(keyPrefix string) ([]*BadgerItem[T], error) {
+type getEntriesConfig struct {
+	keyPrefix    string
+	startFromKey string
+	prefetchSize int
+}
+type getEntriesOpt func(*getEntriesConfig)
 
-	badgerItems := make([]*BadgerItem[T], 0)
+func WithKeyPrefix(s string) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.keyPrefix = s
+	}
+}
 
-	if err := s.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		prefix := []byte(keyPrefix)
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			item := it.Item()
-			err := item.Value(func(val []byte) error {
-				var entryToGet = &BadgerEntry[T]{}
-				dec := gob.NewDecoder(bytes.NewReader(val))
-				err := dec.Decode(&entryToGet)
-				if err != nil {
-					return err
+func WithStartingKey(s string) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.startFromKey = s
+	}
+}
+
+func WithPrefetchSize(i int) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.prefetchSize = i
+	}
+}
+
+// GetEntries is used for read only access to the database. It is thread-safe because Badger
+// provides transactional guarantees, however it can return out-of-date results if writes happens
+// after GetEntries() is first called.
+//
+// It returns a function used iterate over items in BadgerDB in byte-wise lexicographical sorted
+// order until there are no more items in the DB, or no more items matching a KeyPrefix, then it
+// will return nil. If for some reason there is an error getting an item (such as failing to
+// deserialize the item) the function will return an error for the item and move to the next one.
+// The caller can choose to cleanup immediately or attempt to continue iterating over items.
+//
+// If the caller is done iterating over items in the database before all matching items have been
+// returned, the cleanup function MUST be called to cleanup properly. The cleanup function is always
+// safe to call and will never return an error, best practice is to always call it even if
+// GetEntries() may have called it automatically because there were no remaining entries.
+//
+// Options:
+//
+//   - WithKeyPrefix: Start from the first key matching the prefix, and only return keys matching the prefix.
+//   - WithStartingKey: Start from this key if present. Otherwise start from the next smallest key greater than this key.
+//   - WithPrefetchSize: Prefetch the value of the next N items (default: 100).
+//
+// Both WithKeyPrefix and WithStartingKey can be set, but then the starting key must also contain
+// the key prefix.
+//
+// Note: If your keys are sequence numbers (for example to return items in chronological order of
+// when they were created), ensure keys are zero padded to a fixed width to ensure the string
+// representations of the sequence numbers are return in order when sorted lexicographically.
+func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T], error), func(), error) {
+
+	cfg := &getEntriesConfig{
+		keyPrefix:    "",
+		startFromKey: "",
+		prefetchSize: 100,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	txn := s.db.NewTransaction(false)
+	badgerOpts := badger.DefaultIteratorOptions
+	badgerOpts.PrefetchSize = cfg.prefetchSize
+	it := txn.NewIterator(badgerOpts)
+
+	cleanup := func() {
+		it.Close()
+		txn.Discard()
+	}
+
+	// If StartFromKey is specified, then we use this as the seekToPrefix to initially seek to.
+	// If KeyPrefix was also specified, make sure StartFromKey has that prefix.
+	seekToPrefix := ""
+	if cfg.startFromKey != "" {
+		if !strings.HasPrefix(cfg.startFromKey, cfg.keyPrefix) {
+			return nil, cleanup, fmt.Errorf("invalid options: WithStartingKey does not have the prefix WithKeyPrefix")
+		}
+		seekToPrefix = cfg.startFromKey
+	} else if cfg.keyPrefix != "" {
+		seekToPrefix = cfg.keyPrefix
+	} else {
+		// Otherwise start from the zero-th position.
+		it.Rewind()
+	}
+
+	bytePrefix := []byte(cfg.keyPrefix)
+	if seekToPrefix != "" {
+		it.Seek([]byte(seekToPrefix))
+		// Seek returns the next smallest key greater than the prefix (if there were no matches). If
+		// we should only return keys matching a prefix, check the key we found matches.
+		if !it.ValidForPrefix([]byte(cfg.keyPrefix)) {
+			cleanup()
+			return nil, cleanup, nil
+		}
+	}
+
+	getNext := func() (*BadgerItem[T], error) {
+
+		// Checks the iterate is still valid and has the keyPrefix (if specified).
+		if !it.ValidForPrefix(bytePrefix) {
+			return nil, nil
+		} else if it.ValidForPrefix([]byte(ReservedKeyPrefix)) {
+			// Automatically skip over internal entries.
+			for {
+				it.Next()
+				// Here we care if ValidForPrefix is false because the iterator is no
+				// longer valid, or because it doesn't match the prefix. If its no longer valid we
+				// must return nil, otherwise there are remaining items to iterate over.
+				if !it.Valid() {
+					return nil, nil
+				} else if !it.ValidForPrefix([]byte(ReservedKeyPrefix)) {
+					break
 				}
-				badgerItem := &BadgerItem[T]{
-					Key:   string(item.KeyCopy(nil)),
-					Entry: entryToGet,
-				}
-				badgerItems = append(badgerItems, badgerItem)
-				return nil
-			})
-			if err != nil {
-				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return nil, err
+
+		item := it.Item()
+		var result *BadgerItem[T]
+		err := item.Value(func(val []byte) error {
+			result = &BadgerItem[T]{
+				Key: string(item.Key()),
+			}
+			dec := gob.NewDecoder(bytes.NewReader(val))
+			entry := &BadgerEntry[T]{}
+			if err := dec.Decode(entry); err != nil {
+				return fmt.Errorf("error decoding entry: %w", err)
+			}
+			result.Entry = entry
+			return nil
+		})
+		// We move to the next item even if decoding fails or some other error happened getting the
+		// item. The caller can decide if they get an error getting an item if they want to be done
+		// by calling the cleanup func, or keep trying to read items.
+		it.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	}
-	return badgerItems, nil
+
+	if !it.Valid() {
+		cleanup()
+		return nil, cleanup, nil
+	}
+	return getNext, cleanup, nil
 }
 
 // DeleteEntry removes the entry for the specified key from the map. To ensure
@@ -336,6 +572,10 @@ func (s *MapStore[T]) GetEntries(keyPrefix string) ([]*BadgerItem[T], error) {
 // CommitFlag set to delete the entry before releasing the lock ensuring nothing
 // else is able to modify the entry potentially resulting in data loss.
 func (s *MapStore[T]) DeleteEntry(key string) error {
+
+	if strings.HasPrefix(key, ReservedKeyPrefix) {
+		return ErrEntryIllegalKey
+	}
 
 	// Note we can't reuse GetAndLockEntry() or lockAndLoadEntryFromDB() here
 	// otherwise the entry would just be recreated when commitEntry()
