@@ -1,8 +1,6 @@
 module github.com/thinkparq/gobee
 
-go 1.20
-
-replace github.com/thinkparq/protobuf => ../protobuf
+go 1.22
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.25.2
@@ -17,6 +15,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/thinkparq/protobuf v0.0.6
 	go.uber.org/zap v1.25.0
+	google.golang.org/protobuf v1.32.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -63,7 +62,6 @@ require (
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240221002015-b0ce06bbee7c // indirect
 	google.golang.org/grpc v1.62.0 // indirect
-	google.golang.org/protobuf v1.32.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

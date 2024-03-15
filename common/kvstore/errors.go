@@ -8,8 +8,8 @@ var (
 	ErrEntryAlreadyExistsInDB    = errors.New("an entry already exists in the database for the specified key")
 	ErrEntryAlreadyExistsInCache = errors.New("an entry already exists in the cache for the specified key")
 	ErrEntryAlreadyDeleted       = errors.New("the entry was deleted before a lock could be acquired (probably there is a race condition)")
-	// TODO (https://github.com/ThinkParQ/gobee/issues/10): Consider if we
-	// should prevent this from ever happening.
+	// TODO: https://github.com/ThinkParQ/gobee/issues/10
+	// Consider if we should prevent this from ever happening.
 	//
 	// To avoid copying the CacheEntry maps with every GetEntry, we return
 	// pointers to entries inside the cache. This means even after commit() is
