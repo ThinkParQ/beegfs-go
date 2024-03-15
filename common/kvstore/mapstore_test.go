@@ -307,6 +307,24 @@ func TestGetEntries(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, nextItem)
 
+	// If there are no entries to return, there should not be an error and nextItem() should not be
+	// nil but return nil even if called multiple times.
+	nextItem, cleanupIterator, err = ms.GetEntries()
+	require.NoError(t, err)
+	require.NotNil(t, nextItem)
+	item, err := nextItem()
+	require.Nil(t, item)
+	require.NoError(t, err)
+	cleanupIterator()
+
+	nextItem, cleanupIterator, err = ms.GetEntries()
+	require.NoError(t, err)
+	require.NotNil(t, nextItem)
+	item, err = nextItem()
+	require.Nil(t, item)
+	require.NoError(t, err)
+	cleanupIterator()
+
 	// Return all items if no prefix is specified:
 	var expectedSeqOrder []string
 	for expectedVal := 0; expectedVal <= 100; expectedVal++ {
