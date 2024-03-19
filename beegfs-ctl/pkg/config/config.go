@@ -111,6 +111,8 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 			t = nodetype.Storage
 		case beegfs.GetNodeListResp_Node_CLIENT:
 			t = nodetype.Client
+		case beegfs.GetNodeListResp_Node_MANAGEMENT:
+			t = nodetype.Management
 		}
 
 		// Add node to store

@@ -97,6 +97,8 @@ func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_No
 			t = nodetype.Storage
 		case pb.GetNodeListResp_Node_CLIENT:
 			t = nodetype.Client
+		case pb.GetNodeListResp_Node_MANAGEMENT:
+			t = nodetype.Management
 		}
 
 		node := &GetNodeList_Node{
