@@ -8,6 +8,7 @@ import (
 
 	"github.com/thinkparq/gobee/beemsg"
 	"github.com/thinkparq/gobee/types/entity"
+	"github.com/thinkparq/gobee/types/node"
 	"github.com/thinkparq/gobee/types/nodetype"
 	"github.com/thinkparq/protobuf/go/beegfs"
 	"google.golang.org/grpc"
@@ -97,10 +98,19 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	// Loop through the node entries
 	for _, n := range nodes.GetNodes() {
-		addrs := []string{}
-		// Collect the nodes addresses as strings
+		nics := []node.Nic{}
 		for _, a := range n.Nics {
-			addrs = append(addrs, fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort))
+			nict := node.Invalid
+			switch a.Type {
+			case beegfs.Nic_ETHERNET:
+				nict = node.Ethernet
+			case beegfs.Nic_RDMA:
+				nict = node.Rdma
+			case beegfs.Nic_SDP:
+				nict = node.Sdp
+			}
+
+			nics = append(nics, node.Nic{Addr: fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort), Name: a.Name, Type: nict})
 		}
 
 		t := nodetype.Invalid
@@ -116,14 +126,14 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		}
 
 		// Add node to store
-		nodeStore.AddNode(&beemsg.Node{
+		nodeStore.AddNode(&node.Node{
 			Uid: entity.Uid(n.Uid),
 			Id: entity.IdType{
 				Id:   entity.Id(n.NodeId),
 				Type: t,
 			},
 			Alias: entity.Alias(n.Alias),
-			Addrs: addrs,
+			Nics:  nics,
 		})
 	}
 

@@ -9,7 +9,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
+	nodeCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
 	"github.com/thinkparq/gobee/types/nodetype"
 )
 
@@ -32,7 +32,7 @@ func newListCmd() *cobra.Command {
 	// In this case, cfg correspond perfectly with the command implementations config struct, so
 	// we just use it directly to store cfg. If this was not the case, e.g. the passed cfg might
 	// need some transformation, a separate struct can be used.
-	cfg := &node.GetNodeList_Config{}
+	cfg := &nodeCmd.GetNodeList_Config{}
 	localCfg := &getNodeList_Config{}
 
 	cmd := &cobra.Command{
@@ -68,11 +68,11 @@ func newListCmd() *cobra.Command {
 // command handler and process its result (e.g. format the output). The actual command handling code
 // shall be put under pkg/ctl with its own interface and called from here. This strict separation
 // allows the implementation of potential alternative frontends later.
-func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config,
+func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 	localCfg *getNodeList_Config) error {
 
 	// Execute the actual command work
-	nodes, err := node.GetNodeList(cmd.Context(), *cfg)
+	nodes, err := nodeCmd.GetNodeList(cmd.Context(), *cfg)
 	if err != nil {
 		return err
 	}
@@ -99,31 +99,32 @@ func runListCmd(cmd *cobra.Command, cfg *node.GetNodeList_Config,
 	// Print and process node list
 	for _, node := range nodes {
 		// Respect filter
-		if localCfg.filterByNodeType != nodetype.Invalid && node.IdType.Type != localCfg.filterByNodeType {
+		if localCfg.filterByNodeType != nodetype.Invalid && node.Node.Id.Type != localCfg.filterByNodeType {
 			continue
 		}
 
 		// Print a line corresponding to the columns above
 		if config.Get().Debug {
-			fmt.Fprintf(&w, "%d\t", node.Uid)
+			fmt.Fprintf(&w, "%d\t", node.Node.Uid)
 		}
-		fmt.Fprintf(&w, "%d\t%s\t%s\t", node.IdType.Id, node.IdType.Type.String(), node.Alias)
+		fmt.Fprintf(&w, "%d\t%s\t%s\t", node.Node.Id.Id, node.Node.Id.Type.String(), node.Node.Alias)
 
 		// If we requested the nic list for each node, print the available addresses, separated by ,
 		if cfg.WithNics || cfg.ReachabilityCheck {
 			hasReachableNic := false
 			for _, nic := range node.Nics {
-				r := ""
 				if cfg.ReachabilityCheck {
+					r := ""
 					if nic.Reachable {
 						hasReachableNic = true
-						r = ", reachable: yes"
+						r = "reachable: yes"
 					} else {
-						r = ", reachable: no"
+						r = "reachable: no"
 					}
+					fmt.Fprintf(&w, "%s (%s), ", nic.Nic, r)
+				} else {
+					fmt.Fprintf(&w, "%s, ", nic.Nic)
 				}
-
-				fmt.Fprintf(&w, "%s[addr: %s:%d, type: %s%s], ", nic.Name, nic.Addr, node.BeemsgPort, nic.Type, r)
 			}
 			fmt.Fprint(&w, "\t")
 
