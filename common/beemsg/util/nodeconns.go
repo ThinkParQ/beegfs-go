@@ -49,7 +49,7 @@ func (nc *NodeConns) CleanUp() {
 }
 
 // Sends a BeeMsg to one of the given node addresses and receives a response into resp if
-// that is not set to nil. The function tries to reuse existing connections from the NodeConns queue
+// it is not set to nil. The function tries to reuse existing connections from the NodeConns queue
 // first. If  there are none or none of them worked, a new connection is opened. After successfully
 // sending and optionally receiving a BeeMsg, the connection is pushed into the queue for reuse.
 // Setting authSecret to 0 disables authentication.
