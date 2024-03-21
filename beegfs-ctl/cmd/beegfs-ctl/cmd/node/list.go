@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -77,6 +78,15 @@ func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 		return err
 	}
 
+	slices.SortFunc(nodes, func(a, b *nodeCmd.GetNodeList_Node) int {
+		if a.Node.Id.Type == b.Node.Id.Type {
+			return int(a.Node.Id.Id - b.Node.Id.Id)
+		} else {
+			return int(a.Node.Id.Type - b.Node.Id.Type)
+		}
+		// return strings.Compare(a.Node.Alias.String(), b.Node.Alias.String())
+	})
+
 	// Create a new tabwriter with fixed settings for spacings and so on. This should be usually
 	// used for table like output
 	w := cmdfmt.NewTableWriter(os.Stdout)
@@ -86,11 +96,14 @@ func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 
 	// Print the tables header. Columns must end with a tabstop \t, including the last one.
 	if config.Get().Debug {
-		fmt.Fprint(&w, "NodeUID\t")
+		fmt.Fprint(&w, "UID\t")
 	}
-	fmt.Fprint(&w, "NodeID\tType\tAlias\t")
+	fmt.Fprint(&w, "NodeID\tAlias\t")
 	if cfg.WithNics || cfg.ReachabilityCheck {
-		fmt.Fprint(&w, "Nics\t")
+		fmt.Fprint(&w, "Nics\t\t\t")
+		if cfg.ReachabilityCheck {
+			fmt.Fprint(&w, "Reachable\t")
+		}
 	}
 	fmt.Fprint(&w, "\n")
 
@@ -107,23 +120,30 @@ func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 		if config.Get().Debug {
 			fmt.Fprintf(&w, "%d\t", node.Node.Uid)
 		}
-		fmt.Fprintf(&w, "%d\t%s\t%s\t", node.Node.Id.Id, node.Node.Id.Type.String(), node.Node.Alias)
+		fmt.Fprintf(&w, "%s\t%s\t", node.Node.Id, node.Node.Alias)
 
 		// If we requested the nic list for each node, print the available addresses, separated by ,
 		if cfg.WithNics || cfg.ReachabilityCheck {
 			hasReachableNic := false
+			first := true
 			for _, nic := range node.Nics {
+				if !first {
+					fmt.Fprintf(&w, "\n\t\t")
+					if config.Get().Debug {
+						fmt.Fprintf(&w, "\t")
+					}
+				}
+				first = false
+
+				fmt.Fprintf(&w, "%s\t%s\t%s\t", nic.Nic.Name, nic.Nic.Addr, nic.Nic.Type)
+
 				if cfg.ReachabilityCheck {
-					r := ""
 					if nic.Reachable {
 						hasReachableNic = true
-						r = "reachable: yes"
+						fmt.Fprint(&w, "yes")
 					} else {
-						r = "reachable: no"
+						fmt.Fprint(&w, "no")
 					}
-					fmt.Fprintf(&w, "%s (%s), ", nic.Nic, r)
-				} else {
-					fmt.Fprintf(&w, "%s, ", nic.Nic)
 				}
 			}
 			fmt.Fprint(&w, "\t")
