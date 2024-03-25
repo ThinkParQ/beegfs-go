@@ -14,29 +14,26 @@ import (
 	"github.com/thinkparq/gobee/types/nodetype"
 )
 
-// Creates new list nodes command. Run when the command line tools structure is built.
+// Creates new list nodes command. Run when the command line tools structure is built, will be
+// invoked by cobra
 func newListCmd() *cobra.Command {
-	// In this case, cfg correspond perfectly with the command implementations config struct, so
-	// we just use it directly to store cfg. If this was not the case, e.g. the passed cfg might
-	// need some transformation, a separate struct can be used.
+	// The commands configuration. No additional data conversion needed here, so its arguments
+	// are filled directly from the command line flags below.
 	cfg := nodeCmd.GetNodeList_Config{}
+	// Ctl shall exit with a non-zero value if any node is completely unreachable.
+	// Note that this is not needed by the actual command, so it is not part of its config.
 	reachabilityError := false
 
+	// Define cobra command
 	cmd := &cobra.Command{
-		// The long form of the command
-		Use: "list",
-		// The short description of the command
+		Use:   "list",
 		Short: "List BeeGFS nodes",
-		// Called when the command is actually run
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Forward execution to its own function
 			return runListCmd(cmd, cfg, reachabilityError)
 		},
-
-		// There are a lot more optional argument to give here if needed, look up the documentation.
 	}
 
-	// Add flags to the command
+	// Define commands flags
 	cmd.Flags().Var(nodetype.NewPFlag(&cfg.FilterByNodeType, nodetype.Meta, nodetype.Storage, nodetype.Client, nodetype.Management), "nodeType",
 		"Only show nodes of the given type")
 	cmd.Flags().BoolVar(&cfg.WithNics, "withNics", false,
@@ -64,6 +61,7 @@ func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodeList_Config,
 		return err
 	}
 
+	// Sort output
 	slices.SortFunc(nodes, func(a, b *nodeCmd.GetNodeList_Node) int {
 		if a.Node.Id.Type == b.Node.Id.Type {
 			return int(a.Node.Id.Id - b.Node.Id.Id)
@@ -103,11 +101,12 @@ func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodeList_Config,
 		}
 		fmt.Fprintf(&w, "%s\t%s\t", node.Node.Id, node.Node.Alias)
 
-		// If we requested the nic list for each node, print the available addresses, separated by ,
+		// If we requested the nic list for each node, print them, one each line.
 		if cfg.WithNics || cfg.ReachabilityCheck {
 			hasReachableNic := false
 			first := true
 			for _, nic := range node.Nics {
+				// Align Nic on additional lines
 				if !first {
 					fmt.Fprintf(&w, "\n\t\t")
 					if config.Get().Debug {
@@ -129,6 +128,7 @@ func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodeList_Config,
 			}
 			fmt.Fprint(&w, "\t")
 
+			// A node is (completely) unreachable if all its Nics are unreachable.
 			if !hasReachableNic {
 				hasUnreachableNode = true
 			}

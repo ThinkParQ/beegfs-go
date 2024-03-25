@@ -15,12 +15,6 @@ import (
 	"github.com/thinkparq/gobee/types/nodetype"
 )
 
-// NOTE
-//
-// This file is meant as an example to create your own commands. Please follow the general
-// structure, but DO NOT copy the excessive generic comments. Only write meaningful, command specific
-// comments.
-
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
 type GetNodeList_Config struct {
@@ -36,12 +30,13 @@ type GetNodeList_Config struct {
 	ReachabilityTimeout time.Duration
 }
 
+// Wraps a Nic from the nodestore and provides additional reachability info.
 type GetNodeList_Nic struct {
 	Nic       node.Nic
 	Reachable bool
 }
 
-// A GetNodeList result entry.
+// A GetNodeList result entry wrapping a Node from the nodestore together with a list of Nics.
 type GetNodeList_Node struct {
 	Node node.Node
 	Nics []*GetNodeList_Nic
