@@ -14,27 +14,13 @@ import (
 	"github.com/thinkparq/gobee/types/nodetype"
 )
 
-// NOTE
-// This file is meant as an example to create your own commands. Please follow the general
-// structure, but do not copy the excessive generic comments. Only write meaningful, command specific
-// comments.
-
-// Config flags to control output. Everything that does not need to get passed into the actual
-// command (e.g. node.GetNodeList()) should go in here to provide a bit of separation.
-type getNodeList_Config struct {
-	// Controls whether the app should exit with an error code if at least one node is not reachable
-	reachabilityError bool
-	// Filter the output by nodetype.
-	filterByNodeType nodetype.NodeType
-}
-
 // Creates new list nodes command. Run when the command line tools structure is built.
 func newListCmd() *cobra.Command {
 	// In this case, cfg correspond perfectly with the command implementations config struct, so
 	// we just use it directly to store cfg. If this was not the case, e.g. the passed cfg might
 	// need some transformation, a separate struct can be used.
-	cfg := &nodeCmd.GetNodeList_Config{}
-	localCfg := &getNodeList_Config{}
+	cfg := nodeCmd.GetNodeList_Config{}
+	reachabilityError := false
 
 	cmd := &cobra.Command{
 		// The long form of the command
@@ -44,14 +30,14 @@ func newListCmd() *cobra.Command {
 		// Called when the command is actually run
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Forward execution to its own function
-			return runListCmd(cmd, cfg, localCfg)
+			return runListCmd(cmd, cfg, reachabilityError)
 		},
 
 		// There are a lot more optional argument to give here if needed, look up the documentation.
 	}
 
 	// Add flags to the command
-	cmd.Flags().Var(nodetype.NewPFlag(&localCfg.filterByNodeType, nodetype.Meta, nodetype.Storage, nodetype.Client, nodetype.Management), "nodeType",
+	cmd.Flags().Var(nodetype.NewPFlag(&cfg.FilterByNodeType, nodetype.Meta, nodetype.Storage, nodetype.Client, nodetype.Management), "nodeType",
 		"Only show nodes of the given type")
 	cmd.Flags().BoolVar(&cfg.WithNics, "withNics", false,
 		"Also request the list of network addresses/interfaces the nodes report to management")
@@ -59,7 +45,7 @@ func newListCmd() *cobra.Command {
 		"Checks each node for being alive and responding to requests (from the local machine)")
 	cmd.Flags().DurationVar(&cfg.ReachabilityTimeout, "reachabilityTimeout", 1*time.Second,
 		"Defines the waiting time for responses when using --reachabilityCheck")
-	cmd.Flags().BoolVar(&localCfg.reachabilityError, "reachabilityError", false,
+	cmd.Flags().BoolVar(&reachabilityError, "reachabilityError", false,
 		"Return an error if at least one node is completely unreachable")
 
 	return cmd
@@ -69,11 +55,11 @@ func newListCmd() *cobra.Command {
 // command handler and process its result (e.g. format the output). The actual command handling code
 // shall be put under pkg/ctl with its own interface and called from here. This strict separation
 // allows the implementation of potential alternative frontends later.
-func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
-	localCfg *getNodeList_Config) error {
+func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodeList_Config,
+	reachabilityError bool) error {
 
 	// Execute the actual command work
-	nodes, err := nodeCmd.GetNodeList(cmd.Context(), *cfg)
+	nodes, err := nodeCmd.GetNodeList(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
@@ -111,11 +97,6 @@ func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 
 	// Print and process node list
 	for _, node := range nodes {
-		// Respect filter
-		if localCfg.filterByNodeType != nodetype.Invalid && node.Node.Id.Type != localCfg.filterByNodeType {
-			continue
-		}
-
 		// Print a line corresponding to the columns above
 		if config.Get().Debug {
 			fmt.Fprintf(&w, "%d\t", node.Node.Uid)
@@ -156,7 +137,7 @@ func runListCmd(cmd *cobra.Command, cfg *nodeCmd.GetNodeList_Config,
 		fmt.Fprint(&w, "\n")
 	}
 
-	if localCfg.reachabilityError && hasUnreachableNode {
+	if reachabilityError && hasUnreachableNode {
 		return util.NewCtlError(fmt.Errorf("at least one node is unreachable"), 5)
 	}
 

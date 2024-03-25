@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
 	"github.com/thinkparq/gobee/types/node"
+	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // NOTE
@@ -23,6 +24,8 @@ import (
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
 type GetNodeList_Config struct {
+	// Only process and print nodes of the given type.
+	FilterByNodeType nodetype.NodeType
 	// Include the network interface names and addresses and extra info for all the nodes in the
 	// response. Causes extra work on management.
 	WithNics bool
@@ -55,6 +58,10 @@ func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_No
 
 	nodes := make([]*GetNodeList_Node, 0)
 	for _, node := range store.GetNodes() {
+		if cfg.FilterByNodeType != nodetype.Invalid && node.Id.Type != cfg.FilterByNodeType {
+			continue
+		}
+
 		nics := make([]*GetNodeList_Nic, 0, len(node.Nics))
 		for _, nic := range node.Nics {
 			gn := &GetNodeList_Nic{Nic: nic}
