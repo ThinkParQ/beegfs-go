@@ -5,30 +5,28 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/types/entity"
-	"github.com/thinkparq/gobee/types/node"
-	"github.com/thinkparq/gobee/types/nodetype"
+	"github.com/thinkparq/gobee/beegfs"
 )
 
 func TestAddAndGet(t *testing.T) {
 	store := NewNodeStore(1*time.Second, 0)
 	defer store.Cleanup()
 
-	node1001 := &node.Node{Uid: 1001, Id: entity.IdType{Id: 1, Type: nodetype.Meta}, Alias: "meta1"}
+	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}, Alias: "meta1"}
 	store.AddNode(node1001)
-	node1002 := &node.Node{Uid: 1002, Id: entity.IdType{Id: 2, Type: nodetype.Meta}, Alias: "meta2"}
+	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.IdType{Id: 2, Type: beegfs.Meta}, Alias: "meta2"}
 	store.AddNode(node1002)
-	node1011 := &node.Node{Uid: 1011, Id: entity.IdType{Id: 1, Type: nodetype.Storage}, Alias: "storage1"}
+	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.IdType{Id: 1, Type: beegfs.Storage}, Alias: "storage1"}
 	store.AddNode(node1011)
-	node1012 := &node.Node{Uid: 1012, Id: entity.IdType{Id: 2, Type: nodetype.Storage}, Alias: "storage2"}
+	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.IdType{Id: 2, Type: beegfs.Storage}, Alias: "storage2"}
 	store.AddNode(node1012)
 
-	err := store.AddNode(&node.Node{Uid: 1001})
+	err := store.AddNode(&beegfs.Node{Uid: 1001})
 	assert.Error(t, err)
-	err = store.AddNode(&node.Node{Alias: "meta1"})
+	err = store.AddNode(&beegfs.Node{Alias: "meta1"})
 	assert.Error(t, err)
 
-	err = store.AddNode(&node.Node{Id: entity.IdType{Id: 1, Type: nodetype.Meta}})
+	err = store.AddNode(&beegfs.Node{Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}})
 	assert.Error(t, err)
 
 	n, _, err := store.getNodeAndConns(1001)
@@ -39,29 +37,29 @@ func TestAddAndGet(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, n)
 
-	node, err := store.GetNode(entity.IdType{Id: 1, Type: nodetype.Meta})
+	node, err := store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.Meta})
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1001, node.Uid)
 
-	node, err = store.GetNode(entity.IdType{Id: 1, Type: nodetype.Storage})
+	node, err = store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.Storage})
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1011, node.Uid)
 
-	_, err = store.GetNode(entity.IdType{Id: 9999, Type: nodetype.Storage})
+	_, err = store.GetNode(beegfs.IdType{Id: 9999, Type: beegfs.Storage})
 	assert.Error(t, err)
 
-	_, err = store.GetNode(entity.IdType{Id: 1, Type: nodetype.Invalid})
+	_, err = store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.InvalidNodeType})
 	assert.Error(t, err)
 
-	node, err = store.GetNode(entity.Alias("meta1"))
+	node, err = store.GetNode(beegfs.Alias("meta1"))
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1001, node.Uid)
 
-	node, err = store.GetNode(entity.Alias("storage1"))
+	node, err = store.GetNode(beegfs.Alias("storage1"))
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1011, node.Uid)
 
-	_, err = store.GetNode(entity.Alias("invalid"))
+	_, err = store.GetNode(beegfs.Alias("invalid"))
 	assert.Error(t, err)
 }
 
@@ -69,13 +67,13 @@ func TestGetNodes(t *testing.T) {
 	store := NewNodeStore(1*time.Second, 0)
 	defer store.Cleanup()
 
-	node1001 := &node.Node{Uid: 1001, Id: entity.IdType{Id: 1, Type: nodetype.Meta}, Alias: "meta1"}
+	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}, Alias: "meta1"}
 	store.AddNode(node1001)
-	node1002 := &node.Node{Uid: 1002, Id: entity.IdType{Id: 2, Type: nodetype.Meta}, Alias: "meta2"}
+	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.IdType{Id: 2, Type: beegfs.Meta}, Alias: "meta2"}
 	store.AddNode(node1002)
-	node1011 := &node.Node{Uid: 1011, Id: entity.IdType{Id: 1, Type: nodetype.Storage}, Alias: "storage1"}
+	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.IdType{Id: 1, Type: beegfs.Storage}, Alias: "storage1"}
 	store.AddNode(node1011)
-	node1012 := &node.Node{Uid: 1012, Id: entity.IdType{Id: 2, Type: nodetype.Storage}, Alias: "storage2"}
+	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.IdType{Id: 2, Type: beegfs.Storage}, Alias: "storage2"}
 	store.AddNode(node1012)
 
 	nodes := store.GetNodes()
@@ -88,10 +86,10 @@ func TestMetaRootNode(t *testing.T) {
 
 	assert.Nil(t, store.GetMetaRootNode(), "expect nil when no meta node set")
 
-	metaIdType := entity.IdType{Id: 1, Type: nodetype.Meta}
-	storageIdType := entity.IdType{Id: 1, Type: nodetype.Storage}
-	nodeMeta := &node.Node{Uid: 1001, Id: metaIdType, Alias: "meta1"}
-	nodeStorage := &node.Node{Uid: 2001, Id: storageIdType, Alias: "storage2"}
+	metaIdType := beegfs.IdType{Id: 1, Type: beegfs.Meta}
+	storageIdType := beegfs.IdType{Id: 1, Type: beegfs.Storage}
+	nodeMeta := &beegfs.Node{Uid: 1001, Id: metaIdType, Alias: "meta1"}
+	nodeStorage := &beegfs.Node{Uid: 2001, Id: storageIdType, Alias: "storage2"}
 
 	err := store.SetMetaRootNode(metaIdType)
 	assert.Error(t, err, "expect error for node not in store")

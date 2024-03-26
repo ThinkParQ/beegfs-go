@@ -1,19 +1,17 @@
-package node
+package beegfs
 
 import (
 	"fmt"
-
-	"github.com/thinkparq/gobee/types/entity"
 )
 
 // Holds BeeGFS node information, including IDs and Nics
 type Node struct {
 	// The nodes unique EntityID
-	Uid entity.Uid
+	Uid Uid
 	// The nodes NodeID and type
-	Id entity.IdType
+	Id IdType
 	// The nodes alias - formerly known as "node string ID"
-	Alias entity.Alias
+	Alias Alias
 	// Nics of this node
 	Nics []Nic
 }
@@ -41,7 +39,7 @@ func (node Node) Clone() Node {
 type NicType int
 
 const (
-	Invalid NicType = iota
+	InvalidNicType NicType = iota
 	Ethernet
 	Rdma
 	Sdp

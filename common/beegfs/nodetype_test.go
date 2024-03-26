@@ -1,4 +1,4 @@
-package nodetype
+package beegfs
 
 import (
 	"testing"
@@ -14,9 +14,9 @@ func TestFromString(t *testing.T) {
 	assert.Equal(t, Client, FromString(" client "))
 	assert.Equal(t, Client, FromString("c"))
 
-	assert.Equal(t, Invalid, FromString(""))
-	assert.Equal(t, Invalid, FromString("abc"))
-	assert.Equal(t, Invalid, FromString("m"))
-	assert.Equal(t, Invalid, FromString("me_"))
-	assert.Equal(t, Invalid, FromString("cli ent"))
+	assert.Equal(t, InvalidNodeType, FromString(""))
+	assert.Equal(t, InvalidNodeType, FromString("abc"))
+	assert.Equal(t, InvalidNodeType, FromString("m"))
+	assert.Equal(t, InvalidNodeType, FromString("me_"))
+	assert.Equal(t, InvalidNodeType, FromString("cli ent"))
 }

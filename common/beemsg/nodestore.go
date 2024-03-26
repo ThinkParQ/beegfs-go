@@ -6,28 +6,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
-	"github.com/thinkparq/gobee/types/entity"
-	"github.com/thinkparq/gobee/types/node"
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // The node store. Stores node objects and mappings to them as well as connection settings. All
 // exported methods are thread safe.
 type NodeStore struct {
 	// The pointers to the actual entries
-	nodesByUid map[entity.Uid]*node.Node
+	nodesByUid map[beegfs.Uid]*beegfs.Node
 	// For selecting nodes by alias
-	uidByAlias map[entity.Alias]entity.Uid
+	uidByAlias map[beegfs.Alias]beegfs.Uid
 	// For selecting nodes by nodeID and type
-	uidByNodeId map[entity.IdType]entity.Uid
+	uidByNodeId map[beegfs.IdType]beegfs.Uid
 
 	// The meta node which has the root inode
-	metaRootNode *node.Node
+	metaRootNode *beegfs.Node
 
 	// The pointers to the connection stores
-	connsByUid map[entity.Uid]*util.NodeConns
+	connsByUid map[beegfs.Uid]*util.NodeConns
 
 	// Settings
 	connTimeout time.Duration
@@ -43,10 +41,10 @@ type NodeStore struct {
 // no longer required.
 func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeStore {
 	return &NodeStore{
-		nodesByUid:  make(map[entity.Uid]*node.Node),
-		uidByAlias:  make(map[entity.Alias]entity.Uid),
-		uidByNodeId: make(map[entity.IdType]entity.Uid),
-		connsByUid:  make(map[entity.Uid]*util.NodeConns),
+		nodesByUid:  make(map[beegfs.Uid]*beegfs.Node),
+		uidByAlias:  make(map[beegfs.Alias]beegfs.Uid),
+		uidByNodeId: make(map[beegfs.IdType]beegfs.Uid),
+		connsByUid:  make(map[beegfs.Uid]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
 		authSecret:  authenticationSecret,
@@ -61,7 +59,7 @@ func (store *NodeStore) Cleanup() {
 }
 
 // Add a node entry to the store
-func (store *NodeStore) AddNode(node *node.Node) error {
+func (store *NodeStore) AddNode(node *beegfs.Node) error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
@@ -89,8 +87,8 @@ func (store *NodeStore) AddNode(node *node.Node) error {
 	return nil
 }
 
-// Set the meta root node. Must be already present in the store.
-func (store *NodeStore) SetMetaRootNode(id entity.EntityId) error {
+// Set the meta root beegfs. Must be already present in the store.
+func (store *NodeStore) SetMetaRootNode(id beegfs.EntityId) error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
@@ -103,7 +101,7 @@ func (store *NodeStore) SetMetaRootNode(id entity.EntityId) error {
 	node := store.nodesByUid[uid]
 
 	// Make sure it is a meta node
-	if node.Id.Type != nodetype.Meta {
+	if node.Id.Type != beegfs.Meta {
 		return fmt.Errorf("%s is not a meta node", id.String())
 	}
 
@@ -113,7 +111,7 @@ func (store *NodeStore) SetMetaRootNode(id entity.EntityId) error {
 }
 
 // Get the meta root node
-func (store *NodeStore) GetMetaRootNode() *node.Node {
+func (store *NodeStore) GetMetaRootNode() *beegfs.Node {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
@@ -122,13 +120,13 @@ func (store *NodeStore) GetMetaRootNode() *node.Node {
 
 // Returns a single node from the store if the given EntityId exists. The returned Node is a deep
 // copy, therefore the caller can take ownership and do whatever they want with it.
-func (store *NodeStore) GetNode(id entity.EntityId) (node.Node, error) {
+func (store *NodeStore) GetNode(id beegfs.EntityId) (beegfs.Node, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
 	uid, err := store.resolveEntityId(id)
 	if err != nil {
-		return node.Node{}, err
+		return beegfs.Node{}, err
 	}
 
 	// resolveEntityId ensures this uid is actually valid
@@ -139,11 +137,11 @@ func (store *NodeStore) GetNode(id entity.EntityId) (node.Node, error) {
 
 // Returns all nodes from the store. The returned Nodes are deep copies, therefore the caller can
 // take ownership and do whatever they want with them.
-func (store *NodeStore) GetNodes() []node.Node {
+func (store *NodeStore) GetNodes() []beegfs.Node {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
-	res := make([]node.Node, 0, len(store.nodesByUid))
+	res := make([]beegfs.Node, 0, len(store.nodesByUid))
 	for _, v := range store.nodesByUid {
 		res = append(res, v.Clone())
 	}
@@ -154,9 +152,9 @@ func (store *NodeStore) GetNodes() []node.Node {
 // Makes a TCP request to the given node and optionally waits for a response. To receive a response,
 // a pointer to a target struct must be given for the resp argument. If resp is nil, no response is
 // expected.
-func (store *NodeStore) RequestTCP(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+func (store *NodeStore) RequestTCP(ctx context.Context, id beegfs.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 	// Access the store
-	node, conns, err := func() (*node.Node, *util.NodeConns, error) {
+	node, conns, err := func() (*beegfs.Node, *util.NodeConns, error) {
 		store.mutex.RLock()
 		defer store.mutex.RUnlock()
 
@@ -183,8 +181,8 @@ func (store *NodeStore) RequestTCP(ctx context.Context, id entity.EntityId, req 
 // Makes a UDP request to the given node and optionally waits for a response. To receive a response,
 // a pointer to a target struct must be given for the resp argument. If resp is nil, no response is
 // expected.
-func (store *NodeStore) RequestUDP(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	node, _, err := func() (*node.Node, *util.NodeConns, error) {
+func (store *NodeStore) RequestUDP(ctx context.Context, id beegfs.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	node, _, err := func() (*beegfs.Node, *util.NodeConns, error) {
 		// Access the store
 		store.mutex.RLock()
 		defer store.mutex.RUnlock()
@@ -210,7 +208,7 @@ func (store *NodeStore) RequestUDP(ctx context.Context, id entity.EntityId, req 
 }
 
 // Returns the Node and connections for the given uid. Caller must hold store read lock.
-func (store *NodeStore) getNodeAndConns(uid entity.Uid) (*node.Node, *util.NodeConns, error) {
+func (store *NodeStore) getNodeAndConns(uid beegfs.Uid) (*beegfs.Node, *util.NodeConns, error) {
 	node, ok1 := store.nodesByUid[uid]
 	conns, ok2 := store.connsByUid[uid]
 	if !ok1 || !ok2 {
@@ -221,18 +219,18 @@ func (store *NodeStore) getNodeAndConns(uid entity.Uid) (*node.Node, *util.NodeC
 }
 
 // Returns an Uid after making sure it is valid. Caller must hold store read lock.
-func (store *NodeStore) resolveEntityId(id entity.EntityId) (entity.Uid, error) {
-	uid := entity.Uid(0)
+func (store *NodeStore) resolveEntityId(id beegfs.EntityId) (beegfs.Uid, error) {
+	uid := beegfs.Uid(0)
 	switch v := id.(type) {
-	case entity.IdType:
+	case beegfs.IdType:
 		if u, ok := store.uidByNodeId[v]; ok {
 			uid = u
 		}
-	case entity.Alias:
+	case beegfs.Alias:
 		if u, ok := store.uidByAlias[v]; ok {
 			uid = u
 		}
-	case entity.Uid:
+	case beegfs.Uid:
 		uid = v
 	default:
 		return 0, fmt.Errorf("invalid EntityId type")

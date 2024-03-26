@@ -1,4 +1,4 @@
-package nodetype
+package beegfs
 
 import (
 	"strings"
@@ -9,7 +9,7 @@ import (
 type NodeType int
 
 const (
-	Invalid NodeType = iota
+	InvalidNodeType NodeType = iota
 	Client
 	Meta
 	Storage
@@ -23,7 +23,7 @@ func FromString(input string) NodeType {
 	input = strings.ToLower(strings.TrimSpace(input))
 
 	if len(input) == 0 {
-		return Invalid
+		return InvalidNodeType
 	}
 
 	if strings.HasPrefix("client", input) {
@@ -41,7 +41,7 @@ func FromString(input string) NodeType {
 		}
 	}
 
-	return Invalid
+	return InvalidNodeType
 }
 
 // Output user friendly string representation
