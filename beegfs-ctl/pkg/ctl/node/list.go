@@ -9,22 +9,16 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
-	"github.com/thinkparq/gobee/types/entity"
-	"github.com/thinkparq/gobee/types/nodetype"
-	pb "github.com/thinkparq/protobuf/go/beegfs"
 )
-
-// NOTE
-//
-// This file is meant as an example to create your own commands. Please follow the general
-// structure, but DO NOT copy the excessive generic comments. Only write meaningful, command specific
-// comments.
 
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
 type GetNodeList_Config struct {
+	// Only process and print nodes of the given type.
+	FilterByNodeType beegfs.NodeType
 	// Include the network interface names and addresses and extra info for all the nodes in the
 	// response. Causes extra work on management.
 	WithNics bool
@@ -35,83 +29,44 @@ type GetNodeList_Config struct {
 	ReachabilityTimeout time.Duration
 }
 
+// Wraps a Nic from the nodestore and provides additional reachability info.
 type GetNodeList_Nic struct {
-	Name      string
-	Type      string
-	Addr      string
+	Nic       beegfs.Nic
 	Reachable bool
 }
 
-// A GetNodeList result entry.
+// A GetNodeList result entry wrapping a Node from the nodestore together with a list of Nics.
 type GetNodeList_Node struct {
-	Uid        entity.Uid
-	IdType     entity.IdType
-	Alias      entity.Alias
-	BeemsgPort uint16
-	// List of network addresses the node should be available on. Ordered as delivered from
-	// management (e.g. highest priority first)
+	Node beegfs.Node
 	Nics []*GetNodeList_Nic
 }
 
 // Get the complete list of nodes from the mananagement
 func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_Node, error) {
-	mgmtd, err := config.ManagementClient()
+	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Send request to the management via gRPC.
-	res, err := mgmtd.GetNodeList(ctx, &pb.GetNodeListReq{IncludeNics: cfg.WithNics || cfg.ReachabilityCheck})
-	if err != nil {
-		return nil, fmt.Errorf("requesting node list failed: %w", err)
-	}
+	addrMap := make(map[string]*GetNodeList_Nic)
 
-	// Result list of nodes
-	nodes := make([]*GetNodeList_Node, 0, len(res.Nodes))
-	// Maps net.Addr.String() to a GetNodeList_Nic pointer. Used for checkReachability
-	// To avoid too many reallocations, we assume three Nics per node on average
-	addrMap := make(map[string]*GetNodeList_Nic, len(res.Nodes)*2)
+	nodes := make([]*GetNodeList_Node, 0)
+	for _, node := range store.GetNodes() {
+		if cfg.FilterByNodeType != beegfs.InvalidNodeType && node.Id.Type != cfg.FilterByNodeType {
+			continue
+		}
 
-	// Transform into result struct and fill the addrMap
-	for _, node := range res.Nodes {
 		nics := make([]*GetNodeList_Nic, 0, len(node.Nics))
-
-		for _, inic := range node.Nics {
-			nic := &GetNodeList_Nic{
-				Name: inic.Name,
-				Type: inic.Type.String(),
-				Addr: inic.Addr,
-			}
-			nics = append(nics, nic)
-
-			// Add addrMap entry for this Nic
-			addr := fmt.Sprintf("%s:%d", inic.Addr, node.BeemsgPort)
-			addrMap[addr] = nic
+		for _, nic := range node.Nics {
+			gn := &GetNodeList_Nic{Nic: nic}
+			nics = append(nics, gn)
+			addrMap[nic.Addr] = gn
 		}
 
-		var t nodetype.NodeType
-		switch node.Type {
-		case pb.GetNodeListResp_Node_META:
-			t = nodetype.Meta
-		case pb.GetNodeListResp_Node_STORAGE:
-			t = nodetype.Storage
-		case pb.GetNodeListResp_Node_CLIENT:
-			t = nodetype.Client
-		case pb.GetNodeListResp_Node_MANAGEMENT:
-			t = nodetype.Management
-		}
-
-		node := &GetNodeList_Node{
-			Uid: entity.Uid(node.Uid),
-			IdType: entity.IdType{
-				Id:   entity.Id(node.NodeId),
-				Type: t,
-			},
-			Alias:      entity.Alias(node.Alias),
-			BeemsgPort: uint16(node.BeemsgPort),
-			Nics:       nics,
-		}
-		nodes = append(nodes, node)
+		nodes = append(nodes, &GetNodeList_Node{
+			Node: node,
+			Nics: nics,
+		})
 	}
 
 	// Check all nics of all nodes for reachability if requested
