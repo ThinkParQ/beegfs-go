@@ -11,7 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	nodeCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
-	"github.com/thinkparq/gobee/types/nodetype"
+	"github.com/thinkparq/gobee/beegfs"
 )
 
 // Creates new list nodes command. Run when the command line tools structure is built, will be
@@ -34,7 +34,7 @@ func newListCmd() *cobra.Command {
 	}
 
 	// Define commands flags
-	cmd.Flags().Var(nodetype.NewPFlag(&cfg.FilterByNodeType, nodetype.Meta, nodetype.Storage, nodetype.Client, nodetype.Management), "nodeType",
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.FilterByNodeType, beegfs.Meta, beegfs.Storage, beegfs.Client, beegfs.Management), "nodeType",
 		"Only show nodes of the given type")
 	cmd.Flags().BoolVar(&cfg.WithNics, "withNics", false,
 		"Also request the list of network addresses/interfaces the nodes report to management")

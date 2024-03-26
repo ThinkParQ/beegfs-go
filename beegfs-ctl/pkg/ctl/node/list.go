@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
-	"github.com/thinkparq/gobee/types/node"
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
 type GetNodeList_Config struct {
 	// Only process and print nodes of the given type.
-	FilterByNodeType nodetype.NodeType
+	FilterByNodeType beegfs.NodeType
 	// Include the network interface names and addresses and extra info for all the nodes in the
 	// response. Causes extra work on management.
 	WithNics bool
@@ -32,13 +31,13 @@ type GetNodeList_Config struct {
 
 // Wraps a Nic from the nodestore and provides additional reachability info.
 type GetNodeList_Nic struct {
-	Nic       node.Nic
+	Nic       beegfs.Nic
 	Reachable bool
 }
 
 // A GetNodeList result entry wrapping a Node from the nodestore together with a list of Nics.
 type GetNodeList_Node struct {
-	Node node.Node
+	Node beegfs.Node
 	Nics []*GetNodeList_Nic
 }
 
@@ -53,7 +52,7 @@ func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_No
 
 	nodes := make([]*GetNodeList_Node, 0)
 	for _, node := range store.GetNodes() {
-		if cfg.FilterByNodeType != nodetype.Invalid && node.Id.Type != cfg.FilterByNodeType {
+		if cfg.FilterByNodeType != beegfs.InvalidNodeType && node.Id.Type != cfg.FilterByNodeType {
 			continue
 		}
 

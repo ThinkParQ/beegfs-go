@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg"
-	"github.com/thinkparq/gobee/types/entity"
-	"github.com/thinkparq/gobee/types/node"
-	"github.com/thinkparq/gobee/types/nodetype"
-	"github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -40,7 +38,7 @@ func Get() *Config {
 }
 
 // Try to establish a connection to the managements gRPC service
-func ManagementClient() (beegfs.ManagementClient, error) {
+func ManagementClient() (pb.ManagementClient, error) {
 	if globalConfig.ManagementAddr == "" {
 		return nil, fmt.Errorf("management address not set")
 	}
@@ -54,7 +52,7 @@ func ManagementClient() (beegfs.ManagementClient, error) {
 		return nil, fmt.Errorf("connecting to management service on %s failed: %w", globalConfig.ManagementAddr, err)
 	}
 
-	return beegfs.NewManagementClient(g), nil
+	return pb.NewManagementClient(g), nil
 }
 
 // func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
@@ -89,7 +87,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	}
 
 	// Fetch the node list from management
-	nodes, err := c.GetNodeList(ctx, &beegfs.GetNodeListReq{
+	nodes, err := c.GetNodeList(ctx, &pb.GetNodeListReq{
 		IncludeNics: true,
 	})
 	if err != nil {
@@ -98,41 +96,41 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	// Loop through the node entries
 	for _, n := range nodes.GetNodes() {
-		nics := []node.Nic{}
+		nics := []beegfs.Nic{}
 		for _, a := range n.Nics {
-			nict := node.Invalid
+			nict := beegfs.InvalidNicType
 			switch a.Type {
-			case beegfs.Nic_ETHERNET:
-				nict = node.Ethernet
-			case beegfs.Nic_RDMA:
-				nict = node.Rdma
-			case beegfs.Nic_SDP:
-				nict = node.Sdp
+			case pb.Nic_ETHERNET:
+				nict = beegfs.Ethernet
+			case pb.Nic_RDMA:
+				nict = beegfs.Rdma
+			case pb.Nic_SDP:
+				nict = beegfs.Sdp
 			}
 
-			nics = append(nics, node.Nic{Addr: fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort), Name: a.Name, Type: nict})
+			nics = append(nics, beegfs.Nic{Addr: fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort), Name: a.Name, Type: nict})
 		}
 
-		t := nodetype.Invalid
+		t := beegfs.InvalidNodeType
 		switch n.Type {
-		case beegfs.GetNodeListResp_Node_META:
-			t = nodetype.Meta
-		case beegfs.GetNodeListResp_Node_STORAGE:
-			t = nodetype.Storage
-		case beegfs.GetNodeListResp_Node_CLIENT:
-			t = nodetype.Client
-		case beegfs.GetNodeListResp_Node_MANAGEMENT:
-			t = nodetype.Management
+		case pb.GetNodeListResp_Node_META:
+			t = beegfs.Meta
+		case pb.GetNodeListResp_Node_STORAGE:
+			t = beegfs.Storage
+		case pb.GetNodeListResp_Node_CLIENT:
+			t = beegfs.Client
+		case pb.GetNodeListResp_Node_MANAGEMENT:
+			t = beegfs.Management
 		}
 
 		// Add node to store
-		nodeStore.AddNode(&node.Node{
-			Uid: entity.Uid(n.Uid),
-			Id: entity.IdType{
-				Id:   entity.Id(n.NodeId),
+		nodeStore.AddNode(&beegfs.Node{
+			Uid: beegfs.Uid(n.Uid),
+			Id: beegfs.IdType{
+				Id:   beegfs.Id(n.NodeId),
 				Type: t,
 			},
-			Alias: entity.Alias(n.Alias),
+			Alias: beegfs.Alias(n.Alias),
 			Nics:  nics,
 		})
 	}
