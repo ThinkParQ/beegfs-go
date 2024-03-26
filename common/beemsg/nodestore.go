@@ -6,32 +6,32 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/beemsg/util"
-	"github.com/thinkparq/gobee/types/entity"
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // The node store. Stores node objects and mappings to them as well as connection settings. All
 // exported methods are thread safe.
 type NodeStore struct {
 	// The pointers to the actual entries
-	nodesByUid map[entity.Uid]*Node
+	nodesByUid map[beegfs.Uid]*beegfs.Node
 	// For selecting nodes by alias
-	uidByAlias map[entity.Alias]entity.Uid
+	uidByAlias map[beegfs.Alias]beegfs.Uid
 	// For selecting nodes by nodeID and type
-	uidByNodeId map[entity.IdType]entity.Uid
+	uidByNodeId map[beegfs.IdType]beegfs.Uid
 
 	// The meta node which has the root inode
-	metaRootNode *Node
+	metaRootNode *beegfs.Node
 
 	// The pointers to the connection stores
-	connsByUid map[entity.Uid]*util.NodeConns
+	connsByUid map[beegfs.Uid]*util.NodeConns
 
 	// Settings
 	connTimeout time.Duration
 	authSecret  int64
 
+	// Locks the store. Must be taken before accessing any of the maps.
 	mutex sync.RWMutex
 }
 
@@ -41,17 +41,17 @@ type NodeStore struct {
 // no longer required.
 func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeStore {
 	return &NodeStore{
-		nodesByUid:  make(map[entity.Uid]*Node),
-		uidByAlias:  make(map[entity.Alias]entity.Uid),
-		uidByNodeId: make(map[entity.IdType]entity.Uid),
-		connsByUid:  make(map[entity.Uid]*util.NodeConns),
+		nodesByUid:  make(map[beegfs.Uid]*beegfs.Node),
+		uidByAlias:  make(map[beegfs.Alias]beegfs.Uid),
+		uidByNodeId: make(map[beegfs.IdType]beegfs.Uid),
+		connsByUid:  make(map[beegfs.Uid]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
 		authSecret:  authenticationSecret,
 	}
 }
 
-// Frees resources (e.g. tcp connections)
+// Frees resources (e.g. connections). Should be called when the NodeStore is no longer needed.
 func (store *NodeStore) Cleanup() {
 	for _, conns := range store.connsByUid {
 		conns.CleanUp()
@@ -59,7 +59,7 @@ func (store *NodeStore) Cleanup() {
 }
 
 // Add a node entry to the store
-func (store *NodeStore) AddNode(node *Node) error {
+func (store *NodeStore) AddNode(node *beegfs.Node) error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
@@ -87,154 +87,158 @@ func (store *NodeStore) AddNode(node *Node) error {
 	return nil
 }
 
-// Set the meta root node.
-//
-// Must be a meta node present in the store.
-func (store *NodeStore) SetMetaRootNode(node *Node) error {
+// Set the meta root beegfs. Must be already present in the store.
+func (store *NodeStore) SetMetaRootNode(id beegfs.EntityId) error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
+	uid, err := store.resolveEntityId(id)
+	if err != nil {
+		return err
+	}
+
+	// resolveEntityId ensures this uid is valid
+	node := store.nodesByUid[uid]
+
 	// Make sure it is a meta node
-	if node.Id.Type != nodetype.Meta {
-		return fmt.Errorf("{node} is not a meta node")
+	if node.Id.Type != beegfs.Meta {
+		return fmt.Errorf("%s is not a meta node", id.String())
 	}
 
-	// Make sure it is in the store
-	for _, v := range store.nodesByUid {
-		if node == v {
-			store.metaRootNode = node
-			return nil
-		}
-	}
+	store.metaRootNode = node
 
-	return fmt.Errorf("{node} could not be found in store")
+	return nil
 }
 
 // Get the meta root node
-func (store *NodeStore) GetMetaRootNode() *Node {
+func (store *NodeStore) GetMetaRootNode() *beegfs.Node {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
 	return store.metaRootNode
 }
 
-// Get a node by its UID
-func (store *NodeStore) getNodeAndConns(uid entity.Uid) (*Node, *util.NodeConns, error) {
+// Returns a single node from the store if the given EntityId exists. The returned Node is a deep
+// copy, therefore the caller can take ownership and do whatever they want with it.
+func (store *NodeStore) GetNode(id beegfs.EntityId) (beegfs.Node, error) {
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
 
+	uid, err := store.resolveEntityId(id)
+	if err != nil {
+		return beegfs.Node{}, err
+	}
+
+	// resolveEntityId ensures this uid is actually valid
+	node := store.nodesByUid[uid]
+
+	return node.Clone(), nil
+}
+
+// Returns all nodes from the store. The returned Nodes are deep copies, therefore the caller can
+// take ownership and do whatever they want with them.
+func (store *NodeStore) GetNodes() []beegfs.Node {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	res := make([]beegfs.Node, 0, len(store.nodesByUid))
+	for _, v := range store.nodesByUid {
+		res = append(res, v.Clone())
+	}
+
+	return res
+}
+
+// Makes a TCP request to the given node and optionally waits for a response. To receive a response,
+// a pointer to a target struct must be given for the resp argument. If resp is nil, no response is
+// expected.
+func (store *NodeStore) RequestTCP(ctx context.Context, id beegfs.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	// Access the store
+	node, conns, err := func() (*beegfs.Node, *util.NodeConns, error) {
+		store.mutex.RLock()
+		defer store.mutex.RUnlock()
+
+		uid, err := store.resolveEntityId(id)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return store.getNodeAndConns(uid)
+	}()
+
+	if err != nil {
+		return err
+	}
+
+	err = conns.RequestTCP(ctx, node.Addrs(), store.authSecret, store.connTimeout, req, resp)
+	if err != nil {
+		return fmt.Errorf("TCP request to %s failed: %w", node, err)
+	}
+
+	return nil
+}
+
+// Makes a UDP request to the given node and optionally waits for a response. To receive a response,
+// a pointer to a target struct must be given for the resp argument. If resp is nil, no response is
+// expected.
+func (store *NodeStore) RequestUDP(ctx context.Context, id beegfs.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
+	node, _, err := func() (*beegfs.Node, *util.NodeConns, error) {
+		// Access the store
+		store.mutex.RLock()
+		defer store.mutex.RUnlock()
+
+		uid, err := store.resolveEntityId(id)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return store.getNodeAndConns(uid)
+	}()
+
+	if err != nil {
+		return err
+	}
+
+	err = util.RequestUDP(ctx, node.Addrs(), req, resp)
+	if err != nil {
+		return fmt.Errorf("UDP request to %s failed: %w", node, err)
+	}
+
+	return nil
+}
+
+// Returns the Node and connections for the given uid. Caller must hold store read lock.
+func (store *NodeStore) getNodeAndConns(uid beegfs.Uid) (*beegfs.Node, *util.NodeConns, error) {
 	node, ok1 := store.nodesByUid[uid]
 	conns, ok2 := store.connsByUid[uid]
 	if !ok1 || !ok2 {
-		return nil, nil, fmt.Errorf("node '%s' not found", uid)
+		return nil, nil, fmt.Errorf("node %s not found", uid)
 	}
 
 	return node, conns, nil
 }
 
-func (store *NodeStore) GetUid(id entity.EntityId) (entity.Uid, error) {
-	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-
+// Returns an Uid after making sure it is valid. Caller must hold store read lock.
+func (store *NodeStore) resolveEntityId(id beegfs.EntityId) (beegfs.Uid, error) {
+	uid := beegfs.Uid(0)
 	switch v := id.(type) {
-	case entity.IdType:
-		if uid, ok := store.uidByNodeId[v]; ok {
-			return uid, nil
+	case beegfs.IdType:
+		if u, ok := store.uidByNodeId[v]; ok {
+			uid = u
 		}
-	case entity.Alias:
-		if uid, ok := store.uidByAlias[v]; ok {
-			return uid, nil
+	case beegfs.Alias:
+		if u, ok := store.uidByAlias[v]; ok {
+			uid = u
 		}
-	case entity.Uid:
-		if n, ok := store.nodesByUid[v]; ok {
-			return n.Uid, nil
-		}
+	case beegfs.Uid:
+		uid = v
+	default:
+		return 0, fmt.Errorf("invalid EntityId type")
 	}
 
-	return 0, fmt.Errorf("node '%s' not found", id.String())
-}
-
-func (store *NodeStore) GetUidByNodeId(nodeId entity.Id, nodeType nodetype.NodeType) (entity.Uid, error) {
-	return store.GetUid(entity.IdType{
-		Id:   nodeId,
-		Type: nodeType,
-	})
-}
-
-func (store *NodeStore) GetUidByAlias(alias entity.Alias) (entity.Uid, error) {
-	return store.GetUid(alias)
-}
-
-const tcpErrorMsg = "TCP request to %s failed: %w"
-
-// Make a TCP request to a node by its UID
-func (store *NodeStore) Request(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUid(id)
-	if err != nil {
-		return err
+	if _, ok := store.nodesByUid[uid]; !ok {
+		return 0, fmt.Errorf("node %s not found", id.String())
 	}
 
-	node, conns, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
-
-	err = conns.RequestTCP(ctx, node.Addrs, store.authSecret, store.connTimeout, req, resp)
-	if err != nil {
-		return fmt.Errorf(tcpErrorMsg, node, err)
-	}
-
-	return nil
-}
-
-func (store *NodeStore) RequestByUid(ctx context.Context, uid entity.Uid, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.Request(ctx, uid, req, resp)
-}
-
-func (store *NodeStore) RequestByAlias(ctx context.Context, alias entity.Alias, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.Request(ctx, alias, req, resp)
-}
-
-func (store *NodeStore) RequestByNodeId(ctx context.Context, nodeId entity.Id, nodeType nodetype.NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.Request(ctx, entity.IdType{
-		Id:   nodeId,
-		Type: nodeType,
-	}, req, resp)
-}
-
-const udpErrorMsg = "UDP request to %s failed: %w"
-
-// Make a UDP request to a node by its UID and waits for a response if resp is not nil
-func (store *NodeStore) RequestUdp(ctx context.Context, id entity.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	uid, err := store.GetUid(id)
-	if err != nil {
-		return err
-	}
-
-	node, _, err := store.getNodeAndConns(uid)
-	if err != nil {
-		return err
-	}
-
-	err = util.RequestUDP(ctx, node.Addrs, req, resp)
-	if err != nil {
-		return fmt.Errorf(udpErrorMsg, node, err)
-	}
-
-	return nil
-}
-
-func (store *NodeStore) RequestUdpByUid(ctx context.Context, uid entity.Uid, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.RequestUdp(ctx, uid, req, resp)
-}
-
-func (store *NodeStore) RequestUdpByAlias(ctx context.Context, alias entity.Alias, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.RequestUdp(ctx, alias, req, resp)
-}
-
-func (store *NodeStore) RequestUdpByNodeId(ctx context.Context, nodeId entity.Id, nodeType nodetype.NodeType, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
-	return store.RequestUdp(ctx, entity.IdType{
-		Id:   nodeId,
-		Type: nodeType,
-	}, req, resp)
+	return uid, nil
 }

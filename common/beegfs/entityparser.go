@@ -1,14 +1,12 @@
-package entity
+package beegfs
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
-// Custom Parser target variable meant for reading BeeGFS entities (nodes, targets, ...) from the
+// Custom EntityParser target variable meant for reading BeeGFS entities (nodes, targets, ...) from the
 // users input. Must be instantiated for the desired entity kind using one of the provided New
 // functions.
 //
@@ -19,65 +17,65 @@ import (
 //     ID 4 would be 'meta:4'. Node type can be abbreviated as long as it is non-ambiguous
 //     (e.g. "c" matches to client, "me" to meta). Parses into IdType.
 //   - If only one NodeType is accepted, indicated by acceptedNodeTypes (e.g. for storage pools),
-//     a single integer is also allowed and parses into an IdType of this one NodeType.
+//     a single integer is also allowed and parses into an IdType of this one
 //   - a string(without a ':'): An entities unique string alias. These are globally unique and
 //     therefore no nodeType is needed. Parses into Alias.
-type Parser struct {
+type EntityParser struct {
 	// The user facing type name of this flag - will show up in the help output
 	typeName string
 	// If the input is parsed into an Id, this determines the integer size
 	idBitSize int
 	// The node types being accepted as input
-	acceptedNodeTypes []nodetype.NodeType
+	acceptedNodeTypes []NodeType
 }
 
 // Create a new Parser for a BeeGFS node
-func NewNodeParser() Parser {
-	return Parser{
+func NewNodeParser() EntityParser {
+	return EntityParser{
 		typeName:          "node",
 		idBitSize:         32,
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Client, nodetype.Meta, nodetype.Storage, nodetype.Management},
+		acceptedNodeTypes: []NodeType{Client, Meta, Storage, Management},
 	}
 }
 
 // Create a new Parser for a BeeGFS target
-func NewTargetParser() Parser {
-	return Parser{
+func NewTargetParser() EntityParser {
+	return EntityParser{
 		typeName:          "target",
 		idBitSize:         16,
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Meta, nodetype.Storage},
+		acceptedNodeTypes: []NodeType{Meta, Storage},
 	}
 }
 
 // Create a new Parser for a BeeGFS buddy group
 
-func NewBuddyGroupParser() Parser {
-	return Parser{
+func NewBuddyGroupParser() EntityParser {
+	return EntityParser{
 		typeName:          "buddyGroup",
 		idBitSize:         16,
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Meta, nodetype.Storage},
+		acceptedNodeTypes: []NodeType{Meta, Storage},
 	}
 }
 
 // Create a new Parser for a BeeGFS storage pool
-func NewStoragePoolParser() Parser {
-	return Parser{
+func NewStoragePoolParser() EntityParser {
+	return EntityParser{
 		typeName:  "storagePool",
 		idBitSize: 16,
 		// Storage pools are only valid with NodeType storage
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Storage},
+		acceptedNodeTypes: []NodeType{Storage},
 	}
 }
 
 // Parse the input into an EntityId. Returns user friendly errors.
-func (g Parser) Parse(input string) (EntityId, error) {
+func (g EntityParser) Parse(input string) (EntityId, error) {
 	input = strings.TrimSpace(input)
 
 	// Parses rhs into an Id and returns an IdType object
-	typeAndId := func(typ nodetype.NodeType, rhs string) (EntityId, error) {
+	typeAndId := func(typ NodeType, rhs string) (EntityId, error) {
 		id, err := IdFromString(rhs, g.idBitSize)
 		if err != nil {
-			return Invalid{}, err
+			return InvalidEntityId{}, err
 		}
 
 		return IdType{
@@ -98,14 +96,14 @@ func (g Parser) Parse(input string) (EntityId, error) {
 
 			uid, err := strconv.ParseUint(rhs, 10, 64)
 			if err != nil || uid == 0 {
-				return Invalid{}, fmt.Errorf("invalid entity uid '%s' - accepted is a range from 1 to 2^64-1", rhs)
+				return InvalidEntityId{}, fmt.Errorf("invalid entity uid '%s' - accepted is a range from 1 to 2^64-1", rhs)
 			}
 
 			return Uid(uid), nil
 		} else {
 			// it's <nodeType>:<id>
 
-			nt := nodetype.FromString(lhs)
+			nt := FromString(lhs)
 
 			// Check for the nodeType being allowed.
 			if err := func() error {
@@ -121,7 +119,7 @@ func (g Parser) Parse(input string) (EntityId, error) {
 				return fmt.Errorf("invalid id type specifier '%s' - accepted are %s'uid'",
 					lhs, acceptedList.String())
 			}(); err != nil {
-				return Invalid{}, err
+				return InvalidEntityId{}, err
 			}
 
 			return typeAndId(nt, rhs)
@@ -135,7 +133,7 @@ func (g Parser) Parse(input string) (EntityId, error) {
 	}
 
 	// In case we are restricted to exactly one nodeType, try to parse the input into an integer and
-	// interpret it as the id of that nodeType.
+	// interpret it as the id of that
 	if len(g.acceptedNodeTypes) == 1 {
 		if r, err := typeAndId(g.acceptedNodeTypes[0], input); err == nil {
 			return r, nil
@@ -144,5 +142,5 @@ func (g Parser) Parse(input string) (EntityId, error) {
 		// If this fails, we still return the alias error instead
 	}
 
-	return Invalid{}, aliasErr
+	return InvalidEntityId{}, aliasErr
 }

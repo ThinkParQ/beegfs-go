@@ -1,12 +1,10 @@
-package entity
+package beegfs
 
 import (
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 // Implementors uniquely identify a BeeGFS entity of one kind (node, target, buddy group, storage
@@ -52,7 +50,7 @@ func IdFromString(input string, bitSize int) (Id, error) {
 // over all kinds (nodes, targets, ...).
 type IdType struct {
 	Id   Id
-	Type nodetype.NodeType
+	Type NodeType
 }
 
 // User friendly output of IdType
@@ -96,8 +94,8 @@ func AliasFromString(s string) (Alias, error) {
 }
 
 // Represents an unspecified entityId
-type Invalid struct{}
+type InvalidEntityId struct{}
 
-func (n Invalid) String() string {
+func (n InvalidEntityId) String() string {
 	return "<invalid>"
 }

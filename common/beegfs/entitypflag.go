@@ -1,8 +1,8 @@
-package entity
+package beegfs
 
 // Used for reading in a EntityId of various type from cobra or pflag Flag. Implements pflag.Value.
-type PFlag struct {
-	parser   Parser
+type EntityPFlag struct {
+	parser   EntityParser
 	typeName string
 	into     *EntityId
 }
@@ -10,8 +10,8 @@ type PFlag struct {
 // The returned pointer can be passed to cobra.Command.Flags().Var() to read in an node id from the
 // user. into specifies where the parsed input shall be written to and also provides the default
 // value.
-func NewNodePFlag(into *EntityId) *PFlag {
-	return &PFlag{
+func NewNodePFlag(into *EntityId) *EntityPFlag {
+	return &EntityPFlag{
 		parser:   NewNodeParser(),
 		typeName: "node",
 		into:     into,
@@ -21,8 +21,8 @@ func NewNodePFlag(into *EntityId) *PFlag {
 // The returned pointer can be passed to cobra.Command.Flags().Var() to read in a target id from the
 // user. into specifies where the parsed input shall be written to and also provides the default
 // value.
-func NewTargetPFlag(into *EntityId) *PFlag {
-	return &PFlag{
+func NewTargetPFlag(into *EntityId) *EntityPFlag {
+	return &EntityPFlag{
 		parser:   NewTargetParser(),
 		typeName: "target",
 		into:     into,
@@ -32,8 +32,8 @@ func NewTargetPFlag(into *EntityId) *PFlag {
 // The returned pointer can be passed to cobra.Command.Flags().Var() to read in an buddy group id
 // from the user. into specifies where the parsed input shall be written to and also provides the
 // default value.
-func NewBuddyGroupPFlag(into *EntityId) *PFlag {
-	return &PFlag{
+func NewBuddyGroupPFlag(into *EntityId) *EntityPFlag {
+	return &EntityPFlag{
 		parser:   NewBuddyGroupParser(),
 		typeName: "buddyGroup",
 		into:     into,
@@ -43,8 +43,8 @@ func NewBuddyGroupPFlag(into *EntityId) *PFlag {
 // The returned pointer can be passed to cobra.Command.Flags().Var() to read in an storage pool id
 // from the user. into specifies where the parsed input shall be written to and also provides the
 // default value.
-func NewStoragePoolPFlag(into *EntityId) *PFlag {
-	return &PFlag{
+func NewStoragePoolPFlag(into *EntityId) *EntityPFlag {
+	return &EntityPFlag{
 		parser:   NewStoragePoolParser(),
 		typeName: "storagePool",
 		into:     into,
@@ -52,12 +52,12 @@ func NewStoragePoolPFlag(into *EntityId) *PFlag {
 }
 
 // Implement pflag.Value
-func (g *PFlag) Type() string {
+func (g *EntityPFlag) Type() string {
 	return g.typeName
 }
 
 // Implement pflag.Value
-func (g *PFlag) String() string {
+func (g *EntityPFlag) String() string {
 	if g.into != nil {
 		return (*g.into).String()
 	}
@@ -65,7 +65,7 @@ func (g *PFlag) String() string {
 }
 
 // Implement pflag.value
-func (g *PFlag) Set(input string) error {
+func (g *EntityPFlag) Set(input string) error {
 	r, err := g.parser.Parse(input)
 	if err != nil {
 		return err

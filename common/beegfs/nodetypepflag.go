@@ -1,4 +1,4 @@
-package nodetype
+package beegfs
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 )
 
 // Used for reading in a NodeType from cobra or pflag Flag. Implements pflag.Value.
-type PFlag struct {
+type NodeTypePFlag struct {
 	into     *NodeType
 	accepted []NodeType
 }
@@ -14,28 +14,28 @@ type PFlag struct {
 // The returned pointer can be passed to cobra.Command.Flags().Var() to read in a NodeType from the
 // user. into specifies where the parsed input shall be written to and also provides the default
 // value (none if Invalid). The accepted node types for this parameter must be specified.
-func NewPFlag(into *NodeType, accepted ...NodeType) *PFlag {
-	return &PFlag{
+func NewNodeTypePFlag(into *NodeType, accepted ...NodeType) *NodeTypePFlag {
+	return &NodeTypePFlag{
 		into:     into,
 		accepted: accepted,
 	}
 }
 
 // Implement pflag.Value
-func (n *PFlag) Type() string {
+func (n *NodeTypePFlag) Type() string {
 	return "nodeType"
 }
 
 // Implement pflag.Value
-func (n *PFlag) String() string {
-	if n.into != nil && *n.into != Invalid {
+func (n *NodeTypePFlag) String() string {
+	if n.into != nil && *n.into != InvalidNodeType {
 		return (*n.into).String()
 	}
 	return ""
 }
 
 // Implement pflag.value
-func (n *PFlag) Set(v string) error {
+func (n *NodeTypePFlag) Set(v string) error {
 	*n.into = FromString(v)
 
 	acceptedList := strings.Builder{}

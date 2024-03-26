@@ -42,7 +42,7 @@ func RequestUDP(ctx context.Context, addrs []string,
 			continue
 		}
 
-		conn.WriteTo(reqBytes, addr)
+		_, err = conn.WriteTo(reqBytes, addr)
 		if err != nil {
 			errs.Errors = append(errs.Errors, err)
 		}

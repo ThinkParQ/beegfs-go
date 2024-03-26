@@ -1,10 +1,9 @@
-package entity
+package beegfs
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/types/nodetype"
 )
 
 func TestIdFromString(t *testing.T) {
@@ -24,9 +23,9 @@ func TestIdFromString(t *testing.T) {
 }
 
 func TestEntityParser(t *testing.T) {
-	f := Parser{
+	f := EntityParser{
 		idBitSize:         3,
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Meta, nodetype.Client, nodetype.Storage},
+		acceptedNodeTypes: []NodeType{Meta, Client, Storage},
 	}
 
 	_, err := f.Parse("")
@@ -35,31 +34,31 @@ func TestEntityParser(t *testing.T) {
 	// IdType
 	v, err := f.Parse("meta:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: nodetype.Meta}, v)
+	assert.Equal(t, IdType{Id: 1, Type: Meta}, v)
 
 	v, err = f.Parse("me:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: nodetype.Meta}, v)
+	assert.Equal(t, IdType{Id: 1, Type: Meta}, v)
 
 	v, err = f.Parse("storage:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: nodetype.Storage}, v)
+	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
 
 	v, err = f.Parse("s:2")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 2, Type: nodetype.Storage}, v)
+	assert.Equal(t, IdType{Id: 2, Type: Storage}, v)
 
 	v, err = f.Parse("client:2")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 2, Type: nodetype.Client}, v)
+	assert.Equal(t, IdType{Id: 2, Type: Client}, v)
 
 	v, err = f.Parse(" meta : 7 ")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: nodetype.Meta}, v)
+	assert.Equal(t, IdType{Id: 7, Type: Meta}, v)
 
 	v, err = f.Parse(" META : 7 ")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: nodetype.Meta}, v)
+	assert.Equal(t, IdType{Id: 7, Type: Meta}, v)
 
 	_, err = f.Parse("management:1")
 	assert.Error(t, err)
@@ -152,9 +151,9 @@ func TestEntityParser(t *testing.T) {
 }
 
 func TestEntityParserWithFixedNodeType(t *testing.T) {
-	f := Parser{
+	f := EntityParser{
 		idBitSize:         3,
-		acceptedNodeTypes: []nodetype.NodeType{nodetype.Storage},
+		acceptedNodeTypes: []NodeType{Storage},
 	}
 
 	_, err := f.Parse("")
@@ -163,15 +162,15 @@ func TestEntityParserWithFixedNodeType(t *testing.T) {
 	// IdType
 	v, err := f.Parse("storage:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: nodetype.Storage}, v)
+	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
 
 	v, err = f.Parse("1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: nodetype.Storage}, v)
+	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
 
 	v, err = f.Parse("7")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: nodetype.Storage}, v)
+	assert.Equal(t, IdType{Id: 7, Type: Storage}, v)
 
 	_, err = f.Parse("1a")
 	assert.Error(t, err)
