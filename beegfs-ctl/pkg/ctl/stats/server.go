@@ -157,11 +157,11 @@ func getNodeList(ctx context.Context, nt beegfs.NodeType) ([]beegfs.Node, error)
 	res := make([]beegfs.Node, 0, len(nodes))
 
 	for _, n := range nodes {
-		if n.Id.Type != beegfs.Meta && n.Id.Type != beegfs.Storage {
+		if n.Id.NodeType != beegfs.Meta && n.Id.NodeType != beegfs.Storage {
 			continue
 		}
 
-		if nt != beegfs.InvalidNodeType && n.Id.Type != nt {
+		if nt != beegfs.InvalidNodeType && n.Id.NodeType != nt {
 			continue
 		}
 

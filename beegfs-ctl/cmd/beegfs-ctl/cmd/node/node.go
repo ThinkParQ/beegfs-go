@@ -5,7 +5,7 @@ import (
 )
 
 // Creates new "node" command
-func NewNodeCmd() *cobra.Command {
+func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
 		Short: "Query and manage nodes",
@@ -18,7 +18,9 @@ func NewNodeCmd() *cobra.Command {
 
 	// This is the recommended structure by the cobra user guide:
 	// https://github.com/spf13/cobra/blob/main/site/content/user_guide.md
+
 	cmd.AddCommand(newListCmd())
+	cmd.AddCommand(newSetAliasCmd())
 
 	return cmd
 }
