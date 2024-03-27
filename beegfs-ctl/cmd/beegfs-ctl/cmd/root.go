@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/stats"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/config"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 )
@@ -41,6 +42,7 @@ cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est la
 	// Add subcommands
 	cmd.AddCommand(versionCmd)
 	cmd.AddCommand(node.NewNodeCmd())
+	cmd.AddCommand(stats.NewStatsCmd())
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
