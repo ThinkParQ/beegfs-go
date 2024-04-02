@@ -78,10 +78,9 @@ func (n Alias) String() string {
 }
 
 // Creates an Alias from a string and checks for the correct format. Returns a user friendly error
-// if not correct. As Aliases are case-insensitive, this function converts the output string to
-// lowercase.
+// if not correct.
 func AliasFromString(s string) (Alias, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimSpace(s)
 	match, err := regexp.MatchString("^[a-zA-Z][a-zA-Z0-9-_.]*$", s)
 	if err != nil {
 		return Alias(""), err
