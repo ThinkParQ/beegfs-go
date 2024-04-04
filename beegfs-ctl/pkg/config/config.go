@@ -8,18 +8,23 @@ import (
 
 	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg"
+	"github.com/thinkparq/gobee/filesystem"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
+	"github.com/thinkparq/protobuf/go/beeremote"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // The global config singleton
 var globalConfig Config
+var globalMount filesystem.Provider
 
 // Connection settings
 type Config struct {
-	ManagementAddr string
-	BeeRemoteAddr  string
+	ManagementAddr   string
+	BeeRemoteAddr    string
+	BeeGFSMountPoint string
 
 	// The timeout for a single(!) connection attempt
 	ConnTimeout time.Duration
@@ -33,7 +38,9 @@ type Config struct {
 
 	// Tells the command to print additional, normally hidden info. An example would be the entity
 	// UIDs which currently are only used internally and hidden to avoid user confusion.
-	Debug bool
+	Debug         bool
+	DisableEmojis bool
+	NumWorkers    int
 }
 
 // Returns a pointer to the global config singleton
@@ -51,6 +58,9 @@ func ManagementClient() (pb.ManagementClient, error) {
 	// Since the connection is opened asynchronously in the background, a context for timeouts is
 	// not needed here. A potential timeout on connection will be checked when making an actual
 	// request
+	//
+	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/26
+	// Support TLS.
 	g, err := grpc.Dial(globalConfig.ManagementAddr, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})))
 	if err != nil {
 		return nil, fmt.Errorf("connecting to management service on %s failed: %w", globalConfig.ManagementAddr, err)
@@ -59,18 +69,51 @@ func ManagementClient() (pb.ManagementClient, error) {
 	return pb.NewManagementClient(g), nil
 }
 
-// func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
-// 	if globalConfig.ManagementAddr == "" {
-// 		return nil, fmt.Errorf("bee-remote address not set")
-// 	}
+func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
+	if globalConfig.BeeRemoteAddr == "" {
+		return nil, fmt.Errorf("bee-remote address not set")
+	}
+
+	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/26
+	// Support TLS.
+	g, err := grpc.Dial(globalConfig.BeeRemoteAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", globalConfig.BeeRemoteAddr, err)
+	}
+
+	return beeremote.NewBeeRemoteClient(g), nil
+}
+
+// BeeGFSClient provides a standardize way to interact with a mounted BeeGFS through the
+// globalMount. If BeeGFSMountPoint is not set, it requires a path inside BeeGFS and will handle
+// determining where BeeGFS is mounted and initializing the globalMount the first time it is called.
+// When BeeGFSMountPoint is set it always initializes and returns the globalMount based on that
+// mount point.
 //
-// 	g, err := grpc.Dial(globalConfig.BeeRemoteAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("connecting to bee remote on %s failed: %w", globalConfig.BeeRemoteAddr, err)
-// 	}
+// Callers can always use relative paths inside BeeGFS with the filesystem. If a caller does not
+// know if it is has an relative or absolute path, the Filesystem.GetRelativePathWithinMount(path)
+// function can be used to get a sanitized relative path inside BeeGFS.
 //
-// 	return beeremote.NewBeeRemoteClient(g), nil
-// }
+// Note the behavior of filesystem.GetRelativePathWithinMount() differs slightly depending if
+// BeeGFSMountPoint or the provided path is used to determine where BeeGFS is mounted:
+//
+//   - If BeeGFSMountPoint is specified, users can use absolute or relative paths inside BeeGFS from any cwd.
+//     Note absolute paths only work if they are inside the same mount point as BeeGFSMountPoint.
+//   - If BeeGFSMountPoint is NOT specified, users can only use relative paths when the cwd is somewhere in BeeGFS.
+func BeeGFSClient(path string) (filesystem.Provider, error) {
+	if globalMount == nil {
+		var err error
+		if globalConfig.BeeGFSMountPoint != "" {
+			globalMount, err = filesystem.NewFromPath(globalConfig.BeeGFSMountPoint)
+		} else {
+			globalMount, err = filesystem.NewFromPath(path)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return globalMount, nil
+}
 
 // The global node store singleton
 var nodeStore *beemsg.NodeStore
