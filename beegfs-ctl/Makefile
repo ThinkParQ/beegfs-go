@@ -1,0 +1,106 @@
+# force the usage of /bin/bash instead of /bin/sh
+SHELL := /bin/bash
+
+# Name of the binary to build
+CMD = beegfs
+
+# Variables that can be overridden: 
+BUILD_DIR ?= build/dist/opt/beegfs/sbin
+
+# Build Targets
+all: build generate-notices
+
+.PHONY: build clean generate-notices
+
+# Use the same strategy as BeeGFS to generate a $VERSION for the binary and
+# package. The version will look like "1.0.0" if were on a commit tagged
+# "1.0.0". Otherwise it will generate a version like "1.0.0-3-g<COMMIT HASH>"
+# where "3" is the number of commits ahead of tag 1.0.0 and the <COMMIT HASH> is
+# the first ten characters of the commit hash. The only difference is appending
+# "-dev" if the current commit is dirty (i.e., has uncommitted changes).
+build: check-go-version
+	$(eval VERSION := $(shell git describe --tags --match '*.*' --abbrev=10 --dirty="-dev"))
+	@echo "Building $* version $(VERSION)"
+	CGO_ENABLED=0 go build -ldflags="-X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Version=$(VERSION) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BinaryName=$(CMD) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Commit=$(shell git rev-parse HEAD) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BuildTime=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')" -o $(BUILD_DIR)/$(CMD) cmd/beegfs-ctl/main.go
+	chmod 755 $(BUILD_DIR)/$*
+
+build: $(CMDS:%=build-%)
+
+generate-notices:
+	@go-licenses report ./cmd/beegfs-ctl --template hack/notice.tpl > NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+
+# Test targets: 
+# Test targets may make change to the local repository (e.g. running go mod tidy) to
+# verify all code required to build the project has been properly committed.
+# Commonly this is done by running `make test` in CI, but could also be done locally.
+# If you ran `make test` locally you may want to use `git reset` to revert the changes.
+.PHONY: test test-unit check-go-version test-gofmt test-go-tidy test-licenses
+test: check-go-version test-unit test-gofmt test-go-tidy test-licenses
+
+check-go-version:
+	@echo "Checking Go version..."
+	@./hack/check-go-version.sh
+
+test-unit: 
+	@go test ./...
+
+# Verify that the code is formatted using gofmt: 
+# Don't run on the vendor directory to avoid false positives.
+test-gofmt:
+	@echo "Checking 'go fmt' has been run..."
+	@if [ -n "$$(gofmt -l ./ | grep -v vendor)" ]; then \
+		echo "The following files have not been formatted using gofmt:"; \
+		echo -e "\nFix individual files with: \ngofmt -w <file> \n"\
+		"\nOr fix all files with:\nfind . -type d \( -path './vendor' \) -prune -o -name '*.go' -print0 | xargs -0 gofmt -w \n\n" \
+		exit 1; \
+	fi
+
+# Verify that go mod tidy has been run.
+test-go-tidy: tidy
+	@echo " Checking 'go mod tidy' has been run..."
+	@if [ -n "$$(git status --porcelain go.mod go.sum)" ]; then \
+		echo "go.mod and/or go.sum are not up to date. Please run 'go mod tidy' and commit the changes."; \
+		exit 1; \
+	fi
+
+# TODO: Enable when/if we start vendoring code.
+# test-go-vendor:
+# 	@echo "Checking 'go mod vendor' has been run..."
+# 	@if [ -n "$$(git status --porcelain vendor)" ]; then \
+#         echo "Vendor directory is not up to date. Please run 'go mod vendor' and commit the changes."; \
+#         exit 1; \
+#     fi
+
+# For details on what licenses are disallowed see
+# https://github.com/google/go-licenses#check 
+#
+# IMPORTANT: Any exceptions (using --ignore) such as the one for HCL must be
+# manually added AFTER the NOTICE file has been updated and/or other appropriate
+# steps have been taken based on the license requirements also ensure to add 
+# justification below.
+# 
+# === Justification for Ignored Licenses === 
+# 
+# 	No ignored licenses.
+#
+test-licenses: generate-notices
+	@echo "Checking license compliance..."
+	@go-licenses check ./cmd/bee-watch/ --ignore git.beegfs.io --ignore github.com/thinkparq --disallowed_types=forbidden,permissive,reciprocal,restricted,unknown
+	@if [ -n "$$(git status --porcelain NOTICE.md)" ]; then \
+        echo "NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
+        exit 1; \
+    fi
+
+# Targets for installation of various prerequisites:
+.PHONY: install-tools
+install-tools: 
+	go install github.com/google/go-licenses@v1.6.0
+
+# Helper targets:
+clean:
+	rm -f bin/*
+	rm -f build/dist/opt/beegfs/sbin/*
+	rm -rf $(PACKAGE_DIR)
+
+tidy :
+	@go mod tidy
