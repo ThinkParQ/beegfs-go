@@ -34,31 +34,31 @@ func TestEntityParser(t *testing.T) {
 	// IdType
 	v, err := f.Parse("meta:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: Meta}, v)
+	assert.Equal(t, LegacyId{NumId: 1, NodeType: Meta}, v)
 
 	v, err = f.Parse("me:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: Meta}, v)
+	assert.Equal(t, LegacyId{NumId: 1, NodeType: Meta}, v)
 
 	v, err = f.Parse("storage:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
+	assert.Equal(t, LegacyId{NumId: 1, NodeType: Storage}, v)
 
 	v, err = f.Parse("s:2")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 2, Type: Storage}, v)
+	assert.Equal(t, LegacyId{NumId: 2, NodeType: Storage}, v)
 
 	v, err = f.Parse("client:2")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 2, Type: Client}, v)
+	assert.Equal(t, LegacyId{NumId: 2, NodeType: Client}, v)
 
 	v, err = f.Parse(" meta : 7 ")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: Meta}, v)
+	assert.Equal(t, LegacyId{NumId: 7, NodeType: Meta}, v)
 
 	v, err = f.Parse(" META : 7 ")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: Meta}, v)
+	assert.Equal(t, LegacyId{NumId: 7, NodeType: Meta}, v)
 
 	_, err = f.Parse("management:1")
 	assert.Error(t, err)
@@ -162,15 +162,15 @@ func TestEntityParserWithFixedNodeType(t *testing.T) {
 	// IdType
 	v, err := f.Parse("storage:1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
+	assert.Equal(t, LegacyId{NumId: 1, NodeType: Storage}, v)
 
 	v, err = f.Parse("1")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 1, Type: Storage}, v)
+	assert.Equal(t, LegacyId{NumId: 1, NodeType: Storage}, v)
 
 	v, err = f.Parse("7")
 	assert.NoError(t, err)
-	assert.Equal(t, IdType{Id: 7, Type: Storage}, v)
+	assert.Equal(t, LegacyId{NumId: 7, NodeType: Storage}, v)
 
 	_, err = f.Parse("1a")
 	assert.Error(t, err)

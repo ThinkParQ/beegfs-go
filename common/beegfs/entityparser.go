@@ -78,9 +78,9 @@ func (g EntityParser) Parse(input string) (EntityId, error) {
 			return InvalidEntityId{}, err
 		}
 
-		return IdType{
-			Id:   Id(id),
-			Type: typ,
+		return LegacyId{
+			NumId:    NumId(id),
+			NodeType: typ,
 		}, nil
 	}
 
@@ -103,7 +103,7 @@ func (g EntityParser) Parse(input string) (EntityId, error) {
 		} else {
 			// it's <nodeType>:<id>
 
-			nt := FromString(lhs)
+			nt := NodeTypeFromString(lhs)
 
 			// Check for the nodeType being allowed.
 			if err := func() error {

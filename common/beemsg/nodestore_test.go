@@ -12,13 +12,13 @@ func TestAddAndGet(t *testing.T) {
 	store := NewNodeStore(1*time.Second, 0)
 	defer store.Cleanup()
 
-	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}, Alias: "meta1"}
+	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta}, Alias: "meta1"}
 	store.AddNode(node1001)
-	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.IdType{Id: 2, Type: beegfs.Meta}, Alias: "meta2"}
+	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.LegacyId{NumId: 2, NodeType: beegfs.Meta}, Alias: "meta2"}
 	store.AddNode(node1002)
-	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.IdType{Id: 1, Type: beegfs.Storage}, Alias: "storage1"}
+	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.LegacyId{NumId: 1, NodeType: beegfs.Storage}, Alias: "storage1"}
 	store.AddNode(node1011)
-	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.IdType{Id: 2, Type: beegfs.Storage}, Alias: "storage2"}
+	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.LegacyId{NumId: 2, NodeType: beegfs.Storage}, Alias: "storage2"}
 	store.AddNode(node1012)
 
 	err := store.AddNode(&beegfs.Node{Uid: 1001})
@@ -26,7 +26,7 @@ func TestAddAndGet(t *testing.T) {
 	err = store.AddNode(&beegfs.Node{Alias: "meta1"})
 	assert.Error(t, err)
 
-	err = store.AddNode(&beegfs.Node{Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}})
+	err = store.AddNode(&beegfs.Node{Id: beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta}})
 	assert.Error(t, err)
 
 	n, _, err := store.getNodeAndConns(1001)
@@ -37,18 +37,18 @@ func TestAddAndGet(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, n)
 
-	node, err := store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.Meta})
+	node, err := store.GetNode(beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta})
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1001, node.Uid)
 
-	node, err = store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.Storage})
+	node, err = store.GetNode(beegfs.LegacyId{NumId: 1, NodeType: beegfs.Storage})
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1011, node.Uid)
 
-	_, err = store.GetNode(beegfs.IdType{Id: 9999, Type: beegfs.Storage})
+	_, err = store.GetNode(beegfs.LegacyId{NumId: 9999, NodeType: beegfs.Storage})
 	assert.Error(t, err)
 
-	_, err = store.GetNode(beegfs.IdType{Id: 1, Type: beegfs.InvalidNodeType})
+	_, err = store.GetNode(beegfs.LegacyId{NumId: 1, NodeType: beegfs.InvalidNodeType})
 	assert.Error(t, err)
 
 	node, err = store.GetNode(beegfs.Alias("meta1"))
@@ -67,13 +67,13 @@ func TestGetNodes(t *testing.T) {
 	store := NewNodeStore(1*time.Second, 0)
 	defer store.Cleanup()
 
-	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.IdType{Id: 1, Type: beegfs.Meta}, Alias: "meta1"}
+	node1001 := &beegfs.Node{Uid: 1001, Id: beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta}, Alias: "meta1"}
 	store.AddNode(node1001)
-	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.IdType{Id: 2, Type: beegfs.Meta}, Alias: "meta2"}
+	node1002 := &beegfs.Node{Uid: 1002, Id: beegfs.LegacyId{NumId: 2, NodeType: beegfs.Meta}, Alias: "meta2"}
 	store.AddNode(node1002)
-	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.IdType{Id: 1, Type: beegfs.Storage}, Alias: "storage1"}
+	node1011 := &beegfs.Node{Uid: 1011, Id: beegfs.LegacyId{NumId: 1, NodeType: beegfs.Storage}, Alias: "storage1"}
 	store.AddNode(node1011)
-	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.IdType{Id: 2, Type: beegfs.Storage}, Alias: "storage2"}
+	node1012 := &beegfs.Node{Uid: 1012, Id: beegfs.LegacyId{NumId: 2, NodeType: beegfs.Storage}, Alias: "storage2"}
 	store.AddNode(node1012)
 
 	nodes := store.GetNodes()
@@ -86,8 +86,8 @@ func TestMetaRootNode(t *testing.T) {
 
 	assert.Nil(t, store.GetMetaRootNode(), "expect nil when no meta node set")
 
-	metaIdType := beegfs.IdType{Id: 1, Type: beegfs.Meta}
-	storageIdType := beegfs.IdType{Id: 1, Type: beegfs.Storage}
+	metaIdType := beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta}
+	storageIdType := beegfs.LegacyId{NumId: 1, NodeType: beegfs.Storage}
 	nodeMeta := &beegfs.Node{Uid: 1001, Id: metaIdType, Alias: "meta1"}
 	nodeStorage := &beegfs.Node{Uid: 2001, Id: storageIdType, Alias: "storage2"}
 

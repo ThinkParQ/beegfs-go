@@ -19,7 +19,7 @@ type NodeStore struct {
 	// For selecting nodes by alias
 	uidByAlias map[beegfs.Alias]beegfs.Uid
 	// For selecting nodes by nodeID and type
-	uidByNodeId map[beegfs.IdType]beegfs.Uid
+	uidByNodeId map[beegfs.LegacyId]beegfs.Uid
 
 	// The meta node which has the root inode
 	metaRootNode *beegfs.Node
@@ -43,7 +43,7 @@ func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeSt
 	return &NodeStore{
 		nodesByUid:  make(map[beegfs.Uid]*beegfs.Node),
 		uidByAlias:  make(map[beegfs.Alias]beegfs.Uid),
-		uidByNodeId: make(map[beegfs.IdType]beegfs.Uid),
+		uidByNodeId: make(map[beegfs.LegacyId]beegfs.Uid),
 		connsByUid:  make(map[beegfs.Uid]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
@@ -101,7 +101,7 @@ func (store *NodeStore) SetMetaRootNode(id beegfs.EntityId) error {
 	node := store.nodesByUid[uid]
 
 	// Make sure it is a meta node
-	if node.Id.Type != beegfs.Meta {
+	if node.Id.NodeType != beegfs.Meta {
 		return fmt.Errorf("%s is not a meta node", id.String())
 	}
 
@@ -222,7 +222,7 @@ func (store *NodeStore) getNodeAndConns(uid beegfs.Uid) (*beegfs.Node, *util.Nod
 func (store *NodeStore) resolveEntityId(id beegfs.EntityId) (beegfs.Uid, error) {
 	uid := beegfs.Uid(0)
 	switch v := id.(type) {
-	case beegfs.IdType:
+	case beegfs.LegacyId:
 		if u, ok := store.uidByNodeId[v]; ok {
 			uid = u
 		}

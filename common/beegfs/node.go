@@ -9,7 +9,7 @@ type Node struct {
 	// The nodes unique EntityID
 	Uid Uid
 	// The nodes NodeID and type
-	Id IdType
+	Id LegacyId
 	// The nodes alias - formerly known as "node string ID"
 	Alias Alias
 	// Nics of this node

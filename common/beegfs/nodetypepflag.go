@@ -36,7 +36,7 @@ func (n *NodeTypePFlag) String() string {
 
 // Implement pflag.value
 func (n *NodeTypePFlag) Set(v string) error {
-	*n.into = FromString(v)
+	*n.into = NodeTypeFromString(v)
 
 	acceptedList := strings.Builder{}
 	for _, a := range n.accepted {
