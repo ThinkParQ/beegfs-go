@@ -7,16 +7,16 @@ import (
 )
 
 func TestFromString(t *testing.T) {
-	assert.Equal(t, Meta, FromString("meta"))
-	assert.Equal(t, Meta, FromString("me"))
-	assert.Equal(t, Storage, FromString("storage"))
-	assert.Equal(t, Storage, FromString("s"))
-	assert.Equal(t, Client, FromString(" client "))
-	assert.Equal(t, Client, FromString("c"))
+	assert.Equal(t, Meta, NodeTypeFromString("meta"))
+	assert.Equal(t, Meta, NodeTypeFromString("me"))
+	assert.Equal(t, Storage, NodeTypeFromString("storage"))
+	assert.Equal(t, Storage, NodeTypeFromString("s"))
+	assert.Equal(t, Client, NodeTypeFromString(" client "))
+	assert.Equal(t, Client, NodeTypeFromString("c"))
 
-	assert.Equal(t, InvalidNodeType, FromString(""))
-	assert.Equal(t, InvalidNodeType, FromString("abc"))
-	assert.Equal(t, InvalidNodeType, FromString("m"))
-	assert.Equal(t, InvalidNodeType, FromString("me_"))
-	assert.Equal(t, InvalidNodeType, FromString("cli ent"))
+	assert.Equal(t, InvalidNodeType, NodeTypeFromString(""))
+	assert.Equal(t, InvalidNodeType, NodeTypeFromString("abc"))
+	assert.Equal(t, InvalidNodeType, NodeTypeFromString("m"))
+	assert.Equal(t, InvalidNodeType, NodeTypeFromString("me_"))
+	assert.Equal(t, InvalidNodeType, NodeTypeFromString("cli ent"))
 }

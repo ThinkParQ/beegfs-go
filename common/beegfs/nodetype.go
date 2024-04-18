@@ -2,6 +2,8 @@ package beegfs
 
 import (
 	"strings"
+
+	pb "github.com/thinkparq/protobuf/go/beegfs"
 )
 
 // Represents the BeeGFS NodeType. Despite the name, also used for targets, buddy groups and other
@@ -19,7 +21,7 @@ const (
 // Create a NodeType from a string. Providing a non-ambiguous prefix is sufficient, e.g. for client,
 // "c" is enough, for meta at least "me" is required and for management it is "ma". Returns Invalid
 // if there is no non-ambiguous match.
-func FromString(input string) NodeType {
+func NodeTypeFromString(input string) NodeType {
 	input = strings.ToLower(strings.TrimSpace(input))
 
 	if len(input) == 0 {
@@ -39,6 +41,21 @@ func FromString(input string) NodeType {
 		} else if strings.HasPrefix("management", input) || strings.HasPrefix("mgmtd", input) {
 			return Management
 		}
+	}
+
+	return InvalidNodeType
+}
+
+func NodeTypeFromProto(input pb.NodeType) NodeType {
+	switch input {
+	case pb.NodeType_CLIENT:
+		return Client
+	case pb.NodeType_META:
+		return Meta
+	case pb.NodeType_STORAGE:
+		return Storage
+	case pb.NodeType_MANAGEMENT:
+		return Management
 	}
 
 	return InvalidNodeType
