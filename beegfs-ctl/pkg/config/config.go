@@ -27,6 +27,10 @@ type Config struct {
 	// disabled.
 	AuthenticationSecret int64
 
+	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
+	// excluded.
+	Raw bool
+
 	// Tells the command to print additional, normally hidden info. An example would be the entity
 	// UIDs which currently are only used internally and hidden to avoid user confusion.
 	Debug bool
@@ -87,7 +91,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	}
 
 	// Fetch the node list from management
-	nodes, err := c.GetNodeList(ctx, &pb.GetNodeListReq{
+	nodes, err := c.GetNodes(ctx, &pb.GetNodesRequest{
 		IncludeNics: true,
 	})
 	if err != nil {
@@ -99,41 +103,46 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		nics := []beegfs.Nic{}
 		for _, a := range n.Nics {
 			nict := beegfs.InvalidNicType
-			switch a.Type {
-			case pb.Nic_ETHERNET:
+			switch a.GetNicType() {
+			case pb.NicType_ETHERNET:
 				nict = beegfs.Ethernet
-			case pb.Nic_RDMA:
+			case pb.NicType_RDMA:
 				nict = beegfs.Rdma
-			case pb.Nic_SDP:
-				nict = beegfs.Sdp
 			}
 
-			nics = append(nics, beegfs.Nic{Addr: fmt.Sprintf("%s:%d", a.Addr, n.BeemsgPort), Name: a.Name, Type: nict})
+			nics = append(nics, beegfs.Nic{Addr: a.Addr, Name: a.Name, Type: nict})
 		}
 
 		t := beegfs.InvalidNodeType
-		switch n.Type {
-		case pb.GetNodeListResp_Node_META:
+		switch n.GetId().GetLegacyId().GetNodeType() {
+		case pb.NodeType_META:
 			t = beegfs.Meta
-		case pb.GetNodeListResp_Node_STORAGE:
+		case pb.NodeType_STORAGE:
 			t = beegfs.Storage
-		case pb.GetNodeListResp_Node_CLIENT:
+		case pb.NodeType_CLIENT:
 			t = beegfs.Client
-		case pb.GetNodeListResp_Node_MANAGEMENT:
+		case pb.NodeType_MANAGEMENT:
 			t = beegfs.Management
 		}
 
 		// Add node to store
 		nodeStore.AddNode(&beegfs.Node{
-			Uid: beegfs.Uid(n.Uid),
-			Id: beegfs.IdType{
-				Id:   beegfs.Id(n.NodeId),
-				Type: t,
+			Uid: beegfs.Uid(n.Id.Uid),
+			Id: beegfs.LegacyId{
+				NumId:    beegfs.NumId(n.Id.LegacyId.NumId),
+				NodeType: t,
 			},
-			Alias: beegfs.Alias(n.Alias),
+			Alias: beegfs.Alias(n.Id.Alias),
 			Nics:  nics,
 		})
 	}
+
+	metaRoot, err := beegfs.EntityIdSetFromProto(nodes.GetMetaRootNode())
+	if err != nil {
+		return nil, err
+	}
+
+	nodeStore.SetMetaRootNode(metaRoot.Uid)
 
 	return nodeStore, nil
 }

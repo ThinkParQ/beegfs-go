@@ -21,7 +21,6 @@ type serverStats_Config struct {
 	NodeType beegfs.NodeType
 	Interval time.Duration
 	Sum      bool
-	Raw      bool
 }
 
 func newServerStatsCmd() *cobra.Command {
@@ -59,8 +58,6 @@ Stats Server
 		"Interval for repeated stats retrieval in seconds.")
 	cmd.Flags().BoolVar(&cfg.Sum, "sum", false,
 		"Total Stats")
-	cmd.Flags().BoolVar(&cfg.Raw, "raw", false,
-		"Print raw Bytes")
 	return cmd
 }
 
@@ -110,7 +107,7 @@ func singleNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Write
 
 	printHeader(w, false, false)
 	for _, stat := range stats {
-		printData(w, stat, config.Get().Debug)
+		printData(w, stat)
 	}
 	fmt.Fprintf(w, "\n")
 
@@ -127,7 +124,7 @@ func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer
 	printHeader(w, true, config.Get().Debug)
 	for _, serverStats := range perServerstatsResult {
 		cmdfmt.PrintNodeInfoRow(w, serverStats.Node, config.Get().Debug)
-		printData(w, serverStats.Stats, config.Get().Debug)
+		printData(w, serverStats.Stats)
 	}
 
 	return nil
@@ -150,7 +147,7 @@ func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *tabwri
 	fmt.Fprintf(w, "Total results for nodes: %d\n", numberOfNodes)
 	printHeader(w, false, false)
 	for _, stat := range totalStats {
-		printData(w, stat, cfg.Raw)
+		printData(w, stat)
 	}
 	fmt.Fprintf(w, "\n")
 
@@ -167,13 +164,13 @@ func printHeader(w *tabwriter.Writer, includeNodeInfo bool, includeUid bool) {
 }
 
 // Prints one line of stat entry
-func printData(w *tabwriter.Writer, stat stats.Stats, raw bool) {
+func printData(w *tabwriter.Writer, stat stats.Stats) {
 	fmt.Fprintf(w, "%d\t", stat.StatsTime)
 	fmt.Fprintf(w, "%d\t", stat.QueuedRequests)
 	fmt.Fprintf(w, "%d\t", stat.WorkRequests)
 	fmt.Fprintf(w, "%d\t", stat.BusyWorkers)
 
-	if raw {
+	if config.Get().Raw {
 		fmt.Fprintf(w, "%d\t", stat.DiskWriteBytes)
 		fmt.Fprintf(w, "%d\t", stat.DiskReadBytes)
 		fmt.Fprintf(w, "%d\t", stat.NetSendBytes)

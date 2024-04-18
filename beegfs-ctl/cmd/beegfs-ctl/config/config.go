@@ -22,6 +22,11 @@ func Init(cmd *cobra.Command) {
 	viper.BindEnv("debug", "BEEGFS_DEBUG")
 	viper.BindPFlag("debug", cmd.PersistentFlags().Lookup("debug"))
 
+	cmd.PersistentFlags().BoolVar(&config.Get().Raw, "raw", false,
+		"Prints raw values without SI or IEC prefixes (except durations)")
+	viper.BindEnv("raw", "BEEGFS_RAW")
+	viper.BindPFlag("raw", cmd.PersistentFlags().Lookup("raw"))
+
 	// TODO authenticationSecret need custom action to parse it (must be loaded from file)
 	// See here: https://github.com/ThinkParQ/beegfs-ctl/issues/5
 }

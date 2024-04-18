@@ -16,7 +16,7 @@ import (
 
 // The configuration passed to the GetNodeList function. Is built from command line flags in the
 // command line tool.
-type GetNodeList_Config struct {
+type GetNodes_Config struct {
 	// Only process and print nodes of the given type.
 	FilterByNodeType beegfs.NodeType
 	// Include the network interface names and addresses and extra info for all the nodes in the
@@ -30,40 +30,40 @@ type GetNodeList_Config struct {
 }
 
 // Wraps a Nic from the nodestore and provides additional reachability info.
-type GetNodeList_Nic struct {
+type GetNodes_Nic struct {
 	Nic       beegfs.Nic
 	Reachable bool
 }
 
 // A GetNodeList result entry wrapping a Node from the nodestore together with a list of Nics.
-type GetNodeList_Node struct {
+type GetNodes_Node struct {
 	Node beegfs.Node
-	Nics []*GetNodeList_Nic
+	Nics []*GetNodes_Nic
 }
 
 // Get the complete list of nodes from the mananagement
-func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_Node, error) {
+func GetNodes(ctx context.Context, cfg GetNodes_Config) ([]*GetNodes_Node, error) {
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	addrMap := make(map[string]*GetNodeList_Nic)
+	addrMap := make(map[string]*GetNodes_Nic)
 
-	nodes := make([]*GetNodeList_Node, 0)
+	nodes := make([]*GetNodes_Node, 0)
 	for _, node := range store.GetNodes() {
-		if cfg.FilterByNodeType != beegfs.InvalidNodeType && node.Id.Type != cfg.FilterByNodeType {
+		if cfg.FilterByNodeType != beegfs.InvalidNodeType && node.Id.NodeType != cfg.FilterByNodeType {
 			continue
 		}
 
-		nics := make([]*GetNodeList_Nic, 0, len(node.Nics))
+		nics := make([]*GetNodes_Nic, 0, len(node.Nics))
 		for _, nic := range node.Nics {
-			gn := &GetNodeList_Nic{Nic: nic}
+			gn := &GetNodes_Nic{Nic: nic}
 			nics = append(nics, gn)
 			addrMap[nic.Addr] = gn
 		}
 
-		nodes = append(nodes, &GetNodeList_Node{
+		nodes = append(nodes, &GetNodes_Node{
 			Node: node,
 			Nics: nics,
 		})
@@ -92,7 +92,7 @@ func GetNodeList(ctx context.Context, cfg GetNodeList_Config) ([]*GetNodeList_No
 // Checks all of the given Nics for reachability by sending a HeartbeatRequest and waiting for
 // response. The result is directly written to the *GetNodeList_Nic.Reachable. The map may not be
 // touched until this function returns.
-func checkReachability(ctx context.Context, addrMap map[string]*GetNodeList_Nic) error {
+func checkReachability(ctx context.Context, addrMap map[string]*GetNodes_Nic) error {
 	// Create UDP socket - used for sending out the requests and collecting the response
 	sock, err := net.ListenUDP("udp", &net.UDPAddr{})
 	if err != nil {
@@ -139,7 +139,7 @@ func checkReachability(ctx context.Context, addrMap map[string]*GetNodeList_Nic)
 
 // Receive datagrams on the given socket. Set the corresponding *GetNodeList_Nic.Reachable to true
 // for each received one.
-func recvDatagrams(sock *net.UDPConn, addrMap map[string]*GetNodeList_Nic) <-chan error {
+func recvDatagrams(sock *net.UDPConn, addrMap map[string]*GetNodes_Nic) <-chan error {
 	// This channel is just used to signal that the receiver is done
 	closeCh := make(chan error)
 

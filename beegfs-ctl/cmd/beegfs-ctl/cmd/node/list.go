@@ -19,7 +19,7 @@ import (
 func newListCmd() *cobra.Command {
 	// The commands configuration. No additional data conversion needed here, so its arguments
 	// are filled directly from the command line flags below.
-	cfg := nodeCmd.GetNodeList_Config{}
+	cfg := nodeCmd.GetNodes_Config{}
 	// Ctl shall exit with a non-zero value if any node is completely unreachable.
 	// Note that this is not needed by the actual command, so it is not part of its config.
 	reachabilityError := false
@@ -52,21 +52,21 @@ func newListCmd() *cobra.Command {
 // command handler and process its result (e.g. format the output). The actual command handling code
 // shall be put under pkg/ctl with its own interface and called from here. This strict separation
 // allows the implementation of potential alternative frontends later.
-func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodeList_Config,
+func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodes_Config,
 	reachabilityError bool) error {
 
 	// Execute the actual command work
-	nodes, err := nodeCmd.GetNodeList(cmd.Context(), cfg)
+	nodes, err := nodeCmd.GetNodes(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
 
 	// Sort output
-	slices.SortFunc(nodes, func(a, b *nodeCmd.GetNodeList_Node) int {
-		if a.Node.Id.Type == b.Node.Id.Type {
-			return int(a.Node.Id.Id - b.Node.Id.Id)
+	slices.SortFunc(nodes, func(a, b *nodeCmd.GetNodes_Node) int {
+		if a.Node.Id.NodeType == b.Node.Id.NodeType {
+			return int(a.Node.Id.NumId - b.Node.Id.NumId)
 		} else {
-			return int(a.Node.Id.Type - b.Node.Id.Type)
+			return int(a.Node.Id.NodeType - b.Node.Id.NodeType)
 		}
 		// return strings.Compare(a.Node.Alias.String(), b.Node.Alias.String())
 	})
