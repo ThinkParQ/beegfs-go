@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/buddygroup"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/entry"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/rst"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/stats"
@@ -69,6 +70,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(buddygroup.NewCmd())
 	cmd.AddCommand(stats.NewCmd())
 	cmd.AddCommand(rst.NewRSTCmd())
+	cmd.AddCommand(entry.NewEntryCmd())
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())

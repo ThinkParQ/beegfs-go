@@ -126,7 +126,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
-	nodeStore := beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)
+	nodeStore = beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)
 
 	c, err := ManagementClient()
 	if err != nil {
