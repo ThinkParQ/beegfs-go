@@ -438,7 +438,9 @@ func WithPrefetchSize(i int) getEntriesOpt {
 // order until there are no more items in the DB, or no more items matching a KeyPrefix, then it
 // will return nil. If for some reason there is an error getting an item (such as failing to
 // deserialize the item) the function will return an error for the item and move to the next one.
-// The caller can choose to cleanup immediately or attempt to continue iterating over items.
+// The caller can choose to cleanup immediately or attempt to continue iterating over items. As long
+// as GetEntries() does not return an error it is always safe to call this function, it will simply
+// continue to return nil if there are no more items.
 //
 // If the caller is done iterating over items in the database before all matching items have been
 // returned, the cleanup function MUST be called to cleanup properly. The cleanup function is always
@@ -501,7 +503,7 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 		// we should only return keys matching a prefix, check the key we found matches.
 		if !it.ValidForPrefix([]byte(cfg.keyPrefix)) {
 			cleanup()
-			return nil, cleanup, nil
+			return func() (*BadgerItem[T], error) { return nil, nil }, cleanup, nil
 		}
 	}
 
@@ -552,7 +554,7 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 
 	if !it.Valid() {
 		cleanup()
-		return nil, cleanup, nil
+		return func() (*BadgerItem[T], error) { return nil, nil }, cleanup, nil
 	}
 	return getNext, cleanup, nil
 }
