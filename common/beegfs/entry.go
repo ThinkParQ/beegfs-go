@@ -16,6 +16,11 @@ const (
 	EntrySOCKET
 )
 
+// Is file returns true for any kind of file, including symlinks and special files.
+func (t EntryType) IsFile() bool {
+	return t >= 2 && t <= 7
+}
+
 func (t EntryType) String() string {
 	switch t {
 	case EntryDirectory:
@@ -42,14 +47,14 @@ type StripePatternType uint32
 
 const (
 	StripePatternInvalid StripePatternType = iota
-	StripePatternPatternRaid0
+	StripePatternRaid0
 	StripePatternRaid10
 	StripePatternBuddyMirror
 )
 
 func (p StripePatternType) String() string {
 	switch p {
-	case StripePatternPatternRaid0:
+	case StripePatternRaid0:
 		return "RAID0"
 	case StripePatternRaid10:
 		return "RAID10"
@@ -69,25 +74,12 @@ const (
 	entryFeatureFlagBuddyMirrored EntryFeatureFlags = 2
 )
 
-func (f EntryFeatureFlags) String() string {
-	flagsSet := ""
-	if f.IsInlined() {
-		flagsSet += "Inlined inode: yes, "
-	} else {
-		flagsSet += "Inlined inode: no, "
-	}
-
-	if f.IsBuddyMirrored() {
-		flagsSet += "Buddy Mirrored: yes"
-	} else {
-		flagsSet += "Buddy Mirrored: no"
-	}
-
-	return flagsSet
-}
-
 func (f EntryFeatureFlags) IsInlined() bool {
 	return f&entryFeatureFlagInlined != 0
+}
+
+func (f *EntryFeatureFlags) SetInlined() {
+	*f |= entryFeatureFlagInlined
 }
 
 func (f EntryFeatureFlags) IsBuddyMirrored() bool {

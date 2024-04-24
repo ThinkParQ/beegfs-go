@@ -24,8 +24,9 @@ type Serializer struct {
 	// to be read out after the call to Serialize() and be put into the BeeMsg header.
 	MsgFeatureFlags uint16
 	// Any error during serialization goes in here. This field must be checked after using the
-	// serializer by calling Serializer.Finish(), otherwise errors might go through unnoticed.
-	// If this is set, all following operations will do nothing.
+	// serializer by calling Serializer.Finish(), otherwise errors might go through unnoticed. If
+	// this is set, all following operations will do nothing. Currently serializable types are
+	// intentionally not able to set this error.
 	err error
 }
 
@@ -234,7 +235,9 @@ type Deserializer struct {
 	MsgFeatureFlags uint16
 	// Any error during deserialization goes in here. This field must be checked after using the
 	// deserializer by calling Deserializer.Finish(), otherwise errors might go through unnoticed.
-	// If this is set, all following operations will do nothing to prevent "infinite" loops.
+	// If this is set, all following operations will do nothing to prevent "infinite" loops. This
+	// approach avoids the need to include err != nil checks all over the deserialization logic.
+	// Deserializable types can set this using the Fail() method.
 	err error
 }
 
@@ -253,6 +256,15 @@ type Deserializable interface {
 	// and might cause undefined behavior (or cause crashes, if you are lucky). The correctness can
 	// currently only be tested manually, so be very cautios.
 	Deserialize(*Deserializer)
+}
+
+// Fail is how Deserializable types indicate when deserialization should fail for some reason that
+// cannot be detected by the DeserializeX functions. Note this should be used sparingly as generally
+// deserialization should not be concerned with application logic. Valid use cases include handling
+// enums where strict enforcement of valid variants is required, or when it is not necessary to
+// reimplement deserialization logic in Go for deprecated functionality that is no longer supported.
+func (des *Deserializer) Fail(err error) {
+	des.err = err
 }
 
 // To be called after deserialization is done - checks if the whole buffer and only the whole
