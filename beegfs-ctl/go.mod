@@ -1,15 +1,18 @@
 module github.com/thinkparq/beegfs-ctl
 
-go 1.21
+go 1.22
+
+toolchain go1.22.0
 
 require (
 	github.com/dsnet/golib/unitconv v1.0.2
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.17.0
-	github.com/thinkparq/gobee v0.0.5
+	github.com/thinkparq/gobee v0.0.6
 	github.com/thinkparq/protobuf v0.0.6
 	google.golang.org/grpc v1.62.0
+	google.golang.org/protobuf v1.33.0
 )
 
 require (
@@ -32,7 +35,6 @@ require (
 	golang.org/x/sys v0.17.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240221002015-b0ce06bbee7c // indirect
-	google.golang.org/protobuf v1.32.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
