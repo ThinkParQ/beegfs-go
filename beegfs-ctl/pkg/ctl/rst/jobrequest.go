@@ -2,9 +2,11 @@ package rst
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
@@ -42,10 +44,14 @@ type SyncJobResponse struct {
 func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *SyncJobResponse, error) {
 
 	respChan := make(chan *SyncJobResponse, cfg.ChanSize)
-
-	beegfs, err := config.BeeGFSClient(cfg.Path)
+	// TODO: https://github.com/ThinkParQ/bee-remote/issues/40 Support directory downloads. For
+	// downloads we cannot just setup the BeeGFSClient using the path, since it is likely the file
+	// doesn't yet exist in BeeGFS. For now since we only support file downloads the parent
+	// directory must always exist, so we can use it to setup the BeeGFS client. This also works for
+	// uploads regardless if they are by path or file.
+	beegfs, err := config.BeeGFSClient(filepath.Dir(cfg.Path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to setup BeeGFS client: %w", err)
 	}
 	pathInMount, err := beegfs.GetRelativePathWithinMount(cfg.Path)
 	if err != nil {
@@ -66,7 +72,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 		if err != nil {
 			// For downloads its expected the file doesn't already exist in BeeGFS. All other errors
 			// should be returned.
-			if !os.IsNotExist(err) {
+			if !errors.Is(err, fs.ErrNotExist) {
 				return nil, err
 			}
 		} else if !cfg.Overwrite {
