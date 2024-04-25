@@ -81,6 +81,7 @@ func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
 		r := GetTargets_Result{
 			Target:            target,
 			Node:              node,
+			NodeType:          beegfs.NodeTypeFromProto(t.NodeType),
 			ReachabilityState: rbs,
 			ConsistencyState:  cs,
 			LastContactS:      t.LastContactS,
