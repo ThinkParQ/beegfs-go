@@ -53,3 +53,36 @@ func (m *HighResolutionStats) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.NetRecvBytes)
 	beeserde.DeserializeInt(d, &m.WorkRequests)
 }
+
+// Requests client stats
+type GetClientStats struct {
+	CookieIP uint64
+	PerUser  bool
+}
+
+func (m *GetClientStats) MsgId() uint16 {
+	return 1031
+}
+
+func (m *GetClientStats) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.CookieIP)
+
+	if m.PerUser {
+		s.MsgFeatureFlags = 1
+	}
+}
+
+// Client stats response
+type GetClientStatsResp struct {
+	Stats []uint64
+}
+
+func (m *GetClientStatsResp) MsgId() uint16 {
+	return 1032
+}
+
+func (m *GetClientStatsResp) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeSeq[uint64](d, &m.Stats, true, func(inner *uint64) {
+		beeserde.DeserializeInt(d, inner)
+	})
+}
