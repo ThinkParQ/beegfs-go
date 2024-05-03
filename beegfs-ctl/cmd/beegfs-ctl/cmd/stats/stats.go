@@ -12,6 +12,8 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newServerStatsCmd())
+	cmd.AddCommand(newClientStatsCmd())
+	cmd.AddCommand(newUserStatsCmd())
 
 	return cmd
 }

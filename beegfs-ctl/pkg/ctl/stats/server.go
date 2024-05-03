@@ -52,7 +52,7 @@ func statsFromHighResolutionStats(h msg.HighResolutionStats) Stats {
 }
 
 // Queries the stats for one node. The returned slice is chronologically sorted in ascending order.
-func SingleNode(ctx context.Context, id beegfs.EntityId) ([]Stats, error) {
+func SingleServerNode(ctx context.Context, id beegfs.EntityId) ([]Stats, error) {
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return []Stats{}, err
@@ -74,7 +74,7 @@ func SingleNode(ctx context.Context, id beegfs.EntityId) ([]Stats, error) {
 }
 
 // Queries latest stat entry for multiple nodes separately
-func MultiNode(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, error) {
+func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
 		return []NodeStats{}, err
@@ -107,7 +107,7 @@ func MultiNode(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, error) {
 
 // Queries and sums the stats for multiple nodes. The returned slice is chronologically sorted in ascending order.
 // The second return value is the number of nodes used for the sum.
-func MultiNodeAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stats, int, error) {
+func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stats, int, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
 		return []Stats{}, 0, err
