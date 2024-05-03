@@ -94,7 +94,7 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 
 // Queries and prints the stats for one node
 func singleNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
-	stats, err := stats.SingleNode(ctx, cfg.Node)
+	stats, err := stats.SingleServerNode(ctx, cfg.Node)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func singleNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Write
 
 // Queries and prints latest stat entry for multiple nodes separately
 func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
-	perServerstatsResult, err := stats.MultiNode(ctx, cfg.NodeType)
+	perServerstatsResult, err := stats.MultiServerNodes(ctx, cfg.NodeType)
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer
 
 // Queries, sums up and prints the summarized stats for multiple nodes
 func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
-	totalStats, numberOfNodes, err := stats.MultiNodeAggregated(ctx, cfg.NodeType)
+	totalStats, numberOfNodes, err := stats.MultiServerNodesAggregated(ctx, cfg.NodeType)
 	if err != nil {
 		return err
 	}
