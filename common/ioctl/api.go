@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"unsafe"
+
+	"github.com/thinkparq/gobee/beegfs"
 )
 
 // GetConfigFile returns the path to the client configuration file for the provided active BeeGFS mount
@@ -45,25 +47,9 @@ type EntryInfo struct {
 	OwnerID       int
 	ParentEntryID string
 	EntryID       string
-	EntryType     BeeGFSEntryType
+	EntryType     beegfs.EntryType
 	FeatureFlags  EntryInfoFeatureFlags
 }
-
-// Go representation of the BeeGFS `DirEntryType` enum defined in:
-//   - client_module/source/common/storage/StorageDefinitions.h
-//   - common/source/common/storage/StorageDefinitions.h
-type BeeGFSEntryType int
-
-const (
-	BeeGFSUnknown BeeGFSEntryType = iota
-	BeeGFSDirectory
-	BeeGFSRegularFile
-	BeeGFSSymlink
-	BeeGFSBlockDev
-	BeeGFSCharDev
-	BeeGFSFIFO
-	BeeGFSSOCKET
-)
 
 // Go representations of the feature flags defined in:
 //   - client_module/source/common/storage/EntryInfo.h
@@ -107,7 +93,7 @@ func GetEntryInfo(path string) (EntryInfo, error) {
 		OwnerID:       int(arg.OwnerID),
 		ParentEntryID: string(arg.ParentEntryID[:]),
 		EntryID:       string(arg.EntryID[:]),
-		EntryType:     BeeGFSEntryType(arg.EntryType),
+		EntryType:     beegfs.EntryType(arg.EntryType),
 		FeatureFlags:  featureFlags,
 	}, nil
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/gobee/beegfs"
 )
 
 // We cannot run these tests without an actual BeeGFS file system. The following
@@ -55,14 +56,14 @@ func TestGetEntryInfo(t *testing.T) {
 	// Test with a directory:
 	dirEntryInfo, err := GetEntryInfo(testDir)
 	require.NoError(t, err)
-	assert.Equal(t, BeeGFSDirectory, dirEntryInfo.EntryType)
+	assert.Equal(t, beegfs.EntryDirectory, dirEntryInfo.EntryType)
 
 	// Test with a regular file:
 	testPath := testDir + "file1"
 	os.Create(testPath)
 	fileEntryInfo, err := GetEntryInfo(testPath)
 	require.NoError(t, err)
-	assert.Equal(t, BeeGFSRegularFile, fileEntryInfo.EntryType)
+	assert.Equal(t, beegfs.EntryRegularFile, fileEntryInfo.EntryType)
 }
 
 func TestCreateFileStripeHints(t *testing.T) {

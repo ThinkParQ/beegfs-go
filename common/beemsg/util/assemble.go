@@ -27,19 +27,25 @@ func AssembleBeeMsg(in msg.SerializableMsg) ([]byte, error) {
 		return nil, fmt.Errorf("BeeMsg body serialization failed: %w", err)
 	}
 
+	// Once buf is provided to NewSerializer (which creates a bytes.Buffer) the caller should not
+	// use buf again directly. This is because bytes.Buffer will grow the buffer as needed, and by
+	// this point the original buf may not point to the same slice anymore. Instead get the final
+	// buffer and make any necessary modifications before returning.
+	finalBuf := ser.Buf.Bytes()
+
 	// The actual serialized message length is only known after serialization of the body, so we
 	// overwrite the serialized header value with the actual length here
-	if err := msg.OverwriteMsgLen(buf[0:msg.HeaderLen], uint32(ser.Buf.Len())); err != nil {
+	if err := msg.OverwriteMsgLen(finalBuf[0:msg.HeaderLen], uint32(ser.Buf.Len())); err != nil {
 		return nil, err
 	}
 
 	// MsgFeatureFlags is defined during serialization, therefore we overwrite the serialized header
 	// value here
-	if err := msg.OverwriteMsgFeatureFlags(buf[0:msg.HeaderLen], ser.MsgFeatureFlags); err != nil {
+	if err := msg.OverwriteMsgFeatureFlags(finalBuf[0:msg.HeaderLen], ser.MsgFeatureFlags); err != nil {
 		return nil, err
 	}
 
-	return ser.Buf.Bytes(), nil
+	return finalBuf, nil
 }
 
 // Deserializes and outputs a complete BeeMsg (header + body). The input slices must contain the
