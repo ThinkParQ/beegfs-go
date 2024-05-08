@@ -20,7 +20,8 @@ func newCancelCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "cancel <path>",
-		Short: "Cancel job(s) for a file path. By default all incomplete jobs are cancelled.",
+		Short: "Cancel job(s) for a file path.",
+		Long:  "Cancel job(s) for a file path. By default all incomplete jobs are cancelled.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -33,7 +34,7 @@ func newCancelCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.JobID, "jobID", "", "If there are multiple jobs for this path, only update the specified job.")
+	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only update the specified job.")
 	cmd.Flags().BoolVar(&cfg.Force, "force", false, `
 	Use force to attempt to cancel a job and all work requests regardless of their current state.
 	This mode skips verifying the path stills exists to allow cancelling up jobs for deleted paths.

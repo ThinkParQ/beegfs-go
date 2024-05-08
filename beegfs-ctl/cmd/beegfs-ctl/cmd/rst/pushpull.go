@@ -50,7 +50,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.RSTID, "rst", "", "The ID of the Remote Storage Target to synchronize with.")
 	cmd.MarkFlagRequired("rst")
 	cmd.Flags().BoolVar(&cfg.Overwrite, "overwrite", false, "When downloading a file, if a file already exists at the specified path in BeeGFS, an error is returned by default. Optionally the file can be overwritten instead. Note files are always uploaded and will be overwritten unless the RST has file/object versioning enabled.")
-	cmd.Flags().StringVar(&cfg.RemotePath, "remotePath", "", "By default when downloading files/objects, the path where the file should be downloaded in BeeGFS is assumed to also be the file path/object key in the RST. Optionally the remote path can be specified to restore a file in an RST to a different location in BeeGFS (this is ignored for uploads).")
+	cmd.Flags().StringVar(&cfg.RemotePath, "remote-path", "", "By default when downloading files/objects, the path where the file should be downloaded in BeeGFS is assumed to also be the file path/object key in the RST. Optionally the remote path can be specified to restore a file in an RST to a different location in BeeGFS (this is ignored for uploads).")
 	return cmd
 }
 

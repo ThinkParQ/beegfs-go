@@ -8,8 +8,8 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
-		Short: "Query and manage nodes",
-		Long:  "Contains subcommands related to node management",
+		Short: "Query and manage nodes.",
+		Long:  "Contains commands related to node management.",
 	}
 
 	// Add all the subcommands. If they are actual commands doing work, they should be placed in this same package / in the same folder

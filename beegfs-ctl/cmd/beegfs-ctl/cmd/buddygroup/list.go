@@ -20,14 +20,14 @@ func newListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List buddy groups",
+		Short: "List buddy groups.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "nodeType",
-		"Filter by node type")
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "node-type",
+		"Filter by node type.")
 
 	return cmd
 }

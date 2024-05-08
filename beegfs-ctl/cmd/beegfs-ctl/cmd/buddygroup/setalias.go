@@ -10,8 +10,8 @@ import (
 
 func newSetAliasCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "set-alias buddygroup alias",
-		Short: "Sets a buddy group alias",
+		Use:   "set-alias <buddygroup> <alias>",
+		Short: "Set a buddy group alias.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			eid, err := beegfs.NewBuddyGroupParser().Parse(args[0])

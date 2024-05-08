@@ -11,7 +11,7 @@ import (
 func newSetAliasCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-alias node alias",
-		Short: "Sets a node alias",
+		Short: "Set node aliases.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			eid, err := beegfs.NewNodeParser().Parse(args[0])
