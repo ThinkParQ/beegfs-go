@@ -10,8 +10,8 @@ import (
 
 func newSetAliasCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "set-alias target alias",
-		Short: "Sets a target alias",
+		Use:   "set-alias <target> <alias>",
+		Short: "Set target aliases.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			eid, err := beegfs.NewTargetParser().Parse(args[0])

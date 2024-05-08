@@ -11,6 +11,7 @@ import (
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/entry"
 	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/types"
@@ -235,7 +236,11 @@ func printRetro(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, frontendC
 
 	fmt.Fprintf(w, "Stripe pattern details:\n")
 	fmt.Fprintf(w, "+ Type: %s\n", info.Entry.Pattern.Type)
-	fmt.Fprintf(w, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
+	if config.Get().Raw {
+		fmt.Fprintf(w, "+ Chunksize: %d\n", info.Entry.Pattern.Chunksize)
+	} else {
+		fmt.Fprintf(w, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
+	}
 	fmt.Fprintf(w, "+ Number of storage targets: ")
 	actualNumStorageTgts := len(info.Entry.Pattern.TargetIDs)
 	if actualNumStorageTgts == 0 {
@@ -327,7 +332,12 @@ func printTable(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, printHead
 	}
 
 	entryRow += fmt.Sprintf("%s (%d)\t", info.Entry.Pattern.StoragePoolName, info.Entry.Pattern.StoragePoolID)
-	entryRow += fmt.Sprintf("%s (%dx%s)\t", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
+
+	if config.Get().Raw {
+		entryRow += fmt.Sprintf("%s (%dx%d)\t", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, info.Entry.Pattern.Chunksize)
+	} else {
+		entryRow += fmt.Sprintf("%s (%dx%s)\t", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
+	}
 
 	if info.Entry.Type != beegfs.EntryDirectory {
 		if info.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {

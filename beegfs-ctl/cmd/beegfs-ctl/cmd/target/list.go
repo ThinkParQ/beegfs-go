@@ -24,17 +24,17 @@ func newListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List BeeGFS targets",
+		Short: "List BeeGFS targets.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "nodeType",
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "node-type",
 		"Filter by node type")
-	cmd.Flags().Var(beegfs.NewStoragePoolPFlag(&cfg.StoragePool), "storagepool", "Filter by storage pool")
-	cmd.Flags().BoolVar(&cfg.Capacity, "capacity", false, "Print capacity information")
-	cmd.Flags().BoolVar(&cfg.State, "state", false, "Print states as seen by the management daemon")
+	cmd.Flags().Var(beegfs.NewStoragePoolPFlag(&cfg.StoragePool), "storage-pool", "Filter by storage pool.")
+	cmd.Flags().BoolVar(&cfg.Capacity, "capacity", false, "Print capacity information.")
+	cmd.Flags().BoolVar(&cfg.State, "state", false, "Print states as seen by the management service.")
 
 	return cmd
 }
@@ -51,7 +51,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 	if config.Get().Debug {
 		fmt.Fprint(&w, "UID\t")
 	}
-	fmt.Fprint(&w, "Alias\tID\tOn node\tOn storage pool\tLast contact\t")
+	fmt.Fprint(&w, "Alias\tID\tOn Node\tOn Storage Pool\tLast Contact\t")
 
 	if cfg.State {
 		fmt.Fprint(&w, "Reachability\tConsistency\t")

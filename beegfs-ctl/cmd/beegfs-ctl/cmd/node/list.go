@@ -27,23 +27,23 @@ func newListCmd() *cobra.Command {
 	// Define cobra command
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List BeeGFS nodes",
+		Short: "List BeeGFS nodes.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg, reachabilityError)
 		},
 	}
 
 	// Define commands flags
-	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.FilterByNodeType, beegfs.Meta, beegfs.Storage, beegfs.Client, beegfs.Management), "nodeType",
-		"Only show nodes of the given type")
-	cmd.Flags().BoolVar(&cfg.WithNics, "withNics", false,
-		"Also request the list of network addresses/interfaces the nodes report to management")
-	cmd.Flags().BoolVar(&cfg.ReachabilityCheck, "reachabilityCheck", false,
-		"Checks each node for being alive and responding to requests (from the local machine)")
-	cmd.Flags().DurationVar(&cfg.ReachabilityTimeout, "reachabilityTimeout", 1*time.Second,
-		"Defines the waiting time for responses when using --reachabilityCheck")
-	cmd.Flags().BoolVar(&reachabilityError, "reachabilityError", false,
-		"Return an error if at least one node is completely unreachable")
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.FilterByNodeType, beegfs.Meta, beegfs.Storage, beegfs.Client, beegfs.Management), "node-type",
+		"Only show nodes of the given type.")
+	cmd.Flags().BoolVar(&cfg.WithNics, "with-nics", false,
+		"Include the list of network addresses/interfaces the nodes reported to the management service.")
+	cmd.Flags().BoolVar(&cfg.ReachabilityCheck, "reachability-check", false,
+		"Check each node is alive and responding to requests (from the local machine).")
+	cmd.Flags().DurationVar(&cfg.ReachabilityTimeout, "reachability-timeout", 1*time.Second,
+		"Define the waiting time for responses when using --reachability-check.")
+	cmd.Flags().BoolVar(&reachabilityError, "reachability-error", false,
+		"Return an error if at least one node is completely unreachable.")
 
 	return cmd
 }

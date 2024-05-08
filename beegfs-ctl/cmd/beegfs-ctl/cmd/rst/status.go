@@ -32,7 +32,7 @@ func newStatusCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.JobID, "jobID", "", "If a file path is specified, only return results for this specific job.")
+	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If a file path is specified, only return results for this specific job.")
 	cmd.Flags().BoolVar(&cfg.Verbose, "verbose", false, "Include details about individual work requests and responses.")
 	cmd.Flags().IntVar(&cfg.LimitJobsPerPath, "limit", 1, "Limit the number of jobs returned for each path+RST combination (defaults to only the most recent job).")
 	return cmd

@@ -13,7 +13,7 @@ import (
 func newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List storage pools",
+		Short: "List storage pools.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd)
 		},

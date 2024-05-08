@@ -36,8 +36,8 @@ This tool allows you to inspect, configure, and monitor BeeGFS.
 * View help for specific commands with "<command> help".
 * For full product documentation, visit: https://doc.beegfs.io/.
 * Questions?
-  - If you have an active support contract, please visit: https://www.beegfs.io/c/enterprise/.
-  - For community support, check out the mailing list at: https://groups.google.com/g/fhgfs-user/.
+  - If you have an active support contract, please visit: https://www.beegfs.io/c/enterprise/
+  - For community support, check out: https://github.com/ThinkParQ/beegfs/blob/master/SUPPORT.md
 
 BeeGFS is crafted with 💛 by contributors worldwide.
 Thank you for using BeeGFS and supporting its ongoing development! 🐝

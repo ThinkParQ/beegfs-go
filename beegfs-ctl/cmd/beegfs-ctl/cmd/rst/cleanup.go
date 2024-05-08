@@ -18,7 +18,8 @@ func newCleanupCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "cleanup <path>",
-		Short: "Cleanup (delete) jobs for a file path. By default all incomplete jobs are deleted.",
+		Short: "Cleanup (delete) jobs for a file path.",
+		Long:  "Cleanup (delete) jobs for a file path. By default all incomplete jobs are deleted.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -30,7 +31,7 @@ func newCleanupCmd() *cobra.Command {
 			return runCleanupCmd(cmd, cfg)
 		},
 	}
-	cmd.Flags().StringVar(&cfg.JobID, "jobID", "", "If there are multiple jobs for this path, only cleanup the specified job.")
+	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only cleanup the specified job.")
 	cmd.Flags().BoolVar(&cfg.Force, "force", false, `
 	By default completed jobs are skipped when cleaning up so they can be used to determine when a path was synchronized with an RST.
 	Optionally completed jobs can be forcibly cleaned up (generally you will want to use the jobID flag to limit what jobs are deleted).

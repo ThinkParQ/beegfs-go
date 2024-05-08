@@ -21,7 +21,7 @@ func newListCmd() *cobra.Command {
 			return runListCmd(cmd, cfg)
 		},
 	}
-	cmd.Flags().BoolVar(&cfg.ShowSecrets, "showSecrets", false, "If secret keys should be printed in cleartext or masked (default).")
+	cmd.Flags().BoolVar(&cfg.ShowSecrets, "show-secrets", false, "If secret keys should be printed in cleartext or masked (the default).")
 	return cmd
 }
 
