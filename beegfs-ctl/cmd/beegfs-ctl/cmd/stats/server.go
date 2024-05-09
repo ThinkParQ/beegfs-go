@@ -28,7 +28,7 @@ func newServerStatsCmd() *cobra.Command {
 
 	var cmd = &cobra.Command{
 		Use:   "server",
-		Short: "Prints server stats",
+		Short: "Show IO statistics for BeeGFS servers.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				id, err := beegfs.NewNodeParser().Parse(args[0])
@@ -40,24 +40,36 @@ func newServerStatsCmd() *cobra.Command {
 
 			return runServerstatsCmd(cmd, &cfg)
 		},
-		Long: `
-Stats Server
- This mode shows the number of network requests that were processed per second
- by the servers, the number of requests currently pending in the queue and the
- number of worker threads that are currently busy processing requests at the
- time of measurement on the servers, and the amount of read/written data per
- second for storage servers.
-		`,
+		Long: `Show IO statistics for BeeGFS servers.
+  This command shows the number of network requests that were processed per second
+  by the servers, the number of requests currently pending in the queue and the
+  number of worker threads that are currently busy processing requests at the
+  time of measurement on the servers, and the amount of read/written data per
+  second for storage servers. The time field shows Unix timestamps in seconds since
+  the epoch.
+
+  When stats are requested for a single server, the output displays a history of the
+  last few seconds in rows, with the most recent values at the bottom.
+
+  When stats are requested for multiple servers, individual statistics for each 
+  server are displayed, with one row per server.
+
+Example: Print individual stats of all servers, refresh every second.
+  $ beegfs stats server --interval 1s
+
+Example: Print aggregate stats of metadata servers, refresh every 3 seconds.
+  $ beegfs stats server --node-type meta --interval 3s
+`,
 	}
 
 	cmd.Flags().DurationVar(&cfg.History, "history", 10*time.Second,
-		"The history to include")
-	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "nodeType",
-		"The node type to query (metadata, storage). (Default: storage)")
+		"Include historical stats for this duration.")
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "node-type",
+		"The node type to query (meta, storage).")
 	cmd.Flags().DurationVar(&cfg.Interval, "interval", 0*time.Second,
-		"Interval for repeated stats retrieval in seconds.")
+		"Interval to automatically refresh and print updated stats.")
 	cmd.Flags().BoolVar(&cfg.Sum, "sum", false,
-		"Total Stats")
+		"Summarized stats for multiple nodes.")
 	return cmd
 }
 
