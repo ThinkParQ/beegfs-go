@@ -50,17 +50,17 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 		"Interval for repeated stats retrieval in seconds.")
 	cmd.Flags().BoolVar(&cfg.all, "all", false,
 		"Print all values. By default, zero values are skipped.")
-	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.nodeType, beegfs.Meta, beegfs.Storage), "nodeType",
-		"The node type to query (metadata, storage).")
-	cmd.Flags().StringVar(&cfg.filter, "filter", "", "Show values for given client.")
+	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.nodeType, beegfs.Meta, beegfs.Storage), "node-type",
+		"The node type to query (meta, storage).")
+	cmd.Flags().StringVar(&cfg.filter, "filter", "", "Show values for given clients/users.")
 	cmd.Flags().BoolVar(&cfg.names, "names", false,
-		"Show hostnames instead of IPs")
+		"Show hostnames instead of IPs and usernames instead of numerical user IDs.")
 	cmd.Flags().BoolVar(&cfg.sum, "sum", false,
-		"Show aggregated values for all clients.")
+		"Show aggregated values for all clients/users.")
 	cmd.Flags().BoolVar(&cfg.perUser, "user", perUserDefault,
 		"Show user stats.")
 	cmd.Flags().Uint16Var(&cfg.limit, "limit", 0,
-		"Limit number of clients in output.")
+		"Limit number of clients/users in output.")
 
 	return cmd
 }
@@ -68,17 +68,24 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 func newClientStatsCmd() *cobra.Command {
 	s := newGenericClientStatsCmd(false)
 	s.Use = "client"
-	s.Short = "Prints client stats"
-	s.Long = `
-	Stats Client
- This mode queries statistics for client requests from the servers and
- presents them in a sorted list, ordered by sum of requests per client.
- This allows identification of those clients, which are currently
- generating the most load on the servers.
+	s.Short = "Show IO statistics for BeeGFS clients."
+	s.Long = `Show IO statistics for BeeGFS clients.
+  This command queries statistics for client requests from the servers and
+  presents them in a sorted list, ordered by sum of requests per client.
+  This allows identification of those clients, which are currently
+  generating the most load on the servers.
 
- The initial batch of statistics for time index 0 shows the absolute number of
- operations since the servers were started, so only the following batches show
- values for the given interval.`
+  The initial batch of statistics for time index 0 shows the absolute number of
+  operations since the servers were started, then the following batches only show
+  values for the given interval.
+
+Note: 
+  Some client operation related messages (e.g. close file messages) are forwarded
+  by metadata servers. Thus it is possible for servers to also appear in the client stats.
+
+Example: Show per-client metadata access statistics, refresh every 5 seconds.
+  $ beegfs stats client --node-type meta --interval 5s
+`
 
 	return s
 }
@@ -86,17 +93,25 @@ func newClientStatsCmd() *cobra.Command {
 func newUserStatsCmd() *cobra.Command {
 	s := newGenericClientStatsCmd(true)
 	s.Use = "user"
-	s.Short = "Prints user stats"
-	s.Long = `
-	Stats User
-	 This mode queries statistics for user requests from the servers and
-	 presents them in a sorted list, ordered by sum of requests per user.
-	 This allows identification of those users, which are currently
-	 generating the most load on the servers.
-	
-	 The initial batch of statistics for time index 0 shows the absolute number of
-	 operations since the servers were started, so only the following batches show
-	 values for the given interval.`
+	s.Short = "Show IO statistics for BeeGFS users"
+	s.Long = `Show IO statistics for BeeGFS users
+  This command queries statistics for user requests from the servers and
+  presents them in a sorted list, ordered by sum of requests per user.
+  This allows identification of those users, which are currently
+  generating the most load on the servers.
+
+  The initial batch of statistics for time index 0 shows the absolute number of
+  operations since the servers were started, then the following batches only show
+  values for the given interval.
+	 
+Note: 
+  Some client operation related messages (e.g. close file messages) are forwarded
+  by metadata servers and not associated with a specific user. When this happens 
+  the operations are associated with the user ID "-1".
+
+Example: Show per-user storage access statistics, refresh every 5 seconds.
+  $ beegfs stats user --node-type storage --interval 5s
+`
 
 	return s
 }
