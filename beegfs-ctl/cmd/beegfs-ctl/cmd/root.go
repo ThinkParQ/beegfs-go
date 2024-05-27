@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/entry"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/license"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/pool"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/rst"
@@ -65,6 +66,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 
 	// Add subcommands
 	cmd.AddCommand(versionCmd)
+	cmd.AddCommand(license.NewCmd())
 	cmd.AddCommand(node.NewCmd())
 	cmd.AddCommand(target.NewCmd())
 	cmd.AddCommand(pool.NewCmd())
@@ -75,7 +77,6 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
-
 	if err != nil {
 		// If the command returned a util.CtlError with an included exit code, use this to exit the
 		// program
