@@ -5,7 +5,7 @@ import (
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
-	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pm "github.com/thinkparq/protobuf/go/management"
 )
 
 type GetStoragePools_Result struct {
@@ -21,7 +21,7 @@ func GetStoragePools(ctx context.Context) ([]GetStoragePools_Result, error) {
 		return nil, err
 	}
 
-	pools, err := mgmtd.GetStoragePools(ctx, &pb.GetStoragePoolsRequest{})
+	pools, err := mgmtd.GetStoragePools(ctx, &pm.GetStoragePoolsRequest{})
 	if err != nil {
 		return nil, err
 	}

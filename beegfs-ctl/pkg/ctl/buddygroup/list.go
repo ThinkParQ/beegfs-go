@@ -6,6 +6,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pm "github.com/thinkparq/protobuf/go/management"
 )
 
 type GetBuddyGroups_Result struct {
@@ -24,7 +25,7 @@ func GetBuddyGroups(ctx context.Context) ([]GetBuddyGroups_Result, error) {
 		return nil, err
 	}
 
-	groups, err := mgmtd.GetBuddyGroups(ctx, &pb.GetBuddyGroupsRequest{})
+	groups, err := mgmtd.GetBuddyGroups(ctx, &pm.GetBuddyGroupsRequest{})
 	if err != nil {
 		return nil, err
 	}

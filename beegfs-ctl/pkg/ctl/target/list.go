@@ -6,6 +6,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pm "github.com/thinkparq/protobuf/go/management"
 )
 
 type GetTargets_Result struct {
@@ -30,7 +31,7 @@ func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
 		return nil, err
 	}
 
-	targets, err := mgmtd.GetTargets(ctx, &pb.GetTargetsRequest{})
+	targets, err := mgmtd.GetTargets(ctx, &pm.GetTargetsRequest{})
 	if err != nil {
 		return nil, err
 	}

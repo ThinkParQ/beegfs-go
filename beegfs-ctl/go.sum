@@ -191,8 +191,8 @@ github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
 github.com/thinkparq/gobee v0.0.8 h1:5In7Dmu8tuxb7xLtLaP/o8dqfokufR70Ku/4zk6cKmg=
 github.com/thinkparq/gobee v0.0.8/go.mod h1:GoKDlwdxQYKefQEMvhmpdrSuIL9M/qdlmPjWK+p5zwo=
-github.com/thinkparq/protobuf v0.0.6 h1:c5kG1SHBSTyEX4hri3D2q0BSmdGu64Cx1niyCfFa56Q=
-github.com/thinkparq/protobuf v0.0.6/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
+github.com/thinkparq/protobuf v0.0.7 h1:o67KUs2OXCeb78Mx6LwkIFMx5V7IB9SvfY2N+ilLG0M=
+github.com/thinkparq/protobuf v0.0.7/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
