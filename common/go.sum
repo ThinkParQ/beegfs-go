@@ -243,8 +243,8 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/subosito/gotenv v1.4.2 h1:X1TuBLAMDFbaTAChgCBLu3DU3UPyELpnF2jjJ2cz/S8=
 github.com/subosito/gotenv v1.4.2/go.mod h1:ayKnFf/c6rvx/2iiLrJUk1e6plDbT3edrFNGqEflhK0=
-github.com/thinkparq/protobuf v0.0.6 h1:c5kG1SHBSTyEX4hri3D2q0BSmdGu64Cx1niyCfFa56Q=
-github.com/thinkparq/protobuf v0.0.6/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
+github.com/thinkparq/protobuf v0.0.9 h1:WJvcD54/hZSjJMgPM41NtcHKplF+ot17/h/FmLPIE1I=
+github.com/thinkparq/protobuf v0.0.9/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=

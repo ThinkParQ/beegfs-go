@@ -5,6 +5,7 @@ import (
 )
 
 // Holds BeeGFS node information, including IDs and Nics
+// TODO: Use EntityIdSet here https://github.com/ThinkParQ/gobee/issues/37
 type Node struct {
 	// The nodes unique EntityID
 	Uid Uid
@@ -17,7 +18,7 @@ type Node struct {
 }
 
 func (node Node) String() string {
-	return fmt.Sprintf("Node{Alias: %s, Id: %s, Uid: %s}", node.Alias, node.Id, node.Uid)
+	return fmt.Sprintf("%s[%s, %s]", node.Alias.String(), node.Id.String(), node.Uid.String())
 }
 
 func (node Node) Addrs() []string {
