@@ -1,4 +1,4 @@
-package storagepool
+package pool
 
 import (
 	"context"
@@ -16,11 +16,11 @@ func SetAlias(ctx context.Context, eid beegfs.EntityId, newAlias beegfs.Alias) e
 	}
 
 	eidp := eid.ToProto()
-	if l := eidp.GetLegacyId(); l != nil {
-		l.EntityType = pb.EntityType_STORAGE_POOL
-	}
 
-	_, err = client.SetAlias(ctx, &pm.SetAliasRequest{EntityId: eidp, NewAlias: string(newAlias)})
+	_, err = client.SetAlias(ctx, &pm.SetAliasRequest{
+		EntityId:   eidp,
+		EntityType: pb.EntityType_POOL,
+		NewAlias:   string(newAlias)})
 	if err != nil {
 		return err
 	}

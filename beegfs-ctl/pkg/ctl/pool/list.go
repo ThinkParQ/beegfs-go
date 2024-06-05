@@ -1,4 +1,4 @@
-package storagepool
+package pool
 
 import (
 	"context"
@@ -21,7 +21,7 @@ func GetStoragePools(ctx context.Context) ([]GetStoragePools_Result, error) {
 		return nil, err
 	}
 
-	pools, err := mgmtd.GetStoragePools(ctx, &pm.GetStoragePoolsRequest{})
+	pools, err := mgmtd.GetPools(ctx, &pm.GetPoolsRequest{})
 	if err != nil {
 		return nil, err
 	}

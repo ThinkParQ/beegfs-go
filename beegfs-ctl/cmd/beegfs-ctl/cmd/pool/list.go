@@ -1,4 +1,4 @@
-package storagepool
+package pool
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/storagepool"
+	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
 )
 
 func newListCmd() *cobra.Command {
@@ -23,7 +23,7 @@ func newListCmd() *cobra.Command {
 }
 
 func runListCmd(cmd *cobra.Command) error {
-	pools, err := storagepool.GetStoragePools(cmd.Context())
+	pools, err := pool.GetStoragePools(cmd.Context())
 	if err != nil {
 		return err
 	}

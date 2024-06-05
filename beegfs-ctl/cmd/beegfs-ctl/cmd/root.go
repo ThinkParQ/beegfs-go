@@ -10,9 +10,9 @@ import (
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/entry"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/pool"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/rst"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/stats"
-	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/storagepool"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/target"
 	cmdConfig "github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/config"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
@@ -66,7 +66,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(versionCmd)
 	cmd.AddCommand(node.NewCmd())
 	cmd.AddCommand(target.NewCmd())
-	cmd.AddCommand(storagepool.NewCmd())
+	cmd.AddCommand(pool.NewCmd())
 	cmd.AddCommand(buddygroup.NewCmd())
 	cmd.AddCommand(stats.NewCmd())
 	cmd.AddCommand(rst.NewRSTCmd())

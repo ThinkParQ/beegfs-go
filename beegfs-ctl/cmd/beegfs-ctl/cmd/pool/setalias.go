@@ -1,10 +1,10 @@
-package storagepool
+package pool
 
 import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	storagePoolCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/storagepool"
+	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
 	"github.com/thinkparq/gobee/beegfs"
 )
 
@@ -14,7 +14,7 @@ func newSetAliasCmd() *cobra.Command {
 		Short: "Set storage pool aliases.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			eid, err := beegfs.NewStoragePoolParser().Parse(args[0])
+			eid, err := beegfs.NewEntityIdParser(16, beegfs.Storage).Parse(args[0])
 			if err != nil {
 				return err
 			}
@@ -32,7 +32,7 @@ func newSetAliasCmd() *cobra.Command {
 }
 
 func runSetAliasCmd(cmd *cobra.Command, eid beegfs.EntityId, newAlias beegfs.Alias) error {
-	err := storagePoolCmd.SetAlias(cmd.Context(), eid, newAlias)
+	err := backend.SetAlias(cmd.Context(), eid, newAlias)
 	if err != nil {
 		return err
 	}

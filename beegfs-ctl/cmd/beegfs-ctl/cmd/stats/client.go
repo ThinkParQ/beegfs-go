@@ -34,7 +34,7 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				id, err := beegfs.NewNodeParser().Parse(args[0])
+				id, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
 				if err != nil {
 					return err
 				}
