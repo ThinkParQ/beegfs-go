@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/gobee/filesystem"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	pm "github.com/thinkparq/protobuf/go/management"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -49,7 +50,7 @@ func Get() *Config {
 }
 
 // Try to establish a connection to the managements gRPC service
-func ManagementClient() (pb.ManagementClient, error) {
+func ManagementClient() (pm.ManagementClient, error) {
 	if globalConfig.ManagementAddr == "" {
 		return nil, fmt.Errorf("management address not set")
 	}
@@ -66,7 +67,7 @@ func ManagementClient() (pb.ManagementClient, error) {
 		return nil, fmt.Errorf("connecting to management service on %s failed: %w", globalConfig.ManagementAddr, err)
 	}
 
-	return pb.NewManagementClient(g), nil
+	return pm.NewManagementClient(g), nil
 }
 
 func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
@@ -134,7 +135,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	}
 
 	// Fetch the node list from management
-	nodes, err := c.GetNodes(ctx, &pb.GetNodesRequest{
+	nodes, err := c.GetNodes(ctx, &pm.GetNodesRequest{
 		IncludeNics: true,
 	})
 	if err != nil {

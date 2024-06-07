@@ -10,7 +10,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.17.0
 	github.com/thinkparq/gobee v0.0.8
-	github.com/thinkparq/protobuf v0.0.6
+	github.com/thinkparq/protobuf v0.0.7
 	google.golang.org/grpc v1.62.0
 	google.golang.org/protobuf v1.33.0
 )

@@ -6,6 +6,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pm "github.com/thinkparq/protobuf/go/management"
 )
 
 func SetAlias(ctx context.Context, eid beegfs.EntityId, newAlias beegfs.Alias) error {
@@ -19,7 +20,7 @@ func SetAlias(ctx context.Context, eid beegfs.EntityId, newAlias beegfs.Alias) e
 		l.EntityType = pb.EntityType_STORAGE_POOL
 	}
 
-	_, err = client.SetAlias(ctx, &pb.SetAliasRequest{EntityId: eidp, NewAlias: string(newAlias)})
+	_, err = client.SetAlias(ctx, &pm.SetAliasRequest{EntityId: eidp, NewAlias: string(newAlias)})
 	if err != nil {
 		return err
 	}
