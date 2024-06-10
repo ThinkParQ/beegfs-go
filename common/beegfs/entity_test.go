@@ -99,11 +99,11 @@ func TestEntityParser(t *testing.T) {
 
 	v, err = f.Parse("ALIAS")
 	assert.NoError(t, err)
-	assert.Equal(t, Alias("alias"), v)
+	assert.Equal(t, Alias("ALIAS"), v)
 
 	v, err = f.Parse("Alias123_.-")
 	assert.NoError(t, err)
-	assert.Equal(t, Alias("alias123_.-"), v)
+	assert.Equal(t, Alias("Alias123_.-"), v)
 
 	_, err = f.Parse("1alias")
 	assert.Error(t, err)

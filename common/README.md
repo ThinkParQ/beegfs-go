@@ -100,3 +100,14 @@ Include appropriate tests for new or modified functionality and ensure that all
 tests pass before submitting a pull request. Tests also often serve as
 [runnable
 examples](https://github.com/golang/go/wiki/CodeReviewComments#examples)/
+
+Note integration tests with external dependencies such as a mounted BeeGFS file system should use [build
+constraints](https://pkg.go.dev/go/build#hdr-Build_Constraints) (also known as a build tag) so they
+don't run by default. Build constraints that are in use: 
+
+| Constraint | Requires                           |
+| ---------- | ---------------------------------- |
+| beegfs     | BeeGFS must be mounted /mnt/beegfs |
+
+To specify a constraint use `-tags=<constraint>`, for example: 
+`go test github.com/thinkparq/gobee/ioctl -tags=integration`
