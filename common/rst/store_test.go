@@ -5,15 +5,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/gobee/filesystem"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
 func TestUpdateConfig(t *testing.T) {
 
-	mp, err := filesystem.NewFromMountPoint("mock")
-	require.NoError(t, err)
+	mp := filesystem.NewMockFS()
 	clientStore := NewClientStore(mp)
 
 	rstConfigs := []*flex.RemoteStorageTarget{

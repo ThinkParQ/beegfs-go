@@ -1,3 +1,5 @@
+//go:build beegfs
+
 package ioctl
 
 import (

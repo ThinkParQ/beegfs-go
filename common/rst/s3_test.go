@@ -25,8 +25,7 @@ var testS3Client = &S3Client{
 
 func TestGenerateRequests(t *testing.T) {
 	var err error
-	mp, err := filesystem.NewFromMountPoint("mock")
-	require.NoError(t, err)
+	mp := filesystem.NewMockFS()
 	mp.CreateWriteClose(baseTestJob.Request.GetPath(), make([]byte, 1023))
 	// Ensure fast start max size is less than the size used for the mock file (1023). This way the
 	// client doesn't try to create a multi-part upload, which can't be done without a real bucket.
