@@ -110,12 +110,16 @@ func (store *NodeStore) SetMetaRootNode(id beegfs.EntityId) error {
 	return nil
 }
 
-// Get the meta root node
+// Get the meta root node. The returned node is a deep copy so the caller can take ownership and do
+// whatever they want with it. If there is no root metadata node this function returns nil.
 func (store *NodeStore) GetMetaRootNode() *beegfs.Node {
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	return store.metaRootNode
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.metaRootNode == nil {
+		return nil
+	}
+	rootMeta := store.metaRootNode.Clone()
+	return &rootMeta
 }
 
 // Returns a single node from the store if the given EntityId exists. The returned Node is a deep

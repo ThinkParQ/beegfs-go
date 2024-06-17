@@ -72,7 +72,10 @@ func (conns *NodeConns) RequestTCP(ctx context.Context, addrs []string, authSecr
 		}
 
 		// If the request was not successful (e.g. due to closed connection, we just try the next
-		// one and do not push it back to the store)
+		// one and do not push it back to the store). Note requests may also fail due to
+		// serialization bugs, for example "BeeMsg body deserialization failed". When that happens
+		// the request will be retried even though it may have partially or completely succeeded on
+		// the server side (for example if there was a bug deserializing the response).
 		conn.Close()
 	}
 

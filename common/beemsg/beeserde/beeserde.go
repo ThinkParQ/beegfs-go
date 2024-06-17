@@ -41,17 +41,26 @@ func NewSerializer(b []byte) Serializer {
 type Serializable interface {
 	// Defines how to serialize the message or type.
 	// Must match its deserialization procedure. If the type is used as a BeeMsg (or an inner value
-	// of one), it must match the definions defined in other locations, e.g. the C++ or Rust codebase.
+	// of one), it must match the definitions defined in other locations, e.g. the C++ or Rust codebase.
 	// Note that failing to match the other languages definition can potentially go through undetected
 	// and might cause undefined behavior (or cause crashes, if you are lucky). The correctness can
-	// currently only be tested manually, so be very cautios.
+	// currently only be tested manually, so be very cautious.
 	Serialize(*Serializer)
 }
 
+// Fail is how Serializable types indicate when serialization should fail for some reason that
+// cannot be detected by the SerializeX functions. Note this should be used sparingly as generally
+// serialization should not be concerned with application logic. Valid use cases include handling
+// enums where strict enforcement of valid variants is required, or when it is not necessary to
+// reimplement serialization logic in Go for deprecated functionality that is no longer supported.
+func (ser *Serializer) Fail(err error) {
+	ser.err = err
+}
+
 // To be called after serialization is done - checks that there was no error.
-func (des *Serializer) Finish() error {
-	if des.err != nil {
-		return des.err
+func (ser *Serializer) Finish() error {
+	if ser.err != nil {
+		return ser.err
 	}
 
 	return nil
@@ -68,6 +77,7 @@ func SerializeInt(ser *Serializer, value any) {
 
 	if err := binary.Write(&ser.Buf, binary.LittleEndian, value); err != nil {
 		ser.err = err
+		return
 	}
 }
 
@@ -82,6 +92,7 @@ func SerializeBytes(ser *Serializer, value []byte) {
 
 	if _, err := ser.Buf.Write(value); err != nil {
 		ser.err = err
+		return
 	}
 }
 
@@ -95,10 +106,17 @@ func SerializeCStr(ser *Serializer, value []byte, alignTo uint) {
 	}
 
 	SerializeInt(ser, uint32(len(value)))
+	if ser.err != nil {
+		return
+	}
 	SerializeBytes(ser, value)
+	if ser.err != nil {
+		return
+	}
 
 	if err := ser.Buf.WriteByte(0); err != nil {
 		ser.err = err
+		return
 	}
 
 	if alignTo != 0 {
@@ -251,10 +269,10 @@ func NewDeserializer(s []byte, msgFeatureFlags uint16) Deserializer {
 type Deserializable interface {
 	// Defines how to deserialize the message or type.
 	// Must match its serialization procedure. If the type is used as a BeeMsg (or an inner value
-	// of one), it must match the definions defined in other locations, e.g. the C++ or Rust codebase.
+	// of one), it must match the definitions defined in other locations, e.g. the C++ or Rust codebase.
 	// Note that failing to match the other languages definition can potentially go through undetected
 	// and might cause undefined behavior (or cause crashes, if you are lucky). The correctness can
-	// currently only be tested manually, so be very cautios.
+	// currently only be tested manually, so be very cautious.
 	Deserialize(*Deserializer)
 }
 
@@ -295,10 +313,12 @@ func DeserializeInt(des *Deserializer, into any) {
 	// pointer.
 	if reflect.ValueOf(into).Type().Kind() != reflect.Pointer {
 		des.err = fmt.Errorf("attempt to deserialize int into non-pointer")
+		return
 	}
 
 	if err := binary.Read(&des.Buf, binary.LittleEndian, into); err != nil {
 		des.err = err
+		return
 	}
 }
 
@@ -313,6 +333,7 @@ func DeserializeBytes(des *Deserializer, into *[]byte) {
 
 	if _, err := des.Buf.Read(*into); err != nil {
 		des.err = err
+		return
 	}
 }
 
@@ -328,12 +349,19 @@ func DeserializeCStr(des *Deserializer, into *[]byte, alignTo uint) {
 
 	var len uint32
 	DeserializeInt(des, &len)
+	if des.err != nil {
+		return
+	}
 
 	*into = make([]byte, len)
 	DeserializeBytes(des, into)
+	if des.err != nil {
+		return
+	}
 
 	if _, err := des.Buf.ReadByte(); err != nil {
 		des.err = err
+		return
 	}
 
 	if alignTo != 0 {
