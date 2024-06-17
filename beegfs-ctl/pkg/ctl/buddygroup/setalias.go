@@ -16,11 +16,11 @@ func SetAlias(ctx context.Context, eid beegfs.EntityId, newAlias beegfs.Alias) e
 	}
 
 	eidp := eid.ToProto()
-	if l := eidp.GetLegacyId(); l != nil {
-		l.EntityType = pb.EntityType_BUDDY_GROUP
-	}
 
-	_, err = client.SetAlias(ctx, &pm.SetAliasRequest{EntityId: eidp, NewAlias: string(newAlias)})
+	_, err = client.SetAlias(ctx, &pm.SetAliasRequest{
+		EntityId:   eidp,
+		EntityType: pb.EntityType_BUDDY_GROUP,
+		NewAlias:   string(newAlias)})
 	if err != nil {
 		return err
 	}

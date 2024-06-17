@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/buddygroup"
+	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/storagepool"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/target"
 	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -64,7 +64,7 @@ var storagePoolMapper = &mapper[beegfs.NumId, beegfs.EntityIdSet]{}
 
 func initStoragePoolMapper(ctx context.Context) error {
 	if storagePoolMapper.mapping == nil {
-		pools, err := storagepool.GetStoragePools(ctx)
+		pools, err := pool.GetStoragePools(ctx)
 		if err != nil {
 			return fmt.Errorf("unable to get storage pool list from management: %w", err)
 		}

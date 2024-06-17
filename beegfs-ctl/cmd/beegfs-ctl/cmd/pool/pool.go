@@ -1,4 +1,4 @@
-package storagepool
+package pool
 
 import (
 	"github.com/spf13/cobra"
@@ -13,6 +13,9 @@ func NewCmd() *cobra.Command {
 
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newSetAliasCmd())
+	cmd.AddCommand(newCreatePoolCmd())
+	cmd.AddCommand(newAssignPoolCmd())
+	cmd.AddCommand(newDeletePoolCmd())
 
 	return cmd
 }

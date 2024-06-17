@@ -32,7 +32,7 @@ func newListCmd() *cobra.Command {
 
 	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "node-type",
 		"Filter by node type")
-	cmd.Flags().Var(beegfs.NewStoragePoolPFlag(&cfg.StoragePool), "storage-pool", "Filter by storage pool.")
+	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.StoragePool, 16, beegfs.Storage), "pool", "Filter by storage pool.")
 	cmd.Flags().BoolVar(&cfg.Capacity, "capacity", false, "Print capacity information.")
 	cmd.Flags().BoolVar(&cfg.State, "state", false, "Print states as seen by the management service.")
 

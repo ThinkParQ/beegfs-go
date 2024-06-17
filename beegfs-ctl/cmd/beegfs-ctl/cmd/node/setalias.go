@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	nodeCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
+	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
 	"github.com/thinkparq/gobee/beegfs"
 )
 
@@ -14,7 +14,8 @@ func newSetAliasCmd() *cobra.Command {
 		Short: "Set node aliases.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			eid, err := beegfs.NewNodeParser().Parse(args[0])
+			eid, err := beegfs.NewEntityIdParser(32,
+				beegfs.Client, beegfs.Meta, beegfs.Storage, beegfs.Management).Parse(args[0])
 			if err != nil {
 				return err
 			}
@@ -32,7 +33,7 @@ func newSetAliasCmd() *cobra.Command {
 }
 
 func runSetAliasCmd(cmd *cobra.Command, eid beegfs.EntityId, newAlias beegfs.Alias) error {
-	err := nodeCmd.SetAlias(cmd.Context(), eid, newAlias)
+	err := backend.SetAlias(cmd.Context(), eid, newAlias)
 	if err != nil {
 		return err
 	}

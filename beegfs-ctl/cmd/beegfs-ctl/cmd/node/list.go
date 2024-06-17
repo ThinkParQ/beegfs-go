@@ -10,7 +10,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	nodeCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
+	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
 	"github.com/thinkparq/gobee/beegfs"
 )
 
@@ -19,7 +19,7 @@ import (
 func newListCmd() *cobra.Command {
 	// The commands configuration. No additional data conversion needed here, so its arguments
 	// are filled directly from the command line flags below.
-	cfg := nodeCmd.GetNodes_Config{}
+	cfg := backend.GetNodes_Config{}
 	// Ctl shall exit with a non-zero value if any node is completely unreachable.
 	// Note that this is not needed by the actual command, so it is not part of its config.
 	reachabilityError := false
@@ -52,17 +52,17 @@ func newListCmd() *cobra.Command {
 // command handler and process its result (e.g. format the output). The actual command handling code
 // shall be put under pkg/ctl with its own interface and called from here. This strict separation
 // allows the implementation of potential alternative frontends later.
-func runListCmd(cmd *cobra.Command, cfg nodeCmd.GetNodes_Config,
+func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	reachabilityError bool) error {
 
 	// Execute the actual command work
-	nodes, err := nodeCmd.GetNodes(cmd.Context(), cfg)
+	nodes, err := backend.GetNodes(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
 
 	// Sort output
-	slices.SortFunc(nodes, func(a, b *nodeCmd.GetNodes_Node) int {
+	slices.SortFunc(nodes, func(a, b *backend.GetNodes_Node) int {
 		if a.Node.Id.NodeType == b.Node.Id.NodeType {
 			return int(a.Node.Id.NumId - b.Node.Id.NumId)
 		} else {

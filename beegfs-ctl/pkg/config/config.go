@@ -171,12 +171,12 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 		// Add node to store
 		nodeStore.AddNode(&beegfs.Node{
-			Uid: beegfs.Uid(n.Id.Uid),
+			Uid: beegfs.Uid(*n.Id.Uid),
 			Id: beegfs.LegacyId{
 				NumId:    beegfs.NumId(n.Id.LegacyId.NumId),
 				NodeType: t,
 			},
-			Alias: beegfs.Alias(n.Id.Alias),
+			Alias: beegfs.Alias(*n.Id.Alias),
 			Nics:  nics,
 		})
 	}

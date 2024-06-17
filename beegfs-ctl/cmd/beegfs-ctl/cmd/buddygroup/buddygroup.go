@@ -12,7 +12,9 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newListCmd())
+	cmd.AddCommand(newCreateBuddyGroupCmd())
 	cmd.AddCommand(newSetAliasCmd())
+	cmd.AddCommand(newDeleteBuddyGroupCmd())
 
 	return cmd
 }
