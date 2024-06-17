@@ -23,7 +23,7 @@ func TestIdFromString(t *testing.T) {
 }
 
 func TestEntityParser(t *testing.T) {
-	f := EntityParser{
+	f := EntityIdParser{
 		idBitSize:         3,
 		acceptedNodeTypes: []NodeType{Meta, Client, Storage},
 	}
@@ -151,7 +151,7 @@ func TestEntityParser(t *testing.T) {
 }
 
 func TestEntityParserWithFixedNodeType(t *testing.T) {
-	f := EntityParser{
+	f := EntityIdParser{
 		idBitSize:         3,
 		acceptedNodeTypes: []NodeType{Storage},
 	}

@@ -25,7 +25,7 @@ import (
 // Implementors also implement fmt.Stringer() so their value can be printed out nicely.
 type EntityId interface {
 	fmt.Stringer
-	ToProto() *pb.EntityIdVariant
+	ToProto() *pb.EntityIdSet
 }
 
 // Represents a BeeGFS entity NumId (e.g. NodeId, TargetId, BuddyGroupId, StoragePoolId). Note that
@@ -62,8 +62,8 @@ func (n LegacyId) String() string {
 }
 
 // Converts into the protobuf representation
-func (n LegacyId) ToProto() *pb.EntityIdVariant {
-	var res = &pb.EntityIdVariant{}
+func (n LegacyId) ToProto() *pb.EntityIdSet {
+	var res = &pb.EntityIdSet{}
 
 	nt := pb.NodeType_NODE_TYPE_UNSPECIFIED
 	switch n.NodeType {
@@ -77,18 +77,17 @@ func (n LegacyId) ToProto() *pb.EntityIdVariant {
 		nt = pb.NodeType_MANAGEMENT
 	}
 
-	res.Variant = &pb.EntityIdVariant_LegacyId{
-		LegacyId: &pb.LegacyId{
-			NumId:    uint32(n.NumId),
-			NodeType: nt,
-		}}
+	res.LegacyId = &pb.LegacyId{
+		NumId:    uint32(n.NumId),
+		NodeType: nt,
+	}
 
 	return res
 }
 
 // An entity uid as provided by the management - the new way of identifying a BeeGFS entity using
 // only one unique id. This id is also unique over all the kinds (nodes, targets, ...).
-type Uid uint64
+type Uid int64
 
 // User friendly output of Uid
 func (n Uid) String() string {
@@ -96,8 +95,9 @@ func (n Uid) String() string {
 }
 
 // Converts into the protobuf representation
-func (n Uid) ToProto() *pb.EntityIdVariant {
-	var res = &pb.EntityIdVariant{Variant: &pb.EntityIdVariant_Uid{Uid: uint64(n)}}
+func (n Uid) ToProto() *pb.EntityIdSet {
+	uid := int64(n)
+	var res = &pb.EntityIdSet{Uid: &uid}
 	return res
 }
 
@@ -112,8 +112,9 @@ func (n Alias) String() string {
 }
 
 // Converts into the protobuf representation
-func (n Alias) ToProto() *pb.EntityIdVariant {
-	var res = &pb.EntityIdVariant{Variant: &pb.EntityIdVariant_Alias{Alias: n.String()}}
+func (n Alias) ToProto() *pb.EntityIdSet {
+	alias := n.String()
+	var res = &pb.EntityIdSet{Alias: &alias}
 	return res
 }
 
@@ -140,7 +141,7 @@ func (n InvalidEntityId) String() string {
 }
 
 // Converts into the protobuf representation
-func (n InvalidEntityId) ToProto() *pb.EntityIdVariant {
+func (n InvalidEntityId) ToProto() *pb.EntityIdSet {
 	return nil
 }
 
@@ -168,8 +169,8 @@ func EntityIdSetFromProto(input *pb.EntityIdSet) (EntityIdSet, error) {
 	}
 
 	res := EntityIdSet{
-		Uid:   Uid(input.Uid),
-		Alias: Alias(input.Alias),
+		Uid:   Uid(*input.Uid),
+		Alias: Alias(*input.Alias),
 		LegacyId: LegacyId{
 			NumId:    NumId(input.LegacyId.NumId),
 			NodeType: nt,
@@ -177,4 +178,8 @@ func EntityIdSetFromProto(input *pb.EntityIdSet) (EntityIdSet, error) {
 	}
 
 	return res, nil
+}
+
+func (s EntityIdSet) String() string {
+	return fmt.Sprintf("%s[%s, %s]", s.Alias, s.LegacyId, s.Uid)
 }

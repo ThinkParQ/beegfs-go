@@ -61,6 +61,23 @@ func NodeTypeFromProto(input pb.NodeType) NodeType {
 	return InvalidNodeType
 }
 
+func (n NodeType) ToProto() *pb.NodeType {
+	nt := pb.NodeType_NODE_TYPE_UNSPECIFIED
+
+	switch n {
+	case Client:
+		nt = pb.NodeType_CLIENT
+	case Meta:
+		nt = pb.NodeType_META
+	case Storage:
+		nt = pb.NodeType_STORAGE
+	case Management:
+		nt = pb.NodeType_MANAGEMENT
+	}
+
+	return &nt
+}
+
 // Output user friendly string representation
 func (n NodeType) String() string {
 	switch n {

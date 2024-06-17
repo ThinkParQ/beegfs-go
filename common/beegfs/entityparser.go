@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Custom EntityParser target variable meant for reading BeeGFS entities (nodes, targets, ...) from the
+// Custom EntityIdParser target variable meant for reading BeeGFS entities (nodes, targets, ...) from the
 // users input. Must be instantiated for the desired entity kind using one of the provided New
 // functions.
 //
@@ -20,55 +20,28 @@ import (
 //     a single integer is also allowed and parses into an IdType of this one
 //   - a string(without a ':'): An entities unique string alias. These are globally unique and
 //     therefore no nodeType is needed. Parses into Alias.
-type EntityParser struct {
-	// The user facing type name of this flag - will show up in the help output
-	typeName string
+type EntityIdParser struct {
 	// If the input is parsed into an Id, this determines the integer size
 	idBitSize int
 	// The node types being accepted as input
 	acceptedNodeTypes []NodeType
 }
 
-// Create a new Parser for a BeeGFS node
-func NewNodeParser() EntityParser {
-	return EntityParser{
-		typeName:          "node",
-		idBitSize:         32,
-		acceptedNodeTypes: []NodeType{Client, Meta, Storage, Management},
+// Creates a new Parser for an entity id. idBitSize defines the allowed id range (e.g. 16 or 32 bit),
+// accepted defines the accepted node types.
+func NewEntityIdParser(idBitSize int, accepted ...NodeType) EntityIdParser {
+	if len(accepted) == 0 {
+		accepted = []NodeType{Client, Meta, Storage, Management}
 	}
-}
 
-// Create a new Parser for a BeeGFS target
-func NewTargetParser() EntityParser {
-	return EntityParser{
-		typeName:          "target",
-		idBitSize:         16,
-		acceptedNodeTypes: []NodeType{Meta, Storage},
-	}
-}
-
-// Create a new Parser for a BeeGFS buddy group
-
-func NewBuddyGroupParser() EntityParser {
-	return EntityParser{
-		typeName:          "buddyGroup",
-		idBitSize:         16,
-		acceptedNodeTypes: []NodeType{Meta, Storage},
-	}
-}
-
-// Create a new Parser for a BeeGFS storage pool
-func NewStoragePoolParser() EntityParser {
-	return EntityParser{
-		typeName:  "storagePool",
-		idBitSize: 16,
-		// Storage pools are only valid with NodeType storage
-		acceptedNodeTypes: []NodeType{Storage},
+	return EntityIdParser{
+		idBitSize:         idBitSize,
+		acceptedNodeTypes: accepted,
 	}
 }
 
 // Parse the input into an EntityId. Returns user friendly errors.
-func (g EntityParser) Parse(input string) (EntityId, error) {
+func (g EntityIdParser) Parse(input string) (EntityId, error) {
 	input = strings.TrimSpace(input)
 
 	// Parses rhs into an Id and returns an IdType object
