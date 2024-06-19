@@ -3,12 +3,15 @@ package config
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg"
+	"github.com/thinkparq/gobee/beemsg/util"
 	"github.com/thinkparq/gobee/filesystem"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -25,30 +28,72 @@ var globalConfigLock sync.Mutex
 
 // Connection settings
 type Config struct {
-	ManagementAddr   string
-	BeeRemoteAddr    string
+	// Managements gRPC listening address
+	ManagementAddr string
+	// BeeRemotes gRPC listening address
+	BeeRemoteAddr string
+	// A BeeGFS mount point on the local file system
 	BeeGFSMountPoint string
-
 	// The timeout for a single(!) connection attempt
 	ConnTimeout time.Duration
-	// The authentication secret to use for BeeMsg communication. 0 means authentication is
-	// disabled.
-	AuthenticationSecret int64
-
+	// File containing the authentication secret (formerly known as "connAuthFile").
+	// Disable authentication if empty or if the default file doesn't exist.
+	AuthFile string
+	// Disable TLS transport security for gRPC communication.
+	TlsDisable bool
+	// Disable TLS server verification for gRPC communication.
+	TlsDisableVerification bool
+	// Use a custom ca certificate for TLS server verification in addition to the system ones.
+	TlsCaCert string
 	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
 	// excluded.
 	Raw bool
-
 	// Tells the command to print additional, normally hidden info. An example would be the entity
 	// UIDs which currently are only used internally and hidden to avoid user confusion.
-	Debug         bool
+	Debug bool
+	// Disable emoji output in certain commands
 	DisableEmojis bool
-	NumWorkers    int
+	// The maximum number of workers to use when a command can complete work in parallel
+	NumWorkers int
 }
 
 // Returns a pointer to the global config singleton
 func Get() *Config {
 	return &globalConfig
+}
+
+// Returns a grpc.DialOption configured according to the global TLS config
+func tlsDialOption() (grpc.DialOption, error) {
+	if globalConfig.TlsDisable {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	} else {
+		certPool, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("couldn't load system cert pool: %w\n", err)
+		}
+
+		// Append custom ca certificate if provided
+		if globalConfig.TlsCaCert != "" {
+			cert, err := os.ReadFile(globalConfig.TlsCaCert)
+			if err != nil {
+				// Silently ignore the default file not being found
+				if globalConfig.TlsCaCert != "/etc/beegfs/cert.pem" {
+					return nil, fmt.Errorf("reading certificate file failed: %w\n", err)
+				}
+			} else {
+				if !certPool.AppendCertsFromPEM(cert) {
+					return nil, fmt.Errorf("appending cert to pool failed")
+				}
+			}
+		}
+
+		creds := credentials.NewTLS(&tls.Config{
+			RootCAs:            certPool,
+			InsecureSkipVerify: globalConfig.TlsDisableVerification,
+		})
+
+		return grpc.WithTransportCredentials(creds), nil
+	}
 }
 
 // Try to establish a connection to the managements gRPC service
@@ -57,14 +102,16 @@ func ManagementClient() (pm.ManagementClient, error) {
 		return nil, fmt.Errorf("management address not set")
 	}
 
+	tlsDialOption, err := tlsDialOption()
+	if err != nil {
+		return nil, err
+	}
+
 	// Open gRPC connection to management.
 	// Since the connection is opened asynchronously in the background, a context for timeouts is
 	// not needed here. A potential timeout on connection will be checked when making an actual
-	// request
-	//
-	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/26
-	// Support TLS.
-	g, err := grpc.Dial(globalConfig.ManagementAddr, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})))
+	// request.
+	g, err := grpc.Dial(globalConfig.ManagementAddr, tlsDialOption)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to management service on %s failed: %w", globalConfig.ManagementAddr, err)
 	}
@@ -77,9 +124,12 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 		return nil, fmt.Errorf("bee-remote address not set")
 	}
 
-	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/26
-	// Support TLS.
-	g, err := grpc.Dial(globalConfig.BeeRemoteAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	tlsDialOption, err := tlsDialOption()
+	if err != nil {
+		return nil, err
+	}
+
+	g, err := grpc.Dial(globalConfig.BeeRemoteAddr, tlsDialOption)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", globalConfig.BeeRemoteAddr, err)
 	}
@@ -133,11 +183,27 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		defer nodeStoreMu.RUnlock()
 		return nodeStore, nil
 	}
+
 	nodeStoreMu.Lock()
 	defer nodeStoreMu.Unlock()
+
+	authSecret := int64(0)
+	// Setup BeeMsg authentication from the given file
+	if globalConfig.AuthFile != "" {
+		key, err := os.ReadFile(globalConfig.AuthFile)
+		if err != nil {
+			// Silently ignore the default file not being found
+			if globalConfig.AuthFile != "/etc/beegfs/conn.auth" {
+				return nil, fmt.Errorf("couldn't read auth file: %w", err)
+			}
+		} else {
+			authSecret = util.GenerateAuthSecret(key)
+		}
+	}
+
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
-	nodeStore = beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)
+	nodeStore = beemsg.NewNodeStore(globalConfig.ConnTimeout, authSecret)
 
 	c, err := ManagementClient()
 	if err != nil {
