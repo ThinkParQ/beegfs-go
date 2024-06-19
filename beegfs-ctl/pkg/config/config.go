@@ -34,7 +34,7 @@ type Config struct {
 	BeeRemoteAddr string
 	// A BeeGFS mount point on the local file system
 	BeeGFSMountPoint string
-	// The timeout for a single(!) connection attempt
+	// The timeout for a single connection attempt
 	ConnTimeout time.Duration
 	// File containing the authentication secret (formerly known as "connAuthFile").
 	// Disable authentication if empty or if the default file doesn't exist.

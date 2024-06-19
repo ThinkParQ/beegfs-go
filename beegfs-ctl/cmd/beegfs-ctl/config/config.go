@@ -2,6 +2,7 @@ package config
 
 import (
 	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -66,6 +67,11 @@ func Init(cmd *cobra.Command) {
 		"The file containing the authentication secret")
 	viper.BindEnv("auth-file", "BEEGFS_AUTH_FILE")
 	viper.BindPFlag("auth-file", cmd.PersistentFlags().Lookup("auth-file"))
+
+	cmd.PersistentFlags().DurationVar(&config.Get().ConnTimeout, "conn-timeout", time.Millisecond*500,
+		"Maximum time for each BeeMsg TCP connection attempt")
+	viper.BindEnv("conn-timeout", "BEEGFS_CONN_TIMEOUT")
+	viper.BindPFlag("conn-timeout", cmd.PersistentFlags().Lookup("conn-timeout"))
 }
 
 func Cleanup() {
