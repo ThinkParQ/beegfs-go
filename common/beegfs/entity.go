@@ -183,3 +183,16 @@ func EntityIdSetFromProto(input *pb.EntityIdSet) (EntityIdSet, error) {
 func (s EntityIdSet) String() string {
 	return fmt.Sprintf("%s[%s, %s]", s.Alias, s.LegacyId, s.Uid)
 }
+
+func (s EntityIdSet) ToProto() *pb.EntityIdSet {
+	uid := s.Uid.ToProto().Uid
+	alias := s.Alias.ToProto().Alias
+	legacyId := s.LegacyId.ToProto().LegacyId
+
+	return &pb.EntityIdSet{
+		Uid:      uid,
+		Alias:    alias,
+		LegacyId: legacyId,
+	}
+
+}

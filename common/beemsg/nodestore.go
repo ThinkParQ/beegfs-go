@@ -39,7 +39,8 @@ type NodeStore struct {
 //
 // The user should call `Cleanup()` to free allocated resources (e.g. TCP sockets) when the store is
 // no longer required.
-func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeStore {
+// Setting authSecret to 0 disables BeeMsg authentication.
+func NewNodeStore(connTimeout time.Duration, authSecret int64) *NodeStore {
 	return &NodeStore{
 		nodesByUid:  make(map[beegfs.Uid]*beegfs.Node),
 		uidByAlias:  make(map[beegfs.Alias]beegfs.Uid),
@@ -47,7 +48,7 @@ func NewNodeStore(connTimeout time.Duration, authenticationSecret int64) *NodeSt
 		connsByUid:  make(map[beegfs.Uid]*util.NodeConns),
 		mutex:       sync.RWMutex{},
 		connTimeout: connTimeout,
-		authSecret:  authenticationSecret,
+		authSecret:  authSecret,
 	}
 }
 

@@ -50,9 +50,11 @@ func (nc *NodeConns) CleanUp() {
 
 // Sends a BeeMsg to one of the given node addresses and receives a response into resp if
 // it is not set to nil. The function tries to reuse existing connections from the NodeConns queue
-// first. If  there are none or none of them worked, a new connection is opened. After successfully
+// first. If there are none or none of them worked, a new connection is opened. After successfully
 // sending and optionally receiving a BeeMsg, the connection is pushed into the queue for reuse.
-// Setting authSecret to 0 disables authentication.
+// Setting authSecret to 0 disables BeeMsg authentication.
+// Note that timeout controls the timeout per connection attempt while the context controls the
+// global timeout. Thus, timeout should be significantly shorter than the global timeout.
 func (conns *NodeConns) RequestTCP(ctx context.Context, addrs []string, authSecret int64,
 	timeout time.Duration, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 

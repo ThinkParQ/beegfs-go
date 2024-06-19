@@ -102,6 +102,8 @@ type connResult struct {
 
 // Connects to a one of the given node addresses by TCP, trying the provided addresses in order.
 // Setting authSecret to 0 disables authentication.
+// Note that timeout controls the timeout per connection attempt while the context controls the
+// global timeout. Thus, timeout should be significantly shorter than the global timeout.
 func ConnectTCP(ctx context.Context, addrs []string, authSecret int64, timeout time.Duration) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
@@ -133,7 +135,9 @@ func ConnectTCP(ctx context.Context, addrs []string, authSecret int64, timeout t
 	return conn, nil
 }
 
-// Attempt to TCP connect to one address at a time with the given timeout
+// Attempt to TCP connect to one address at a time with the given timeout.
+// Note that timeout controls the timeout per connection attempt while the context controls the
+// global timeout.
 func connectLoop(ctx context.Context, addrs []string, timeout time.Duration, ch chan connResult) {
 	defer close(ch)
 	dialer := net.Dialer{Timeout: timeout}
@@ -141,7 +145,8 @@ func connectLoop(ctx context.Context, addrs []string, timeout time.Duration, ch 
 
 	// Try to connect to the node using its addresses in order
 	for _, addr := range addrs {
-		conn, err := dialer.Dial("tcp", addr)
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+
 		if err == nil {
 			// Connection established
 			select {
