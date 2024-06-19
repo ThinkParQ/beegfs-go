@@ -191,12 +191,17 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		})
 	}
 
-	metaRoot, err := beegfs.EntityIdSetFromProto(nodes.GetMetaRootNode())
-	if err != nil {
-		return nil, err
-	}
+	if metaRoot := nodes.GetMetaRootNode(); metaRoot != nil {
+		metaRoot2, err := beegfs.EntityIdSetFromProto(metaRoot)
+		if err != nil {
+			return nil, err
+		}
 
-	nodeStore.SetMetaRootNode(metaRoot.Uid)
+		err = nodeStore.SetMetaRootNode(metaRoot2.Uid)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	return nodeStore, nil
 }
