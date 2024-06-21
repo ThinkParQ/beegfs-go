@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/buddygroup"
@@ -26,15 +27,18 @@ type mapper[C comparable, T any] struct {
 	mapping map[C]T
 }
 
+var (
+	ErrMapperNotInitialized = errors.New("mapper not initialized (this is likely a bug)")
+	ErrMapperNotFound       = errors.New("requested ID not found")
+)
+
 func (m *mapper[C, T]) Get(id C) (t T, err error) {
-	// The error text returned here replicates the errors printed by the old CTL when target
-	// mappings either were unavailable, or there was no mapping for the given ID.
 	if m.mapping == nil {
-		return t, fmt.Errorf("<unknown>")
+		return t, ErrMapperNotInitialized
 	}
 	v, ok := m.mapping[id]
 	if !ok {
-		return t, fmt.Errorf("<unmapped>")
+		return t, ErrMapperNotFound
 	}
 	return v, nil
 }
@@ -59,8 +63,8 @@ func initStorageTargetMapper(ctx context.Context) error {
 	return nil
 }
 
-// Map of legacy storage pool IDs to their full entity ID set including alias (description)
-var storagePoolMapper = &mapper[beegfs.NumId, beegfs.EntityIdSet]{}
+// Map of legacy storage pool IDs to pools.
+var storagePoolMapper = &mapper[beegfs.NumId, pool.GetStoragePools_Result]{}
 
 func initStoragePoolMapper(ctx context.Context) error {
 	if storagePoolMapper.mapping == nil {
@@ -69,9 +73,45 @@ func initStoragePoolMapper(ctx context.Context) error {
 			return fmt.Errorf("unable to get storage pool list from management: %w", err)
 		}
 
-		storagePoolMapper.mapping = make(map[beegfs.NumId]beegfs.EntityIdSet)
+		storagePoolMapper.mapping = make(map[beegfs.NumId]pool.GetStoragePools_Result)
 		for _, pool := range pools {
-			storagePoolMapper.mapping[pool.Pool.LegacyId.NumId] = pool.Pool
+			storagePoolMapper.mapping[pool.Pool.LegacyId.NumId] = pool
+		}
+	}
+	return nil
+}
+
+// Map of storage pool UIDs to pools.
+var storagePoolUIDMapper = &mapper[beegfs.Uid, pool.GetStoragePools_Result]{}
+
+func initStoragePoolUIDMapper(ctx context.Context) error {
+	if storagePoolUIDMapper.mapping == nil {
+		pools, err := pool.GetStoragePools(ctx)
+		if err != nil {
+			return fmt.Errorf("unable to get storage pool list from management: %w", err)
+		}
+
+		storagePoolUIDMapper.mapping = make(map[beegfs.Uid]pool.GetStoragePools_Result)
+		for _, pool := range pools {
+			storagePoolUIDMapper.mapping[pool.Pool.Uid] = pool
+		}
+	}
+	return nil
+}
+
+// Map of storage pool aliases to pools.
+var storagePoolAliasMapper = &mapper[beegfs.Alias, pool.GetStoragePools_Result]{}
+
+func initStoragePoolAliasMapper(ctx context.Context) error {
+	if storagePoolAliasMapper.mapping == nil {
+		pools, err := pool.GetStoragePools(ctx)
+		if err != nil {
+			return fmt.Errorf("unable to get storage pool list from management: %w", err)
+		}
+
+		storagePoolAliasMapper.mapping = make(map[beegfs.Alias]pool.GetStoragePools_Result)
+		for _, pool := range pools {
+			storagePoolAliasMapper.mapping[pool.Pool.Alias] = pool
 		}
 	}
 	return nil
