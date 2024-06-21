@@ -35,17 +35,9 @@ func newEntryInfoCmd() *cobra.Command {
 		Short: "Get details about one or more entries in BeeGFS.",
 		Long: `Get details about one or more entries in BeeGFS.
 
-When supported by the current shell, standard Linux wildcards (globbing patterns) can be used in each path:
-
-- '*': Matches any sequence of characters (e.g., '*.txt' matches all '.txt' files).
-- '?': Matches any single character (e.g., '?.txt' matches 'a.txt', 'b.txt', etc.).
-- '[abc]': Matches any single character listed (e.g., 'file[123].txt' matches 'file1.txt', 'file2.txt', 'file3.txt').
-- '{a,b,c}': Matches any of the patterns provided (e.g., 'file.{txt,pdf}' matches 'file.txt' and 'file.pdf').
-
-Alternative modes: 
-
-- Use the '--recurse' flag to return information about all entries under the specified directory.
-- Read multiple entries from stdin by using '-' as the path (e.g., 'cat file_list.txt | beegfs entry info -').
+Specifying Paths:
+When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
+Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
 		`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
