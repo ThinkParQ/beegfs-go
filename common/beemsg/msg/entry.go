@@ -1,6 +1,7 @@
 package msg
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/thinkparq/gobee/beegfs"
@@ -153,6 +154,35 @@ type StripePattern struct {
 // Equivalent of HasNoPoolFlag in C++.
 const hasNoPoolFlag uint32 = 1 << 24
 
+func (m *StripePattern) Serialize(s *beeserde.Serializer) {
+	// Length is populated at the end once we know the size of the message.
+	lengthPos := s.Buf.Len()
+	beeserde.SerializeInt(s, int32(0))
+	// This flag is for compatibility with really old versions of BeeGFS (e.g., 2014). If we
+	// find a stripe pattern with the no pool flag set, most likely something went wrong or
+	// someone is trying to use CTL with an unsupported version of BeeGFS.
+	if !m.HasPoolID {
+		s.Fail(fmt.Errorf("unsupported message (has no storage pool ID)"))
+	}
+	beeserde.SerializeInt(s, m.Type)
+	beeserde.SerializeInt(s, m.Chunksize)
+	beeserde.SerializeInt(s, m.StoragePoolID)
+	beeserde.SerializeInt(s, m.DefaultNumTargets)
+	switch m.Type {
+	case beegfs.StripePatternRaid0, beegfs.StripePatternBuddyMirror:
+		beeserde.SerializeSeq(s, m.TargetIDs, true, func(out uint16) {
+			beeserde.SerializeInt(s, out)
+		})
+	case beegfs.StripePatternRaid10:
+		s.Fail(fmt.Errorf("unsupported stripe pattern found: %s", beegfs.StripePatternRaid10))
+	default:
+		s.Fail(fmt.Errorf("unknown stripe pattern: %s", m.Type))
+	}
+	// Now populate length:
+	finalLength := s.Buf.Len()
+	binary.LittleEndian.PutUint32(s.Buf.Bytes()[lengthPos:], uint32(finalLength))
+}
+
 func (m *StripePattern) Deserialize(d *beeserde.Deserializer) {
 
 	// First deserialize the StripePatternHeader:
@@ -217,13 +247,93 @@ type RemoteStorageTarget struct {
 	RSTIDs         []uint16
 }
 
+func (m *RemoteStorageTarget) Serialize(s *beeserde.Serializer) {
+	if m.majorVersion == 0 && m.minorVersion == 0 {
+		if m.CoolDownPeriod != 0 || m.Reserved != 0 || m.FilePolicies != 0 || (m.RSTIDs != nil && len(m.RSTIDs) > 0) {
+			// Handle setting the initial major and minor versions
+			m.majorVersion = 1
+			m.minorVersion = 0
+		}
+	}
+	beeserde.SerializeInt(s, m.majorVersion)
+	beeserde.SerializeInt(s, m.minorVersion)
+	beeserde.SerializeInt(s, m.CoolDownPeriod)
+	beeserde.SerializeInt(s, m.Reserved)
+	beeserde.SerializeInt(s, m.FilePolicies)
+	beeserde.SerializeSeq(s, m.RSTIDs, true, func(out uint16) {
+		beeserde.SerializeInt(s, out)
+	})
+}
+
 func (m *RemoteStorageTarget) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.majorVersion)
 	beeserde.DeserializeInt(d, &m.minorVersion)
+	if m.majorVersion > 1 || m.minorVersion != 0 {
+		d.Fail(fmt.Errorf("unsupported RST format (major: %d, minor: %d)", m.majorVersion, m.minorVersion))
+	}
 	beeserde.DeserializeInt(d, &m.CoolDownPeriod)
 	beeserde.DeserializeInt(d, &m.Reserved)
 	beeserde.DeserializeInt(d, &m.FilePolicies)
 	beeserde.DeserializeSeq(d, &m.RSTIDs, true, func(out *uint16) {
 		beeserde.DeserializeInt(d, out)
 	})
+}
+
+type SetDirPatternRequest struct {
+	EntryInfo EntryInfo
+	Pattern   StripePattern
+	RST       RemoteStorageTarget
+	// Uid is an internal field to force callers to use the SetUID method so the hasUid flag is
+	// always set correctly. This is required for serialization to work correctly.
+	uid uint32
+	// Equivalent of the HAS_UID flag from the original SetDirPatternMsg.
+	hasUid bool
+}
+
+func (m *SetDirPatternRequest) MsgId() uint16 {
+	return 2047
+}
+
+func (m *SetDirPatternRequest) Serialize(s *beeserde.Serializer) {
+	m.EntryInfo.Serialize(s)
+	m.Pattern.Serialize(s)
+	m.RST.Serialize(s)
+	if m.hasUid {
+		beeserde.SerializeInt(s, m.uid)
+		s.MsgFeatureFlags = 1
+	}
+}
+
+func (m *SetDirPatternRequest) Deserialize(d *beeserde.Deserializer) {
+	m.EntryInfo.Deserialize(d)
+	m.Pattern.Deserialize(d)
+	m.RST.Deserialize(d)
+	if d.MsgFeatureFlags&1 != 0 {
+		beeserde.DeserializeInt(d, &m.uid)
+		m.hasUid = true
+	}
+}
+
+func (m *SetDirPatternRequest) SetUID(uid uint32) {
+	m.hasUid = true
+	m.uid = uid
+}
+
+func (m *SetDirPatternRequest) GetUID() *uint32 {
+	if m.hasUid {
+		return &m.uid
+	}
+	return nil
+}
+
+type SetDirPatternResponse struct {
+	Result beegfs.OpsErr
+}
+
+func (m *SetDirPatternResponse) MsgId() uint16 {
+	return 2048
+}
+
+func (m *SetDirPatternResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
 }
