@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
@@ -112,14 +111,14 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 		e.MetaBuddyGroup = int(entry.OwnerID)
 	}
 
-	pool, err := storagePoolMapper.Get(beegfs.NumId(entryInfo.Pattern.StoragePoolID))
+	pool, err := storagePoolMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
 	if err == nil {
 		e.Pattern.StoragePoolName = pool.Pool.Alias.String()
 	}
 
 	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 {
 		for _, tgt := range entryInfo.Pattern.TargetIDs {
-			node, err := storageTargetMapper.Get(beegfs.NumId(tgt))
+			node, err := targetMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
 			if err != nil {
 				e.Pattern.StorageTargets[beegfs.NumId(tgt)] = nil
 			} else {
@@ -130,7 +129,7 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 
 	if len(entryInfo.RST.RSTIDs) != 0 {
 		for _, id := range entryInfo.RST.RSTIDs {
-			rst, err := rstMapper.Get(strconv.Itoa(int(id)))
+			rst, err := rstMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(id)})
 			if err != nil {
 				e.Remote.Targets[id] = nil
 			} else {
@@ -194,7 +193,7 @@ func GetEntries(ctx context.Context, cfg GetEntriesConfig) (<-chan *GetEntryComb
 		return nil, nil, fmt.Errorf("unable to proceed without metadata buddy group mappings: %w", err)
 	}
 
-	err = initStorageTargetMapper(ctx)
+	err = initTargetMapper(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to proceed without target-to-node mappings: %w", err)
 	}
@@ -399,7 +398,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, searchPath string) (msg
 		// that to the ID of the current primary metadata node.
 		var metaNodeNumID beegfs.NumId
 		if resp.EntryInfoWithDepth.EntryInfo.FeatureFlags.IsBuddyMirrored() {
-			primaryMetaNode, err := metaBuddyMapper.Get(beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID))
+			primaryMetaNode, err := metaBuddyMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID), NodeType: beegfs.Meta})
 			if err != nil {
 				return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", resp.EntryInfoWithDepth.EntryInfo.OwnerID, err)
 			}

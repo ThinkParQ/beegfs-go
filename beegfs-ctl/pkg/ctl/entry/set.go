@@ -230,29 +230,11 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 	}
 	if newCfg.Pool != nil {
 		pool := pool.GetStoragePools_Result{}
-		var err error
-		switch v := (*newCfg.Pool).(type) {
-		case beegfs.Uid:
-			err = initStoragePoolUIDMapper(ctx)
-			if err != nil {
-				return SetEntryResult{}, err
-			}
-			pool, err = storagePoolUIDMapper.Get(v)
-		case beegfs.Alias:
-			err = initStoragePoolAliasMapper(ctx)
-			if err != nil {
-				return SetEntryResult{}, err
-			}
-			pool, err = storagePoolAliasMapper.Get(v)
-		case beegfs.LegacyId:
-			err = initStoragePoolMapper(ctx)
-			if err != nil {
-				return SetEntryResult{}, err
-			}
-			pool, err = storagePoolMapper.Get(v.NumId)
-		default:
-			err = fmt.Errorf("invalid pool identifier")
+		err := initStoragePoolMapper(ctx)
+		if err != nil {
+			return SetEntryResult{}, err
 		}
+		pool, err = storagePoolMapper.Get(*newCfg.Pool)
 		if err != nil {
 			return SetEntryResult{}, fmt.Errorf("unable to retrieve the specified storage pool %v: %w", *newCfg.Pool, err)
 		}
@@ -267,7 +249,7 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 			if err != nil {
 				return SetEntryResult{}, err
 			}
-			if !newCfg.Force && len(metaBuddyMapper.mapping) == 0 {
+			if !newCfg.Force && len(metaBuddyMapper.mappingByUID) == 0 {
 				return SetEntryResult{}, fmt.Errorf("no buddy groups have been defined to use for stripe pattern %s (use force to override)", strings.ToLower(beegfs.StripePatternBuddyMirror.String()))
 			}
 		}
