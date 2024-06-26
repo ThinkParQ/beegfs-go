@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/thinkparq/gobee/beegfs"
@@ -20,6 +21,7 @@ import (
 // The global config singleton
 var globalConfig Config
 var globalMount filesystem.Provider
+var globalConfigLock sync.Mutex
 
 // Connection settings
 type Config struct {
@@ -119,12 +121,20 @@ func BeeGFSClient(path string) (filesystem.Provider, error) {
 // The global node store singleton
 var nodeStore *beemsg.NodeStore
 
+// nodeStoreMu is used to coordinate initialization of the node store.
+var nodeStoreMu sync.RWMutex
+
 // Return a pointer to the global node store. Initializes and fetches node list on first call.
+// Thread safe so multiple goroutines may call it simultaneously and only the first call will
+// initialize the NodeStore and block the others until initialization completes.
 func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	if nodeStore != nil {
+		nodeStoreMu.RLock()
+		defer nodeStoreMu.RUnlock()
 		return nodeStore, nil
 	}
-
+	nodeStoreMu.Lock()
+	defer nodeStoreMu.Unlock()
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
 	nodeStore = beemsg.NewNodeStore(globalConfig.ConnTimeout, globalConfig.AuthenticationSecret)

@@ -1,11 +1,8 @@
 package entry
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"text/tabwriter"
 
 	"github.com/dsnet/golib/unitconv"
@@ -38,17 +35,9 @@ func newEntryInfoCmd() *cobra.Command {
 		Short: "Get details about one or more entries in BeeGFS.",
 		Long: `Get details about one or more entries in BeeGFS.
 
-When supported by the current shell, standard Linux wildcards (globbing patterns) can be used in each path:
-
-- '*': Matches any sequence of characters (e.g., '*.txt' matches all '.txt' files).
-- '?': Matches any single character (e.g., '?.txt' matches 'a.txt', 'b.txt', etc.).
-- '[abc]': Matches any single character listed (e.g., 'file[123].txt' matches 'file1.txt', 'file2.txt', 'file3.txt').
-- '{a,b,c}': Matches any of the patterns provided (e.g., 'file.{txt,pdf}' matches 'file.txt' and 'file.pdf').
-
-Alternative modes: 
-
-- Use the '--recurse' flag to return information about all entries under the specified directory.
-- Read multiple entries from stdin by using '-' as the path (e.g., 'cat file_list.txt | beegfs entry info -').
+Specifying Paths:
+When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
+Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
 		`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -143,10 +132,6 @@ run:
 				// returning the error.
 				multiErr.Errors = append(multiErr.Errors, err)
 			}
-		case err, ok := <-errChan:
-			if ok {
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
 		}
 	}
 
@@ -154,53 +139,6 @@ run:
 		return &multiErr
 	}
 	return nil
-}
-
-func getDelimiterFromString(s string) (byte, error) {
-	// The default stdin-delimiter used to print the user help won't parse correctly.
-	if s == "\n" {
-		s = `\n`
-	}
-	if unquoted, err := strconv.Unquote(`"` + s + `"`); err == nil && len(unquoted) == 1 {
-		return unquoted[0], nil
-	} else {
-		return 0, fmt.Errorf("the stdin-delimiter must be a single character or valid escape sequence such as \"\\n\" for a newline or \"\\x00\" for null (provided: %s)", s)
-	}
-}
-
-func readPathsFromStdin(ctx context.Context, delimiter byte, pathsChan chan<- string, errChan chan<- error) {
-	scanner := bufio.NewScanner(os.Stdin)
-	splitFunc := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		for i := 0; i < len(data); i++ {
-			if data[i] == delimiter {
-				return i + 1, data[:i], nil
-			}
-		}
-		// When EOF is reached, return what is left:
-		if atEOF && len(data) != 0 {
-			return len(data), data, nil
-		}
-		// Otherwise request more data
-		return 0, nil, nil
-	}
-	scanner.Split(splitFunc)
-
-	func() {
-		defer close(pathsChan)
-		for scanner.Scan() {
-			input := scanner.Text()
-			select {
-			case pathsChan <- input:
-			case <-ctx.Done():
-				errChan <- ctx.Err()
-				return
-			}
-			if err := scanner.Err(); err != nil {
-				errChan <- err
-				return
-			}
-		}
-	}()
 }
 
 func printRetro(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, frontendCfg entryInfoCfg) {
