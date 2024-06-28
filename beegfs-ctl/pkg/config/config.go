@@ -206,7 +206,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		IncludeNics: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting node list from management: %w", err)
 	}
 
 	// Loop through the node entries

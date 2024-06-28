@@ -270,7 +270,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 					errChan <- err
 					return
 				}
-				result, err := getEntry(ctx, searchPath, verbose, false)
+				result, err := GetEntry(ctx, searchPath, verbose, false)
 				if err != nil {
 					errChan <- err
 					return
@@ -285,7 +285,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 	return entriesChan
 }
 
-func getEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
+func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
 	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
 	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is

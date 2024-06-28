@@ -204,7 +204,7 @@ func setEntries(ctx context.Context, newConfig SetEntryConfig, paths <-chan stri
 // called through SetEntries() and is not safe to call directly as it relies on SetEntries() for
 // some config validation to avoid duplicate checking of the newCfg for each entry.
 func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
-	entry, err := getEntry(ctx, searchPath, false, true)
+	entry, err := GetEntry(ctx, searchPath, false, true)
 	if err != nil {
 		return SetEntryResult{}, err
 	}
