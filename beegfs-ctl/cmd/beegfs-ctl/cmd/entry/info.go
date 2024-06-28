@@ -64,7 +64,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\n", "Change the string delimiter used to determine individual paths when read from stdin (e.g., --stdin-delimiter=\"\\x00\" for NULL).")
 	cmd.Flags().BoolVar(&frontendCfg.retroPaths, "retro-print-paths", false, "Print paths at the top of each entry in the retro output.")
 	cmd.Flags().MarkHidden("retro-print-paths")
-	cmd.Flags().IntVar(&frontendCfg.flushInterval, "flush-interval", 10, "Set the number of lines to buffer before flushing output and reprinting the header. Increasing this number can improve alignment but decrease real-time responsiveness. Set to zero to disable printing headers.")
+	cmd.Flags().IntVar(&frontendCfg.flushInterval, "flush-interval", 1000, "Set the number of lines to buffer before flushing output and reprinting the header. Increasing this number can improve alignment but decrease real-time responsiveness. Set to zero to disable printing headers.")
 	return cmd
 }
 
@@ -117,7 +117,7 @@ run:
 			if frontendCfg.retro {
 				printRetro(&w, info, frontendCfg)
 			} else {
-				printTable(&w, info, printHeader)
+				printTable(&w, info, printHeader, frontendCfg)
 				printHeader = false
 			}
 			if frontendCfg.flushInterval > 0 && count%frontendCfg.flushInterval == 0 {
@@ -250,15 +250,23 @@ func printRetro(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, frontendC
 			fmt.Fprintf(w, " + Path: %s\n", info.Entry.Verbose.HashPath[1:])
 			printMetaNodeInfo(info.Entry, true)
 		}
+		if info.Entry.Type == beegfs.EntryRegularFile {
+			fmt.Fprintf(w, "Client Sessions\n")
+			fmt.Fprintf(w, "+ Reading: %d\n+ Writing: %d\n", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite)
+		}
 	}
 	fmt.Fprintf(w, "\n")
 }
 
 // TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/56
 // Finish implementing (mainly just verbose output).
-func printTable(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, printHeader bool) {
+func printTable(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, printHeader bool, frontendCfg entryInfoCfg) {
 	if printHeader {
-		fmt.Fprintf(w, "Path\tEntry ID\tType\tMeta Node\tMeta Mirror\tStorage Pool\tStripe Pattern\tStorage Targets\tBuddy Groups\tRemote Targets\tCool Down\n")
+		fmt.Fprintf(w, "Path\tEntry ID\tType\tMeta Node\tMeta Mirror\tStorage Pool\tStripe Pattern\tStorage Targets\tBuddy Groups\tRemote Targets\tCool Down")
+		if frontendCfg.verbose {
+			fmt.Fprintf(w, "\tClient Sessions")
+		}
+		fmt.Fprintf(w, "\n")
 	}
 	entryRow := fmt.Sprintf("%s\t", info.Path)
 	entryRow += fmt.Sprintf("%s\t%s\t", info.Entry.EntryID, info.Entry.Type)
@@ -320,6 +328,14 @@ func printTable(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, printHead
 		entryRow += fmt.Sprintf("\t%ds", info.Entry.Remote.CoolDownPeriod)
 	} else {
 		entryRow += "(none)\t(n/a)"
+	}
+
+	if frontendCfg.verbose {
+		if info.Entry.Type == beegfs.EntryRegularFile {
+			entryRow += fmt.Sprintf("\tReading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite)
+		} else {
+			entryRow += "\tN/A"
+		}
 	}
 
 	fmt.Fprintf(w, "%s\n", entryRow)
