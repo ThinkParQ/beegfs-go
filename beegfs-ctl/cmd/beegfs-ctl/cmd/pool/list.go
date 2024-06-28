@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
@@ -31,7 +32,7 @@ func runListCmd(cmd *cobra.Command) error {
 	w := cmdfmt.NewTableWriter(os.Stdout)
 	defer w.Flush()
 
-	if config.Get().Debug {
+	if viper.GetBool(config.DebugKey) {
 		fmt.Fprint(&w, "UID\t")
 	}
 	fmt.Fprint(&w, "Alias\tID\tMembers\t")
@@ -39,7 +40,7 @@ func runListCmd(cmd *cobra.Command) error {
 	fmt.Fprintln(&w)
 
 	for _, p := range pools {
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%d\t", p.Pool.Uid)
 		}
 
@@ -49,13 +50,13 @@ func runListCmd(cmd *cobra.Command) error {
 		for _, t := range p.Targets {
 			if !first {
 				fmt.Fprint(&w, "\n\t\t")
-				if config.Get().Debug {
+				if viper.GetBool(config.DebugKey) {
 					fmt.Fprint(&w, "\t")
 				}
 			}
 			first = false
 
-			if config.Get().Debug {
+			if viper.GetBool(config.DebugKey) {
 				fmt.Fprintf(&w, "%v\t", t)
 			} else {
 				fmt.Fprintf(&w, "%s\t", t.Alias.String())
@@ -65,13 +66,13 @@ func runListCmd(cmd *cobra.Command) error {
 		for _, t := range p.BuddyGroups {
 			if !first {
 				fmt.Fprint(&w, "\n\t\t")
-				if config.Get().Debug {
+				if viper.GetBool(config.DebugKey) {
 					fmt.Fprint(&w, "\t")
 				}
 			}
 			first = false
 
-			if config.Get().Debug {
+			if viper.GetBool(config.DebugKey) {
 				fmt.Fprintf(&w, "%v\t", t)
 			} else {
 				fmt.Fprintf(&w, "%s\t", t.Alias.String())

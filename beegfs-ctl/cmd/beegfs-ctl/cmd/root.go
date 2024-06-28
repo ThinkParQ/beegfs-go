@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/entry"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
@@ -44,7 +45,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		`, longHelpHeader, strings.Repeat("=", len(longHelpHeader))),
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if config.Get().NumWorkers < 1 {
+			if viper.GetInt(config.NumWorkersKey) < 1 {
 				return fmt.Errorf("the number of workers must be at least 1")
 			}
 			return nil
@@ -59,7 +60,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 
 	// Initialize global config
 	// Can be accessed at config.Config and passed to the ctl API
-	cmdConfig.Init(cmd)
+	cmdConfig.InitGlobalFlags(cmd)
 	defer cmdConfig.Cleanup()
 
 	// Add subcommands

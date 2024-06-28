@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
@@ -79,7 +80,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	defer w.Flush()
 
 	// Print the tables header. Columns must end with a tabstop \t, including the last one.
-	if config.Get().Debug {
+	if viper.GetBool(config.DebugKey) {
 		fmt.Fprint(&w, "UID\t")
 	}
 	fmt.Fprint(&w, "NodeID\tAlias\t")
@@ -96,7 +97,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	// Print and process node list
 	for _, node := range nodes {
 		// Print a line corresponding to the columns above
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%d\t", node.Node.Uid)
 		}
 		fmt.Fprintf(&w, "%s\t%s\t", node.Node.Id, node.Node.Alias)
@@ -109,7 +110,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 				// Align Nic on additional lines
 				if !first {
 					fmt.Fprintf(&w, "\n\t\t")
-					if config.Get().Debug {
+					if viper.GetBool(config.DebugKey) {
 						fmt.Fprintf(&w, "\t")
 					}
 				}

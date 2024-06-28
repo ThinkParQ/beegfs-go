@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
@@ -195,7 +196,7 @@ func (f *rstsFlag) Set(value string) error {
 	for _, str := range rstStrings {
 		parsedRST, err := strconv.ParseUint(str, 10, 16)
 		if err != nil {
-			if config.Get().Debug {
+			if viper.GetBool(config.DebugKey) {
 				return fmt.Errorf("error parsing RST ID %s: %w", str, err)
 			}
 			return fmt.Errorf("invalid RST ID %s", str)

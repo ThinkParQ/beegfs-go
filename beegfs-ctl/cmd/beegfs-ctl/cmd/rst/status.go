@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
@@ -165,7 +166,7 @@ func convertJobStateToEmoji(state beeremote.Job_State) string {
 	if !exists {
 		return "�"
 	}
-	if !config.Get().DisableEmojis {
+	if !viper.GetBool(config.DisableEmojisKey) {
 		return representation.emoji
 	}
 	return representation.alternative
@@ -192,7 +193,7 @@ func convertWorkStateToEmoji(state flex.Work_State) string {
 	if !exists {
 		return "�"
 	}
-	if !config.Get().DisableEmojis {
+	if !viper.GetBool(config.DisableEmojisKey) {
 		return representation.emoji
 	}
 	return representation.alternative

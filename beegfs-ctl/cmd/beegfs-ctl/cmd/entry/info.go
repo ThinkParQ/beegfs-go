@@ -7,6 +7,7 @@ import (
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/entry"
@@ -174,7 +175,7 @@ func printRetro(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, frontendC
 
 	fmt.Fprintf(w, "Stripe pattern details:\n")
 	fmt.Fprintf(w, "+ Type: %s\n", info.Entry.Pattern.Type)
-	if config.Get().Raw {
+	if viper.GetBool(config.RawKey) {
 		fmt.Fprintf(w, "+ Chunksize: %d\n", info.Entry.Pattern.Chunksize)
 	} else {
 		fmt.Fprintf(w, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
@@ -271,7 +272,7 @@ func printTable(w *tabwriter.Writer, info *entry.GetEntryCombinedInfo, printHead
 
 	entryRow += fmt.Sprintf("%s (%d)\t", info.Entry.Pattern.StoragePoolName, info.Entry.Pattern.StoragePoolID)
 
-	if config.Get().Raw {
+	if viper.GetBool(config.RawKey) {
 		entryRow += fmt.Sprintf("%s (%dx%d)\t", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, info.Entry.Pattern.Chunksize)
 	} else {
 		entryRow += fmt.Sprintf("%s (%dx%s)\t", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
