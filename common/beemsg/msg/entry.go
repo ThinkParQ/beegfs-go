@@ -113,7 +113,9 @@ type GetEntryInfoResponse struct {
 	Path    PathInfo
 	RST     RemoteStorageTarget
 	// Metadata mirror node (0 means none). Note this is no longer in use and thus always set to 0.
-	MirrorNodeID uint16
+	MirrorNodeID     uint16
+	NumSessionsRead  uint32
+	NumSessionsWrite uint32
 }
 
 func (m *GetEntryInfoResponse) MsgId() uint16 {
@@ -126,6 +128,8 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	m.Path.Deserialize(d)
 	m.RST.Deserialize(d)
 	beeserde.DeserializeInt(d, &m.MirrorNodeID)
+	beeserde.DeserializeInt(d, &m.NumSessionsRead)
+	beeserde.DeserializeInt(d, &m.NumSessionsWrite)
 }
 
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
