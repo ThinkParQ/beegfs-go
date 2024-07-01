@@ -2,6 +2,7 @@ package config
 
 import (
 	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -47,8 +48,30 @@ func Init(cmd *cobra.Command) {
 	viper.BindEnv("num-workers", "BEEGFS_NUM_WORKERS")
 	viper.BindPFlag("num-workers", cmd.PersistentFlags().Lookup("num-workers"))
 
-	// TODO authenticationSecret need custom action to parse it (must be loaded from file)
-	// See here: https://github.com/ThinkParQ/beegfs-ctl/issues/5
+	cmd.PersistentFlags().BoolVar(&config.Get().TlsDisable, "tls-disable", false,
+		"Disable TLS for gRPC communication")
+	viper.BindEnv("tls-disable", "BEEGFS_TLS_DISABLE")
+	viper.BindPFlag("tls-disable", cmd.PersistentFlags().Lookup("tls-disable"))
+
+	cmd.PersistentFlags().StringVar(&config.Get().TlsCaCert, "tls-ca-cert", "/etc/beegfs/cert.pem",
+		"Use a custom CA certificate for server verification")
+	viper.BindEnv("tls-ca-cert", "BEEGFS_TLS_CA_CERT")
+	viper.BindPFlag("tls-ca-cert", cmd.PersistentFlags().Lookup("tls-ca-cert"))
+
+	cmd.PersistentFlags().BoolVar(&config.Get().TlsDisableVerification, "tls-disable-verification", false,
+		"Disable TLS server verification")
+	viper.BindEnv("tls-disable-verification", "BEEGFS_TLS_DISABLE_VERIFICATION")
+	viper.BindPFlag("tls-disable-verification", cmd.PersistentFlags().Lookup("tls-disable-verification"))
+
+	cmd.PersistentFlags().StringVar(&config.Get().AuthFile, "auth-file", "/etc/beegfs/conn.auth",
+		"The file containing the authentication secret")
+	viper.BindEnv("auth-file", "BEEGFS_AUTH_FILE")
+	viper.BindPFlag("auth-file", cmd.PersistentFlags().Lookup("auth-file"))
+
+	cmd.PersistentFlags().DurationVar(&config.Get().ConnTimeout, "conn-timeout", time.Millisecond*500,
+		"Maximum time for each BeeMsg TCP connection attempt")
+	viper.BindEnv("conn-timeout", "BEEGFS_CONN_TIMEOUT")
+	viper.BindPFlag("conn-timeout", cmd.PersistentFlags().Lookup("conn-timeout"))
 }
 
 func Cleanup() {
