@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
 	"github.com/thinkparq/gobee/beegfs"
@@ -144,10 +145,10 @@ func setEntries(ctx context.Context, newConfig SetEntryConfig, paths <-chan stri
 		// Because multiple workers may write to this channel it is closed by the parent goroutine
 		// once all workers return.
 		defer close(entriesChan)
-		numWorkers := config.Get().NumWorkers
+		numWorkers := viper.GetInt(config.NumWorkersKey)
 		if numWorkers > 1 {
 			// One worker will be dedicated for the walkDir function unless there is only one CPU.
-			numWorkers = config.Get().NumWorkers - 1
+			numWorkers = viper.GetInt(config.NumWorkersKey) - 1
 		}
 		wg := sync.WaitGroup{}
 		// If any of the workers encounter an error, this context is used to signal to the other

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/buddygroup"
@@ -41,7 +42,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 	w := cmdfmt.NewTableWriter(os.Stdout)
 	defer w.Flush()
 
-	if config.Get().Debug {
+	if viper.GetBool(config.DebugKey) {
 		fmt.Fprint(&w, "UID\t")
 	}
 	fmt.Fprint(&w, "Alias\tID\tPrimary\tSecondary\t")
@@ -53,13 +54,13 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			continue
 		}
 
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%d\t", beegfs.Uid(t.BuddyGroup.Uid))
 		}
 
 		fmt.Fprintf(&w, "%s\t%s\t", t.BuddyGroup.Alias, t.BuddyGroup.LegacyId)
 
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%v (%s)\t", t.PrimaryTarget, t.PrimaryConsistencyState)
 			fmt.Fprintf(&w, "%v (%s)\t", t.SecondaryTarget, t.SecondaryConsistencyState)
 		} else {

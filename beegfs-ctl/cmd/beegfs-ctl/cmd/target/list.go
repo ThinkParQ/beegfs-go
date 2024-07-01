@@ -6,6 +6,7 @@ import (
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/target"
@@ -48,7 +49,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 	w := cmdfmt.NewTableWriter(os.Stdout)
 	defer w.Flush()
 
-	if config.Get().Debug {
+	if viper.GetBool(config.DebugKey) {
 		fmt.Fprint(&w, "UID\t")
 	}
 	fmt.Fprint(&w, "Alias\tID\tOn Node\tOn Storage Pool\tLast Contact\t")
@@ -90,20 +91,20 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			}
 		}
 
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%d\t", beegfs.Uid(t.Target.Uid))
 		}
 
 		fmt.Fprintf(&w, "%s\t%s\t", t.Target.Alias, t.Target.LegacyId)
 
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "%v\t", t.Node)
 		} else {
 			fmt.Fprintf(&w, "%s\t", t.Node.Alias)
 		}
 
 		if t.StoragePool != nil {
-			if config.Get().Debug {
+			if viper.GetBool(config.DebugKey) {
 				fmt.Fprintf(&w, "%v\t", t.StoragePool)
 			} else {
 				fmt.Fprintf(&w, "%s\t", t.StoragePool.Alias)
@@ -124,7 +125,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 
 		if cfg.Capacity {
 			if t.FreeSpaceBytes != nil {
-				if config.Get().Raw {
+				if viper.GetBool(config.RawKey) {
 					fmt.Fprintf(&w, "%d/", *t.FreeSpaceBytes)
 				} else {
 					fmt.Fprintf(&w, "%sB/", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 0))
@@ -134,7 +135,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			}
 
 			if t.TotalSpaceBytes != nil {
-				if config.Get().Raw {
+				if viper.GetBool(config.RawKey) {
 					fmt.Fprintf(&w, "%d\t", *t.TotalSpaceBytes)
 				} else {
 					fmt.Fprintf(&w, "%sB\t", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 0))
@@ -144,7 +145,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			}
 
 			if t.FreeInodes != nil {
-				if config.Get().Raw {
+				if viper.GetBool(config.RawKey) {
 					fmt.Fprintf(&w, "%d/", *t.FreeInodes)
 				} else {
 					fmt.Fprintf(&w, "%s/", unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 0))
@@ -154,7 +155,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			}
 
 			if t.TotalInodes != nil {
-				if config.Get().Raw {
+				if viper.GetBool(config.RawKey) {
 					fmt.Fprintf(&w, "%d\t", *t.TotalInodes)
 				} else {
 					fmt.Fprintf(&w, "%s\t", unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 0))

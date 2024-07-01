@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
@@ -43,8 +44,8 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 	}
 
 	request := &beeremote.GetJobsRequest{
-		IncludeWorkRequests: cfg.Verbose || config.Get().Debug,
-		IncludeWorkResults:  cfg.Verbose || config.Get().Debug,
+		IncludeWorkRequests: cfg.Verbose || viper.GetBool(config.DebugKey),
+		IncludeWorkResults:  cfg.Verbose || viper.GetBool(config.DebugKey),
 	}
 
 	switch {

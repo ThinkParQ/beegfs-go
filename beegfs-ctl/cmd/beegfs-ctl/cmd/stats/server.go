@@ -9,6 +9,7 @@ import (
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/stats"
@@ -133,9 +134,9 @@ func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer
 		return err
 	}
 
-	printHeader(w, true, config.Get().Debug)
+	printHeader(w, true, viper.GetBool(config.DebugKey))
 	for _, serverStats := range perServerstatsResult {
-		cmdfmt.PrintNodeInfoRow(w, serverStats.Node, config.Get().Debug)
+		cmdfmt.PrintNodeInfoRow(w, serverStats.Node, viper.GetBool(config.DebugKey))
 		printData(w, serverStats.Stats)
 	}
 
@@ -182,7 +183,7 @@ func printData(w *tabwriter.Writer, stat stats.Stats) {
 	fmt.Fprintf(w, "%d\t", stat.WorkRequests)
 	fmt.Fprintf(w, "%d\t", stat.BusyWorkers)
 
-	if config.Get().Raw {
+	if viper.GetBool(config.RawKey) {
 		fmt.Fprintf(w, "%d\t", stat.DiskWriteBytes)
 		fmt.Fprintf(w, "%d\t", stat.DiskReadBytes)
 		fmt.Fprintf(w, "%d\t", stat.NetSendBytes)

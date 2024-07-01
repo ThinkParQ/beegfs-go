@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
@@ -64,7 +65,7 @@ func runCleanupCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 
 	for _, job := range response.Results {
 		fmt.Fprintf(&w, "\tJob: %s\n", job.GetJob())
-		if config.Get().Debug {
+		if viper.GetBool(config.DebugKey) {
 			fmt.Fprintf(&w, "\t\tWork Requests:\n")
 			for _, wr := range job.GetWorkRequests() {
 				fmt.Fprintf(&w, "\t\t\t%s\n", wr)

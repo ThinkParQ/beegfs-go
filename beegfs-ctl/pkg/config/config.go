@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
+	"github.com/spf13/viper"
 	"github.com/thinkparq/gobee/beegfs"
 	"github.com/thinkparq/gobee/beemsg"
 	"github.com/thinkparq/gobee/beemsg/util"
@@ -21,50 +21,45 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Viper keys for the global config. Should be used when accessing it instead of raw strings.
+// Currently these are also used by the frontend for command line flag and env variable names.
+const (
+	// Managements gRPC listening address
+	ManagementAddrKey = "mgmtd-addr"
+	// BeeRemotes gRPC listening address
+	BeeRemoteAddrKey = "bee-remote-addr"
+	// A BeeGFS mount point on the local file system
+	BeeGFSMountPointKey = "mount-point"
+	// The timeout for a single connection attempt
+	ConnTimeoutKey = "conn-timeout"
+	// File containing the authentication secret (formerly known as "connAuthFile").
+	// Disable authentication if empty or if the default file doesn't exist.
+	AuthFileKey = "auth-file"
+	// Disable TLS transport security for gRPC communication.
+	TlsDisableKey = "tls-disable"
+	// Disable TLS server verification for gRPC communication.
+	TlsDisableVerificationKey = "tls-disable-verification"
+	// Use a custom ca certificate for TLS server verification in addition to the system ones.
+	TlsCaCertKey = "tls-ca-cert"
+	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
+	// excluded.
+	RawKey = "raw"
+	// Tells the command to print additional, normally hidden info. An example would be the entity
+	// UIDs which currently are only used internally and hidden to avoid user confusion.
+	DebugKey = "debug"
+	// Disable emoji output in certain commands
+	DisableEmojisKey = "disable-emojis"
+	// The maximum number of workers to use when a command can complete work in parallel
+	NumWorkersKey = "num-workers"
+)
+
 // The global config singleton
-var globalConfig Config
 var globalMount filesystem.Provider
 var globalConfigLock sync.Mutex
 
-// Connection settings
-type Config struct {
-	// Managements gRPC listening address
-	ManagementAddr string
-	// BeeRemotes gRPC listening address
-	BeeRemoteAddr string
-	// A BeeGFS mount point on the local file system
-	BeeGFSMountPoint string
-	// The timeout for a single connection attempt
-	ConnTimeout time.Duration
-	// File containing the authentication secret (formerly known as "connAuthFile").
-	// Disable authentication if empty or if the default file doesn't exist.
-	AuthFile string
-	// Disable TLS transport security for gRPC communication.
-	TlsDisable bool
-	// Disable TLS server verification for gRPC communication.
-	TlsDisableVerification bool
-	// Use a custom ca certificate for TLS server verification in addition to the system ones.
-	TlsCaCert string
-	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
-	// excluded.
-	Raw bool
-	// Tells the command to print additional, normally hidden info. An example would be the entity
-	// UIDs which currently are only used internally and hidden to avoid user confusion.
-	Debug bool
-	// Disable emoji output in certain commands
-	DisableEmojis bool
-	// The maximum number of workers to use when a command can complete work in parallel
-	NumWorkers int
-}
-
-// Returns a pointer to the global config singleton
-func Get() *Config {
-	return &globalConfig
-}
-
 // Returns a grpc.DialOption configured according to the global TLS config
 func tlsDialOption() (grpc.DialOption, error) {
-	if globalConfig.TlsDisable {
+	if viper.GetBool(TlsDisableKey) {
 		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
 	} else {
 		certPool, err := x509.SystemCertPool()
@@ -73,11 +68,11 @@ func tlsDialOption() (grpc.DialOption, error) {
 		}
 
 		// Append custom ca certificate if provided
-		if globalConfig.TlsCaCert != "" {
-			cert, err := os.ReadFile(globalConfig.TlsCaCert)
+		if viper.GetString(TlsCaCertKey) != "" {
+			cert, err := os.ReadFile(viper.GetString(TlsCaCertKey))
 			if err != nil {
 				// Silently ignore the default file not being found
-				if globalConfig.TlsCaCert != "/etc/beegfs/cert.pem" {
+				if viper.IsSet(TlsCaCertKey) {
 					return nil, fmt.Errorf("reading certificate file failed: %w\n", err)
 				}
 			} else {
@@ -89,7 +84,7 @@ func tlsDialOption() (grpc.DialOption, error) {
 
 		creds := credentials.NewTLS(&tls.Config{
 			RootCAs:            certPool,
-			InsecureSkipVerify: globalConfig.TlsDisableVerification,
+			InsecureSkipVerify: viper.GetBool(TlsDisableVerificationKey),
 		})
 
 		return grpc.WithTransportCredentials(creds), nil
@@ -98,9 +93,7 @@ func tlsDialOption() (grpc.DialOption, error) {
 
 // Try to establish a connection to the managements gRPC service
 func ManagementClient() (pm.ManagementClient, error) {
-	if globalConfig.ManagementAddr == "" {
-		return nil, fmt.Errorf("management address not set")
-	}
+	addr := viper.GetString(ManagementAddrKey)
 
 	tlsDialOption, err := tlsDialOption()
 	if err != nil {
@@ -111,27 +104,25 @@ func ManagementClient() (pm.ManagementClient, error) {
 	// Since the connection is opened asynchronously in the background, a context for timeouts is
 	// not needed here. A potential timeout on connection will be checked when making an actual
 	// request.
-	g, err := grpc.Dial(globalConfig.ManagementAddr, tlsDialOption)
+	g, err := grpc.Dial(addr, tlsDialOption)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to management service on %s failed: %w", globalConfig.ManagementAddr, err)
+		return nil, fmt.Errorf("connecting to management service on %s failed: %w", addr, err)
 	}
 
 	return pm.NewManagementClient(g), nil
 }
 
 func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
-	if globalConfig.BeeRemoteAddr == "" {
-		return nil, fmt.Errorf("bee-remote address not set")
-	}
+	addr := viper.GetString(BeeRemoteAddrKey)
 
 	tlsDialOption, err := tlsDialOption()
 	if err != nil {
 		return nil, err
 	}
 
-	g, err := grpc.Dial(globalConfig.BeeRemoteAddr, tlsDialOption)
+	g, err := grpc.Dial(addr, tlsDialOption)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", globalConfig.BeeRemoteAddr, err)
+		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", addr, err)
 	}
 
 	return beeremote.NewBeeRemoteClient(g), nil
@@ -156,8 +147,8 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 func BeeGFSClient(path string) (filesystem.Provider, error) {
 	if globalMount == nil {
 		var err error
-		if globalConfig.BeeGFSMountPoint != "" {
-			globalMount, err = filesystem.NewFromPath(globalConfig.BeeGFSMountPoint)
+		if viper.IsSet(BeeGFSMountPointKey) {
+			globalMount, err = filesystem.NewFromPath(viper.GetString(BeeGFSMountPointKey))
 		} else {
 			globalMount, err = filesystem.NewFromPath(path)
 		}
@@ -189,11 +180,11 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	authSecret := int64(0)
 	// Setup BeeMsg authentication from the given file
-	if globalConfig.AuthFile != "" {
-		key, err := os.ReadFile(globalConfig.AuthFile)
+	if viper.GetString(AuthFileKey) != "" {
+		key, err := os.ReadFile(viper.GetString(AuthFileKey))
 		if err != nil {
 			// Silently ignore the default file not being found
-			if globalConfig.AuthFile != "/etc/beegfs/conn.auth" {
+			if viper.IsSet(AuthFileKey) {
 				return nil, fmt.Errorf("couldn't read auth file: %w", err)
 			}
 		} else {
@@ -203,7 +194,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
-	nodeStore = beemsg.NewNodeStore(globalConfig.ConnTimeout, authSecret)
+	nodeStore = beemsg.NewNodeStore(viper.GetDuration(ConnTimeoutKey), authSecret)
 
 	c, err := ManagementClient()
 	if err != nil {
@@ -277,7 +268,5 @@ func Cleanup() {
 	if nodeStore != nil {
 		nodeStore.Cleanup()
 	}
-
-	globalConfig = Config{}
 	nodeStore = nil
 }

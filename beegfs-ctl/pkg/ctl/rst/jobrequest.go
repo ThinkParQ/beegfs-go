@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -198,10 +199,10 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 		}
 	}
 
-	numWorkers := config.Get().NumWorkers
+	numWorkers := viper.GetInt(config.NumWorkersKey)
 	if numWorkers > 1 {
 		// One worker will be dedicated for walkDir (this function) unless there is only one CPU.
-		numWorkers = config.Get().NumWorkers - 1
+		numWorkers = viper.GetInt(config.NumWorkersKey) - 1
 	}
 
 	for range numWorkers {
