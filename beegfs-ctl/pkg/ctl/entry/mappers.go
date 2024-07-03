@@ -7,11 +7,12 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/buddygroup"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/target"
 	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
@@ -142,9 +143,14 @@ func initRSTMapper(ctx context.Context) error {
 	if rstMapper.mappingByUID == nil &&
 		rstMapper.mappingByAlias == nil &&
 		rstMapper.mappingByLegacyID == nil {
-		rsts, err := rst.GetRSTConfig(ctx)
+		beeRemote, err := config.BeeRemoteClient()
 		if err != nil {
-			return fmt.Errorf("unable to get Remote Storage Target configuration from BeeRemote: %w", err)
+			return err
+		}
+		// Don't call into RST package because it needs to call GetEntry which would cause an import cycle.
+		rsts, err := beeRemote.GetRSTConfig(ctx, &beeremote.GetRSTConfigRequest{})
+		if err != nil {
+			return err
 		}
 		rstMapper.mappingByAlias = make(map[beegfs.Alias]*flex.RemoteStorageTarget)
 		rstMapper.mappingByUID = make(map[beegfs.Uid]*flex.RemoteStorageTarget)

@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -25,9 +27,11 @@ type SyncJobRequestCfg struct {
 	RemotePath string
 	Download   bool
 	ChanSize   int
+	Force      bool
 }
 
 type SyncJobResponse struct {
+	Path     string
 	Result   *beeremote.JobResult
 	Err      error
 	FatalErr bool
@@ -106,25 +110,42 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 		},
 	}
 
+	// Ignore readers and writers when force is set. Otherwise for uploads we can always ignore
+	// readers. For downloads we should check for readers or writers.
+	ignoreReaders := cfg.Force
+	ignoreWriters := cfg.Force
+	if baseRequest.GetSync().Operation == flex.SyncJob_UPLOAD {
+		ignoreReaders = true
+	}
+
 	if !isDir {
 		// Complete the request in a separate goroutine otherwise if the caller provided an
 		// unbuffered channel we would block here.
 		go func() {
+			defer close(respChan)
 			baseRequest.Path = pathInMount
-			resp, err := beeRemote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: baseRequest})
+			resp := &SyncJobResponse{
+				Path: baseRequest.Path,
+			}
+			rstIDs, err := checkEntryAndDetermineRSTs(ctx, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
 			if err != nil {
-				respChan <- &SyncJobResponse{
-					Result: nil,
-					Err:    err,
-				}
-			} else {
-				respChan <- &SyncJobResponse{
-					// We have to check the error because resp could be nil.
-					Result: resp.Result,
-					Err:    nil,
+				resp.Err = err
+				respChan <- resp
+				return
+			}
+			for _, rst := range rstIDs {
+				baseRequest.RemoteStorageTarget = rst
+				r, err := beeRemote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: baseRequest})
+				if err != nil {
+					// We have to check the error because r could be nil so we shouldn't try and
+					// deference resp to set the resp.Result.
+					resp.Err = err
+					respChan <- resp
+				} else {
+					resp.Result = r.Result
+					respChan <- resp
 				}
 			}
-			close(respChan)
 		}()
 		return respChan, nil
 	}
@@ -158,6 +179,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 				req.Path, err = beegfs.GetRelativePathWithinMount(path)
 				if err != nil {
 					respChan <- &SyncJobResponse{
+						Path:   path,
 						Result: nil,
 						Err:    err,
 					}
@@ -167,32 +189,41 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 					cancel()
 					return
 				}
-				resp, err := beeRemote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: req})
+
+				resp := &SyncJobResponse{
+					Path: req.Path,
+				}
+
+				rstIDs, err := checkEntryAndDetermineRSTs(ctx, req.RemoteStorageTarget, req.Path, ignoreReaders, ignoreWriters)
 				if err != nil {
-					if st, ok := status.FromError(err); ok {
-						switch st.Code() {
-						case codes.Unavailable:
-							respChan <- &SyncJobResponse{
-								Result:   nil,
-								Err:      fmt.Errorf("fatal error sending request to BeeRemote: %w", err),
-								FatalErr: true,
+					resp.Err = err
+					respChan <- resp
+					continue
+				}
+
+				for _, rst := range rstIDs {
+					req.RemoteStorageTarget = rst
+					r, err := beeRemote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: req})
+					if err != nil {
+						// We have to check the error because r could be nil so we shouldn't try and
+						// deference r to set the resp.Result and some errors are handled specially.
+						if st, ok := status.FromError(err); ok {
+							switch st.Code() {
+							case codes.Unavailable:
+								resp.Err = fmt.Errorf("fatal error sending request to BeeRemote: %w", err)
+								resp.FatalErr = true
+								respChan <- resp
+								// This would happen if there is an error connecting to BeeRemote.
+								// Don't keep trying and signal other goroutines to shutdown as well.
+								cancel()
+								return
 							}
-							// This would happen if there is an error connecting to BeeRemote.
-							// Don't keep trying and signal other goroutines to shutdown as well.
-							cancel()
-							return
 						}
-					}
-					respChan <- &SyncJobResponse{
-						Result: nil,
-						Err:    err,
-					}
-				} else {
-					respChan <- &SyncJobResponse{
-						// We have to check the error because resp could be nil, and we want to
-						// handle certain errors specially.
-						Result: resp.Result,
-						Err:    err,
+						resp.Err = err
+						respChan <- resp
+					} else {
+						resp.Result = r.Result
+						respChan <- resp
 					}
 				}
 			}
@@ -248,4 +279,44 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 	}()
 
 	return respChan, nil
+}
+
+// checkEntryAndDetermineRSTs returns specific errors if any clients have the specified path open
+// for reading, writing, or both. These checks can be skipped for readers and/or writers by setting
+// the ignoreX arguments. If rstID is set it returns a slice with only that RST otherwise it checks
+// if any RSTs are set on the entry and returns a slice with each of the RSTs, or ErrFileHasNoRSTs
+// if rstID is not set and the entry has no RSTs defined.
+func checkEntryAndDetermineRSTs(ctx context.Context, rstID string, path string, ignoreReaders bool, ignoreWriters bool) ([]string, error) {
+	entry, err := entry.GetEntry(ctx, path, false, false)
+	if err != nil {
+		return nil, err
+	}
+	if !ignoreWriters && entry.Entry.NumSessionsWrite > 0 {
+		err = ErrFileOpenForWriting
+	}
+	if !ignoreReaders && entry.Entry.NumSessionsRead > 0 {
+		// Not using errors.Join because it adds a newline when printing each error which looks
+		// awkward in the CTL output.
+		if err != nil {
+			err = ErrFileOpenForReadingAndWriting
+		} else {
+			err = ErrFileOpenForReading
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var rstIDs []string
+	if rstID != "" {
+		rstIDs = []string{rstID}
+	} else if len(entry.Entry.Remote.RSTIDs) > 0 {
+		rstIDs = make([]string, 0, len(entry.Entry.Remote.RSTIDs))
+		for _, rst := range entry.Entry.Remote.RSTIDs {
+			rstIDs = append(rstIDs, strconv.Itoa(int(rst)))
+		}
+	} else {
+		return nil, ErrFileHasNoRSTs
+	}
+	return rstIDs, nil
 }

@@ -59,6 +59,14 @@ type Entry struct {
 	FeatureFlags   beegfs.EntryFeatureFlags
 	Pattern        patternConfig
 	Remote         remoteConfig
+	// NumSessionsRead is only applicable for regular files. Note sessions is the number of clients
+	// that have this file open for reading at least once. If the same file has the a file opened
+	// multiple times, it is still treated as a single session for that client.
+	NumSessionsRead uint32
+	// NumSessionsWrite is only applicable for regular files.  Note sessions is the number of clients
+	// that have this file open for writing at least once. If the same file has the a file opened
+	// multiple times, it is still treated as a single session for that client.
+	NumSessionsWrite uint32
 	// Only populated if GetEntryConfig.Verbose.
 	Verbose Verbose
 	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
@@ -106,6 +114,8 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 			RemoteStorageTarget: entryInfo.RST,
 			Targets:             make(map[uint16]*flex.RemoteStorageTarget),
 		},
+		NumSessionsRead:  entryInfo.NumSessionsRead,
+		NumSessionsWrite: entryInfo.NumSessionsWrite,
 	}
 	if entry.FeatureFlags.IsBuddyMirrored() {
 		e.MetaBuddyGroup = int(entry.OwnerID)
@@ -260,7 +270,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 					errChan <- err
 					return
 				}
-				result, err := getEntry(ctx, searchPath, verbose, false)
+				result, err := GetEntry(ctx, searchPath, verbose, false)
 				if err != nil {
 					errChan <- err
 					return
@@ -275,7 +285,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 	return entriesChan
 }
 
-func getEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
+func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
 	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
 	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
