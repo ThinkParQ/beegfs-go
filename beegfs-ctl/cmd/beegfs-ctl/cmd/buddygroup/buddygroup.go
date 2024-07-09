@@ -15,6 +15,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newCreateBuddyGroupCmd())
 	cmd.AddCommand(newSetAliasCmd())
 	cmd.AddCommand(newDeleteBuddyGroupCmd())
+	cmd.AddCommand(newMirrorRootInodeCmd())
 
 	return cmd
 }
