@@ -44,8 +44,12 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time for each BeeMsg TCP connection attempt")
 
 	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, "By default all logging is disabled example for fatal errors. Optionally additional logging to stderr can be enabled to assist with debugging (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
+
 	cmd.PersistentFlags().Bool(config.LogDeveloperKey, false, "Enable logging at DebugLevel and above and print stack traces at WarnLevel and above.")
 	cmd.PersistentFlags().MarkHidden(config.LogDeveloperKey)
+
+	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, "The table columns to print. Does currently NOT automatically set potential flags required to actually fetch the data for the extra columns. `all` prints all available columns.")
+	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, "The number of table rows before the header is repeated and the output is flushed to stdout. If set to 0, prints no header and immediately flushes every row.")
 
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")

@@ -91,7 +91,7 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 	var multiErr types.MultiError
 	// When printing a table, print the header initially then only when flushing the buffer.

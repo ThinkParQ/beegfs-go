@@ -29,7 +29,7 @@ func runListCmd(cmd *cobra.Command) error {
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 
 	if viper.GetBool(config.DebugKey) {

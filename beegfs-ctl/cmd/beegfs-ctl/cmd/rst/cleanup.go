@@ -50,7 +50,7 @@ func runCleanupCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 
 	if !response.Ok {
