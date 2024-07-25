@@ -36,7 +36,8 @@ func newEntrySetCmd() *cobra.Command {
 		Use:   "set <path> [<path>] ...",
 		Short: "Configure stripe patterns, storage pools, remote storage targets, and more.",
 		Long: `Configure stripe patterns, storage pools, remote storage targets, and more. 
-The new configuration will only be effective for new files and sub-directories of the given path(s). 
+New configurations will apply only to new files and sub-directories of the specified path(s), with the exception of Remote Storage Targets,
+which can be updated for existing files at any time. Enable the --verbose flag to view detailed configuration changes for each entry.
 
 Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to update multiple directories at once.
@@ -47,9 +48,6 @@ Required Permissions:
 This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config. 
 This enables normal users to change the default number of targets and chunksize for directories they own. All other options can only be changed by root.
 				`,
-		// TODO: https://github.com/ThinkParQ/beegfs-core/issues/3784. Update the help text to
-		// indicated RST settings can be updated on files after they are created. Also consider
-		// adding a flag to not silently skip updating entries that cannot be updated.
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
