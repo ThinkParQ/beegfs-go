@@ -189,10 +189,10 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8=
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
-github.com/thinkparq/gobee v0.0.11 h1:l9WrpExveE7qIPRh4Nr0sEYSTI5xSmfrJYkmSUEr4iQ=
-github.com/thinkparq/gobee v0.0.11/go.mod h1:0QW35LiqqTG8dX6MoX5mL4Wc2ONsFuc6E+vYo2pUQQ8=
-github.com/thinkparq/protobuf v0.0.10 h1:o3znJ0LCy05poEr0FBKvMSNJqascMHvRYyhVsN5b6EE=
-github.com/thinkparq/protobuf v0.0.10/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
+github.com/thinkparq/gobee v0.0.12 h1:5fZQg5V7Iek5XthtKQx1euywWzZqWR+pQamtGF4c/k0=
+github.com/thinkparq/gobee v0.0.12/go.mod h1:0QW35LiqqTG8dX6MoX5mL4Wc2ONsFuc6E+vYo2pUQQ8=
+github.com/thinkparq/protobuf v0.0.12 h1:p2+fDQj0GfdDxrIAE5EA4YvA/DluFsRM7N9fhcEUWds=
+github.com/thinkparq/protobuf v0.0.12/go.mod h1:ECPwmpoEIFcGYMXQTkXF+ZfvcygtsL4QKQfagRXftPk=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
