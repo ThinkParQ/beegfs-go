@@ -31,7 +31,7 @@ build: $(CMDS:%=build-%)
 # Commonly this is done by running `make test` in CI, but could also be done locally.
 # If you ran `make test` locally you may want to use `git reset` to revert the changes.
 .PHONY: test
-test: check-go-version check-gofmt check-linters check-go-tidy test-unit check-licenses
+test: check-go-version check-gofmt check-linters check-go-tidy test-unit check-vulnerabilities check-licenses
 
 .PHONY: check-go-version
 check-go-version:
@@ -55,6 +55,11 @@ check-gofmt:
 check-linters:
 	staticcheck ./...
 	go vet ./...
+
+# Check for vulnerability issues
+.PHONY: check-vulnerabilities
+check-vulnerabilities:
+	govulncheck ./...
 
 # Run the unit tests
 .PHONY: test-unit
@@ -84,12 +89,21 @@ generate-notices:
 # 
 # === Justification for Ignored Licenses === 
 # 
-# 	No ignored licenses.
-#
+# github.com/hashicorp/hcl: Distributed under MPL 2.0 which is a copyleft (reciprocal) license.
+#   By default we consider reciprocal licenses a disallowed type because we need
+#   to manually verify our use doesn't violate the license terms. Here our use
+#   of an MPL 2.0 license is acceptable because we don't modify any of the
+#   original source. Note this exists in the project because we use Viper
+#   creating an indirect dependancy on HCL. However we don't allow users to use
+#   HCL for configuration so technically we don't even use this at all.
 .PHONY: check-licenses
 check-licenses: generate-notices
 	@echo "Checking license compliance..."
-	@go-licenses check ./cmd/beegfs-ctl/ --ignore git.beegfs.io --ignore github.com/thinkparq --disallowed_types=forbidden,permissive,reciprocal,restricted,unknown
+	@go-licenses check ./... \
+		--disallowed_types=forbidden,permissive,reciprocal,restricted,unknown \
+		--ignore git.beegfs.io \
+		--ignore github.com/thinkparq \
+		--ignore github.com/hashicorp/hcl
 	@if [ -n "$$(git status --porcelain NOTICE.md)" ]; then \
         echo "NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
@@ -100,6 +114,7 @@ check-licenses: generate-notices
 install-tools: 
 	go install honnef.co/go/tools/cmd/staticcheck@latest
 	go install github.com/google/go-licenses@v1.6.0
+	go install golang.org/x/vuln/cmd/govulncheck@latest
 
 # Helper targets:
 .PHONY: clean
