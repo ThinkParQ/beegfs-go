@@ -61,7 +61,7 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteNode_Config) error {
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("Received no id info from the server.")
+			return fmt.Errorf("received no id info from the server")
 		} else {
 			fmt.Printf("Node can be deleted: %s\n", res)
 			if res.LegacyId.NodeType == beegfs.Meta {

@@ -61,7 +61,7 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteTarget_Config) error {
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("Received no id info from the server.")
+			return fmt.Errorf("received no id info from the server")
 		} else {
 			fmt.Printf(`Target can be deleted: %s
 Deleting a target might cause adverse effects to your file system and should only be done if no files using it are left. If you really want to delete the target, please add the --yes flag to the command.

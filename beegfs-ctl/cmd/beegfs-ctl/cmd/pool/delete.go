@@ -61,7 +61,7 @@ func runDeletePoolCmd(cmd *cobra.Command, cfg deletePool_Config) error {
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("Received no id info from the server.")
+			return fmt.Errorf("received no id info from the server")
 		} else {
 			fmt.Printf("Pool can be deleted: %s\nIf you really want to delete it, please add the --yes flag to the command.\n", res)
 		}

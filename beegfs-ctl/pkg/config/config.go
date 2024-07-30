@@ -55,7 +55,6 @@ const (
 
 // The global config singleton
 var globalMount filesystem.Provider
-var globalConfigLock sync.Mutex
 
 // Returns a grpc.DialOption configured according to the global TLS config
 func tlsDialOption() (grpc.DialOption, error) {
@@ -64,7 +63,7 @@ func tlsDialOption() (grpc.DialOption, error) {
 	} else {
 		certPool, err := x509.SystemCertPool()
 		if err != nil {
-			return nil, fmt.Errorf("couldn't load system cert pool: %w\n", err)
+			return nil, fmt.Errorf("couldn't load system cert pool: %w", err)
 		}
 
 		// Append custom ca certificate if provided
@@ -73,7 +72,7 @@ func tlsDialOption() (grpc.DialOption, error) {
 			if err != nil {
 				// Silently ignore the default file not being found
 				if viper.IsSet(TlsCaCertKey) {
-					return nil, fmt.Errorf("reading certificate file failed: %w\n", err)
+					return nil, fmt.Errorf("reading certificate file failed: %w", err)
 				}
 			} else {
 				if !certPool.AppendCertsFromPEM(cert) {
