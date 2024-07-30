@@ -88,7 +88,7 @@ func TestMetaRootNode(t *testing.T) {
 
 	metaIdType := beegfs.LegacyId{NumId: 1, NodeType: beegfs.Meta}
 	storageIdType := beegfs.LegacyId{NumId: 1, NodeType: beegfs.Storage}
-	nodeMeta := &beegfs.Node{Uid: 1001, Id: metaIdType, Alias: "meta1"}
+	nodeMeta := &beegfs.Node{Uid: 1001, Id: metaIdType, Alias: "meta1", Nics: []beegfs.Nic{}}
 	nodeStorage := &beegfs.Node{Uid: 2001, Id: storageIdType, Alias: "storage2"}
 
 	err := store.SetMetaRootNode(metaIdType)
