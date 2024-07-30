@@ -17,6 +17,6 @@ jobs:
       - name: Install toolchains and tools
         run: make install-tools
       - name: Run checks
-        run: make check-gofmt check-linters check-go-tidy
+        run: make check-gofmt check-linters check-go-tidy check-vulnerabilities check-licenses
       - name: Run tests
         run: make test-unit
