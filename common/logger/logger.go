@@ -33,9 +33,9 @@ type Config struct {
 	Type              supportedLogTypes `mapstructure:"type"`
 	File              string            `mapstructure:"file"`
 	Level             int8              `mapstructure:"level"`
-	MaxSize           int               `mapstructure:"maxSize"`
-	NumRotatedFiles   int               `mapstructure:"numRotatedFiles"`
-	IncomingEventRate bool              `mapstructure:"incomingEventRate"`
+	MaxSize           int               `mapstructure:"max-size"`
+	NumRotatedFiles   int               `mapstructure:"num-rotated-files"`
+	IncomingEventRate bool              `mapstructure:"incoming-event-rate"`
 	Developer         bool              `mapstructure:"developer"`
 }
 

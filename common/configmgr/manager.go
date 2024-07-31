@@ -87,7 +87,7 @@ type ConfigManager struct {
 
 // New creates a new ConfigManager that is setup to parse configuration based on
 // the provided flagset and environment variable prefix. If the flagset includes
-// a cfgFile flag, configuration from that file will also be used. It does not
+// a cfg-file flag, configuration from that file will also be used. It does not
 // know anything about the actual application configuration, accepting instead
 // the Configurable interface which is used to unmarshal the provided
 // configuration sources into the specific type that represents the applications
@@ -288,7 +288,8 @@ func (cm *ConfigManager) updateConfiguration() error {
 		val := pair[1]
 
 		if strings.HasPrefix(key, cm.envVarPrefix) {
-			viperKey := strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(key, cm.envVarPrefix)), "_", ".")
+			viperKey := strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(key, cm.envVarPrefix)), "__", ".")
+			viperKey = strings.ReplaceAll(viperKey, "_", "-")
 
 			if viperKey == "subscribers" {
 				// We do not want to allow subscribers to be specified multiple
@@ -312,23 +313,23 @@ func (cm *ConfigManager) updateConfiguration() error {
 		}
 	}
 
-	// Important we do this last as a cfgFile could be set as a flag or
+	// Important we do this last as a cfg-file could be set as a flag or
 	// environment variable. We also want to allow configuring BeeWatch entirely
 	// without a config file.
-	if v.GetString("cfgfile") != "" {
+	if v.GetString("cfg-file") != "" {
 		// First we read the config file into a separate Viper instance.
 		// We mainly do this so we can check subscribers are only being set in one place.
 		// Otherwise we'd have to define complicated precedence rules for merging subscribers.
 		vFile := viper.New()
-		vFile.SetConfigFile(v.GetString("cfgfile"))
+		vFile.SetConfigFile(v.GetString("cfg-file"))
 
 		if err := vFile.ReadInConfig(); err != nil {
 			if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-				return fmt.Errorf("rejecting configuration update: configuration file at '%s' was not found (check it exists and permissions are set correctly)", v.GetString("cfgFile"))
+				return fmt.Errorf("rejecting configuration update: configuration file at '%s' was not found (check it exists and permissions are set correctly)", v.GetString("cfg-file"))
 			} else if _, ok := err.(viper.ConfigParseError); ok {
-				return fmt.Errorf("rejecting configuration update: error parsing configuration file at '%s': %w", v.GetString("cfgFile"), err)
+				return fmt.Errorf("rejecting configuration update: error parsing configuration file at '%s': %w", v.GetString("cfg-file"), err)
 			}
-			return fmt.Errorf("rejecting configuration update: an unknown error occurred reading config file '%s' (check permissions): %w", v.GetString("cfgFile"), err)
+			return fmt.Errorf("rejecting configuration update: an unknown error occurred reading config file '%s' (check permissions): %w", v.GetString("cfg-file"), err)
 		}
 		subscribersFromFile := vFile.GetStringSlice("subscriber")
 
@@ -336,15 +337,15 @@ func (cm *ConfigManager) updateConfiguration() error {
 			return fmt.Errorf("rejecting configuration update: subscribers cannot be set using a mix of flags, environment variables, and a configuration file (only one is allowed)")
 		}
 		// If all our checks pass we'll actually use the config file for the combined Viper instance.
-		v.SetConfigFile(v.GetString("cfgfile"))
+		v.SetConfigFile(v.GetString("cfg-file"))
 
-		// Merge the configuration set via flags and environment variables with the cfgFile.
+		// Merge the configuration set via flags and environment variables with the cfg-file.
 		if err := v.MergeInConfig(); err != nil {
-			return fmt.Errorf("rejecting configuration update: an unknown error occurred merging configuration sources: %s", err)
+			return fmt.Errorf("rejecting configuration update: an unknown error occurred merging configuration sources: %w", err)
 		}
 	}
 
-	if v.GetBool("developer.dumpconfig") {
+	if v.GetBool("developer.dump-config") {
 		fmt.Printf("Dumping final merged configuration from Viper: \n\n%s\n\n", v.AllSettings())
 	}
 
