@@ -341,3 +341,29 @@ func (m *SetDirPatternResponse) MsgId() uint16 {
 func (m *SetDirPatternResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
+
+type SetFilePatternRequest struct {
+	EntryInfo EntryInfo
+	RST       RemoteStorageTarget
+}
+
+func (m *SetFilePatternRequest) MsgId() uint16 {
+	return 2123
+}
+
+func (m *SetFilePatternRequest) Serialize(s *beeserde.Serializer) {
+	m.EntryInfo.Serialize(s)
+	m.RST.Serialize(s)
+}
+
+type SetFilePatternResponse struct {
+	Result beegfs.OpsErr
+}
+
+func (m *SetFilePatternResponse) MsgId() uint16 {
+	return 2124
+}
+
+func (m *SetFilePatternResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
+}
