@@ -43,6 +43,7 @@ type supportedLogTypes string
 
 const (
 	StdOut  supportedLogTypes = "stdout"
+	StdErr  supportedLogTypes = "stderr"
 	LogFile supportedLogTypes = "logfile"
 	// The syslog type is the slowest logging option due to how zap log messages
 	// need to be translated to syslog messages and severity levels.
@@ -54,6 +55,7 @@ const (
 // for example if an invalid type is specified.
 var SupportedLogTypes = []supportedLogTypes{
 	StdOut,
+	StdErr,
 	LogFile,
 	Syslog,
 }
@@ -112,6 +114,8 @@ func New(newConfig Config) (*Logger, error) {
 	switch newConfig.Type {
 	case StdOut:
 		logDestination = zapcore.AddSync(os.Stdout)
+	case StdErr:
+		logDestination = zapcore.AddSync(os.Stderr)
 	case LogFile:
 		// Just being able to write to the provided log file is not sufficient
 		// if we want to rotate log files. Make sure the directory selected for
@@ -198,20 +202,22 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 // getLevel maps Zap log levels to BeeGFS log levels.
 func getLevel(newLevel int8) (zapcore.Level, error) {
 
-	// We'll map Zap levels to standard BeeGFS log levels. The use of an atomic
-	// level means we can change this after the application has started.
-	//var zapLevel zap.AtomicLevel
+	// We'll map Zap levels to standard BeeGFS log levels. The use of an atomic level means we can
+	// change this after the application has started.
 	switch newLevel {
+	case 0:
+		return zapcore.FatalLevel, nil
 	case 1:
+		return zapcore.ErrorLevel, nil
+	case 2:
 		return zapcore.WarnLevel, nil
 	case 3:
 		return zapcore.InfoLevel, nil
-	case 5:
+	case 4, 5:
 		return zapcore.DebugLevel, nil
 	default:
-		// If we used zapcore.InvalidLevel we could cause a panic.
-		// So instead return a sane level just in case something decides to
-		// ignore the error and use the level we return anyway.
-		return zapcore.InfoLevel, fmt.Errorf("the provided log.level (%d) is invalid (must be 1, 3, or 5)", newLevel)
+		// If we used zapcore.InvalidLevel we could cause a panic. So instead return a sane level
+		// just in case something decides to ignore the error and use the level we return anyway.
+		return zapcore.InfoLevel, fmt.Errorf("the provided log.level (%d) is invalid (must be 0-5)", newLevel)
 	}
 }

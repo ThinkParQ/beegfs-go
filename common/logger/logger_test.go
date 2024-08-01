@@ -48,7 +48,7 @@ func TestUpdateConfiguration(t *testing.T) {
 
 	logger1, err := New(Config{
 		Type:  "stdout",
-		Level: 1,
+		Level: 2,
 	})
 
 	assert.NoError(t, err)
@@ -70,10 +70,13 @@ func TestGetLevel(t *testing.T) {
 		wantLevel zapcore.Level
 		wantErr   error
 	}{
-		{1, zapcore.WarnLevel, nil},
+		{0, zapcore.FatalLevel, nil},
+		{1, zapcore.ErrorLevel, nil},
+		{2, zapcore.WarnLevel, nil},
 		{3, zapcore.InfoLevel, nil},
+		{4, zapcore.DebugLevel, nil},
 		{5, zapcore.DebugLevel, nil},
-		{2, zapcore.InfoLevel, fmt.Errorf("the provided log.level (2) is invalid (must be 1, 3, or 5)")},
+		{6, zapcore.InfoLevel, fmt.Errorf("the provided log.level (6) is invalid (must be 0-5)")},
 	}
 
 	for _, tt := range tests {
