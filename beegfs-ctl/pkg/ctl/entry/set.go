@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
 	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/gobee/beemsg"
 	"github.com/thinkparq/gobee/beemsg/msg"
 	"github.com/thinkparq/gobee/filesystem"
 )
@@ -214,6 +215,13 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 		return SetEntryResult{}, err
 	}
 
+	if entry.Entry.Type == beegfs.EntryRegularFile {
+		return handleRegularFile(ctx, store, entry, newCfg, searchPath)
+	}
+
+	return handleDirectory(ctx, store, entry, newCfg, searchPath)
+}
+func handleDirectory(ctx context.Context, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
 	// Start with the current settings for this entry:
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
@@ -246,7 +254,7 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 	}
 	if newCfg.StripePattern != nil {
 		if *newCfg.StripePattern == beegfs.StripePatternBuddyMirror {
-			err = initMetaBuddyMapper(ctx)
+			err := initMetaBuddyMapper(ctx)
 			if err != nil {
 				return SetEntryResult{}, err
 			}
@@ -264,12 +272,58 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 	}
 
 	var resp = &msg.SetDirPatternResponse{}
-	err = store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+	err := store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
 		return SetEntryResult{}, err
 	}
 
 	if resp.Result != beegfs.OpsErr_SUCCESS && resp.Result != beegfs.OpsErr_NOTADIR {
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
+	}
+
+	return SetEntryResult{
+		Path:    searchPath,
+		Status:  resp.Result,
+		Updates: newCfg,
+	}, nil
+}
+
+func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
+	// Start with the current settings for this entry
+	request := &msg.SetFilePatternRequest{
+		EntryInfo: *entry.Entry.origEntryInfoMsg,
+		RST:       entry.Entry.Remote.RemoteStorageTarget,
+	}
+
+	// Determine whether any RST related fields are provided in newCfg
+	isRSTConfigSpecified := false
+	if newCfg.RemoteTargets != nil {
+		request.RST.RSTIDs = newCfg.RemoteTargets
+		isRSTConfigSpecified = true
+	}
+	if newCfg.RemoteCooldownSecs != nil {
+		request.RST.CoolDownPeriod = *newCfg.RemoteCooldownSecs
+		isRSTConfigSpecified = true
+	}
+
+	// Return early if no RST configuration is specified, because
+	// at present only RST updates are allowed for regular files.
+	if !isRSTConfigSpecified {
+		return SetEntryResult{
+			Path:    searchPath,
+			Status:  beegfs.OpsErr_NOTSUPP,
+			Updates: newCfg,
+		}, nil
+	}
+
+	// Send the request and handle the response
+	var resp = &msg.SetFilePatternResponse{}
+	err := store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+	if err != nil {
+		return SetEntryResult{}, err
+	}
+
+	if resp.Result != beegfs.OpsErr_SUCCESS {
 		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
 	}
 
