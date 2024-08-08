@@ -12,7 +12,7 @@ require (
 	github.com/spf13/viper v1.17.0
 	github.com/stretchr/testify v1.8.4
 	github.com/thinkparq/gobee v0.0.15
-	github.com/thinkparq/protobuf v0.0.13
+	github.com/thinkparq/protobuf v0.0.14
 	google.golang.org/grpc v1.62.0
 	google.golang.org/protobuf v1.33.0
 )

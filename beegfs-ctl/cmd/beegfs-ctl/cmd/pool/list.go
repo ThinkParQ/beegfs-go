@@ -2,8 +2,9 @@ package pool
 
 import (
 	"fmt"
-	"os"
+	"strings"
 
+	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
@@ -12,75 +13,117 @@ import (
 )
 
 func newListCmd() *cobra.Command {
+	var withLimits bool
+
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List storage pools.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runListCmd(cmd)
+			return RunListCmd(cmd, pool.GetStoragePools_Config{WithLimits: withLimits})
 		},
 	}
+
+	cmd.Flags().BoolVar(&withLimits, "with-limits", false, "Request and print pool default quota limits")
 
 	return cmd
 }
 
-func runListCmd(cmd *cobra.Command) error {
-	pools, err := pool.GetStoragePools(cmd.Context())
+func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
+	// Since this table contains cells with multiple rows, pageSize=0 would mess up the output.
+	if viper.GetUint(config.PageSizeKey) == 0 {
+		return fmt.Errorf("--%s=0 is not supported for this view", config.PageSizeKey)
+	}
+
+	pools, err := pool.GetStoragePools(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
-
-	if viper.GetBool(config.DebugKey) {
-		fmt.Fprint(&w, "UID\t")
+	defaultColumns := []string{"alias", "id", "members"}
+	if cfg.WithLimits {
+		defaultColumns = append(defaultColumns, "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit")
 	}
-	fmt.Fprint(&w, "Alias\tID\tMembers\t")
 
-	fmt.Fprintln(&w)
+	tbl := cmdfmt.NewTableWrapper(
+		[]string{"uid", "alias", "id", "members", "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit"},
+		defaultColumns,
+	)
 
 	for _, p := range pools {
-		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%d\t", p.Pool.Uid)
+		userSpaceLimit := ""
+		if p.UserSpaceLimit != nil {
+			if *p.UserSpaceLimit == -1 {
+				userSpaceLimit = "∞"
+			} else {
+				if viper.GetBool(config.RawKey) {
+					userSpaceLimit = fmt.Sprint(*p.UserSpaceLimit)
+				} else {
+					userSpaceLimit = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*p.UserSpaceLimit), unitconv.IEC, 0))
+				}
+			}
 		}
 
-		fmt.Fprintf(&w, "%s\t%s\t", p.Pool.Alias, p.Pool.LegacyId)
+		userInodeLimit := ""
+		if p.UserInodeLimit != nil {
+			if *p.UserInodeLimit == -1 {
+				userInodeLimit = "∞"
+			} else {
+				if viper.GetBool(config.RawKey) {
+					userInodeLimit = fmt.Sprint(*p.UserInodeLimit)
+				} else {
+					userInodeLimit = unitconv.FormatPrefix(float64(*p.UserInodeLimit), unitconv.SI, 0)
+				}
+			}
+		}
 
-		first := true
+		groupSpaceLimit := ""
+		if p.GroupSpaceLimit != nil {
+			if *p.GroupSpaceLimit == -1 {
+				groupSpaceLimit = "∞"
+			} else {
+				if viper.GetBool(config.RawKey) {
+					groupSpaceLimit = fmt.Sprint(*p.GroupSpaceLimit)
+				} else {
+					groupSpaceLimit = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*p.GroupSpaceLimit), unitconv.IEC, 0))
+				}
+			}
+		}
+
+		groupInodeLimit := ""
+		if p.GroupInodeLimit != nil {
+			if *p.GroupInodeLimit == -1 {
+				groupInodeLimit = "∞"
+			} else {
+				if viper.GetBool(config.RawKey) {
+					groupInodeLimit = fmt.Sprint(*p.GroupInodeLimit)
+				} else {
+					groupInodeLimit = unitconv.FormatPrefix(float64(*p.GroupInodeLimit), unitconv.SI, 0)
+				}
+			}
+		}
+
+		members := ""
 		for _, t := range p.Targets {
-			if !first {
-				fmt.Fprint(&w, "\n\t\t")
-				if viper.GetBool(config.DebugKey) {
-					fmt.Fprint(&w, "\t")
-				}
-			}
-			first = false
-
 			if viper.GetBool(config.DebugKey) {
-				fmt.Fprintf(&w, "%v\t", t)
+				members += t.String() + "\n"
 			} else {
-				fmt.Fprintf(&w, "%s\t", t.Alias.String())
+				members += t.Alias.String() + "\n"
 			}
 		}
-
 		for _, t := range p.BuddyGroups {
-			if !first {
-				fmt.Fprint(&w, "\n\t\t")
-				if viper.GetBool(config.DebugKey) {
-					fmt.Fprint(&w, "\t")
-				}
-			}
-			first = false
-
 			if viper.GetBool(config.DebugKey) {
-				fmt.Fprintf(&w, "%v\t", t)
+				members += t.String() + "\n"
 			} else {
-				fmt.Fprintf(&w, "%s\t", t.Alias.String())
+				members += t.Alias.String() + "\n"
 			}
 		}
 
-		fmt.Fprintln(&w)
+		members = strings.Trim(members, "\n")
+
+		tbl.Row(p.Pool.Uid, p.Pool.Alias, p.Pool.LegacyId, members, userSpaceLimit, userInodeLimit, groupSpaceLimit, groupInodeLimit)
 	}
 
+	tbl.PrintRemaining()
+	fmt.Println()
 	return nil
 }

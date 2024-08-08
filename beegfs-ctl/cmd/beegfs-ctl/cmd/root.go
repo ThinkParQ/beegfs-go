@@ -13,6 +13,7 @@ import (
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/license"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/pool"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/quota"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/rst"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/stats"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/target"
@@ -74,6 +75,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(stats.NewCmd())
 	cmd.AddCommand(rst.NewRSTCmd())
 	cmd.AddCommand(entry.NewEntryCmd())
+	cmd.AddCommand(quota.NewCmd())
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())

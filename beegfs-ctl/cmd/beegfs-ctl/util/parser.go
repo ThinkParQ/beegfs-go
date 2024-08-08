@@ -1,9 +1,11 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 var siPrefixes = map[string]float64{
@@ -28,8 +30,8 @@ var siPrefixes = map[string]float64{
 
 var iecPrefixes = map[string]float64{
 	"":    1,
-	"Ki":  1 << 10,
-	"KiB": 1 << 10,
+	"ki":  1 << 10,
+	"kiB": 1 << 10,
 	"Mi":  1 << 20,
 	"MiB": 1 << 20,
 	"Gi":  1 << 30,
@@ -75,4 +77,56 @@ func ParseIntFromStr(input string) (uint64, error) {
 		return uint64(num * multiplier), nil
 	}
 	return 0, fmt.Errorf("invalid size prefix, must be a valid SI prefix (k, M, G, T, P, E, Z, Y), or IEC prefix (Ki, Mi, Gi, Ti, Pi, Ei, Ei, Zi, Yi), or no prefix for bytes")
+}
+
+// Parses a string in the form `<int>-<int>` or `<int>` into two integers representing the lowest
+// and the highest value of a range.
+func ParseUint64RangeFromStr(input string, minLower uint64, maxUpper uint64) (uint64, uint64, error) {
+	if minLower > maxUpper {
+		return 0, 0, fmt.Errorf("invalid range bounds configuration: minLower can't be larger than maxUpper")
+	}
+
+	formatError := "invalid range, must be in the form `<min>-<max>` or `<value>`"
+
+	re := regexp.MustCompile(`^(\d+)-(\d+)$`)
+	matches := re.FindStringSubmatch(strings.TrimSpace(input))
+	if matches == nil {
+		// No match, try to parse single number
+		v, err := strconv.ParseUint(input, 10, 64)
+		if err != nil {
+			return 0, 0, errors.New(formatError)
+		}
+		if v < minLower {
+			return 0, 0, fmt.Errorf("minimum value is %d, got %d", minLower, v)
+		}
+		if v > maxUpper {
+			return 0, 0, fmt.Errorf("maximum value is %d, got %d", maxUpper, v)
+		}
+
+		return v, v, nil
+	} else if len(matches) != 3 {
+		return 0, 0, errors.New(formatError)
+	}
+
+	// Match, parse both numbers
+	lower, err := strconv.ParseUint(matches[1], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New(formatError)
+	}
+	if lower < minLower {
+		return 0, 0, fmt.Errorf("minimum lower value is %d, got %d", minLower, lower)
+	}
+	upper, err := strconv.ParseUint(matches[2], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New(formatError)
+	}
+	if upper > maxUpper {
+		return 0, 0, fmt.Errorf("maximum upper value is %d, got %d", maxUpper, upper)
+	}
+
+	if lower > upper {
+		return 0, 0, fmt.Errorf("invalid range, the lower value (%d) is larger than the upper value (%d)", lower, upper)
+	}
+
+	return lower, upper, nil
 }
