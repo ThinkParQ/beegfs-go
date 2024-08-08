@@ -3,6 +3,7 @@ package kvstore
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -993,4 +995,151 @@ func BenchmarkGetEntries(b *testing.B) {
 	entry, err := nextEntry()
 	require.NoError(b, err)
 	require.Nil(b, entry)
+}
+
+func TestStartRunner(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	// Setup new database and replace garbage collection.
+	opts := badger.DefaultOptions(path)
+	ms, closeDB, err := NewMapStore[map[int]string](opts, 1)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	// Cancel the map store's garbage collection and replace it with one for testing that includes mocked interfaces.
+	ms.gc.runnerCtxCancel()
+	ms.gc = newBadgerGarbageCollectionForTesting(ms.db)
+
+	ms.gc.garbageCollector.(*mockGarbageCollection).On("IsClosed").Return(false).Once()
+	assert.True(t, ms.gc.StartRunner())
+	assert.False(t, ms.gc.StartRunner())
+	assert.False(t, ms.gc.StartRunner())
+}
+
+func TestAttemptGarbageCollection(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	opts := badger.DefaultOptions(path)
+	ms, closeDB, err := NewMapStore[map[int]string](opts, 1)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	// Cancel the map store's garbage collection and replace it with one for testing that includes mocked interfaces.
+	ms.gc.runnerCtxCancel()
+	ms.gc = newBadgerGarbageCollectionForTesting(ms.db)
+
+	NotErrNoRewrite := fmt.Errorf("not badger.ErrNoRewrite")
+	tests := []struct {
+		name                   string
+		delay                  int
+		runDatabaseGCErrorList []error // Controls runGarbageCollection response, badger.ErrNoRewrite and NotErrNoRewrite will return true, false respectively.
+		isSystemLoadHighList   []bool
+		expected               int
+	}{
+		{"Above forcedGCThresholdSec with no GC work", ms.gc.initialSleepDelaySec, []error{badger.ErrNoRewrite}, []bool{false}, ms.gc.initialSleepDelaySec},
+		{"Above forcedGCThresholdSec with error or high system load in runGarbageCollection", ms.gc.initialSleepDelaySec, []error{NotErrNoRewrite}, []bool{false}, ms.gc.forcedGCThresholdSec},
+		{"Above forcedGCThresholdSec with high system load and gc deferred", ms.gc.initialSleepDelaySec, []error{}, []bool{true}, ms.gc.initialSleepDelaySec / 2},
+		{"forcedGCThresholdSec with no GC work", ms.gc.forcedGCThresholdSec, []error{badger.ErrNoRewrite}, []bool{false}, ms.gc.initialSleepDelaySec},
+		{"forcedGCThresholdSec with error or high system load in runGarbageCollection", ms.gc.forcedGCThresholdSec, []error{NotErrNoRewrite}, []bool{false}, ms.gc.forcedGCThresholdSec},
+		{"forcedGCThresholdSec with high system load but GC is force and then completes", ms.gc.forcedGCThresholdSec, []error{badger.ErrNoRewrite}, []bool{true}, ms.gc.initialSleepDelaySec},
+		{"forcedGCThresholdSec with high system load but error or high system load in runGarbageCollection", ms.gc.forcedGCThresholdSec, []error{NotErrNoRewrite}, []bool{true}, ms.gc.forcedGCThresholdSec},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockGC := ms.gc.garbageCollector.(*mockGarbageCollection)
+			mockSL := ms.gc.systemLoadDetector.(*mockSystemLoad)
+			for _, runDatabaseGCError := range test.runDatabaseGCErrorList {
+				mockGC.On("RunValueLogGC", mock.Anything).Return(runDatabaseGCError).Once()
+			}
+			for _, isSystemLoadHigh := range test.isSystemLoadHighList {
+				mockSL.On("isSystemLoadHigh").Return(isSystemLoadHigh, 0.0, nil).Once()
+			}
+			result := ms.gc.attemptGarbageCollection(test.delay)
+			assert.Equal(t, test.expected, result)
+		})
+	}
+}
+
+func TestRunGarbageCollection(t *testing.T) {
+	path, cleanup, err := tempPathForTesting(badgerTestDir)
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	opts := badger.DefaultOptions(path)
+	ms, closeDB, err := NewMapStore[map[int]string](opts, 1)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, closeDB())
+	}()
+
+	// Cancel the map store's garbage collection and replace it with one for testing that includes mocked interfaces.
+	ms.gc.runnerCtxCancel()
+	ms.gc = newBadgerGarbageCollectionForTesting(ms.db)
+
+	NotErrNoRewrite := fmt.Errorf("not badger.ErrNoRewrite")
+	tests := []struct {
+		name                   string
+		runDatabaseGCErrorList []error
+		isSystemLoadHighList   []bool
+		expected               bool
+	}{
+		{"Completes gc work", []error{nil, badger.ErrNoRewrite}, []bool{false}, true},
+		{"Completes part of GC work with GC error", []error{nil, NotErrNoRewrite}, []bool{false}, false},
+		{"Completes part of GC work with high system load", []error{nil}, []bool{true}, false},
+		{"No gc work", []error{badger.ErrNoRewrite}, []bool{false}, true},
+		{"GC error", []error{NotErrNoRewrite}, []bool{}, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockGC := ms.gc.garbageCollector.(*mockGarbageCollection)
+			mockSL := ms.gc.systemLoadDetector.(*mockSystemLoad)
+			for _, runDatabaseGCError := range test.runDatabaseGCErrorList {
+				mockGC.On("RunValueLogGC", mock.Anything).Return(runDatabaseGCError).Once()
+			}
+			for _, isSystemLoadHigh := range test.isSystemLoadHighList {
+				mockSL.On("isSystemLoadHigh").Return(isSystemLoadHigh, 0.0, nil).Once()
+			}
+			result := ms.gc.runGarbageCollection()
+			assert.Equal(t, test.expected, result)
+		})
+	}
+}
+
+func TestIsSystemLoadHigh(t *testing.T) {
+	cpus := float64(runtime.NumCPU())
+	tests := []struct {
+		name        string
+		readContent []byte
+		readError   error
+		expected    bool
+		expectedMsg string
+	}{
+		{"Low system load", []byte(fmt.Sprintf("%.2f 100.0 100.0 2/2612 354372", cpus-0.1)), nil, false, ""},
+		{"High system load", []byte(fmt.Sprintf("%.2f 100.0 100.0 2/2612", cpus)), nil, true, ""},
+		{"Missing system load information", []byte{}, nil, false, "failed to retrieve system load information"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockReadFile := func(s string) ([]byte, error) {
+				return test.readContent, test.readError
+			}
+			sl := systemLoad{1.0, mockReadFile}
+			result, _, err := sl.isSystemLoadHigh()
+			assert.Equal(t, test.expected, result)
+			if len(test.expectedMsg) > 0 {
+				assert.ErrorContains(t, err, test.expectedMsg)
+			}
+		})
+	}
 }
