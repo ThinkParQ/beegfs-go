@@ -58,6 +58,14 @@ const (
 	// DebugLevel and above, and uses a console encoder. Logs are written to standard error.
 	// Stacktraces are included on logs of WarnLevel and above. DPanicLevel logs will panic.
 	LogDeveloperKey = "log-developer"
+	// Print only the given columns of a table. Applied automatically when cmdfmt.NewTable() is used.
+	// "all" prints all available columns, not only the default ones.
+	ColumnsKey = "columns"
+	// Determines the number of rows to be printed before the header is repeated. Also determines
+	// how often output is actually flushed to stdout. Not applied automatically. If set to 0,
+	// should not print a header at all and flush each row automatically (this requires NOT using
+	// the go-pretty table printer and just print columns separated by spaces).
+	PageSizeKey = "page-size"
 )
 
 // The global config singleton

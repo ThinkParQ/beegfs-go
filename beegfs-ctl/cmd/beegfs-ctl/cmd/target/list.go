@@ -46,7 +46,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 
 	if viper.GetBool(config.DebugKey) {

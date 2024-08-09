@@ -32,7 +32,7 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 
 	sort.Slice(response.Rsts, func(i, j int) bool {

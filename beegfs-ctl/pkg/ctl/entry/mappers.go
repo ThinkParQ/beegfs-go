@@ -106,7 +106,7 @@ func initStoragePoolMapper(ctx context.Context) error {
 	if storagePoolMapper.mappingByUID == nil &&
 		storagePoolMapper.mappingByAlias == nil &&
 		storagePoolMapper.mappingByLegacyID == nil {
-		pools, err := pool.GetStoragePools(ctx)
+		pools, err := pool.GetStoragePools(ctx, pool.GetStoragePools_Config{})
 		if err != nil {
 			return fmt.Errorf("unable to get storage pool list from management: %w", err)
 		}

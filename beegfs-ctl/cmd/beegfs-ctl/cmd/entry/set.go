@@ -103,7 +103,7 @@ This enables normal users to change the default number of targets and chunksize 
 // this PR (https://github.com/spf13/cobra/pull/2117) is merged we could get rid of it and use flag
 // groups instead. WARNING: New flags are not automatically printed and must be added below.
 func runEntrySetHelp(cmd *cobra.Command, args []string) {
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	printFlagsHelp := func(cmd *cobra.Command, flags []string) {
 		for _, flagName := range flags {
 			flag := cmd.Flags().Lookup(flagName)
@@ -170,7 +170,7 @@ func runEntrySetCmd(cmd *cobra.Command, args []string, frontendCfg entrySetCfg, 
 		return err
 	}
 
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 	var multiErr types.MultiError
 	// When printing a table, print the header initially then only reprint when flushing the buffer.

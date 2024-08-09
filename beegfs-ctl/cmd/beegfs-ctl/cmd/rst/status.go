@@ -46,7 +46,7 @@ func runGetStatusCmd(cmd *cobra.Command, cfg rst.GetJobsConfig) error {
 	if err != nil {
 		return err
 	}
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	defer w.Flush()
 
 	totalPaths := 0

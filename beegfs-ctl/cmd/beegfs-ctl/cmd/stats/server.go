@@ -77,7 +77,7 @@ Example: Print aggregate stats of metadata servers, refresh every 3 seconds.
 func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 	// incase if the interval is given we loop here until the user presses ctrl + c
 	for {
-		w := cmdfmt.NewTableWriter(os.Stdout)
+		w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 
 		var err error
 		if _, ok := cfg.Node.(beegfs.InvalidEntityId); ok {
@@ -136,7 +136,7 @@ func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer
 
 	printHeader(w, true, viper.GetBool(config.DebugKey))
 	for _, serverStats := range perServerstatsResult {
-		cmdfmt.PrintNodeInfoRow(w, serverStats.Node, viper.GetBool(config.DebugKey))
+		cmdfmt.PrintNodeInfoRowDeprecated(w, serverStats.Node, viper.GetBool(config.DebugKey))
 		printData(w, serverStats.Stats)
 	}
 
@@ -170,7 +170,7 @@ func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *tabwri
 // Prints the tables header
 func printHeader(w *tabwriter.Writer, includeNodeInfo bool, includeUid bool) {
 	if includeNodeInfo {
-		cmdfmt.PrintNodeInfoHeader(w, includeUid)
+		cmdfmt.PrintNodeInfoHeaderDeprecated(w, includeUid)
 	}
 
 	fmt.Fprintf(w, "Time\tQueue length\tRequests\tBusy workers\tWritten\tRead\tSent\tReceived\t\n")

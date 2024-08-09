@@ -74,7 +74,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 
 	// Create a new tabwriter with fixed settings for spacings and so on. This should be usually
 	// used for table like output
-	w := cmdfmt.NewTableWriter(os.Stdout)
+	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 	// The returned Writer must be flushed to actually output anything. We do so after we are done
 	// writing to it.
 	defer w.Flush()

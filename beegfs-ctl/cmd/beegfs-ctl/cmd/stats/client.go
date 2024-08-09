@@ -142,7 +142,7 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 			return err
 		}
 
-		w := cmdfmt.NewTableWriter(os.Stdout)
+		w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
 
 		fmt.Fprintf(&w, "------- %ds -------\n", t)
 		printOps(&w, intervalStats, cfg, sum)
