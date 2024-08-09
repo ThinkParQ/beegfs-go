@@ -2,7 +2,7 @@
 # with. When updating be sure to also change any .github/workflows/ that install
 # a specific Go version and update the go.mod file.
 GO_BUILD_VERSION="go1.22.5"
-INSTALLED_VERSION=$(go version | { read _ _ ver _; echo ${ver}; } )  || die "determining version of go failed"
+INSTALLED_VERSION=$(go version | { read _ _ ver _; echo ${ver}; } )  || { echo >&2 "ERROR: determining version of go failed"; exit 1; }
 
 if [ "$INSTALLED_VERSION" == "$GO_BUILD_VERSION" ]
 then
