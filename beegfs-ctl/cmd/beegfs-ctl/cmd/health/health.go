@@ -9,6 +9,6 @@ func NewHealthCmd() *cobra.Command {
 		Use:   "health",
 		Short: "Inspect the health of BeeGFS",
 	}
-	cmd.AddCommand(newCheckCmd(), newNetCmd(), newDFCmd())
+	cmd.AddCommand(newCheckCmd(), newNetCmd(), newDFCmd(), newBundleCmd())
 	return cmd
 }

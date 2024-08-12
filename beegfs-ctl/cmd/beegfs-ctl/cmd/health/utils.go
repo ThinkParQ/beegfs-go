@@ -18,9 +18,13 @@ const (
 )
 
 func printHeader(text string, char string) {
+	fmt.Printf("%s", sPrintHeader(text, char))
+}
+
+func sPrintHeader(text string, char string) string {
 	repeat := strings.Repeat(char, len(text))
 	repeat = repeat[:len(text)]
-	fmt.Printf("%s\n%s\n%s\n", repeat, text, repeat)
+	return fmt.Sprintf("%s\n%s\n%s\n", repeat, text, repeat)
 }
 
 // printClientHeader prints out a standard header before displaying content for various clients.
