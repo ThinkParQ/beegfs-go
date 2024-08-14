@@ -2,7 +2,6 @@ package target
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
@@ -13,21 +12,27 @@ import (
 	"github.com/thinkparq/gobee/beegfs"
 )
 
-type list_Config struct {
-	NodeType    beegfs.NodeType
-	Capacity    bool
-	State       bool
+type PrintConfig struct {
+	NodeType beegfs.NodeType
+	Capacity bool
+	State    bool
+	// Set to nil or beegfs.InvalidEntityId{} to include all targets.
 	StoragePool beegfs.EntityId
 }
 
 func newListCmd() *cobra.Command {
-	cfg := list_Config{StoragePool: beegfs.InvalidEntityId{}}
+	cfg := PrintConfig{StoragePool: beegfs.InvalidEntityId{}}
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List BeeGFS targets.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runListCmd(cmd, cfg)
+			targets, err := target.GetTargets(cmd.Context())
+			if err != nil {
+				return err
+			}
+			PrintTargetList(cfg, targets)
+			return nil
 		},
 	}
 
@@ -40,135 +45,136 @@ func newListCmd() *cobra.Command {
 	return cmd
 }
 
-func runListCmd(cmd *cobra.Command, cfg list_Config) error {
-	targets, err := target.GetTargets(cmd.Context())
-	if err != nil {
-		return err
-	}
+// PrintTargetList prints out the provided list of targets based on the given list config. It is
+// exported for reuse in other packages like health that need to print the target list.
+func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
-
+	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "capacity pool", "space", "% free space", "inodes", "% free inodes"}
+	defaultColumns := []string{"id", "alias", "on node", "pool"}
 	if viper.GetBool(config.DebugKey) {
-		fmt.Fprint(&w, "UID\t")
-	}
-	fmt.Fprint(&w, "Alias\tID\tOn Node\tOn Storage Pool\tLast Contact\t")
-
-	if cfg.State {
-		fmt.Fprint(&w, "Reachability\tConsistency\t")
-	}
-
-	if cfg.Capacity {
-		fmt.Fprint(&w, "Space\tInodes\tCapacity Pool\t")
+		defaultColumns = allColumns
+	} else {
+		if cfg.State {
+			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency")
+		}
+		if cfg.Capacity {
+			defaultColumns = append(defaultColumns, "capacity pool", "space", "% free space", "inodes", "% free inodes")
+		}
 	}
 
-	fmt.Fprintln(&w)
+	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	defer tbl.PrintRemaining()
 
 	for _, t := range targets {
 		if cfg.NodeType != beegfs.InvalidNodeType && t.NodeType != cfg.NodeType {
 			continue
 		}
 
-		if t.StoragePool != nil {
-			switch v := cfg.StoragePool.(type) {
-			case beegfs.Uid:
-				if t.StoragePool.Uid != v {
+		if cfg.StoragePool != nil {
+			if t.StoragePool != nil {
+				switch v := cfg.StoragePool.(type) {
+				case beegfs.Uid:
+					if t.StoragePool.Uid != v {
+						continue
+					}
+				case beegfs.Alias:
+					if t.StoragePool.Alias != v {
+						continue
+					}
+				case beegfs.LegacyId:
+					if t.StoragePool.LegacyId != v {
+						continue
+					}
+				}
+				// Otherwise type beegfs.InvalidEntityId (aka don't filter by pool).
+			} else {
+				// If there isn't a storage pool set on the target this should be a metadata target.
+				// If we're filtering by storage pools, metadata targets should never be included.
+				if _, ok := cfg.StoragePool.(beegfs.InvalidEntityId); !ok {
 					continue
 				}
-			case beegfs.Alias:
-				if t.StoragePool.Alias != v {
-					continue
-				}
-			case beegfs.LegacyId:
-				if t.StoragePool.LegacyId != v {
-					continue
-				}
+				// cfg.StoragePool is type beegfs.InvalidEntityId (aka don't filter by pool).
 			}
+		} // Otherwise nil (aka don't filter by pool).
 
-		} else {
-			if _, ok := cfg.StoragePool.(beegfs.InvalidEntityId); !ok {
-				continue
-			}
-		}
-
+		node := t.Node.Alias.String()
 		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%d\t", beegfs.Uid(t.Target.Uid))
+			node = t.Node.String()
+
 		}
-
-		fmt.Fprintf(&w, "%s\t%s\t", t.Target.Alias, t.Target.LegacyId)
-
-		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%v\t", t.Node)
-		} else {
-			fmt.Fprintf(&w, "%s\t", t.Node.Alias)
-		}
-
+		pool := "n/a"
 		if t.StoragePool != nil {
 			if viper.GetBool(config.DebugKey) {
-				fmt.Fprintf(&w, "%v\t", t.StoragePool)
+				pool = t.StoragePool.String()
 			} else {
-				fmt.Fprintf(&w, "%s\t", t.StoragePool.Alias)
+				pool = t.StoragePool.Alias.String()
 			}
-		} else {
-			fmt.Fprintf(&w, "\t")
 		}
-
+		lastContact := "unknown"
 		if t.LastContactS != nil {
-			fmt.Fprintf(&w, "%d s ago\t", *t.LastContactS)
+			lastContact = fmt.Sprintf("%ds ago", *t.LastContactS)
+		}
+
+		space := "-/"
+		if t.FreeSpaceBytes != nil {
+			if viper.GetBool(config.RawKey) {
+				space = fmt.Sprintf("%d/", *t.FreeSpaceBytes)
+			} else {
+				space = fmt.Sprintf("%sB/", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
+			}
+		}
+		if t.TotalSpaceBytes != nil {
+			if viper.GetBool(config.RawKey) {
+				space += fmt.Sprintf("%d\t", *t.TotalSpaceBytes)
+			} else {
+				space += fmt.Sprintf("%sB\t", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 1))
+			}
 		} else {
-			fmt.Fprint(&w, "-\t")
+			space += "-"
 		}
 
-		if cfg.State {
-			fmt.Fprintf(&w, "%s\t%s\t", t.ReachabilityState, t.ConsistencyState)
+		percentSpaceFree := "-"
+		if t.FreeSpaceBytes != nil && t.TotalSpaceBytes != nil {
+			percentSpaceFree = fmt.Sprintf("%.2f%%", (float64(*t.FreeSpaceBytes)/float64(*t.TotalSpaceBytes))*100)
 		}
 
-		if cfg.Capacity {
-			if t.FreeSpaceBytes != nil {
-				if viper.GetBool(config.RawKey) {
-					fmt.Fprintf(&w, "%d/", *t.FreeSpaceBytes)
-				} else {
-					fmt.Fprintf(&w, "%sB/", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 0))
-				}
+		inodes := "-/"
+		if t.FreeInodes != nil {
+			if viper.GetBool(config.RawKey) {
+				inodes = fmt.Sprintf("%d/", *t.FreeInodes)
 			} else {
-				fmt.Fprint(&w, "-/")
+				inodes = fmt.Sprintf("%s/", unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1))
 			}
-
-			if t.TotalSpaceBytes != nil {
-				if viper.GetBool(config.RawKey) {
-					fmt.Fprintf(&w, "%d\t", *t.TotalSpaceBytes)
-				} else {
-					fmt.Fprintf(&w, "%sB\t", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 0))
-				}
+		}
+		if t.TotalInodes != nil {
+			if viper.GetBool(config.RawKey) {
+				inodes += fmt.Sprintf("%d\t", *t.TotalInodes)
 			} else {
-				fmt.Fprint(&w, "-\t")
+				inodes += fmt.Sprintf("%s\t", unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1))
 			}
-
-			if t.FreeInodes != nil {
-				if viper.GetBool(config.RawKey) {
-					fmt.Fprintf(&w, "%d/", *t.FreeInodes)
-				} else {
-					fmt.Fprintf(&w, "%s/", unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 0))
-				}
-			} else {
-				fmt.Fprint(&w, "-/")
-			}
-
-			if t.TotalInodes != nil {
-				if viper.GetBool(config.RawKey) {
-					fmt.Fprintf(&w, "%d\t", *t.TotalInodes)
-				} else {
-					fmt.Fprintf(&w, "%s\t", unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 0))
-				}
-			} else {
-				fmt.Fprint(&w, "-\t")
-			}
-
-			fmt.Fprintf(&w, "%s\t", t.CapacityPool)
+		} else {
+			inodes += "-"
 		}
 
-		fmt.Fprintln(&w)
+		percentInodesFree := "-"
+		if t.FreeInodes != nil && t.TotalInodes != nil {
+			percentInodesFree = fmt.Sprintf("%.2f%%", (float64(*t.FreeInodes)/float64(*t.TotalInodes))*100)
+		}
+
+		tbl.Row(
+			t.Target.Uid,
+			t.Target.LegacyId,
+			t.Target.Alias,
+			node,
+			pool,
+			t.ReachabilityState,
+			lastContact,
+			t.ConsistencyState,
+			t.CapacityPool,
+			space,
+			percentSpaceFree,
+			inodes,
+			percentInodesFree,
+		)
 	}
-
-	return nil
 }
