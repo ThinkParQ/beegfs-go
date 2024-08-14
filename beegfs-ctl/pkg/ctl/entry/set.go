@@ -73,7 +73,7 @@ func (config *SetEntryConfig) Validate() error {
 			if config.StripePattern != nil {
 				return fmt.Errorf("only root can configure stripe patterns")
 			}
-			if config.RemoteTargets != nil && len(config.RemoteTargets) > 0 {
+			if len(config.RemoteTargets) > 0 {
 				return fmt.Errorf("only root can configure remote targets")
 			}
 			if config.RemoteCooldownSecs != nil {
