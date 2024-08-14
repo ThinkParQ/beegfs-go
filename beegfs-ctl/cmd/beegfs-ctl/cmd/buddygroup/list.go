@@ -2,7 +2,6 @@ package buddygroup
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -38,38 +37,39 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 	if err != nil {
 		return err
 	}
+	if len(groups) == 0 {
+		return fmt.Errorf("no mirrors configured")
+	}
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
+	defaultColumns := []string{"alias", "id", "primary", "secondary"}
+	allColumns := append([]string{"uid"}, defaultColumns...)
 
 	if viper.GetBool(config.DebugKey) {
-		fmt.Fprint(&w, "UID\t")
+		defaultColumns = allColumns
 	}
-	fmt.Fprint(&w, "Alias\tID\tPrimary\tSecondary\t")
-
-	fmt.Fprintln(&w)
+	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	defer tbl.PrintRemaining()
 
 	for _, t := range groups {
 		if cfg.NodeType != beegfs.InvalidNodeType && t.NodeType != cfg.NodeType {
 			continue
 		}
-
+		primaryTarget := ""
+		secondaryTarget := ""
 		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%d\t", beegfs.Uid(t.BuddyGroup.Uid))
-		}
-
-		fmt.Fprintf(&w, "%s\t%s\t", t.BuddyGroup.Alias, t.BuddyGroup.LegacyId)
-
-		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%v (%s)\t", t.PrimaryTarget, t.PrimaryConsistencyState)
-			fmt.Fprintf(&w, "%v (%s)\t", t.SecondaryTarget, t.SecondaryConsistencyState)
+			primaryTarget = fmt.Sprintf("%v (%s)", t.PrimaryTarget, t.PrimaryConsistencyState)
+			secondaryTarget = fmt.Sprintf("%v (%s)", t.SecondaryTarget, t.SecondaryConsistencyState)
 		} else {
-			fmt.Fprintf(&w, "%s (%s)\t", t.PrimaryTarget.Alias, t.PrimaryConsistencyState)
-			fmt.Fprintf(&w, "%s (%s)\t", t.SecondaryTarget.Alias, t.SecondaryConsistencyState)
+			primaryTarget = fmt.Sprintf("%s (%s)", t.PrimaryTarget.Alias, t.PrimaryConsistencyState)
+			secondaryTarget = fmt.Sprintf("%s (%s)", t.SecondaryTarget.Alias, t.SecondaryConsistencyState)
 		}
-
-		fmt.Fprintln(&w)
+		tbl.Row(
+			beegfs.Uid(t.BuddyGroup.Uid),
+			t.BuddyGroup.Alias,
+			t.BuddyGroup.LegacyId,
+			primaryTarget,
+			secondaryTarget,
+		)
 	}
-
 	return nil
 }
