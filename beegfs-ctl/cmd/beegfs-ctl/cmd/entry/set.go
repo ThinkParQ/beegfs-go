@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -20,7 +19,6 @@ import (
 type entrySetCfg struct {
 	recurse            bool
 	stdinDelimiter     string
-	flushInterval      int
 	confirmBulkUpdates bool
 	verbose            bool
 }
@@ -92,9 +90,8 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().MarkHidden("remote-cooldown")
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.NewConfig.Force, "force", false, "Allow some configuration checks to be overridden.")
-	cmd.Flags().IntVar(&frontendCfg.flushInterval, "flush-interval", 1000, `Set the number of lines to buffer before flushing output and reprinting the header. 
-				Increasing this number can improve alignment but decrease real-time responsiveness. Set to zero to disable printing headers.`)
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
+	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd
 }
 
@@ -128,7 +125,7 @@ func runEntrySetHelp(cmd *cobra.Command, args []string) {
 	printFlagsHelp(cmd, inputFlags)
 
 	fmt.Fprintf(&w, "\nAdvanced Options:\n")
-	advancedFlags := sort.StringSlice{"force", "flush-interval", "yes"}
+	advancedFlags := sort.StringSlice{"force", "yes"}
 	advancedFlags.Sort()
 	printFlagsHelp(cmd, advancedFlags)
 
@@ -170,15 +167,12 @@ func runEntrySetCmd(cmd *cobra.Command, args []string, frontendCfg entrySetCfg, 
 		return err
 	}
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
+	// The table is only used for printing verbose output and tbl.PrintRemaining() is only called at
+	// the end when running in verbose mode (to avoid the headers printing out). If this is ever
+	// used to print other output adjust how/where tbl.PrintRemaining() is called as needed.
+	allColumns := []string{"path", "status", "configuration updates"}
+	tbl := cmdfmt.NewTableWrapper(allColumns, allColumns)
 	var multiErr types.MultiError
-	// When printing a table, print the header initially then only reprint when flushing the buffer.
-	printHeader := true
-	// If the interval is zero don't ever print the header.
-	if frontendCfg.flushInterval == 0 {
-		printHeader = false
-	}
 	count := 0
 
 run:
@@ -191,14 +185,11 @@ run:
 				break run
 			}
 			if frontendCfg.verbose {
-				printSetResultsTable(&w, result, printHeader)
-				printHeader = false
-				if frontendCfg.flushInterval > 0 && count%frontendCfg.flushInterval == 0 {
-					printHeader = true
-					w.Flush()
-				} else if frontendCfg.flushInterval == 0 {
-					w.Flush()
+				configUpdates := "None"
+				if result.Status == beegfs.OpsErr_SUCCESS {
+					configUpdates = sprintfNewEntryConfig(result.Updates)
 				}
+				tbl.Row(result.Path, result.Status, configUpdates)
 			}
 		case err, ok := <-errChan:
 			if ok {
@@ -211,11 +202,10 @@ run:
 	}
 
 	if frontendCfg.verbose {
-		fmt.Fprintf(&w, "Processed %d entries.\n", count-1)
+		tbl.PrintRemaining()
+		fmt.Printf("Processed %d entries.\n", count-1)
 	} else {
-		fmt.Fprintf(&w, "Processed %d entries.\nConfiguration Updates: ", count-1)
-		printNewEntryConfig(&w, backendCfg.NewConfig)
-		fmt.Fprintf(&w, "\n")
+		fmt.Printf("Processed %d entries.\nConfiguration Updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg.NewConfig))
 	}
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
@@ -224,22 +214,9 @@ run:
 	return nil
 }
 
-func printSetResultsTable(w *tabwriter.Writer, result entry.SetEntryResult, printHeader bool) {
-	if printHeader {
-		fmt.Fprintf(w, "Path\tStatus\tConfiguration Updates:\n")
-	}
-	fmt.Fprintf(w, "%s\t%s\t", result.Path, result.Status)
-	if result.Status == beegfs.OpsErr_SUCCESS {
-		printNewEntryConfig(w, result.Updates)
-	} else {
-		fmt.Fprintf(w, "None")
-	}
-	fmt.Fprintf(w, "\n")
-}
-
-// printNewEntryConfig() only prints non-nil/empty fields from the newConfig. This is meant for only
-// printing what configuration updates were applied.
-func printNewEntryConfig(w *tabwriter.Writer, newConfig entry.SetEntryConfig) {
+// sprintfNewEntryConfig() combines all non-nil/empty fields from the newConfig into a comma
+// separated string. This is meant for printing what configuration updates were applied.
+func sprintfNewEntryConfig(newConfig entry.SetEntryConfig) string {
 	val := reflect.ValueOf(newConfig)
 	typ := reflect.TypeOf(newConfig)
 	// We can't specify the size of the slice upfront because we don't know how many fields
@@ -266,5 +243,5 @@ func printNewEntryConfig(w *tabwriter.Writer, newConfig entry.SetEntryConfig) {
 			line = append(line, fmt.Sprintf("%s (none)", fieldType.Name))
 		}
 	}
-	fmt.Fprintf(w, "%s", strings.Join(line, ", "))
+	return strings.Join(line, ", ")
 }
