@@ -253,7 +253,7 @@ type RemoteStorageTarget struct {
 
 func (m *RemoteStorageTarget) Serialize(s *beeserde.Serializer) {
 	if m.majorVersion == 0 && m.minorVersion == 0 {
-		if m.CoolDownPeriod != 0 || m.Reserved != 0 || m.FilePolicies != 0 || (m.RSTIDs != nil && len(m.RSTIDs) > 0) {
+		if m.CoolDownPeriod != 0 || m.Reserved != 0 || m.FilePolicies != 0 || len(m.RSTIDs) > 0 {
 			// Handle setting the initial major and minor versions
 			m.majorVersion = 1
 			m.minorVersion = 0
