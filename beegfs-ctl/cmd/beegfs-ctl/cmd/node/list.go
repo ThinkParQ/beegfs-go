@@ -2,7 +2,6 @@ package node
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"time"
 
@@ -69,73 +68,58 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 		} else {
 			return int(a.Node.Id.NodeType - b.Node.Id.NodeType)
 		}
-		// return strings.Compare(a.Node.Alias.String(), b.Node.Alias.String())
 	})
 
-	// Create a new tabwriter with fixed settings for spacings and so on. This should be usually
-	// used for table like output
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	// The returned Writer must be flushed to actually output anything. We do so after we are done
-	// writing to it.
-	defer w.Flush()
+	allColumns := []string{"uid", "id", "alias", "nics", "reachable"}
+	defaultColumns := []string{"id", "alias"}
 
-	// Print the tables header. Columns must end with a tabstop \t, including the last one.
 	if viper.GetBool(config.DebugKey) {
-		fmt.Fprint(&w, "UID\t")
-	}
-	fmt.Fprint(&w, "NodeID\tAlias\t")
-	if cfg.WithNics || cfg.ReachabilityCheck {
-		fmt.Fprint(&w, "Nics\t\t\t")
-		if cfg.ReachabilityCheck {
-			fmt.Fprint(&w, "Reachable\t")
+		defaultColumns = allColumns
+	} else {
+		if cfg.WithNics || cfg.ReachabilityCheck {
+			defaultColumns = append(defaultColumns, "nics")
+			if cfg.ReachabilityCheck {
+				defaultColumns = append(defaultColumns, "reachable")
+			}
 		}
 	}
-	fmt.Fprint(&w, "\n")
 
+	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	defer tbl.PrintRemaining()
 	hasUnreachableNode := false
 
 	// Print and process node list
 	for _, node := range nodes {
-		// Print a line corresponding to the columns above
-		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "%d\t", node.Node.Uid)
-		}
-		fmt.Fprintf(&w, "%s\t%s\t", node.Node.Id, node.Node.Alias)
 
-		// If we requested the nic list for each node, print them, one each line.
-		if cfg.WithNics || cfg.ReachabilityCheck {
-			hasReachableNic := false
-			first := true
-			for _, nic := range node.Nics {
-				// Align Nic on additional lines
-				if !first {
-					fmt.Fprintf(&w, "\n\t\t")
-					if viper.GetBool(config.DebugKey) {
-						fmt.Fprintf(&w, "\t")
-					}
-				}
-				first = false
-
-				fmt.Fprintf(&w, "%s\t%s\t%s\t", nic.Nic.Name, nic.Nic.Addr, nic.Nic.Type)
-
+		nics := ""
+		reachableNics := ""
+		hasReachableNic := false
+		for i, nic := range node.Nics {
+			if i != 0 {
+				nics += "\n"
+				reachableNics += "\n"
+			}
+			nics += fmt.Sprintf("%s:%s (%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr)
+			if nic.Reachable {
+				hasReachableNic = hasReachableNic || nic.Reachable
+				reachableNics += "yes"
+			} else {
 				if cfg.ReachabilityCheck {
-					if nic.Reachable {
-						hasReachableNic = true
-						fmt.Fprint(&w, "yes")
-					} else {
-						fmt.Fprint(&w, "no")
-					}
+					reachableNics += "no"
+				} else {
+					reachableNics += "?"
 				}
 			}
-			fmt.Fprint(&w, "\t")
-
-			// A node is (completely) unreachable if all its Nics are unreachable.
-			if !hasReachableNic {
-				hasUnreachableNode = true
-			}
 		}
+		hasUnreachableNode = hasUnreachableNode || !hasReachableNic
 
-		fmt.Fprint(&w, "\n")
+		tbl.Row(
+			node.Node.Uid,
+			node.Node.Id,
+			node.Node.Alias,
+			nics,
+			reachableNics,
+		)
 	}
 
 	if reachabilityError && hasUnreachableNode {
