@@ -2,14 +2,21 @@ package kvstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
+	"math/rand"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/mock"
 	"github.com/thinkparq/gobee/types"
 )
 
@@ -119,6 +126,7 @@ type MapStore[T any] struct {
 	// This behavior can be customized through the `WithPK` options.
 	pkSeqGenerator *badger.Sequence
 	config         *mapStoreConfig
+	gc             *badgerGarbageCollection
 }
 
 // One or more CommitFlags can optionally be used to modify the behavior of
@@ -202,6 +210,9 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapSto
 		return nil, nil, err
 	}
 
+	gc := NewBadgerGarbageCollection(db)
+	gc.StartRunner()
+
 	closeFunc := func() error {
 		multiErr := types.MultiError{}
 		if err := seq.Release(); err != nil {
@@ -223,6 +234,7 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapSto
 		db:             db,
 		pkSeqGenerator: seq,
 		config:         cfg,
+		gc:             gc,
 	}, closeFunc, nil
 }
 
@@ -740,7 +752,6 @@ func (s *MapStore[T]) commitEntry(key string, entry *CacheEntry[T]) func(flags .
 	lockReleased := false
 
 	return func(flags ...CommitFlag) error {
-
 		if lockReleased {
 			return ErrEntryLockAlreadyReleased
 		}
@@ -819,4 +830,271 @@ func (s *MapStore[T]) commitEntry(key string, entry *CacheEntry[T]) func(flags .
 		}
 		return nil
 	}
+}
+
+type garbageCollector interface {
+	// runDatabaseGC() run the database's garbage collection.
+	RunValueLogGC(discardRatio float64) error
+	// isDatabaseClosed() indicates whether the database has been closed.
+	IsClosed() bool
+}
+
+type systemLoadDetector interface {
+	isSystemLoadHigh() (bool, float64, error)
+}
+
+var _ systemLoadDetector = &systemLoad{}
+
+type systemLoad struct {
+	// Garbage collection runs at regular intervals but may be deferred if the system load is high. The
+	// loadAverageThreshold is a normalized value representing the system load as a percentage, calculated as
+	// loadAverage/numberOfCpus. A value greater than 1.0 indicates that, on average, there are processes waiting for CPU
+	// time per available CPU.
+	loadAverageThreshold float64
+	readFile             func(string) ([]byte, error)
+}
+
+type badgerGarbageCollection struct {
+	garbageCollector
+	systemLoadDetector
+
+	// Channel is used to ensure there's one and only one garbage collection start started.
+	start chan struct{}
+	// Database logger
+	logger badger.Logger
+	// initialSleepDelaySec is the sleep interval between garbage collection runs.
+	initialSleepDelaySec int
+	// forcedGCThresholdSec is the minimum sleep interval till garbage collection can no longer be deferred.
+	forcedGCThresholdSec int
+	// sleepDelayNoiseSec defines the range of randomness added to each garbage collection sleep interval. This helps prevent
+	// overlapping garbage collection runs across multiple MapStore instances.
+	sleepDelayNoiseSec int
+	// Context for terminating the garbage collection runner.
+	runnerCtx context.Context
+	// Context cancel function for terminating the garbage collection runner.
+	runnerCtxCancel context.CancelFunc
+}
+
+type badgerGarbageCollectionOpt func(*badgerGarbageCollection)
+
+func NewBadgerGarbageCollection(db *badger.DB, opts ...badgerGarbageCollectionOpt) *badgerGarbageCollection {
+	runnerCtx, runnerCtxCancel := context.WithCancel(context.Background())
+	gc := &badgerGarbageCollection{
+		start:                make(chan struct{}, 1),
+		logger:               db.Opts().Logger,
+		initialSleepDelaySec: 6 * 60 * 60,
+		forcedGCThresholdSec: 15 * 60,
+		sleepDelayNoiseSec:   10 * 60,
+		runnerCtx:            runnerCtx,
+		runnerCtxCancel:      runnerCtxCancel,
+	}
+	gc.garbageCollector = db
+	gc.systemLoadDetector = &systemLoad{loadAverageThreshold: 1.0, readFile: os.ReadFile}
+
+	for _, opt := range opts {
+		opt(gc)
+	}
+	return gc
+}
+
+// Set system load threshold value.
+func WithSystemLoadThreshold(threshold float64) badgerGarbageCollectionOpt {
+	return func(gc *badgerGarbageCollection) {
+		if threshold <= 0.0 {
+			gc.logger.Warningf("invalid system load threshold! It must be greater than 0.0.")
+			return
+		}
+		gc.systemLoadDetector = &systemLoad{loadAverageThreshold: threshold}
+	}
+}
+
+// Set initial sleep delay time.
+func WithInitialSleepDelaySec(delay int) badgerGarbageCollectionOpt {
+	return func(gc *badgerGarbageCollection) {
+		if delay <= 0 {
+			gc.logger.Warningf("invalid initialSleepDelaySec time! It must be greater than 0.")
+			return
+		}
+		gc.initialSleepDelaySec = delay
+
+	}
+}
+
+// Set sleep delay minimum value.
+func WithForcedGCThresholdSec(delay int) badgerGarbageCollectionOpt {
+	return func(gc *badgerGarbageCollection) {
+		if delay <= 0 {
+			gc.logger.Warningf("invalid forcedGCThresholdSec time! It must be greater than 0.")
+			return
+		}
+		gc.forcedGCThresholdSec = delay
+
+	}
+}
+
+// Set sleep delay noise time.
+func WithSleepDelayNoiseSec(delay int) badgerGarbageCollectionOpt {
+	return func(gc *badgerGarbageCollection) {
+		if delay <= 0 {
+			gc.logger.Warningf("invalid sleepDelayNoiseSec value! It must be greater than 0.")
+			return
+		}
+		gc.sleepDelayNoiseSec = delay
+
+	}
+}
+
+// StartRunner() initiates the garbage collection process if it is not already running. It ensure one and only one
+// instance runs at a time. The process executes in a separate goroutine. Clean up will be triggered when the database
+// is closed. Returns true when a runner has started.
+func (gc *badgerGarbageCollection) StartRunner() bool {
+	select {
+	case gc.start <- struct{}{}:
+		go func() {
+			defer func() { <-gc.start }()
+			gc.runner()
+		}()
+		return true
+	default:
+		return false
+	}
+}
+
+// runner() executes garbage collection at regular intervals with an added random time to prevent multiple instances of
+// badgerDB running at the same time. The interval between runs can be deferred based on high system load averages; each time
+// garbage collection is deferred, the interval is reduced. If the sleep time is less than GCSleepIntervalMinimum then
+// garbage collection cannot be deferred.
+func (gc *badgerGarbageCollection) runner() {
+	delay := gc.initialSleepDelaySec
+	for {
+		if gc.IsClosed() {
+			return
+		}
+
+		select {
+		case <-gc.runnerCtx.Done():
+			return
+		case <-time.After(gc.getSleepInterval(delay)):
+		}
+
+		delay = gc.attemptGarbageCollection(delay)
+	}
+}
+
+// Attempt to execute garbage collection. Garbage collection will be deferred when the system load is high unless delay
+// is less than the minimum. If the delay is less than the minimum, garbage collection will be forced to run. Should the
+// database have been closed or is unavailable then the minimum delay time will be returned.
+func (gc *badgerGarbageCollection) attemptGarbageCollection(delay int) int {
+	isSystemLoadHigh, _, err := gc.isSystemLoadHigh()
+	if err != nil {
+		gc.logger.Warningf("failed to determine system load: %v", err)
+	}
+	if !isSystemLoadHigh || delay <= gc.forcedGCThresholdSec {
+		if success := gc.runGarbageCollection(); success {
+			delay = gc.initialSleepDelaySec
+		} else {
+			delay = gc.forcedGCThresholdSec
+			gc.logger.Infof("database garbage collection failed to complete. Retry in %d seconds.", delay)
+		}
+	} else {
+		delay /= 2.0
+		gc.logger.Infof("database garbage collection was deferred. Retry in %d seconds", delay)
+	}
+
+	return delay
+}
+
+// runDatabaseGC() will be run repeatedly until there is nothing more to do unless either an error or there is a high
+// system load detected.
+func (gc *badgerGarbageCollection) runGarbageCollection() bool {
+	start := time.Now()
+	for {
+		if err := gc.RunValueLogGC(0.5); err != nil {
+			if errors.Is(err, badger.ErrNoRewrite) {
+				gc.logger.Debugf("database garbage collection complete (total time: %s)", time.Since(start).String())
+				return true
+			}
+			gc.logger.Warningf("database garbage collection failed to complete: %v.", err)
+			return false
+		}
+
+		isSystemLoadHigh, load, err := gc.isSystemLoadHigh()
+		if err != nil {
+			gc.logger.Warningf("failed to determine system load: %v", err)
+		}
+		if isSystemLoadHigh {
+			gc.logger.Infof("paused garbage collection since system load average is high. (system load %.2f).", load)
+			return false
+		}
+	}
+}
+
+// getSleepInterval() adds random noise to the provided interval.
+func (gc *badgerGarbageCollection) getSleepInterval(seconds int) time.Duration {
+	noise := rand.Intn(gc.sleepDelayNoiseSec) - (gc.sleepDelayNoiseSec / 2)
+	seconds += noise
+	return time.Duration(seconds * int(time.Second))
+}
+
+// isSystemLoadHigh() determines whether there is a high system load. The pass 1 and 5 minutes are considered.
+func (l *systemLoad) isSystemLoadHigh() (bool, float64, error) {
+	data, err := l.readFile("/proc/loadavg")
+	fields := strings.Fields(string(data))
+	if len(fields) < 1 {
+		return false, 0.0, fmt.Errorf("failed to retrieve system load information: %v", err)
+	}
+	load1Min, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return false, 0.0, fmt.Errorf("failed to retrieve system load information: %v", err)
+	}
+
+	cpuCount := float64(runtime.NumCPU())
+	load := load1Min / cpuCount
+	return load >= l.loadAverageThreshold, load, nil
+}
+
+var _ garbageCollector = &mockGarbageCollection{}
+
+type mockGarbageCollection struct {
+	mock.Mock
+}
+
+func (m *mockGarbageCollection) RunValueLogGC(discardRatio float64) error {
+	args := m.Called()
+	return args.Error(0)
+}
+func (m *mockGarbageCollection) IsClosed() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+var _ systemLoadDetector = &mockSystemLoad{}
+
+type mockSystemLoad struct {
+	mock.Mock
+}
+
+func (m *mockSystemLoad) isSystemLoadHigh() (bool, float64, error) {
+	args := m.Called()
+	return args.Bool(0), args.Get(1).(float64), args.Error(2)
+}
+
+func newBadgerGarbageCollectionForTesting(db *badger.DB, opts ...badgerGarbageCollectionOpt) *badgerGarbageCollection {
+	runnerCtx, runnerCtxCancel := context.WithCancel(context.Background())
+	gc := &badgerGarbageCollection{
+		start:                make(chan struct{}, 1),
+		logger:               db.Opts().Logger,
+		initialSleepDelaySec: 6 * 60 * 60,
+		forcedGCThresholdSec: 15 * 60,
+		sleepDelayNoiseSec:   10 * 60,
+		runnerCtx:            runnerCtx,
+		runnerCtxCancel:      runnerCtxCancel,
+	}
+	gc.garbageCollector = &mockGarbageCollection{}
+	gc.systemLoadDetector = &mockSystemLoad{}
+
+	for _, opt := range opts {
+		opt(gc)
+	}
+	return gc
 }
