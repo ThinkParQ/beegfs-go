@@ -21,129 +21,94 @@ import (
 )
 
 const (
-	// Errors will be returned when trying to create or get entries that match `ReservedKeyPrefix`.
+	// Errors will be returned when trying to create or get entries that match `reservedKeyPrefix`.
 	// IMPORTANT: Changing this is not backwards compatible.
-	ReservedKeyPrefix = "mapstore_"
+	reservedKeyPrefix = "mapstore_"
 )
 
-// CacheEntry represents an in-memory entry in the MapStore.
-type CacheEntry[T any] struct {
-	// Metadata can optionally store arbitrary details about the entry. One use case is storing
-	// additional information needed to look up details about this entry in another MapStore. For
-	// example if one MapStore tracks map[fsPath]Job and other tracks map[jobID]jobResults the
-	// latter could store fsPath as metadata allowing reverse lookups of a Job based on the jobID.
-	//
-	// Metadata may also be used to store automatically generated fields, such as
-	// `mapstore_generated_pk`, which is populated if a key was automatically generated when
-	// creating an entry.
-	//
-	// IMPORTANT: Metadata keys prefixed with the reserved key prefix "mapstore_" are reserved for
-	// internal use and behavior is indeterminate if these keys are written to or modified.
-	Metadata map[string]string
-	// Store any generic type in BadgerDB. If `T` is a reference type that
-	// requires initialization (such as a map or a slice) then it is up to the
-	// caller to initialize the Value field of the entry immediately after
-	// calling `CreateAndLockEntry()`.
-	//
-	// Example:
-	//	entry, _, _ := mapStore.CreateAndLockEntry("key1")
-	//	entry.Value = make(map[string]string)
-	//	entry.Value["innerKey1"] = "innerValue1"
-	Value T
+// EntryLock is used to manage access to database entries.
+type EntryLock struct {
 	// The mutex should be locked when reading or writing to a particular entry.
 	mu sync.Mutex
-	// The isDeleted flag should be checked immediately after a goroutine locks an
-	// entry. It indicates the entry has been isDeleted from the cache map and DB
-	// and should no longer be used. This is used to coordinate thread-safe
-	// deletions from the map without requiring the entire map to be locked.
-	isDeleted bool
-	// keepCached should be incremented by goroutines intending to access the
-	// entry before attempting to lock the entry. This signals to the goroutine
-	// currently holding the entry lock it should not be evicted from the cache
-	// when we've exceeded the cacheCapacity (to attempt avoiding expensive
-	// reads from disk). Note this does not guarantee the entry will be kept in
-	// the cache and callers should still check isCached after acquiring the
-	// entry lock.
-	keepCached atomic.Int32
-	// The isCached flag should be checked immediately after a goroutine locks
-	// an entry. It indicates the entry is no longer in the cache but still
-	// present in the database. It is a safety mechanism in case there is a race
-	// incrementing and checking keepCached.
-	isCached bool
+	// The isEntryDeleted flag should be checked immediately after a go routine locks an entry. This flag indicates that
+	// the entry has been deleted from the database and should no longer be used. It helps coordinate thread-safe
+	// deletions from the MapStore without locking the entire MapStore.
+	isEntryDeleted bool
+	// keepLock is a hold counter for go routines intending to access the entry before acquiring the lock. Note that this
+	// does not guarantee the entry will be retained, so the caller should still check isEntryDeleted after successfully
+	// acquiring the lock.
+	keepLock atomic.Int32
+	// The isEntryLockDeleted flag should be checked immediately after a go routine locks an entry.
+	// This flag indicates that the entry's lock has been deleted, but the entry itself may still exist.
+	// It acts as a safety mechanism to handle potential race conditions when incrementing and checking keepLock.
+	isEntryLockDeleted bool
+}
+
+// Create and return a new EntryLock with its mutex already locked.
+func newLockedEntryLock() *EntryLock {
+	lock := &EntryLock{
+		mu:                 sync.Mutex{},
+		isEntryDeleted:     false,
+		isEntryLockDeleted: false,
+	}
+	lock.mu.Lock()
+	return lock
+}
+
+// badgerEntry is used to encode and decode entries from the database.
+type badgerEntry[T any] struct {
+	Value T
+}
+
+// Update BadgerEntry with an encoded entry.
+func (e *badgerEntry[T]) updateWithEncodedEntry(entry []byte) error {
+	decoder := gob.NewDecoder(bytes.NewReader(entry))
+	err := decoder.Decode(&e)
+	return err
+}
+
+// encode the BadgerEntry as []byte.
+func (e *badgerEntry[T]) encode() (encodedEntry []byte, err error) {
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+	if err = encoder.Encode(e); err != nil {
+		return nil, err
+	}
+	encodedEntry = buffer.Bytes()
+	return
 }
 
 // BadgerItem represents a key/value pair that is stored on-disk using BadgerDB.
 // It is typically used when directly returning multiple Badger entries.
 type BadgerItem[T any] struct {
 	Key   string
-	Entry *BadgerEntry[T]
+	Entry *badgerEntry[T]
 }
 
-// BadgerEntry is what is stored on-disk using BadgerDB for a particular entry.
-// It is the on-disk equivalent of a cache entry. It is used when
-// encoding/decoding the contents of an entry from BadgerDB.
-type BadgerEntry[T any] struct {
-	Metadata map[string]string
-	Value    T
-}
-
-// MapStore is an in memory representation of a map[string]map[string]T that
-// handles automatically loading and unloading entries as needed from BadgerDB
-// into memory to keep overall memory utilization in check.
+// MapStore provides thread-safe management of key-value entries stored in a Badger database, using a map[string]T
+// representation.
 type MapStore[T any] struct {
-	// Global lock on the cache. A write lock is required to add or remove
-	// entries from the cache map. A read lock is required when getting an
-	// existing entry in the map. Once the entry is retrieved the caller should
-	// release the read lock and instead attempt to take a write lock on the
-	// entry. IMPORTANT: Don't hold the global lock on the cache while also
-	// waiting to lock an entry or a deadlock can occur when trying to release
-	// an entry if the entry needs to be evicted from the cache or deleted.
+	// Global MapStore lock is used to synchronize read and write operations on the EntryLocks map. IMPORTANT: After
+	// looking up an entryLock in the EntryLocks map, release the global MapStore lock BEFORE attempting to lock the
+	// entryLock or deadlocks will occur (because deletions require the entry and global EntryLocks map be locked).
 	mu sync.RWMutex
-	// An in memory cache of MapStore entries that also exist in the DB. The
-	// cache size is kept in check by immediately evicting new entries if the
-	// maximum cache size is exceeded. This logic is because the oldest or least
-	// recently used items in the cache are actually most likely to be needed
-	// sooner since they represent the longest running jobs. IMPORTANT: The
-	// cache is less about speeding up performance and mostly about providing
-	// additional ordering guarantees not provided directly by Badger. Notably
-	// we ensure multiple goroutines can update the same entry and the results
-	// from both goroutines will be reflected in the DB. The read only
-	// "GetEntry" methods provide the fastest access to the MapStore by avoiding
-	// locking at the cost of returning slightly outdated results.
-	cache map[string]*CacheEntry[T]
-	// cacheCapacity indicates the maximum number of entries in the cache.
-	// Note the actual cache size can be slightly higher than this additional
-	// cache space is allocated as needed for entries actively being accessed.
-	cacheCapacity int
-	// We don't do any additional locking around the database since badger
-	// already gives us transactional guarantees. Developers should be
-	// familiar with what guarantees this provides in the context of Badger:
+	// The entryLocks map maintains mappings for all active entry locks. These locks are used to manage access to
+	// database entries.
+	entryLocks map[string]*EntryLock
+	// No additional locking is implemented around the database, as Badger already provides transactional guarantees.
+	// Developers should understand the guarantees provided by Badger in this context:
 	// https://dgraph.io/docs/badger/get-started/#transactions
 	db *badger.DB
-	// If the caller desires when creating DB entries can generate unique monotonically increasing
-	// uint64 keys. As keys are strings in BadgerDB, by default we encode strings using base36 with
-	// a fixed width allowing the caller to iterate over entries in the order they were written.
-	// This behavior can be customized through the `WithPK` options.
+	// If the caller desires when creating DB entries can generate unique monotonically increasing uint64 keys. As keys
+	// are strings in BadgerDB, by default we encode strings using base36 with a fixed width allowing the caller to
+	// iterate over entries in the order they were written. This behavior can be customized through the `WithPK`
+	// options.
 	pkSeqGenerator *badger.Sequence
-	config         *mapStoreConfig
-	gc             *badgerGarbageCollection
+	// Configuration options for the MapStore.
+	config *mapStoreConfig
+	// Manages badger database garbage collection.
+	gc *badgerGarbageCollection
 }
-
-// One or more CommitFlags can optionally be used to modify the behavior of
-// commitEntry(). Supported flags are defined as typed constants.
-type CommitFlag int
-
-const (
-	// Including the DeleteEntry flag when calling commitEntry() will
-	// delete the entry from BadgerDB and the cache before releasing the lock.
-	DeleteEntry CommitFlag = iota
-	// Including the UpdateOnly flag when calling commitEntry() will
-	// update the entry in BadgerDB, but not release the lock. This allows the
-	// caller to commit incremental updates to stable storage without giving
-	// up exclusive access to the entry. This is especially useful if other
-	// processes may use the read only GetEntry or GetEntries methods.
-	UpdateOnly
-)
 
 type mapStoreConfig struct {
 	pkSeqBandwidth uint64
@@ -181,10 +146,9 @@ func WithPKBase(base int) mapStoreOpt {
 	}
 }
 
-// NewMapStore attempts to initialize a MapStore backed by a database at dbPath.
-// It returns an pointer to the MapStore and a function that should be called to
-// close the database when the MapStore is no longer needed.
-func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapStoreOpt) (*MapStore[T], func() error, error) {
+// NewMapStore initializes a MapStore where key-value entries are stored in a database. It returns a pointer to the
+// MapStore and a function that should be called to close the database when the MapStore is no longer needed.
+func NewMapStore[T any](opts badger.Options, msOpts ...mapStoreOpt) (*MapStore[T], func() error, error) {
 
 	cfg := &mapStoreConfig{
 		pkSeqBandwidth: 1000,
@@ -205,7 +169,7 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapSto
 	// confusing to users and at worst breaks methods like GetEntries. To avoid having to use a
 	// separate DB for generating sequence we have established a ReservedKeyPrefix used to create
 	// entries for internal use that are ignored by the facing methods.
-	seq, err := db.GetSequence([]byte(ReservedKeyPrefix+"pk_seq_gen"), cfg.pkSeqBandwidth)
+	seq, err := db.GetSequence([]byte(reservedKeyPrefix+"pk_seq_gen"), cfg.pkSeqBandwidth)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -229,8 +193,7 @@ func NewMapStore[T any](opts badger.Options, cacheCapacity int, msOpts ...mapSto
 
 	return &MapStore[T]{
 		mu:             sync.RWMutex{},
-		cache:          make(map[string]*CacheEntry[T]),
-		cacheCapacity:  cacheCapacity,
+		entryLocks:     make(map[string]*EntryLock),
 		db:             db,
 		pkSeqGenerator: seq,
 		config:         cfg,
@@ -246,175 +209,148 @@ func (s *MapStore[T]) generateNextPK() (string, error) {
 	return fmt.Sprintf("%0*s", s.config.pkSeqWidth, strconv.FormatInt(int64(seq), s.config.pkSeqBase)), nil
 }
 
-// CreateAndLockEntry() creates a new entry in the MapStore for the provided key. If the provided
-// key already has an entry it returns an error. Otherwise it creates an entry, locks it, adds it to
-// the in-memory cache then returns the pointer to the new entry and a function that must be used to
-// commit changes to the database and release the lock when the caller is finished using it. Once
-// the lock is released the caller SHOULD NOT reuse the pointer to the entry and best practice would
-// be to immediately set it to nil to prevent reuse and ensure it can be garbage collected.
-//
-// If the caller does not provide a key (i.e., key == "") then a unique monotonically increasing key
-// (i.e., PK) will be automatically generated and also added to the Metadata map as
-// mapstore_generated_pk. Generated keys are based on a uint64 (which also determines the max key)
-// but stored as a string and guaranteed to be unique and in increasing byte-wise lexicographical
-// sorted order. If a crash occurs there may be gaps in the key sequence based on the
-// WithPKBandwidth setting, but keys are always guaranteed to be unique and in order. Note it is
-// allowed for callers to use a mix of generated and user specified keys in the same DB. If there is
-// a collision with an existing key when creating an entry an error will be returned.
-//
-// IMPORTANT: All keys prefixed with "mapstore_" are reserved for internal use ONLY. Attempts to
-// create or get entries with this key prefix will return an error.
-func (s *MapStore[T]) CreateAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
+type createAndLockEntryConfig struct {
+	allowExistingEntry bool
+	value              any
+}
 
-	generatedPK := false
+type createAndLockEntryOpt func(*createAndLockEntryConfig)
+
+// Including the WithAllowExisting option permits existing database entries to be returned. However, the
+// ErrEntryAlreadyExistsInDB error will still be returned when existing entries are encountered.
+func WithAllowExisting(allowExistingEntry bool) createAndLockEntryOpt {
+	return func(cfg *createAndLockEntryConfig) {
+		cfg.allowExistingEntry = allowExistingEntry
+	}
+}
+
+// Including the WithValue option forces the CreateAndLockEntry call to initialize the database entry with the provided value.
+// This option is ignored if WithAllowExisting and the entry always exists (i.e., the existing value will not be overwritten).
+func WithValue(value any) createAndLockEntryOpt {
+	return func(cfg *createAndLockEntryConfig) {
+		cfg.value = value
+	}
+}
+
+// CreateAndLockEntry() creates a new entry and returns it along with a commit function. By default, if an entry already
+// exists for the specified key, the function returns an ErrEntryAlreadyExistsInDB error. This behavior can be modified
+// by using the WithAllowExistingEntry(true) option. When this option is enabled, if an entry already exists, a copy of
+// the existing entry is returned along with a commit function and the ErrEntryAlreadyExistsInDB error. In this case,
+// the WithValue() option will be ignored.
+//
+// If no key is provided (i.e., key == ""), a unique, monotonically increasing primary key (PK) is automatically
+// generated, with a 13-character numerical string in base-36 format. These generated keys are guaranteed to be unique
+// and sorted in byte-wise lexicographical order. While gaps in the key sequence may occur due to crashes (depending on
+// the WithPKBandwidth settings), the uniqueness and ordering of keys are preserved. Callers can mix generated and
+// user-specified keys within the same database. If a collision occurs when attempting to create an entry with an
+// existing key, an error will be returned.
+//
+// IMPORTANT: All keys prefixed with "mapstore_" are reserved for internal use ONLY. Attempts to create or access
+// entries with this prefix will result in an error.
+func (s *MapStore[T]) CreateAndLockEntry(key string, opts ...createAndLockEntryOpt) (string, *badgerEntry[T], func(...commitEntryConfigOpts) error, error) {
+	if strings.HasPrefix(key, reservedKeyPrefix) {
+		return key, nil, nil, ErrEntryIllegalKey
+	}
+
 	if key == "" {
-		var err error
-		key, err = s.generateNextPK()
+		generatedKey, err := s.generateNextPK()
 		if err != nil {
-			return nil, nil, err
+			return key, nil, nil, err
 		}
-		generatedPK = true
-	} else if strings.HasPrefix(key, ReservedKeyPrefix) {
+		key = generatedKey
+	}
+
+	cfg := &createAndLockEntryConfig{
+		allowExistingEntry: false,
+		value:              nil,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	entryLock, err := s.getEntryLock(key)
+	if err != nil {
+		return key, nil, nil, err
+	}
+
+	entry, err := s.getEntry(key)
+	if err == nil { // Entry unexpectedly exists
+		if cfg.allowExistingEntry {
+			return key, entry, s.commitEntry(key, entry, entryLock), ErrEntryAlreadyExistsInDB
+		}
+		s.deleteEntryLockUnlocked(key, entryLock)
+		entryLock.mu.Unlock()
+		return key, nil, nil, ErrEntryAlreadyExistsInDB
+	} else if !errors.Is(err, ErrEntryNotInDB) { // Unknown error
+		return key, nil, nil, err
+	}
+
+	newEntry := &badgerEntry[T]{}
+	if cfg.value != nil {
+		newEntry.Value = cfg.value.(T)
+	}
+	return key, newEntry, s.commitEntry(key, newEntry, entryLock), nil
+}
+
+// GetAndLockEntry provides access to a MapStore entry, returning a read-only copy of the entry and a release function.
+// The release function must be called to apply any changes to the database. If the entry does not exist, an
+// ErrEntryNotInDB error is returned.
+func (s *MapStore[T]) GetAndLockEntry(key string) (*badgerEntry[T], func(...commitEntryConfigOpts) error, error) {
+	if strings.HasPrefix(key, reservedKeyPrefix) {
 		return nil, nil, ErrEntryIllegalKey
 	}
 
-	// First verify the in-memory MapStore and database don't already
-	// have an entry for key. If they do refuse to create a new entry.
-	_, commitEntry, err := s.lockAndLoadEntryFromDB(key)
-	if err != nil && err != badger.ErrKeyNotFound {
-		return nil, nil, err // An unknown error occurred.
-	} else if err == nil {
-		commitEntry() // If we got a valid entry we must release it.
-		return nil, nil, ErrEntryAlreadyExistsInDB
+	entryLock, err := s.getEntryLock(key)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// If the entry isn't in the database more than likely we'll be able to
-	// create it. First lock the in-memory MapStore so we can add an entry.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.cache[key]; ok {
-		// This indicates something else raced with us and was able to create a
-		// conflicting entry. For now lets not try to add a bunch of logic to
-		// prevent this from ever happening. With the way we use the MapStore
-		// this shouldn't ever be a problem.
-		return nil, nil, fmt.Errorf("%w: (probably the caller is not setup to prevent race conditions)", ErrEntryAlreadyExistsInDB)
+	entry, err := s.getEntry(key)
+	if err != nil {
+		// Delete entryLock since an entry was not obtained from the database.
+		s.deleteEntryLockUnlocked(key, entryLock)
+		entryLock.mu.Unlock()
+		return nil, nil, fmt.Errorf("failed to retrieve database entry: %w", err)
 	}
 
-	metadata := make(map[string]string)
-	if generatedPK {
-		metadata[ReservedKeyPrefix+"generated_pk"] = key
-	}
-
-	newEntry := &CacheEntry[T]{
-		mu:        sync.Mutex{},
-		Metadata:  metadata,
-		isDeleted: false,
-		isCached:  true,
-	}
-
-	// Lock the new entry entry before adding to the cache.
-	// That way another goroutine can't race and get it.
-	newEntry.mu.Lock()
-	s.cache[key] = newEntry
-
-	return newEntry, s.commitEntry(key, newEntry), nil
+	return entry, s.commitEntry(key, entry, entryLock), nil
 }
 
-// GetAndLockEntry is used to get access to the MapStore entry for key. It first
-// checks if the entry is already loaded in the in-memory cache and
-// automatically attempts to load it from the database if needed. It returns a
-// pointer to the entry and a function that must be used to release it when
-// access is no longer required. If the entry doesn't exist a
-// badger.ErrKeyNotFound error will be returned. Once the lock is released the
-// caller SHOULD NOT reuse the pointer to the entry and best practice would be
-// to immediately set it to nil to prevent reuse and ensure it can be garbage
-// collected.
-func (s *MapStore[T]) GetAndLockEntry(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
-
-	if strings.HasPrefix(key, ReservedKeyPrefix) {
-		return nil, nil, ErrEntryIllegalKey
-	}
-
-	// First see if there if there is already an entry in the cache for key:
-	var entry *CacheEntry[T]
-	for {
-		s.mu.RLock()
-		var ok bool
-		entry, ok = s.cache[key]
-		s.mu.RUnlock()
-		if !ok {
-			// If its not in the cache, see if we can load it from the database:
-			entry, commitEntry, err := s.lockAndLoadEntryFromDB(key)
-			if err == ErrEntryAlreadyExistsInCache {
-				// It is possible another goroutine was trying to access this
-				// entry and loaded it into the cache before we could. Check
-				// cache again.
-				continue
-			} else if err != nil {
-				return nil, nil, err
-			}
-			return entry, commitEntry, nil
-		}
-		break
-	}
-
-	// If another goroutine is accessing the entry, when it calls commitEntry()
-	// the entry may be evicted from the cache if we're over the cacheCapacity. To try and
-	// avoid having to reload the entry from disk before trying to lock, we can signal our
-	// intent to other goroutines by incrementing keepCached.
-	entry.keepCached.Add(1)
-	defer entry.keepCached.Add(-1)
-
-	// Important we lock the entry before checking to see it was deleted. This
-	// allows us to only take a read lock above to get the entry from the map,
-	// then release the global lock and only wait for the entry lock thus
-	// minimizing lock contention.
-	entry.mu.Lock()
-	if entry.isDeleted {
-		entry.mu.Unlock()
-		return nil, nil, ErrEntryAlreadyDeleted
-	} else if !entry.isCached {
-		entry.mu.Unlock()
-		// Use recursion here to retry getting the entry if there was a race
-		// condition and the entry was evicted from the cache before we could
-		// get at it. Likely under normal use this should never cause a problem
-		// unless there were two or more goroutines constantly trying to get the
-		// same entry (which probably indicates an upstream bug anyway) and the
-		// cache is at capacity.
-		return s.GetAndLockEntry(key)
-	}
-	return entry, s.commitEntry(key, entry), nil
-}
-
-// GetEntry is used for read only access to the database. It returns a copy of
-// the entry specified by key, or a badger.ErrKeyNotFound if it does not exist.
-// It avoids lock contention by bypassing the cache and always reading directly
-// from the database. It is thread-safe because Badger provides transactional
-// guarantees, however it can return out-of-date results if writes happens after
-// the transaction to get the entry was already created.
-func (s *MapStore[T]) GetEntry(key string) (*BadgerEntry[T], error) {
-
-	if strings.HasPrefix(key, ReservedKeyPrefix) {
+// GetEntry provides read-only access to the database. It returns a copy of the entry specified by the key, or
+// ErrEntryNotInDB if the entry does not exist. Although thread-safe due to Badger's transactional guarantees,
+// this method may return out-of-date results if writes occur after the transaction to retrieve the entry has been initiated.
+func (s *MapStore[T]) GetEntry(key string) (*badgerEntry[T], error) {
+	if strings.HasPrefix(key, reservedKeyPrefix) {
 		return nil, ErrEntryIllegalKey
 	}
 
-	var entryToGet = &BadgerEntry[T]{}
+	return s.getEntry(key)
+}
 
-	if err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(key))
-		if err != nil {
-			return err
-		}
-		err = item.Value(func(val []byte) error {
-			dec := gob.NewDecoder(bytes.NewReader(val))
-			err := dec.Decode(&entryToGet)
-			return err
-		})
-		return err
-	}); err != nil {
-		return nil, err
+// Remove the entry from the database for the specified key. This operation is idempotent, meaning that if delete
+// is called on an entry that has already been deleted, no error will be returned.
+//
+// Note: For workflows that use GetAndLockEntry() to inspect and verify the entry before deletion, ensure that the entry
+// is released before calling DeleteEntry() to avoid a deadlock. A better approach is to call commitEntry() with the
+// DeleteEntry CommitFlag set, which deletes the entry before releasing the lock, thereby preventing any further
+// modifications that could lead to data loss.
+func (s *MapStore[T]) DeleteEntry(key string) error {
+	if strings.HasPrefix(key, reservedKeyPrefix) {
+		return ErrEntryIllegalKey
 	}
-	return entryToGet, nil
+
+	entryLock, err := s.getEntryLock(key)
+	if errors.Is(err, ErrEntryAlreadyDeleted) {
+		return nil
+	}
+
+	if err := s.deleteEntry(key, entryLock); err != nil && !errors.Is(err, ErrEntryNotInDB) {
+		return err
+	}
+
+	s.deleteEntryLockUnlocked(key, entryLock)
+	entryLock.mu.Unlock()
+	return nil
 }
 
 type getEntriesConfig struct {
@@ -424,40 +360,44 @@ type getEntriesConfig struct {
 }
 type getEntriesOpt func(*getEntriesConfig)
 
+// Including the WithKeyPrefix option forces GetEntries to start from the first key matching the prefix and return only
+// keys that match the prefix.
 func WithKeyPrefix(s string) getEntriesOpt {
 	return func(cfg *getEntriesConfig) {
 		cfg.keyPrefix = s
 	}
 }
 
+// Including the WithStartingKey option forces GetEntries to start from this key if it exists. Otherwise, it starts from
+// the next smallest key greater than the specified key. Note that when a starting key is specified, a key prefix must
+// also be provided.
 func WithStartingKey(s string) getEntriesOpt {
 	return func(cfg *getEntriesConfig) {
 		cfg.startFromKey = s
 	}
 }
 
+// Including the WithPrefetchSize option forces GetEntries to prefetch the values of the next N items (default is 100).
 func WithPrefetchSize(i int) getEntriesOpt {
 	return func(cfg *getEntriesConfig) {
 		cfg.prefetchSize = i
 	}
 }
 
-// GetEntries is used for read only access to the database. It is thread-safe because Badger
-// provides transactional guarantees, however it can return out-of-date results if writes happens
-// after GetEntries() is first called.
+// GetEntries is used for read only access to the database. It is thread-safe because Badger provides transactional
+// guarantees, however it can return out-of-date results if writes happens after GetEntries() is first called.
 //
-// It returns a function used iterate over items in BadgerDB in byte-wise lexicographical sorted
-// order until there are no more items in the DB, or no more items matching a KeyPrefix, then it
-// will return nil. If for some reason there is an error getting an item (such as failing to
-// deserialize the item) the function will return an error for the item and move to the next one.
-// The caller can choose to cleanup immediately or attempt to continue iterating over items. As long
-// as GetEntries() does not return an error it is always safe to call this function, it will simply
-// continue to return nil if there are no more items.
+// It returns a function used iterate over items in BadgerDB in byte-wise lexicographical sorted order until there are
+// no more items in the DB, or no more items matching a KeyPrefix, then it will return nil. If for some reason there is
+// an error getting an item (such as failing to deserialize the item) the function will return an error for the item and
+// move to the next one. The caller can choose to cleanup immediately or attempt to continue iterating over items. As
+// long as GetEntries() does not return an error it is always safe to call this function, it will simply continue to
+// return nil if there are no more items.
 //
-// If the caller is done iterating over items in the database before all matching items have been
-// returned, the cleanup function MUST be called to cleanup properly. The cleanup function is always
-// safe to call and will never return an error, best practice is to always call it even if
-// GetEntries() may have called it automatically because there were no remaining entries.
+// If the caller is done iterating over items in the database before all matching items have been returned, the cleanup
+// function MUST be called to cleanup properly. The cleanup function is always safe to call and will never return an
+// error, best practice is to always call it even if GetEntries() may have called it automatically because there were no
+// remaining entries.
 //
 // Options:
 //
@@ -465,12 +405,11 @@ func WithPrefetchSize(i int) getEntriesOpt {
 //   - WithStartingKey: Start from this key if present. Otherwise start from the next smallest key greater than this key.
 //   - WithPrefetchSize: Prefetch the value of the next N items (default: 100).
 //
-// Both WithKeyPrefix and WithStartingKey can be set, but then the starting key must also contain
-// the key prefix.
+// Both WithKeyPrefix and WithStartingKey can be set, but then the starting key must also contain the key prefix.
 //
-// Note: If your keys are sequence numbers (for example to return items in chronological order of
-// when they were created), ensure keys are zero padded to a fixed width to ensure the string
-// representations of the sequence numbers are return in order when sorted lexicographically.
+// Note: If your keys are sequence numbers (for example to return items in chronological order of when they were
+// created), ensure keys are zero padded to a fixed width to ensure the string representations of the sequence numbers
+// are return in order when sorted lexicographically.
 func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T], error), func(), error) {
 
 	cfg := &getEntriesConfig{
@@ -511,8 +450,8 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 	bytePrefix := []byte(cfg.keyPrefix)
 	if seekToPrefix != "" {
 		it.Seek([]byte(seekToPrefix))
-		// Seek returns the next smallest key greater than the prefix (if there were no matches). If
-		// we should only return keys matching a prefix, check the key we found matches.
+		// Seek returns the next smallest key greater than the prefix (if there were no matches). If we should only
+		// return keys matching a prefix, check the key we found matches.
 		if !it.ValidForPrefix([]byte(cfg.keyPrefix)) {
 			cleanup()
 			return func() (*BadgerItem[T], error) { return nil, nil }, cleanup, nil
@@ -524,44 +463,43 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 		// Checks the iterate is still valid and has the keyPrefix (if specified).
 		if !it.ValidForPrefix(bytePrefix) {
 			return nil, nil
-		} else if it.ValidForPrefix([]byte(ReservedKeyPrefix)) {
+		} else if it.ValidForPrefix([]byte(reservedKeyPrefix)) {
 			// Automatically skip over internal entries.
 			for {
 				it.Next()
-				// Here we care if ValidForPrefix is false because the iterator is no
-				// longer valid, or because it doesn't match the prefix. If its no longer valid we
-				// must return nil, otherwise there are remaining items to iterate over.
+				// Here we care if ValidForPrefix is false because the iterator is no longer valid, or because it
+				// doesn't match the prefix. If its no longer valid we must return nil, otherwise there are remaining
+				// items to iterate over.
 				if !it.Valid() {
 					return nil, nil
-				} else if !it.ValidForPrefix([]byte(ReservedKeyPrefix)) {
+				} else if !it.ValidForPrefix([]byte(reservedKeyPrefix)) {
 					break
 				}
 			}
 		}
 
+		nextResult := &BadgerItem[T]{
+			Key:   "",
+			Entry: &badgerEntry[T]{},
+		}
+
 		item := it.Item()
-		var result *BadgerItem[T]
-		err := item.Value(func(val []byte) error {
-			result = &BadgerItem[T]{
-				Key: string(item.Key()),
-			}
-			dec := gob.NewDecoder(bytes.NewReader(val))
-			entry := &BadgerEntry[T]{}
-			if err := dec.Decode(entry); err != nil {
+		err := item.Value(func(encodedEntry []byte) error {
+			nextResult.Key = string(item.Key())
+			if err := nextResult.Entry.updateWithEncodedEntry(encodedEntry); err != nil {
 				return fmt.Errorf("error decoding entry: %w", err)
 			}
-			result.Entry = entry
 			return nil
 		})
-		// We move to the next item even if decoding fails or some other error happened getting the
-		// item. The caller can decide if they get an error getting an item if they want to be done
-		// by calling the cleanup func, or keep trying to read items.
+
+		// We move to the next item even if decoding fails or some other error happened getting the item. The caller can
+		// decide if they get an error getting an item if they want to be done by calling the cleanup func, or keep
+		// trying to read items.
 		it.Next()
 		if err != nil {
 			return nil, err
 		}
-
-		return result, nil
+		return nextResult, nil
 	}
 
 	if !it.Valid() {
@@ -571,264 +509,243 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 	return getNext, cleanup, nil
 }
 
-// DeleteEntry removes the entry for the specified key from the map. To ensure
-// deletions are thread-safe without needing to lock the entire map it does not
-// guarantee memory associated with the entry is immediately freed, but just
-// deletes the key from the cache map and underlying BadgerDB. It then sets the
-// deleted flag on the entry informing other goroutines that may be trying to
-// lock the entry that it is no longer valid. It is idempotent so if delete is
-// called against an entry that was already deleted it will not return an error.
-//
-// Note for workflows that call GetAndLockEntry() to inspect and verify the
-// entry is safe to delete before calling DeleteEntry() the entry must be
-// released before calling DeleteEntry() or a deadlock will occur. Generally the
-// better option is to instead call commitEntry() with the DeleteEntry
-// CommitFlag set to delete the entry before releasing the lock ensuring nothing
-// else is able to modify the entry potentially resulting in data loss.
-func (s *MapStore[T]) DeleteEntry(key string) error {
-
-	if strings.HasPrefix(key, ReservedKeyPrefix) {
-		return ErrEntryIllegalKey
-	}
-
-	// Note we can't reuse GetAndLockEntry() or lockAndLoadEntryFromDB() here
-	// otherwise the entry would just be recreated when commitEntry()
-	// was called.
-	deleteEntryFromDBFunc := func() error {
-		return s.db.Update(func(txn *badger.Txn) error {
-			err := txn.Delete([]byte(key))
-			return err
-		})
-	}
-
-	s.mu.RLock()
-	entry, ok := s.cache[key]
-	if !ok {
-		// If the entry isn't cached just delete the entry from the database
-		// without reloading it into the cache. This is safe to do with only
-		// a read lock because it prevents anything else from trying to reload
-		// this entry into the cache (but we don't need to write to the cache).
-		defer s.mu.RUnlock()
-		return deleteEntryFromDBFunc()
-	}
-	// Otherwise if the entry was cached we also have to clean up the cached
-	// entry. First we need to release our global lock until we actually lock
-	// the entry. Otherwise we could end up a deadlock if another goroutine is
-	// trying to evict this entry from the cache.
-	s.mu.RUnlock()
-	entry.keepCached.Add(1)
-	defer entry.keepCached.Add(-1)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.isDeleted {
-		return nil // Entry was already deleted.
-	}
-
-	err := deleteEntryFromDBFunc()
+// Update the database entry for the specified key.
+func (s *MapStore[T]) updateEntry(key string, entry *badgerEntry[T]) error {
+	entryToStore, err := entry.encode()
 	if err != nil {
 		return err
 	}
-	entry.isDeleted = true
 
-	// This is unlikely, but it is possible whoever held the lock last on the
-	// entry evicted it from cache already. If this is the case we get a slight
-	// performance gain by not having to take a global lock and delete the entry
-	// from cache.
-	if !entry.isCached {
-		return nil
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Set([]byte(key), entryToStore)
+		return err
+	}); err != nil {
+		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.cache, key)
-	entry.isCached = false
+
 	return nil
 }
 
-// lockAndLoadEntryFromDB attempts to get an entry from the DB and add it to the
-// in-memory cache. If there is already an entry in the cache for the specified
-// key it will always return an error. If it gets the entry from the DB it locks
-// the entry before adding it to the cache then returns a pointer to the entry
-// and a function that should be called to commit the entry to the database and
-// release the lock. This ensures the caller is always granted exclusive access
-// to the newly loaded entry. If the entry is not found in the database then an
-// badger.ErrKeyNotFound error will be returned.
-func (s *MapStore[T]) lockAndLoadEntryFromDB(key string) (*CacheEntry[T], func(flags ...CommitFlag) error, error) {
+// Remove the entry from the database for the specified key.
+func (s *MapStore[T]) deleteEntry(key string, entryLock *EntryLock) error {
+	err := s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(key))
+		return err
+	})
 
-	for {
-		// First lock the MapStore then double check the entry isn't already cached
-		// so we don't accidentally overwrite an existing entry. We will only unlock
-		// if we get a valid entry so we can check if the entry was deleted.
-		// Otherwise keep holding the lock so we can add and lock the new entry.
-		s.mu.Lock()
-		entry, ok := s.cache[key]
-		if ok {
-			s.mu.Unlock()
-			entry.mu.Lock()
-			isDeleted := entry.isDeleted
-			entry.mu.Unlock()
-			if isDeleted {
-				// Possibly there was a race and something deleted this entry
-				// after we looked it up. In this case the entry doesn't
-				// actually exist in the cache, but we should keep checking
-				// the cache to see if someone else recreated it.
-				continue
-			}
-			return nil, nil, ErrEntryAlreadyExistsInCache
-		}
-		break
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return ErrEntryNotInDB
 	}
-	newEntry := &CacheEntry[T]{
-		mu:        sync.Mutex{},
-		isDeleted: false,
-		isCached:  true,
+
+	if err != nil {
+		return fmt.Errorf("unable to delete entry from DB, the cached entry may no longer match the database entry: %w", err)
 	}
-	newEntry.mu.Lock()
-	s.cache[key] = newEntry
-	// Safe to unlock here because we now have an exclusive lock on this specific entry.
-	// Reading from the DB could be expensive, we don't want to leave the mutex locked.
-	s.mu.Unlock()
 
-	var entryToGet = &BadgerEntry[T]{}
+	entryLock.isEntryDeleted = true
+	return nil
+}
 
-	if err := s.db.View(func(txn *badger.Txn) error {
+// getEntry provides read-only access to the database. It returns a copy of the entry specified by the key, or
+// ErrEntryNotInDB when the entry does not exist. Although thread-safe due to Badger's transactional guarantees,
+// this method may return out-of-date results if writes occur after the transaction to retrieve the entry has been initiated.
+func (s *MapStore[T]) getEntry(key string) (*badgerEntry[T], error) {
+	var entry = &badgerEntry[T]{}
+	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
 		if err != nil {
 			return err
 		}
-		err = item.Value(func(val []byte) error {
-			dec := gob.NewDecoder(bytes.NewReader(val))
-			err := dec.Decode(&entryToGet)
-			return err
+		err = item.Value(func(encodedEntry []byte) error {
+			return entry.updateWithEncodedEntry(encodedEntry)
 		})
 		return err
-	}); err != nil {
-		// If we can't load value from the database ensure not to leave an
-		// invalid entry in the cache. Currently we don't allow overwriting
-		// existing entries in the cache so there is no other way to correct
-		// this scenario (for example a dangling entry currently breaks
-		// CreateAndLockEntry()). To ensure the deletion is thread-safe we don't
-		// delete the new entry from memory as we would panic if another
-		// goroutine is trying to get a lock on this entry. Instead we just
-		// remove it from the cache map and set the deleted flag so any
-		// outstanding goroutines trying to lock this particular entry will know
-		// it is no longer valid.
-		newEntry.isDeleted = true
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		delete(s.cache, key)
-		newEntry.mu.Unlock()
-		return nil, nil, err
+	})
+
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, ErrEntryNotInDB
+		}
+		return nil, err
 	}
 
-	newEntry.Metadata = entryToGet.Metadata
-	newEntry.Value = entryToGet.Value
-	return newEntry, s.commitEntry(key, newEntry), nil
+	return entry, nil
 }
 
-// commitEntry is used to commit the value of an already locked in-memory entry
-// to the database. The behavior of commitEntry() can be adjusted by
-// providing one or more CommitFlags, for example to indicate the entry should
-// be deleted before releasing the lock. By default it commits then releases the
-// lock on the entry, but the caller can choose to only update the database and
-// keep the entry locked with the UpdateOnly flag. If commit is called after the
-// lock is released it will return an error.
+// Add the entryLock to the MapStore's EntryLocks map under the specified key. The calling goroutine MUST already hold
+// the entryLock, as addEntryLockUnlocked does not acquire it.
+func (s *MapStore[T]) addEntryLockUnlocked(key string, entryLock *EntryLock) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.entryLocks[key]; ok {
+		// This indicates that a race condition occurred, allowing a conflicting entryLock to be created. For now, we
+		// won’t add complex logic to prevent this, as it shouldn’t pose an issue given our current usage of the
+		// MapStore. The caller will probably just need to retry.
+		return fmt.Errorf("%w: (probably the caller is not setup to prevent race conditions)", ErrEntryLockAlreadyExists)
+	}
+
+	s.entryLocks[key] = entryLock
+	return nil
+}
+
+// Removes the entryLock from the EntryLocks map for the specified key if no other goroutines are waiting for it.
+// The calling goroutine MUST already hold the entryLock, as deleteEntryLockUnlocked does not acquire it.
+func (s *MapStore[T]) deleteEntryLockUnlocked(key string, entryLock *EntryLock) {
+	if entryLock.isEntryLockDeleted || entryLock.keepLock.Load() > 0 {
+		return
+	}
+	entryLock.isEntryLockDeleted = true
+
+	s.mu.Lock()
+	delete(s.entryLocks, key)
+	s.mu.Unlock()
+}
+
+// Retrieve an existing entryLock or create a new one for the specified key. If an entryLock already exists, this will
+// block until the entry becomes available. If the caller acquires the lock, then they MUST release it by calling
+// entryLock.mu.Unlock()
+func (s *MapStore[T]) getEntryLock(key string) (*EntryLock, error) {
+	s.mu.RLock()
+	entryLock, entryLockExists := s.entryLocks[key]
+	s.mu.RUnlock()
+
+	if !entryLockExists {
+		entryLock := newLockedEntryLock()
+		if err := s.addEntryLockUnlocked(key, entryLock); err != nil {
+			// If another entryLock was created for the same key and added first then recall getEntryLock().
+			if errors.Is(err, ErrEntryLockAlreadyExists) {
+				return s.getEntryLock(key)
+			}
+			return nil, err
+		}
+		return entryLock, nil
+	}
+
+	s.waitForEntryLock(entryLock)
+
+	// Check if the entry has been deleted. If it has, confirm that it's entryLock has also been removed from the
+	// EntryLocks map, and then return ErrEntryAlreadyDeleted.
+	if entryLock.isEntryDeleted {
+		s.deleteEntryLockUnlocked(key, entryLock)
+		entryLock.mu.Unlock()
+		return nil, ErrEntryAlreadyDeleted
+	}
+
+	// Since the entry has not been deleted, ensure that the entryLock has not been removed. If it has, call
+	// getEntryLock() again to obtain a new entryLock. This scenario occurs when one go routine deletes the entryLock
+	// without deleting the entry itself, after another go routine has acquired the lock but before keepLock has been
+	// incremented.
+	if entryLock.isEntryLockDeleted {
+		entryLock.mu.Unlock()
+		return s.getEntryLock(key)
+	}
+
+	return entryLock, nil
+}
+
+// Acquire a hold on an existing entryLock and block until it becomes available. Note that this does not prevent the
+// entry from being deleted; it only ensures that the entryLock itself is not removed from the MapStore's EntryLocks
+// map.
+func (s *MapStore[T]) waitForEntryLock(entryLock *EntryLock) {
+	entryLock.keepLock.Add(1)
+	entryLock.mu.Lock()
+	entryLock.keepLock.Add(-1)
+}
+
+type commitEntryConfig struct {
+	deleteEntry       bool
+	updateOnly        bool
+	holdLockOnFailure bool
+}
+
+type commitEntryConfigOpts func(*commitEntryConfig)
+
+// Including the WithDeleteEntry option in a commitEntry call will delete the entry from the database before the lock is
+// released.
+func WithDeleteEntry(deleteEntry bool) commitEntryConfigOpts {
+	return func(cfg *commitEntryConfig) {
+		cfg.deleteEntry = deleteEntry
+	}
+}
+
+// Including the WithUpdateOnly option in a commitEntry call will update the entry in BadgerDB without releasing the lock.
+// This allows the caller to commit incremental updates to stable storage while maintaining exclusive access to the entry.
+// This is particularly useful when other processes may be using the read-only GetEntry or GetEntries methods.
+func WithUpdateOnly(updateOnly bool) commitEntryConfigOpts {
+	return func(cfg *commitEntryConfig) {
+		cfg.updateOnly = updateOnly
+	}
+}
+
+// Including the WithHoldLockOnFailure option in a commitEntry call will prevent the entryLock from being released
+// if the update or delete operation fails.
+func WithHoldLockOnFailure(holdLockOnFailure bool) func(*commitEntryConfig) {
+	return func(cfg *commitEntryConfig) {
+		cfg.holdLockOnFailure = holdLockOnFailure
+	}
+}
+
+// Commit the entry to the database.
 //
-// If the entry is released, the cache is at capacity and no other goroutines
-// are waiting on this entry it will automatically evict the entry from the
-// cache once the DB is updated.
+// The behavior of commitEntry can be modified using CommitFlags. For instance, passing UpdateOnly allows the database
+// to be updated without releasing the entryLock, enabling further changes. By default, commitEntry updates the database
+// and then releases the entryLock regardless of whether the commit succeeds. To guarantee the success of the commit use
+// ReleaseLockOnSuccess
 //
-// IMPORTANT: Ensure to actually check the error and not silently discard it,
-// for example by calling this using a defer without extra handling. For example
-// this is a common way to handle this:
+// IMPORTANT: Always handle the returned error instead of silently discarding it. Avoid using defer without proper error
+// handling. A common pattern for handling this is:
 //
 //	defer func() {
-//	    err := commitEntry()
-//	    if err != nil {
-//	        log.Error("unable to release entry", zap.Error(err))
+//	    if err := commitEntry(); err != nil {
+//	        log.Error("Failed to release entry", zap.Error(err))
 //	    }
 //	}()
-func (s *MapStore[T]) commitEntry(key string, entry *CacheEntry[T]) func(flags ...CommitFlag) error {
+func (s *MapStore[T]) commitEntry(key string, entry *badgerEntry[T], entryLock *EntryLock) func(opts ...commitEntryConfigOpts) error {
 
+	// lockReleased flag is maintained be cause this function can be repeatedly called. For example this closure is
+	// called once, release(UpdateOnly) then the closure would still be valid to call again.
 	lockReleased := false
 
-	return func(flags ...CommitFlag) error {
+	return func(opts ...commitEntryConfigOpts) error {
+
+		cfg := &commitEntryConfig{
+			deleteEntry:       false,
+			updateOnly:        false,
+			holdLockOnFailure: false,
+		}
+		for _, opt := range opts {
+			opt(cfg)
+		}
+		// The err variable is used to manage the deferred release of the entryLock. When the ReleaseLockOnSuccess
+		// CommitFlag is passed, the entryLock will only be released if err == nil.
+		var err error
+
 		if lockReleased {
 			return ErrEntryLockAlreadyReleased
 		}
 
-		deleteEntry := false
-		updateOnly := false
-		for _, f := range flags {
-			switch f {
-			case DeleteEntry:
-				deleteEntry = true
-			case UpdateOnly:
-				updateOnly = true
-			}
-		}
-
-		if deleteEntry && updateOnly {
+		if cfg.deleteEntry && cfg.updateOnly {
 			return fmt.Errorf("invalid combination of commit flags specified, retry operation with corrected flags (cannot both delete and only update an entry)")
 		}
 
-		if !updateOnly {
-			// If there was some reason we want to allow the caller to retry the
-			// commit if there was an error, we could consider only setting this
-			// to true after a successful commit.
-			lockReleased = true
-			defer entry.mu.Unlock()
+		// Unless the UpdateOnly CommitFlag is passed, create a deferred closure to release the entry's entryLock.
+		if !cfg.updateOnly {
+			defer func() {
+				if !cfg.holdLockOnFailure || err == nil {
+					lockReleased = true
+					s.deleteEntryLockUnlocked(key, entryLock)
+					entryLock.mu.Unlock()
+				}
+			}()
 		}
 
-		if deleteEntry {
-
-			if err := s.db.Update(func(txn *badger.Txn) error {
-				err := txn.Delete([]byte(key))
-				return err
-			}); err != nil {
-				return fmt.Errorf("unable to delete entry from DB, the cached entry may no longer match the database entry: %w", err)
-			}
-
-			entry.isDeleted = true
-			// This is unlikely, but it is possible whoever held the lock last on the
-			// entry evicted it from cache already. If this is the case we get a slight
-			// performance gain by not having to take a global lock and delete the entry
-			// from cache.
-			if !entry.isCached {
-				return nil
-			}
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			delete(s.cache, key)
-			entry.isCached = false
-			return nil
-		}
-
-		var valueBuf bytes.Buffer
-		enc := gob.NewEncoder(&valueBuf)
-
-		entryToStore := BadgerEntry[T]{
-			Metadata: entry.Metadata,
-			Value:    entry.Value,
-		}
-
-		if err := enc.Encode(entryToStore); err != nil {
+		if cfg.deleteEntry {
+			err = s.deleteEntry(key, entryLock)
 			return err
 		}
 
-		if err := s.db.Update(func(txn *badger.Txn) error {
-			err := txn.Set([]byte(key), valueBuf.Bytes())
-			return err
-		}); err != nil {
-			return err
-		}
-
-		if !updateOnly && len(s.cache) > s.cacheCapacity && entry.keepCached.Load() == 0 {
-			entry.isCached = false
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			delete(s.cache, key)
-		}
-		return nil
+		err = s.updateEntry(key, entry)
+		return err
 	}
 }
 
@@ -945,7 +862,7 @@ func WithSleepDelayNoiseSec(delay int) badgerGarbageCollectionOpt {
 }
 
 // StartRunner() initiates the garbage collection process if it is not already running. It ensure one and only one
-// instance runs at a time. The process executes in a separate goroutine. Clean up will be triggered when the database
+// instance runs at a time. The process executes in a separate go routine. Clean up will be triggered when the database
 // is closed. Returns true when a runner has started.
 func (gc *badgerGarbageCollection) StartRunner() bool {
 	select {
