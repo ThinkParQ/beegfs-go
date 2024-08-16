@@ -2,12 +2,9 @@ package rst
 
 import (
 	"fmt"
-	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"google.golang.org/grpc/codes"
@@ -64,32 +61,25 @@ func runCancelCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 		return err
 	}
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
-
 	if !response.Ok {
-		fmt.Fprintf(&w, "Unable to cancel one or more jobs: %s\n", response.Message)
+		fmt.Printf("Unable to cancel one or more jobs: %s\n\n", response.Message)
 	} else {
 		if !cfg.Force {
-			fmt.Fprintf(&w, "Cancelled all jobs except ones that were already completed:\n")
+			fmt.Printf("Cancelled all jobs except ones that were already completed:\n\n")
 		} else {
-			fmt.Fprintf(&w, "Cancelled all jobs:\n")
+			fmt.Printf("Cancelled all jobs:\n\n")
 		}
 	}
 
+	tbl := newJobsTable(withDefaultColumns([]string{"ok", "path", "target", "last update", "job id", "request type"}))
+	defer tbl.PrintRemaining()
+
+	sort.Slice(response.Results, func(i, j int) bool {
+		return response.Results[i].Job.Status.Updated.AsTime().After(response.Results[j].Job.Status.Updated.AsTime())
+	})
+
 	for _, job := range response.Results {
-		fmt.Fprintf(&w, "\tJob: %s\n", job.GetJob())
-		if viper.GetBool(config.DebugKey) {
-			fmt.Fprintf(&w, "\t\tWork Requests:\n")
-			for _, wr := range job.GetWorkRequests() {
-				fmt.Fprintf(&w, "\t\t\t%s\n", wr)
-			}
-			fmt.Fprintf(&w, "\t\tWork Responses:\n")
-			for _, wr := range job.GetWorkResults() {
-				fmt.Fprintf(&w, "\t\t\t%s\n", wr)
-			}
-		}
-		fmt.Fprintf(&w, "\n")
+		tbl.Row(job)
 	}
 	return nil
 }

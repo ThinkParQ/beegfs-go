@@ -2,8 +2,8 @@ package rst
 
 import (
 	"fmt"
-	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
@@ -32,37 +32,50 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 		return err
 	}
 
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-	defer w.Flush()
+	defaultColumns := []string{"id", "name", "policies", "type", "configuration"}
 
+	tbl := cmdfmt.NewTableWrapper(defaultColumns, defaultColumns)
+	defer tbl.PrintRemaining()
 	sort.Slice(response.Rsts, func(i, j int) bool {
 		return response.Rsts[i].Id < response.Rsts[j].Id
 	})
 
-	fmt.Fprintf(&w, "ID\tName\tPolicies\tType\tConfiguration\n")
 	for _, rst := range response.Rsts {
-		fmt.Fprintf(&w, "%d\t", rst.Id)
-		fmt.Fprintf(&w, "%s\t", rst.Name)
-		fmt.Fprintf(&w, "%s\t", rst.Policies.String())
+
+		var rstType string
+		var rstConfiguration string
+
 		switch rst.Type.(type) {
 		case *flex.RemoteStorageTarget_S3_:
-			fmt.Fprintf(&w, "S3\t")
+			stringBuilder := strings.Builder{}
+			rstType = "s3"
 			rst.GetS3().ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 				if string(fd.Name()) == "secret_key" && !cfg.ShowSecrets {
-					fmt.Fprintf(&w, "%s: *****, ", fd.Name())
+					stringBuilder.WriteString(fmt.Sprintf("%s: *****, ", fd.Name()))
 				} else {
-					fmt.Fprintf(&w, "%s: %s, ", fd.Name(), v)
+					stringBuilder.WriteString(fmt.Sprintf("%s: %s, ", fd.Name(), v))
 				}
 				return true
 			})
-			fmt.Fprintf(&w, "\n")
+			// Get rid of the last comma+space in the printed configuration.
+			rstConfiguration = stringBuilder.String()[:stringBuilder.Len()-2]
 		default:
 			if !cfg.ShowSecrets {
-				fmt.Fprintf(&w, "Unknown\tUnknown RST configuration is masked by default.\n")
+				rstType = "unknown"
+				rstConfiguration = ("unknown configuration masked by default")
 			} else {
-				fmt.Fprintf(&w, "Unknown\t%s\n", rst.GetType())
+				rstType = "unknown"
+				rstConfiguration = fmt.Sprintf("%v", rst.GetType())
 			}
 		}
+
+		tbl.Row(
+			rst.GetId(),
+			rst.GetName(),
+			rst.GetPolicies().String(),
+			rstType,
+			rstConfiguration,
+		)
 	}
 
 	return nil
