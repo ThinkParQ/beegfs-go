@@ -3,10 +3,8 @@ package stats
 import (
 	"fmt"
 	"net"
-	"os"
 	"os/user"
 	"strconv"
-	"text/tabwriter"
 	"time"
 
 	"github.com/dsnet/golib/unitconv"
@@ -17,15 +15,17 @@ import (
 )
 
 type clientStats_Config struct {
-	node     beegfs.EntityId
-	nodeType beegfs.NodeType
-	interval time.Duration
-	all      bool
-	filter   string
-	names    bool
-	sum      bool
-	limit    uint16
-	perUser  bool
+	node      beegfs.EntityId
+	nodeType  beegfs.NodeType
+	interval  time.Duration
+	all       bool
+	filter    string
+	names     bool
+	sum       bool
+	limit     uint16
+	perUser   bool
+	withEmpty bool
+	retro     bool
 }
 
 func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
@@ -61,6 +61,8 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 		"Show user stats.")
 	cmd.Flags().Uint16Var(&cfg.limit, "limit", 0,
 		"Limit number of clients/users in output.")
+	cmd.Flags().BoolVar(&cfg.withEmpty, "with-empty", false, "Print empty columns.")
+	cmd.Flags().BoolVar(&cfg.retro, "retro", false, "Print output in the horizontal style of the old CTL.")
 
 	return cmd
 }
@@ -120,6 +122,23 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 	old := []stats.ClientOps{}
 	t := 0
 
+	var tbl cmdfmt.TableWrapper
+	if !cfg.retro {
+		var firstColumnName string
+		if cfg.perUser {
+			firstColumnName = "user"
+		} else {
+			firstColumnName = "client"
+		}
+		var allColumns []string
+		if cfg.nodeType == beegfs.Meta {
+			allColumns = append([]string{firstColumnName}, stats.MetaOpNamesLower...)
+		} else {
+			allColumns = append([]string{firstColumnName}, stats.StorageOpNamesLower...)
+		}
+		tbl = cmdfmt.NewTableWrapper(allColumns, allColumns, cmdfmt.WithEmptyColumns(cfg.withEmpty))
+	}
+
 	for {
 		var current []stats.ClientOps
 		var err error
@@ -142,12 +161,11 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 			return err
 		}
 
-		w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-
-		fmt.Fprintf(&w, "------- %ds -------\n", t)
-		printOps(&w, intervalStats, cfg, sum)
-
-		fmt.Fprintf(&w, "\n")
+		fmt.Printf("------- %ds -------\n", t)
+		printOps(&tbl, intervalStats, cfg, sum)
+		if !cfg.retro {
+			tbl.PrintRemaining()
+		}
 
 		if cfg.interval <= 0 {
 			break
@@ -160,7 +178,7 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 	return nil
 }
 
-func printOps(w *tabwriter.Writer, cs []stats.ClientOps, cfg *clientStats_Config, sum []uint64) {
+func printOps(tbl *cmdfmt.TableWrapper, cs []stats.ClientOps, cfg *clientStats_Config, sum []uint64) {
 	limit := len(cs)
 	if cfg.limit > 0 {
 		limit = min(int(cfg.limit), limit)
@@ -183,15 +201,21 @@ func printOps(w *tabwriter.Writer, cs []stats.ClientOps, cfg *clientStats_Config
 				continue
 			}
 		}
-
-		printOpsRow(w, name, c.Ops, cfg.nodeType, cfg.all)
+		if cfg.retro {
+			printOpsRetro(name, c.Ops, cfg.nodeType, cfg.all)
+		} else {
+			printOpsRow(tbl, name, c.Ops, cfg.nodeType, cfg.all)
+		}
 	}
 
 	if (sum != nil && cfg.sum && sum[0] > 1) || cfg.all {
-		printOpsRow(w, "Summary", sum, cfg.nodeType, cfg.all)
-	}
+		if cfg.retro {
+			printOpsRetro("Summary", sum, cfg.nodeType, cfg.all)
+		} else {
+			printOpsRow(tbl, "Summary", sum, cfg.nodeType, cfg.all)
+		}
 
-	w.Flush()
+	}
 }
 
 func userIDToString(id uint64, name bool) string {
@@ -229,7 +253,35 @@ func clientIPToString(ip uint64, name bool) string {
 }
 
 // Prints one client Ip/username, number of operations and operation name
-func printOpsRow(w *tabwriter.Writer, name string, ops []uint64, nt beegfs.NodeType, raw bool) {
+func printOpsRow(tbl *cmdfmt.TableWrapper, name string, ops []uint64, nt beegfs.NodeType, raw bool) {
+	var opNames []string
+	if nt == beegfs.Meta {
+		opNames = stats.MetaOpNamesLower
+	} else {
+		opNames = stats.StorageOpNamesLower
+	}
+
+	rowColumns := append(make([]any, 0, len(opNames)), name)
+	for i, v := range ops {
+		if v != 0 || raw {
+			if opNames[i] == "rd" || opNames[i] == "wr" {
+				rowColumns = append(rowColumns, unitconv.FormatPrefix(float64(v), unitconv.IEC, 0))
+			} else {
+				rowColumns = append(rowColumns, fmt.Sprintf("%d", v))
+			}
+		} else {
+			rowColumns = append(rowColumns, "")
+		}
+	}
+
+	tbl.Row(
+		rowColumns...,
+	)
+}
+
+// Prints one client Ip/username, number of operations and operation name in the old-style CTL
+// "retro" format.
+func printOpsRetro(name string, ops []uint64, nt beegfs.NodeType, raw bool) {
 	var opNames []string
 	if nt == beegfs.Meta {
 		opNames = stats.MetaOpNames
@@ -237,17 +289,17 @@ func printOpsRow(w *tabwriter.Writer, name string, ops []uint64, nt beegfs.NodeT
 		opNames = stats.StorageOpNames
 	}
 
-	fmt.Fprintf(w, "%s:\t", name)
+	fmt.Printf("%s: ", name)
 
 	for i, v := range ops {
 		if v != 0 || raw {
 			if opNames[i] == "rd" || opNames[i] == "wr" {
-				fmt.Fprintf(w, "%s [%s]\t", unitconv.FormatPrefix(float64(v), unitconv.IEC, 0), opNames[i])
+				fmt.Printf("%s [%s] ", unitconv.FormatPrefix(float64(v), unitconv.IEC, 0), opNames[i])
 			} else {
-				fmt.Fprintf(w, "%d [%s]\t", v, opNames[i])
+				fmt.Printf("%d [%s] ", v, opNames[i])
 			}
 		}
 	}
 
-	fmt.Fprintf(w, "\n")
+	fmt.Print("\n")
 }

@@ -39,6 +39,19 @@ type TableWrapper struct {
 	printCols   []string
 	pageSize    uint
 	rowCount    uint
+	config      TableWrapperOptions
+}
+
+type TableWrapperOptions struct {
+	WithEmptyColumns bool
+}
+
+type TableWrapperOption func(*TableWrapperOptions)
+
+func WithEmptyColumns(withEmpty bool) TableWrapperOption {
+	return func(args *TableWrapperOptions) {
+		args.WithEmptyColumns = withEmpty
+	}
 }
 
 // Creates a new table.Writer, applying some default settings. Reads certain viper config keys to
@@ -48,7 +61,14 @@ type TableWrapper struct {
 // call table.AppendRow() providing as many columns as set for the header. defaultColumns defines
 // which columns to print by default. A user can do --columns=all to print all columns instead.
 // Column names should be lowercase.
-func NewTableWrapper(columns []string, defaultColumns []string) TableWrapper {
+func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWrapperOption) TableWrapper {
+	cfg := TableWrapperOptions{
+		WithEmptyColumns: true,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	// Determine the columns to be printed
 	printCols := defaultColumns
 	if viper.IsSet(config.ColumnsKey) {
@@ -59,6 +79,7 @@ func NewTableWrapper(columns []string, defaultColumns []string) TableWrapper {
 		columns:   columns,
 		printCols: printCols,
 		pageSize:  viper.GetUint(config.PageSizeKey),
+		config:    cfg,
 	}
 
 	// If pageSize is > 0, we want to use TableWriter
@@ -84,11 +105,23 @@ func (w *TableWrapper) replaceTableWriter() {
 			PageSeparator: "\n",
 		},
 		Format: table.FormatOptions{
-			Direction: text.LeftToRight,
-			Footer:    text.FormatUpper,
-			Header:    text.FormatUpper,
+			// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
+			// initForRenderSuppressColumns() does not ignore control characters. This was fixed
+			// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
+			// a new go-pretty release is tagged. But it also results in hidden characters being
+			// added to columns which are included if a user copies text, which can lead to weird
+			// behavior (for example copying a unix timestamp to a timestamp converter website).
+			// We should leave this disabled unless it becomes necessary.
+			//
+			// Direction: text.LeftToRight,
+			Footer: text.FormatUpper,
+			Header: text.FormatUpper,
 		},
 	})
+
+	if !w.config.WithEmptyColumns {
+		tbl.SuppressEmptyColumns()
+	}
 
 	// Build the header
 	row := table.Row{}

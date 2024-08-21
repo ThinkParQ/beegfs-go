@@ -10,10 +10,20 @@ import (
 	"github.com/thinkparq/gobee/beemsg/msg"
 )
 
+const (
+	// The first minRespStatsSize elements of the stats slice are reserved. To avoid a panic in case
+	// we receive an unexpected response we validate the stats slice is at least this large then
+	// allow access to the first minRespStatsSize elements by their indices.
+	minRespStatsSize = 8
+)
+
 var (
-	// list of operation names corresponding to their index in Client Operation list.
-	MetaOpNames    = []string{"sum", "ack", "close", "entInf", "fndOwn", "mkdir", "create", "rddir", "refrEnt", "mdsInf", "rmdir", "rmLnk", "mvDirIns", "mvFiIns", "open", "ren", "sChDrct", "sAttr", "sDirPat", "stat", "statfs", "trunc", "symlnk", "unlnk", "lookLI", "statLI", "revalLI", "openLI", "createLI", "hardlnk", "flckAp", "flckEn", "flckRg", "dirparent", "listXA", "getXA", "rmXA", "setXA", "mirror"}
-	StorageOpNames = []string{"sum", "ack", "sChDrct", "getFSize", "sAttr", "statfs", "trunc", "close", "fsync", "ops-rd", "rd", "ops-wr", "wr", "gendbg", "hrtbeat", "remNode", "storInf", "unlnk"}
+	// list of operation names corresponding to their index in Client Operation list. When used as
+	// column names in a table they must be all lower case, hence the duplicate definitions.
+	MetaOpNames         = []string{"sum", "ack", "close", "entInf", "fndOwn", "mkdir", "create", "rddir", "refrEnt", "mdsInf", "rmdir", "rmLnk", "mvDirIns", "mvFiIns", "open", "ren", "sChDrct", "sAttr", "sDirPat", "stat", "statfs", "trunc", "symlnk", "unlnk", "lookLI", "statLI", "revalLI", "openLI", "createLI", "hardlnk", "flckAp", "flckEn", "flckRg", "dirparent", "listXA", "getXA", "rmXA", "setXA", "mirror"}
+	MetaOpNamesLower    = []string{"sum", "ack", "close", "entinf", "fndown", "mkdir", "create", "rddir", "refrent", "mdsinf", "rmdir", "rmlnk", "mvdirins", "mvfiins", "open", "ren", "schdrct", "sattr", "sdirpat", "stat", "statfs", "trunc", "symlnk", "unlnk", "lookli", "statli", "revalli", "openli", "createli", "hardlnk", "flckap", "flcken", "flckrg", "dirparent", "listxa", "getxa", "rmxa", "setxa", "mirror"}
+	StorageOpNames      = []string{"sum", "ack", "sChDrct", "getFSize", "sAttr", "statfs", "trunc", "close", "fsync", "ops-rd", "rd", "ops-wr", "wr", "gendbg", "hrtbeat", "remNode", "storInf", "unlnk"}
+	StorageOpNamesLower = []string{"sum", "ack", "schdrct", "getfsize", "sattr", "statfs", "trunc", "close", "fsync", "ops-rd", "rd", "ops-wr", "wr", "gendbg", "hrtbeat", "remnode", "storinf", "unlnk"}
 )
 
 // Contains details of client/user and a list of number of operations done by them
@@ -135,7 +145,7 @@ func PerNodeType(ctx context.Context, nt beegfs.NodeType, userStats bool) ([]Cli
 	for _, ch := range channels {
 		resp := <-ch
 		if resp.err != nil {
-			return []ClientOps{}, err
+			return []ClientOps{}, resp.err
 		}
 
 		statsList = append(statsList, resp.ClientOps)
@@ -183,6 +193,10 @@ func getClientStats(ctx context.Context, n beegfs.Node, userStats bool) <-chan g
 			err = store.RequestTCP(ctx, n.Id, &request, &resp)
 			if err != nil {
 				ch <- getClientStatsResult{err: err}
+				return
+			} else if len(resp.Stats) < minRespStatsSize {
+				ch <- getClientStatsResult{err: fmt.Errorf("response size was smaller than expected (probably this is a bug elsewhere)")}
+				return
 			}
 
 			// The 0th index of response contains the number of operation for each client id/user id
@@ -200,11 +214,11 @@ func getClientStats(ctx context.Context, n beegfs.Node, userStats bool) <-chan g
 			// After first 8 position Every next slice of length [1 + numOps] contains 0th index as ip/userid and other are operation stats.
 			// Validate if the returned response are in the above format
 			subArrLen := int(numOps) + 1
-			if len(resp.Stats[8:])%subArrLen != 0 {
+			if len(resp.Stats[minRespStatsSize:])%subArrLen != 0 {
 				ch <- getClientStatsResult{err: fmt.Errorf("reported length of ClientStats from %s OpsList doesn't match the actual length", n.Alias)}
 			}
 
-			opsSlice := resp.Stats[8:]
+			opsSlice := resp.Stats[minRespStatsSize:]
 
 			// Iterate over subarray of length [1 + numOps]
 			for f, l := 0, subArrLen; l < len(resp.Stats); f, l = f+subArrLen, l+subArrLen {
