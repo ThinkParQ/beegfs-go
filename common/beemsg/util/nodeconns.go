@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
@@ -73,12 +74,16 @@ func (conns *NodeConns) RequestTCP(ctx context.Context, addrs []string, authSecr
 			return nil
 		}
 
-		// If the request was not successful (e.g. due to closed connection, we just try the next
-		// one and do not push it back to the store). Note requests may also fail due to
-		// serialization bugs, for example "BeeMsg body deserialization failed". When that happens
-		// the request will be retried even though it may have partially or completely succeeded on
-		// the server side (for example if there was a bug deserializing the response).
-		conn.Close()
+		if errors.Is(err, ErrBeeMsgWrite) {
+			// If the request was not successful due to a communication issue (e.g. due to closed
+			// connection), we just try the next one and do not push it back to the store.
+			conn.Close()
+		} else {
+			// If the error is not a write related error, we abort here as it doesn't make
+			// sense to retry. An example would be a (de)serialization error where retrying doesn't
+			// make sense or could even cause harm.
+			return err
+		}
 	}
 
 	// No established connection left in store. If we are not yet over the connection limit,

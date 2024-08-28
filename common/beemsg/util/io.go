@@ -41,7 +41,7 @@ func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("writing BeeMsg failed: %w", err)
+		return fmt.Errorf("%w: %w", ErrBeeMsgWrite, err)
 	}
 
 	return nil
@@ -58,7 +58,7 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("reading BeeMsg header failed: %w", err)
+		return fmt.Errorf("%w: %w", ErrBeeMsgRead, err)
 	}
 
 	// Extract the whole message length from the serialized header
@@ -75,7 +75,7 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("reading BeeMsg failed: %w", err)
+		return fmt.Errorf("%w: %w", ErrBeeMsgRead, err)
 	}
 
 	return DisassembleBeeMsg(bufHeader, bufBody, out)
