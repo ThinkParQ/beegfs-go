@@ -109,12 +109,32 @@ func TestCStrAlignment(t *testing.T) {
 	assert.Equal(t, 12, s5.Buf.Len())
 }
 
+func TestStringSeq(t *testing.T) {
+	s := NewSerializer([]byte{})
+
+	in := [][]byte{[]byte("String1"), []byte("String2"), []byte("LongerString")}
+	SerializeStringSeq(&s, in)
+	assert.NoError(t, s.Finish())
+
+	d := NewDeserializer(s.Buf.Bytes(), 0)
+	out := [][]byte{}
+	DeserializeStringSeq(&d, &out)
+
+	assert.NoError(t, d.Finish())
+	assert.Equal(t, in, out)
+
+	// Check that forbidden null bytes cause an error
+	nullByteInput := [][]byte{[]byte("String1\x00A"), []byte("String2"), []byte("LongerString")}
+	SerializeStringSeq(&s, nullByteInput)
+	assert.Error(t, s.Finish())
+}
+
 func TestNestedSeq(t *testing.T) {
 	s := NewSerializer([]byte{})
 
 	in := [][]uint32{{1, 2, 3}, {4, 5, 6, 7, 8}, {0xFFFFFFFE, 0xFFFFFFFF}}
-	SerializeSeq[[]uint32](&s, in, true, func(in []uint32) {
-		SerializeSeq[uint32](&s, in, false, func(in uint32) {
+	SerializeSeq(&s, in, true, func(in []uint32) {
+		SerializeSeq(&s, in, false, func(in uint32) {
 			SerializeInt(&s, in)
 		})
 	})
@@ -122,8 +142,8 @@ func TestNestedSeq(t *testing.T) {
 
 	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := [][]uint32{}
-	DeserializeSeq[[]uint32](&d, &out, true, func(out *[]uint32) {
-		DeserializeSeq[uint32](&d, out, false, func(out *uint32) {
+	DeserializeSeq(&d, &out, true, func(out *[]uint32) {
+		DeserializeSeq(&d, out, false, func(out *uint32) {
 			DeserializeInt(&d, out)
 		})
 	})
@@ -146,10 +166,10 @@ func TestNestedMap(t *testing.T) {
 		},
 	}
 
-	SerializeMap[int8, map[uint16]uint64](&s, in, true, func(in int8) {
+	SerializeMap(&s, in, true, func(in int8) {
 		SerializeInt(&s, in)
 	}, func(in map[uint16]uint64) {
-		SerializeMap[uint16, uint64](&s, in, false, func(in uint16) {
+		SerializeMap(&s, in, false, func(in uint16) {
 			SerializeInt(&s, in)
 		}, func(in uint64) {
 			SerializeInt(&s, in)
@@ -159,12 +179,12 @@ func TestNestedMap(t *testing.T) {
 
 	d := NewDeserializer(s.Buf.Bytes(), 0)
 	out := map[int8]map[uint16]uint64{}
-	DeserializeMap[int8, map[uint16]uint64](&d, &out, true, func(out *int8) {
+	DeserializeMap(&d, &out, true, func(out *int8) {
 		DeserializeInt(&d, out)
 	}, func(out *map[uint16]uint64) {
 		*out = map[uint16]uint64{}
 
-		DeserializeMap[uint16, uint64](&d, out, false, func(out *uint16) {
+		DeserializeMap(&d, out, false, func(out *uint16) {
 			DeserializeInt(&d, out)
 		}, func(out *uint64) {
 			DeserializeInt(&d, out)
