@@ -23,9 +23,15 @@ func (msg *testMsg) MsgId() uint16 {
 	return 12345
 }
 
+var serdeFail bool = false
+
 func (msg *testMsg) Serialize(s *beeserde.Serializer) {
 	beeserde.SerializeInt(s, msg.fieldA)
 	beeserde.SerializeCStr(s, msg.fieldB, 0)
+
+	if serdeFail {
+		s.Fail(fmt.Errorf("expected fail"))
+	}
 
 	s.MsgFeatureFlags = msg.flags
 }
@@ -33,6 +39,10 @@ func (msg *testMsg) Serialize(s *beeserde.Serializer) {
 func (msg *testMsg) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &msg.fieldA)
 	beeserde.DeserializeCStr(d, &msg.fieldB, 0)
+
+	if serdeFail {
+		d.Fail(fmt.Errorf("expected fail"))
+	}
 
 	msg.flags = d.MsgFeatureFlags
 }
@@ -42,12 +52,31 @@ func TestReadWrite(t *testing.T) {
 	in := testMsg{fieldA: 123, fieldB: []byte{1, 2, 3}, flags: 50000}
 	buf := bytes.Buffer{}
 	out := testMsg{}
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
 
+	// No error
 	assert.NoError(t, WriteTo(ctx, &buf, &in))
 	assert.NoError(t, ReadFrom(ctx, &buf, &out))
-
 	assert.Equal(t, in, out)
+
+	// Deserialization error
+	assert.NoError(t, WriteTo(ctx, &buf, &in))
+	serdeFail = true
+	err := ReadFrom(ctx, &buf, &out)
+	assert.Error(t, err)
+	// Deserialization error should NOT contain ErrBeeMsgWrite
+	assert.NotErrorIs(t, err, ErrBeeMsgWrite)
+
+	// Serialization error should NOT contain ErrBeeMsgWrite
+	assert.NotErrorIs(t, WriteTo(ctx, &buf, &in), ErrBeeMsgWrite)
+
+	// Cancelling the context will error out of the connection related parts, therefore the write error
+	// must contain ErrBeeMsgWrite
+	cancel()
+	serdeFail = false
+
+	assert.ErrorIs(t, WriteTo(ctx, &buf, &in), ErrBeeMsgWrite)
+	assert.NotErrorIs(t, ReadFrom(ctx, &buf, &out), ErrBeeMsgWrite)
 }
 
 func TestGoWithContext(t *testing.T) {

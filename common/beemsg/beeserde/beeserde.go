@@ -9,6 +9,8 @@ import (
 	"reflect"
 )
 
+var nullByteSlice = []byte{0}
+
 // SERIALIZER
 
 // Represents the serialization state and is passed to the Serialize() methods. Contains the target
@@ -190,6 +192,47 @@ func SerializeSeq[T any](ser *Serializer, value []T, includeTotalSize bool, f fu
 		}
 
 		f(e)
+	}
+
+	// Overwrite the placeholders
+	ss.finish(ser, len(value))
+}
+
+// Serializes a slice of []bytes into a special sequence. This is a specialization that is used on the
+// C++ side by default for std::list<std::string>, std::vector<std::string> and std::set<std::string>.
+// This skips the length fields that CStr has and totally relies on a terminating null byte for
+// deserialization. For that reason, the input is checked for containing null bytes which will cause
+// an error and abort serialization (it would break the deserializer).
+// Note that we refer to "strings" here despite accepting []byte because on the C++ it is used for
+// std::string, which is not the same as a string in Go.
+func SerializeStringSeq(ser *Serializer, value [][]byte) {
+	if ser.err != nil {
+		return
+	}
+
+	// Setup the sequence helper
+	ss := seqSerializer{}
+	ss.begin(ser, true)
+
+	// Serialize the strings
+	for _, s := range value {
+		if ser.err != nil {
+			return
+		}
+
+		if bytes.Contains([]byte(s), nullByteSlice) {
+			ser.Fail(fmt.Errorf("SerializeStringSeq input must not contain any null bytes"))
+		}
+
+		SerializeBytes(ser, s)
+		if ser.err != nil {
+			return
+		}
+
+		if err := ser.Buf.WriteByte(0x00); err != nil {
+			ser.err = err
+			return
+		}
 	}
 
 	// Overwrite the placeholders
@@ -413,6 +456,39 @@ func DeserializeSeq[T any](des *Deserializer, into *[]T, includeTotalSize bool, 
 		var v T
 		f(&v)
 		*into = append(*into, v)
+	}
+}
+
+// Deserializes a special sequence containing "strings" into a slice of []byte. This is
+// a specialization that is used on the C++ side by default for std::list<std::string>,
+// std::vector<std::string> and std::set<std::string>. This skips the length fields that CStr
+// has and totally relies on a terminating null bytes. This usually works although std::string
+// can technically contain null bytes and therefor might show up here as input and break the
+// deserialization. If somethings goes wrong here, keep the possibility in mind. Note that we refer
+// to "strings" here despite accepting []byte, because on the C++ it is used for std::string, which
+// is not the same as a string in Go.
+func DeserializeStringSeq(des *Deserializer, into *[][]byte) {
+	if des.err != nil {
+		return
+	}
+
+	l := deserializeSeqLen(des, true)
+
+	// Deserialize the strings of the sequence
+	for i := 0; i < int(l); i++ {
+		if des.err != nil {
+			return
+		}
+
+		var s []byte
+		s, err := des.Buf.ReadBytes(0x00)
+		if err != nil {
+			des.err = err
+			return
+		}
+
+		// Exclude the null byte
+		*into = append(*into, s[0:len(s)-1])
 	}
 }
 
