@@ -105,8 +105,14 @@ func tlsDialOption() (grpc.DialOption, error) {
 	}
 }
 
+var mgmtClient pm.ManagementClient
+
 // Try to establish a connection to the managements gRPC service
 func ManagementClient() (pm.ManagementClient, error) {
+	if mgmtClient != nil {
+		return mgmtClient, nil
+	}
+
 	addr := viper.GetString(ManagementAddrKey)
 
 	tlsDialOption, err := tlsDialOption()
@@ -122,11 +128,17 @@ func ManagementClient() (pm.ManagementClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to management service on %s failed: %w", addr, err)
 	}
+	mgmtClient = pm.NewManagementClient(g)
 
-	return pm.NewManagementClient(g), nil
+	return mgmtClient, nil
 }
 
+var beeRemoteClient beeremote.BeeRemoteClient
+
 func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
+	if beeRemoteClient != nil {
+		return beeRemoteClient, nil
+	}
 	addr := viper.GetString(BeeRemoteAddrKey)
 
 	tlsDialOption, err := tlsDialOption()
@@ -139,7 +151,8 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", addr, err)
 	}
 
-	return beeremote.NewBeeRemoteClient(g), nil
+	beeRemoteClient = beeremote.NewBeeRemoteClient(g)
+	return beeRemoteClient, nil
 }
 
 // BeeGFSClient provides a standardize way to interact with a mounted BeeGFS through the
