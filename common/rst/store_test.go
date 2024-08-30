@@ -16,7 +16,7 @@ func TestUpdateConfig(t *testing.T) {
 
 	rstConfigs := []*flex.RemoteStorageTarget{
 		{
-			Id: "0",
+			Id: 0,
 			Type: &flex.RemoteStorageTarget_S3_{
 				S3: &flex.RemoteStorageTarget_S3{
 					Bucket:      "bucket",
@@ -32,7 +32,7 @@ func TestUpdateConfig(t *testing.T) {
 	// Updating an existing RST is not allowed:
 	notEqualRSTConfig := []*flex.RemoteStorageTarget{
 		{
-			Id: "0",
+			Id: 0,
 			Type: &flex.RemoteStorageTarget_S3_{
 				S3: &flex.RemoteStorageTarget_S3{
 					Bucket:      "bucket-UPDATE",
@@ -44,7 +44,7 @@ func TestUpdateConfig(t *testing.T) {
 	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig), ErrConfigUpdateNotAllowed)
 
 	// Adding an RST is not allowed:
-	notEqualRSTConfig = append(notEqualRSTConfig, &flex.RemoteStorageTarget{Id: "1"})
+	notEqualRSTConfig = append(notEqualRSTConfig, &flex.RemoteStorageTarget{Id: 1})
 	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig), ErrConfigUpdateNotAllowed)
 
 	// Removing an RST is not allowed:

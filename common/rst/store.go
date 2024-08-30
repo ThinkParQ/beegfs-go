@@ -12,14 +12,14 @@ import (
 // ClientStore is a thread safe wrapper around a map of RST IDs to their clients. This allows the
 // clients to be reconfigured/updated after the ClientStore is initialized.
 type ClientStore struct {
-	clients    map[string]Provider
+	clients    map[uint32]Provider
 	mu         sync.RWMutex
 	mountPoint filesystem.Provider
 }
 
 func NewClientStore(mountPoint filesystem.Provider) *ClientStore {
 	return &ClientStore{
-		clients:    make(map[string]Provider),
+		clients:    make(map[uint32]Provider),
 		mountPoint: mountPoint,
 	}
 }
@@ -31,7 +31,7 @@ func NewClientStore(mountPoint filesystem.Provider) *ClientStore {
 // an error using a client it should not keep retrying with the old client but rather call Get()
 // again to ensure it is working with the latest version. This ensures clients are thread-safe
 // while minimizing the logic required in the ClientStore and caller.
-func (s *ClientStore) Get(id string) (Provider, bool) {
+func (s *ClientStore) Get(id uint32) (Provider, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	c, ok := s.clients[id]
@@ -72,7 +72,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 		}
 	} else {
 		// Otherwise configure the RSTs.
-		rstMap := make(map[string]Provider)
+		rstMap := make(map[uint32]Provider)
 		for _, config := range rstConfigs {
 			rst, err := New(ctx, config, s.mountPoint)
 			if err != nil {
@@ -87,7 +87,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 
 // SetMockClientForTesting allows the caller to directly add mock client(s) to the internal map so
 // expectations can be setup externally for testing.
-func (s *ClientStore) SetMockClientForTesting(id string, client *MockClient) {
+func (s *ClientStore) SetMockClientForTesting(id uint32, client *MockClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clients[id] = client
