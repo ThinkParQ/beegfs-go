@@ -24,6 +24,21 @@ type GetTargets_Result struct {
 	CapacityPool      string
 }
 
+// Defined as constants for reuse elsewhere, notably the health checks.
+const (
+	ReachabilityOnline          = "Online"
+	ReachabilityProbablyOffline = "Probably offline"
+	ReachabilityOffline         = "Offline"
+
+	ConsistencyGood        = "Good"
+	ConsistencyNeedsResync = "Needs resync"
+	ConsistencyBad         = "Bad"
+
+	CapacityNormal    = "Normal"
+	CapacityLow       = "Low"
+	CapacityEmergency = "Emergency"
+)
+
 // Get the complete list of targets from the mananagement
 func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
 	mgmtd, err := config.ManagementClient()
@@ -42,31 +57,31 @@ func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
 		rbs := ""
 		switch t.ReachabilityState {
 		case pb.ReachabilityState_ONLINE:
-			rbs = "Online"
+			rbs = ReachabilityOnline
 		case pb.ReachabilityState_POFFLINE:
-			rbs = "Probably offline"
+			rbs = ReachabilityProbablyOffline
 		case pb.ReachabilityState_OFFLINE:
-			rbs = "Offline"
+			rbs = ReachabilityOffline
 		}
 
 		cs := ""
 		switch t.ConsistencyState {
 		case pb.ConsistencyState_GOOD:
-			cs = "Good"
+			cs = ConsistencyGood
 		case pb.ConsistencyState_NEEDS_RESYNC:
-			cs = "Needs resync"
+			cs = ConsistencyNeedsResync
 		case pb.ConsistencyState_BAD:
-			cs = "Bad"
+			cs = ConsistencyBad
 		}
 
 		cp := ""
 		switch t.CapPool {
 		case pb.CapacityPool_NORMAL:
-			cp = "Normal"
+			cp = CapacityNormal
 		case pb.CapacityPool_LOW:
-			cp = "Low"
+			cp = CapacityLow
 		case pb.CapacityPool_EMERGENCY:
-			cp = "Emergency"
+			cp = CapacityEmergency
 		}
 
 		target, err := beegfs.EntityIdSetFromProto(t.Id)

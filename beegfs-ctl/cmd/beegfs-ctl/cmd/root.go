@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/entry"
+	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/health"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/license"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/node"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd/pool"
@@ -76,6 +77,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(rst.NewRSTCmd())
 	cmd.AddCommand(entry.NewEntryCmd())
 	cmd.AddCommand(quota.NewCmd())
+	cmd.AddCommand(health.NewHealthCmd())
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
