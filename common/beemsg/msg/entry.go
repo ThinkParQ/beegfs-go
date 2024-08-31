@@ -8,6 +8,89 @@ import (
 	"github.com/thinkparq/gobee/beemsg/beeserde"
 )
 
+// UnlinkFileRequest is currently only used for cleaning up disposal files. That use case does not
+// need to trigger a file system modification event, and does not set the Flag_BuddyMirrorSecond
+// flag. If this message needs to be used for other purposes serialization of those fields may need
+// to be implemented.
+type UnlinkFileRequest struct {
+	ParentInfo  EntryInfo
+	DelFileName []byte
+	// Not implemented:
+	// FileEvent      struct{}
+	// DirTimestamps  struct{}
+	// FileInfo       EntryInfo
+	// FileTimestamps struct{}
+}
+
+func (m *UnlinkFileRequest) MsgId() uint16 {
+	return 2007
+}
+
+func (m *UnlinkFileRequest) Serialize(s *beeserde.Serializer) {
+	m.ParentInfo.Serialize(s)
+	beeserde.SerializeCStr(s, m.DelFileName, 4)
+}
+
+type UnlinkFileResponse struct {
+	Result beegfs.OpsErr
+}
+
+func (m *UnlinkFileResponse) MsgId() uint16 {
+	return 2008
+}
+
+func (m *UnlinkFileResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
+}
+
+type ListDirFromOffsetRequest struct {
+	ServerOffset int64
+	MaxOutNames  uint32
+	EntryInfo    EntryInfo
+	FilterDots   bool
+}
+
+func (m *ListDirFromOffsetRequest) MsgId() uint16 {
+	return 2029
+}
+
+func (m *ListDirFromOffsetRequest) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.ServerOffset)
+	beeserde.SerializeInt(s, m.MaxOutNames)
+	m.EntryInfo.Serialize(s)
+	beeserde.SerializeInt(s, m.FilterDots)
+}
+
+type ListDirFromOffsetResponse struct {
+	NewServerOffset int64
+	ServerOffsets   []int64
+	Result          int32
+	EntryTypes      []uint8
+	EntryIDs        [][]byte
+	Names           [][]byte
+}
+
+func (m *ListDirFromOffsetResponse) MsgId() uint16 {
+	return 2030
+}
+
+func (m *ListDirFromOffsetResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.NewServerOffset)
+	beeserde.DeserializeSeq(d, &m.ServerOffsets, true, func(out *int64) {
+		beeserde.DeserializeInt(d, out)
+	})
+	beeserde.DeserializeInt(d, &m.Result)
+	beeserde.DeserializeSeq(d, &m.EntryTypes, true, func(out *uint8) {
+		beeserde.DeserializeInt(d, out)
+	})
+	beeserde.DeserializeStringSeq(d, &m.EntryIDs)
+	beeserde.DeserializeStringSeq(d, &m.Names)
+	typesLen, entryIDsLen, namesLen := len(m.EntryTypes), len(m.EntryIDs), len(m.Names)
+	if typesLen != entryIDsLen && entryIDsLen != namesLen {
+		d.Fail(fmt.Errorf("sanity check failed, number of elements in sequences do not match (num types: %d, num entries: %d, num names: %d)", typesLen, entryIDsLen, namesLen))
+	}
+}
+
 type FindOwnerRequest struct {
 	SearchDepth  uint32
 	CurrentDepth uint32
