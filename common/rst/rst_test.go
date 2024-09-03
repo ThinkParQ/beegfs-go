@@ -17,7 +17,7 @@ var baseTestJob = &beeremote.Job{
 	ExternalId: "1234",
 	Request: &beeremote.JobRequest{
 		Path:                "/foo/bar",
-		RemoteStorageTarget: "1",
+		RemoteStorageTarget: 1,
 	},
 	Status: &beeremote.Job_Status{
 		State:   beeremote.Job_SCHEDULED,
