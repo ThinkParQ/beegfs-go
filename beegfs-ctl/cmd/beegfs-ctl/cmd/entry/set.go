@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -100,7 +101,8 @@ This enables normal users to change the default number of targets and chunksize 
 // this PR (https://github.com/spf13/cobra/pull/2117) is merged we could get rid of it and use flag
 // groups instead. WARNING: New flags are not automatically printed and must be added below.
 func runEntrySetHelp(cmd *cobra.Command, args []string) {
-	w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
+	w := tabwriter.Writer{}
+	w.Init(os.Stdout, 0, 0, 2, ' ', 0)
 	printFlagsHelp := func(cmd *cobra.Command, flags []string) {
 		for _, flagName := range flags {
 			flag := cmd.Flags().Lookup(flagName)

@@ -2,36 +2,13 @@ package cmdfmt
 
 import (
 	"fmt"
-	"io"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
 )
-
-func NewDeprecatedTableWriter(output io.Writer) tabwriter.Writer {
-	tw := tabwriter.Writer{}
-	tw.Init(output, 0, 0, 2, ' ', 0)
-	return tw
-}
-
-func PrintNodeInfoHeaderDeprecated(w *tabwriter.Writer, includeUid bool) {
-	if includeUid {
-		fmt.Fprintf(w, "UID\t")
-	}
-	fmt.Fprintf(w, "NodeID\tAlias\t")
-}
-
-func PrintNodeInfoRowDeprecated(w *tabwriter.Writer, n beegfs.Node, includeUid bool) {
-	if includeUid {
-		fmt.Fprintf(w, "%s\t", n.Uid)
-	}
-	fmt.Fprintf(w, "%s\t%s\t", n.Id, n.Alias)
-}
 
 type TableWrapper struct {
 	tableWriter table.Writer
