@@ -80,8 +80,8 @@ writeResponses:
 			})
 
 			// Print jobs by RST ID:
-			rstsForPath := []string{}
-			jobsPerRST := map[string][]*beeremote.JobResult{}
+			rstsForPath := []uint32{}
+			jobsPerRST := map[uint32][]*beeremote.JobResult{}
 			for _, job := range resp.Results {
 				if jobsPerRST[job.Job.Request.RemoteStorageTarget] == nil {
 					jobsPerRST[job.Job.Request.RemoteStorageTarget] = make([]*beeremote.JobResult, 0, 1)
@@ -95,7 +95,7 @@ writeResponses:
 			})
 
 			for _, id := range rstsForPath {
-				fmt.Fprintf(&w, "%s Remote Storage Target: %s\n", convertJobStateToEmoji(jobsPerRST[id][0].Job.Status.State), id)
+				fmt.Fprintf(&w, "%s Remote Storage Target: %d\n", convertJobStateToEmoji(jobsPerRST[id][0].Job.Status.State), id)
 				for i, job := range jobsPerRST[id] {
 					if i >= cfg.LimitJobsPerPath {
 						break
@@ -105,7 +105,7 @@ writeResponses:
 					// Optimize printing jobs we know about (for example no need to print path again):
 					switch job.Job.Request.Type.(type) {
 					case *beeremote.JobRequest_Sync:
-						fmt.Fprintf(&w, "request: {remote_storage_target: %s, type: sync, %s}", job.Job.Request.RemoteStorageTarget, job.Job.Request.GetSync())
+						fmt.Fprintf(&w, "request: {remote_storage_target: %d, type: sync, %s}", job.Job.Request.RemoteStorageTarget, job.Job.Request.GetSync())
 					default:
 						fmt.Fprintf(&w, "request: {%s}", job.Job.GetRequest())
 					}

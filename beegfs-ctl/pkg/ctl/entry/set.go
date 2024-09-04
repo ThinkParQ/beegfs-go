@@ -49,7 +49,7 @@ type SetEntryConfig struct {
 	Pool               *beegfs.EntityId
 	DefaultNumTargets  *uint32
 	StripePattern      *beegfs.StripePatternType
-	RemoteTargets      []uint16
+	RemoteTargets      []uint32
 	RemoteCooldownSecs *uint16
 }
 
