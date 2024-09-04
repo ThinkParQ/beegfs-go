@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time for each BeeMsg TCP connection attempt")
 
-	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, "By default all logging is disabled example for fatal errors. Optionally additional logging to stderr can be enabled to assist with debugging (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
+	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, fmt.Sprintf("By default all logging is disabled example for fatal errors. Optionally additional logging to stderr can be enabled to assist with debugging (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).\n\tNote: When enabling logging you may wish to set --%s=0 to ensure output and log messages are synchronized.", config.PageSizeKey))
 
 	cmd.PersistentFlags().Bool(config.LogDeveloperKey, false, "Enable logging at DebugLevel and above and print stack traces at WarnLevel and above.")
 	cmd.PersistentFlags().MarkHidden(config.LogDeveloperKey)
