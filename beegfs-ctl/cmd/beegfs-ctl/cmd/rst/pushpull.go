@@ -31,7 +31,7 @@ WARNING: When uploading multiple entries, any entries that do not have RSTs conf
 			return runPushOrPullCmd(cmd, cfg)
 		},
 	}
-	cmd.Flags().StringVar(&cfg.RSTID, "rst", "", "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Uint32Var(&cfg.RSTID, "rst", 0, "Perform a one time push to the specified Remote Storage Target ID.")
 	cmd.Flags().BoolVar(&cfg.Force, "force", false, "Force push file(s) to the RST even if another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	return cmd
@@ -48,6 +48,9 @@ func newPullCmd() *cobra.Command {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
 			}
+			if cfg.RSTID == 0 {
+				return fmt.Errorf("invalid rst. The rst id must be greater than zero")
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,7 +58,7 @@ func newPullCmd() *cobra.Command {
 			return runPushOrPullCmd(cmd, cfg)
 		},
 	}
-	cmd.Flags().StringVar(&cfg.RSTID, "rst", "", "The ID of the Remote Storage Target where the file should be pulled from.")
+	cmd.Flags().Uint32Var(&cfg.RSTID, "rst", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
 	cmd.MarkFlagRequired("rst")
 	cmd.Flags().BoolVar(&cfg.Overwrite, "overwrite", false, "When downloading a file, if a file already exists at the specified path in BeeGFS, an error is returned by default. Optionally the file can be overwritten instead. Note files are always uploaded and will be overwritten unless the RST has file/object versioning enabled.")
 	cmd.Flags().StringVar(&cfg.RemotePath, "remote-path", "", "By default when downloading files/objects, the path where the file should be downloaded in BeeGFS is assumed to also be the file path/object key in the RST. Optionally the remote path can be specified to restore a file in an RST to a different location in BeeGFS (this is ignored for uploads).")

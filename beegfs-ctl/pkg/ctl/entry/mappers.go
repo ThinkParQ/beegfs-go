@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
@@ -156,11 +155,7 @@ func initRSTMapper(ctx context.Context) error {
 		rstMapper.mappingByUID = make(map[beegfs.Uid]*flex.RemoteStorageTarget)
 		rstMapper.mappingByLegacyID = make(map[beegfs.LegacyId]*flex.RemoteStorageTarget)
 		for _, rst := range rsts.Rsts {
-			id, err := strconv.Atoi(rst.Id)
-			if err != nil {
-				return fmt.Errorf("error converting RST ID to an integer (this is likely a bug in BeeRemote)")
-			}
-			rstMapper.mappingByLegacyID[beegfs.LegacyId{NumId: beegfs.NumId(id)}] = rst
+			rstMapper.mappingByLegacyID[beegfs.LegacyId{NumId: beegfs.NumId(rst.Id)}] = rst
 		}
 	}
 	return nil

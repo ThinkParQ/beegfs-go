@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -21,7 +20,7 @@ import (
 )
 
 type SyncJobRequestCfg struct {
-	RSTID      string
+	RSTID      uint32
 	Path       string
 	Overwrite  bool
 	RemotePath string
@@ -286,7 +285,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 // the ignoreX arguments. If rstID is set it returns a slice with only that RST otherwise it checks
 // if any RSTs are set on the entry and returns a slice with each of the RSTs, or ErrFileHasNoRSTs
 // if rstID is not set and the entry has no RSTs defined.
-func checkEntryAndDetermineRSTs(ctx context.Context, rstID string, path string, ignoreReaders bool, ignoreWriters bool) ([]string, error) {
+func checkEntryAndDetermineRSTs(ctx context.Context, rstID uint32, path string, ignoreReaders bool, ignoreWriters bool) ([]uint32, error) {
 	entry, err := entry.GetEntry(ctx, path, false, false)
 	if err != nil {
 		return nil, err
@@ -307,14 +306,12 @@ func checkEntryAndDetermineRSTs(ctx context.Context, rstID string, path string, 
 		return nil, err
 	}
 
-	var rstIDs []string
-	if rstID != "" {
-		rstIDs = []string{rstID}
+	var rstIDs []uint32
+	if rstID != 0 {
+		rstIDs = []uint32{rstID}
 	} else if len(entry.Entry.Remote.RSTIDs) > 0 {
-		rstIDs = make([]string, 0, len(entry.Entry.Remote.RSTIDs))
-		for _, rst := range entry.Entry.Remote.RSTIDs {
-			rstIDs = append(rstIDs, strconv.Itoa(int(rst)))
-		}
+		rstIDs = make([]uint32, 0, len(entry.Entry.Remote.RSTIDs))
+		copy(rstIDs, entry.Entry.Remote.RSTIDs)
 	} else {
 		return nil, ErrFileHasNoRSTs
 	}

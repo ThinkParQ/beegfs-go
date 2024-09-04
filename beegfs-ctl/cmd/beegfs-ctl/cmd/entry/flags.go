@@ -161,10 +161,10 @@ func (f *numTargetsFlag) Set(value string) error {
 }
 
 type rstsFlag struct {
-	p *[]uint16
+	p *[]uint32
 }
 
-func newRstsFlag(p *[]uint16) *rstsFlag {
+func newRstsFlag(p *[]uint32) *rstsFlag {
 	return &rstsFlag{p: p}
 }
 
@@ -188,11 +188,11 @@ func (f *rstsFlag) Type() string {
 
 func (f *rstsFlag) Set(value string) error {
 	if strings.ToLower(value) == "none" {
-		*f.p = make([]uint16, 0)
+		*f.p = make([]uint32, 0)
 		return nil
 	}
 	rstStrings := strings.Split(value, ",")
-	rstUint16s := make([]uint16, 0, len(rstStrings))
+	rstUint32s := make([]uint32, 0, len(rstStrings))
 	for _, str := range rstStrings {
 		parsedRST, err := strconv.ParseUint(str, 10, 16)
 		if err != nil {
@@ -201,9 +201,9 @@ func (f *rstsFlag) Set(value string) error {
 			}
 			return fmt.Errorf("invalid RST ID %s", str)
 		}
-		rstUint16s = append(rstUint16s, uint16(parsedRST))
+		rstUint32s = append(rstUint32s, uint32(parsedRST))
 	}
-	*f.p = rstUint16s
+	*f.p = rstUint32s
 	return nil
 }
 

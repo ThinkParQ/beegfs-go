@@ -90,7 +90,7 @@ type patternConfig struct {
 type remoteConfig struct {
 	msg.RemoteStorageTarget
 	// Map of RST IDs to their full configuration details.
-	Targets map[uint16]*flex.RemoteStorageTarget
+	Targets map[uint32]*flex.RemoteStorageTarget
 }
 
 // newEntry is used to assemble an entry from BeeMsgs. If user friendly names of the various IDs
@@ -112,7 +112,7 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 		},
 		Remote: remoteConfig{
 			RemoteStorageTarget: entryInfo.RST,
-			Targets:             make(map[uint16]*flex.RemoteStorageTarget),
+			Targets:             make(map[uint32]*flex.RemoteStorageTarget),
 		},
 		NumSessionsRead:  entryInfo.NumSessionsRead,
 		NumSessionsWrite: entryInfo.NumSessionsWrite,

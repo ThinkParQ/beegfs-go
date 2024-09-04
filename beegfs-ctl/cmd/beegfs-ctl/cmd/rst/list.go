@@ -41,7 +41,7 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 
 	fmt.Fprintf(&w, "ID\tName\tPolicies\tType\tConfiguration\n")
 	for _, rst := range response.Rsts {
-		fmt.Fprintf(&w, "%s\t", rst.Id)
+		fmt.Fprintf(&w, "%d\t", rst.Id)
 		fmt.Fprintf(&w, "%s\t", rst.Name)
 		fmt.Fprintf(&w, "%s\t", rst.Policies.String())
 		switch rst.Type.(type) {
