@@ -82,19 +82,13 @@ func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWra
 		config:    cfg,
 	}
 
-	// If pageSize is > 0, we want to use TableWriter
-	if w.pageSize > 0 {
-		w.replaceTableWriter()
-	}
+	w.replaceTableWriter()
 
 	return w
 }
 
 // Creates a new internal TableWriter to prepare printing a new page
 func (w *TableWrapper) replaceTableWriter() {
-	if w.pageSize == 0 {
-		return
-	}
 
 	// Set the style. We use a very simple style with only spaces as separators to make parsing
 	// easier.
@@ -123,18 +117,23 @@ func (w *TableWrapper) replaceTableWriter() {
 		tbl.SuppressEmptyColumns()
 	}
 
-	// Build the header
-	row := table.Row{}
-	for _, h := range w.columns {
-		row = append(row, strings.ToLower(h))
+	// Don't print a header if the page size is zero:
+	if w.pageSize > 0 {
+		// Build the header
+		row := table.Row{}
+		for _, h := range w.columns {
+			row = append(row, strings.ToLower(h))
+		}
+		tbl.AppendHeader(row)
 	}
-	tbl.AppendHeader(row)
 
 	colCfg := []table.ColumnConfig{}
 
 	// Hide all columns not to be printed
-	for _, name := range w.columns {
-		colCfg = append(colCfg, table.ColumnConfig{Name: name, Hidden: true})
+	for i, name := range w.columns {
+		// The column number is used here because Name does not work if there is no header (as is
+		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
+		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true})
 		for _, cName := range w.printCols {
 			if cName == name || cName == "all" {
 				colCfg[len(colCfg)-1].Hidden = false
@@ -149,35 +148,25 @@ func (w *TableWrapper) replaceTableWriter() {
 }
 
 // Appends a Row to the TableWriter if used, prints row to stdout otherwise. Auto prints the table
-// if pageSize rows have been added/
+// if pageSize rows have been added. If the pageSize is zero the row is immediately printed.
 func (w *TableWrapper) Row(fields ...any) {
-	if w.tableWriter != nil {
-		w.tableWriter.AppendRow(fields)
-		w.rowCount += 1
-
-		if w.rowCount%w.pageSize == 0 {
-			fmt.Println(w.tableWriter.Render())
-			fmt.Println()
-			w.replaceTableWriter()
-		}
-	} else {
-		for i, f := range fields {
-			if len(w.columns) > i {
-				for _, cName := range w.printCols {
-					if cName == w.columns[i] || cName == "all" {
-						fmt.Printf("%v  ", f)
-						break
-					}
-				}
-			}
-		}
+	w.tableWriter.AppendRow(fields)
+	w.rowCount += 1
+	if w.pageSize == 0 {
+		fmt.Println(w.tableWriter.Render())
+		// Intentionally don't print a blank line between rows when the page size is zero.
+		w.replaceTableWriter()
+	} else if w.rowCount%w.pageSize == 0 {
+		fmt.Println(w.tableWriter.Render())
 		fmt.Println()
+		w.replaceTableWriter()
 	}
 }
 
 // Prints the remaining rows of the table if tableWriter is used.
 func (w *TableWrapper) PrintRemaining() {
-	if w.tableWriter != nil && w.rowCount%w.pageSize != 0 {
+	// If the page size is zero rows are printed as they were added so there are no remaining rows.
+	if w.pageSize != 0 && w.rowCount%w.pageSize != 0 {
 		fmt.Println(w.tableWriter.Render())
 		fmt.Println()
 		w.replaceTableWriter()
