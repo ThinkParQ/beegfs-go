@@ -248,7 +248,7 @@ type RemoteStorageTarget struct {
 	CoolDownPeriod uint16
 	Reserved       uint16
 	FilePolicies   uint16
-	RSTIDs         []uint16
+	RSTIDs         []uint32
 }
 
 func (m *RemoteStorageTarget) Serialize(s *beeserde.Serializer) {
@@ -264,7 +264,7 @@ func (m *RemoteStorageTarget) Serialize(s *beeserde.Serializer) {
 	beeserde.SerializeInt(s, m.CoolDownPeriod)
 	beeserde.SerializeInt(s, m.Reserved)
 	beeserde.SerializeInt(s, m.FilePolicies)
-	beeserde.SerializeSeq(s, m.RSTIDs, true, func(out uint16) {
+	beeserde.SerializeSeq(s, m.RSTIDs, true, func(out uint32) {
 		beeserde.SerializeInt(s, out)
 	})
 }
@@ -278,7 +278,7 @@ func (m *RemoteStorageTarget) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.CoolDownPeriod)
 	beeserde.DeserializeInt(d, &m.Reserved)
 	beeserde.DeserializeInt(d, &m.FilePolicies)
-	beeserde.DeserializeSeq(d, &m.RSTIDs, true, func(out *uint16) {
+	beeserde.DeserializeSeq(d, &m.RSTIDs, true, func(out *uint32) {
 		beeserde.DeserializeInt(d, out)
 	})
 }
