@@ -253,7 +253,8 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 					// TODO: https://github.com/ThinkParQ/bee-remote/issues/25
 					// Support symbolic links.
 					respChan <- &SyncJobResponse{
-						Err: fmt.Errorf("skipping symbolic link: %s", path),
+						Path: path,
+						Err:  fmt.Errorf("skipping symbolic link: %s", path),
 					}
 				} else if !d.IsDir() {
 					// Only send file paths to the channel.

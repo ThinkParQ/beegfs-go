@@ -15,8 +15,8 @@ import (
 type GetJobsConfig struct {
 	JobID            string
 	Path             string
-	Verbose          bool
-	LimitJobsPerPath int
+	WithWorkRequests bool
+	WithWorkResults  bool
 }
 
 type GetJobsResponse struct {
@@ -44,8 +44,8 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 	}
 
 	request := &beeremote.GetJobsRequest{
-		IncludeWorkRequests: cfg.Verbose || viper.GetBool(config.DebugKey),
-		IncludeWorkResults:  cfg.Verbose || viper.GetBool(config.DebugKey),
+		IncludeWorkRequests: cfg.WithWorkRequests || viper.GetBool(config.DebugKey),
+		IncludeWorkResults:  cfg.WithWorkResults || viper.GetBool(config.DebugKey),
 	}
 
 	switch {

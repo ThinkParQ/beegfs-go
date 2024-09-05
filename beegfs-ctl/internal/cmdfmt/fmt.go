@@ -2,36 +2,13 @@ package cmdfmt
 
 import (
 	"fmt"
-	"io"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
 )
-
-func NewDeprecatedTableWriter(output io.Writer) tabwriter.Writer {
-	tw := tabwriter.Writer{}
-	tw.Init(output, 0, 0, 2, ' ', 0)
-	return tw
-}
-
-func PrintNodeInfoHeaderDeprecated(w *tabwriter.Writer, includeUid bool) {
-	if includeUid {
-		fmt.Fprintf(w, "UID\t")
-	}
-	fmt.Fprintf(w, "NodeID\tAlias\t")
-}
-
-func PrintNodeInfoRowDeprecated(w *tabwriter.Writer, n beegfs.Node, includeUid bool) {
-	if includeUid {
-		fmt.Fprintf(w, "%s\t", n.Uid)
-	}
-	fmt.Fprintf(w, "%s\t%s\t", n.Id, n.Alias)
-}
 
 type TableWrapper struct {
 	tableWriter table.Writer
@@ -39,6 +16,19 @@ type TableWrapper struct {
 	printCols   []string
 	pageSize    uint
 	rowCount    uint
+	config      TableWrapperOptions
+}
+
+type TableWrapperOptions struct {
+	WithEmptyColumns bool
+}
+
+type TableWrapperOption func(*TableWrapperOptions)
+
+func WithEmptyColumns(withEmpty bool) TableWrapperOption {
+	return func(args *TableWrapperOptions) {
+		args.WithEmptyColumns = withEmpty
+	}
 }
 
 // Creates a new table.Writer, applying some default settings. Reads certain viper config keys to
@@ -48,7 +38,14 @@ type TableWrapper struct {
 // call table.AppendRow() providing as many columns as set for the header. defaultColumns defines
 // which columns to print by default. A user can do --columns=all to print all columns instead.
 // Column names should be lowercase.
-func NewTableWrapper(columns []string, defaultColumns []string) TableWrapper {
+func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWrapperOption) TableWrapper {
+	cfg := TableWrapperOptions{
+		WithEmptyColumns: true,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	// Determine the columns to be printed
 	printCols := defaultColumns
 	if viper.IsSet(config.ColumnsKey) {
@@ -59,21 +56,16 @@ func NewTableWrapper(columns []string, defaultColumns []string) TableWrapper {
 		columns:   columns,
 		printCols: printCols,
 		pageSize:  viper.GetUint(config.PageSizeKey),
+		config:    cfg,
 	}
 
-	// If pageSize is > 0, we want to use TableWriter
-	if w.pageSize > 0 {
-		w.replaceTableWriter()
-	}
+	w.replaceTableWriter()
 
 	return w
 }
 
 // Creates a new internal TableWriter to prepare printing a new page
 func (w *TableWrapper) replaceTableWriter() {
-	if w.pageSize == 0 {
-		return
-	}
 
 	// Set the style. We use a very simple style with only spaces as separators to make parsing
 	// easier.
@@ -84,24 +76,41 @@ func (w *TableWrapper) replaceTableWriter() {
 			PageSeparator: "\n",
 		},
 		Format: table.FormatOptions{
-			Direction: text.LeftToRight,
-			Footer:    text.FormatUpper,
-			Header:    text.FormatUpper,
+			// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
+			// initForRenderSuppressColumns() does not ignore control characters. This was fixed
+			// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
+			// a new go-pretty release is tagged. But it also results in hidden characters being
+			// added to columns which are included if a user copies text, which can lead to weird
+			// behavior (for example copying a unix timestamp to a timestamp converter website).
+			// We should leave this disabled unless it becomes necessary.
+			//
+			// Direction: text.LeftToRight,
+			Footer: text.FormatUpper,
+			Header: text.FormatUpper,
 		},
 	})
 
-	// Build the header
-	row := table.Row{}
-	for _, h := range w.columns {
-		row = append(row, strings.ToLower(h))
+	if !w.config.WithEmptyColumns {
+		tbl.SuppressEmptyColumns()
 	}
-	tbl.AppendHeader(row)
+
+	// Don't print a header if the page size is zero:
+	if w.pageSize > 0 {
+		// Build the header
+		row := table.Row{}
+		for _, h := range w.columns {
+			row = append(row, strings.ToLower(h))
+		}
+		tbl.AppendHeader(row)
+	}
 
 	colCfg := []table.ColumnConfig{}
 
 	// Hide all columns not to be printed
-	for _, name := range w.columns {
-		colCfg = append(colCfg, table.ColumnConfig{Name: name, Hidden: true})
+	for i, name := range w.columns {
+		// The column number is used here because Name does not work if there is no header (as is
+		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
+		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true})
 		for _, cName := range w.printCols {
 			if cName == name || cName == "all" {
 				colCfg[len(colCfg)-1].Hidden = false
@@ -116,35 +125,25 @@ func (w *TableWrapper) replaceTableWriter() {
 }
 
 // Appends a Row to the TableWriter if used, prints row to stdout otherwise. Auto prints the table
-// if pageSize rows have been added/
+// if pageSize rows have been added. If the pageSize is zero the row is immediately printed.
 func (w *TableWrapper) Row(fields ...any) {
-	if w.tableWriter != nil {
-		w.tableWriter.AppendRow(fields)
-		w.rowCount += 1
-
-		if w.rowCount%w.pageSize == 0 {
-			fmt.Println(w.tableWriter.Render())
-			fmt.Println()
-			w.replaceTableWriter()
-		}
-	} else {
-		for i, f := range fields {
-			if len(w.columns) > i {
-				for _, cName := range w.printCols {
-					if cName == w.columns[i] || cName == "all" {
-						fmt.Printf("%v  ", f)
-						break
-					}
-				}
-			}
-		}
+	w.tableWriter.AppendRow(fields)
+	w.rowCount += 1
+	if w.pageSize == 0 {
+		fmt.Println(w.tableWriter.Render())
+		// Intentionally don't print a blank line between rows when the page size is zero.
+		w.replaceTableWriter()
+	} else if w.rowCount%w.pageSize == 0 {
+		fmt.Println(w.tableWriter.Render())
 		fmt.Println()
+		w.replaceTableWriter()
 	}
 }
 
 // Prints the remaining rows of the table if tableWriter is used.
 func (w *TableWrapper) PrintRemaining() {
-	if w.tableWriter != nil && w.rowCount%w.pageSize != 0 {
+	// If the page size is zero rows are printed as they were added so there are no remaining rows.
+	if w.pageSize != 0 && w.rowCount%w.pageSize != 0 {
 		fmt.Println(w.tableWriter.Render())
 		fmt.Println()
 		w.replaceTableWriter()

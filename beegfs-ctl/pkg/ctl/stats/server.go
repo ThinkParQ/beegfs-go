@@ -52,25 +52,25 @@ func statsFromHighResolutionStats(h msg.HighResolutionStats) Stats {
 }
 
 // Queries the stats for one node. The returned slice is chronologically sorted in ascending order.
-func SingleServerNode(ctx context.Context, id beegfs.EntityId) ([]Stats, error) {
+func SingleServerNode(ctx context.Context, id beegfs.EntityId) (beegfs.Node, []Stats, error) {
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return []Stats{}, err
+		return beegfs.Node{}, []Stats{}, err
 	}
 
 	n, err := store.GetNode(id)
 	if err != nil {
-		return []Stats{}, err
+		return beegfs.Node{}, []Stats{}, err
 	}
 
 	sRes := <-getServerStats(ctx, n)
 	if sRes.err != nil {
-		return []Stats{}, sRes.err
+		return beegfs.Node{}, []Stats{}, sRes.err
 	}
 
 	slices.Reverse(sRes.stats)
 
-	return sRes.stats, nil
+	return n, sRes.stats, nil
 }
 
 // Queries latest stat entry for multiple nodes separately

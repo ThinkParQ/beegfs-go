@@ -2,9 +2,10 @@ package stats
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"text/tabwriter"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/dsnet/golib/unitconv"
@@ -28,15 +29,20 @@ func newServerStatsCmd() *cobra.Command {
 	cfg := serverStats_Config{Node: beegfs.InvalidEntityId{}}
 
 	var cmd = &cobra.Command{
-		Use:   "server",
+		Use:   "server [<node>]",
 		Short: "Show IO statistics for BeeGFS servers.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
+			if len(args) == 1 {
 				id, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
 				if err != nil {
 					return err
 				}
 				cfg.Node = id
+				if cfg.Sum {
+					return errors.New("cannot summarize results for a single node")
+				}
+			} else if len(args) > 1 {
+				return errors.New("cannot specify multiple nodes (zero or one node must be specified)")
 			}
 
 			return runServerstatsCmd(cmd, &cfg)
@@ -49,17 +55,22 @@ func newServerStatsCmd() *cobra.Command {
   second for storage servers. The time field shows Unix timestamps in seconds since
   the epoch.
 
-  When stats are requested for a single server, the output displays a history of the
-  last few seconds in rows, with the most recent values at the bottom.
+  By default prints out stats for all server types refreshing every 1s until Ctrl+C.
 
-  When stats are requested for multiple servers, individual statistics for each 
-  server are displayed, with one row per server.
+  When stats are requested for a single server by specifying <node>, the output displays 
+  a history of the last few seconds in rows, with the most recent values at the bottom.
 
-Example: Print individual stats of all servers, refresh every second.
+  When stats are requested for multiple servers (by omitting <node>), individual 
+  statistics for each server are displayed, with one row per server.
+
+Example: Print individual stats of all servers, refreshed every second.
   $ beegfs stats server --interval 1s
 
-Example: Print aggregate stats of metadata servers, refresh every 3 seconds.
-  $ beegfs stats server --node-type meta --interval 3s
+Example: Print aggregate stats of metadata servers, refreshed every 3 seconds.
+  $ beegfs stats server --node-type meta --interval 3s --sum
+
+Example: Print stats for a single metadata server:
+  $ beegfs stats server meta:1
 `,
 	}
 
@@ -67,7 +78,7 @@ Example: Print aggregate stats of metadata servers, refresh every 3 seconds.
 		"Include historical stats for this duration.")
 	cmd.Flags().Var(beegfs.NewNodeTypePFlag(&cfg.NodeType, beegfs.Meta, beegfs.Storage), "node-type",
 		"The node type to query (meta, storage).")
-	cmd.Flags().DurationVar(&cfg.Interval, "interval", 0*time.Second,
+	cmd.Flags().DurationVar(&cfg.Interval, "interval", 1*time.Second,
 		"Interval to automatically refresh and print updated stats.")
 	cmd.Flags().BoolVar(&cfg.Sum, "sum", false,
 		"Summarized stats for multiple nodes.")
@@ -75,27 +86,36 @@ Example: Print aggregate stats of metadata servers, refresh every 3 seconds.
 }
 
 func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
+
+	defaultColumns := []string{"time", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
+	defaultWithNode := []string{"node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
+	allColumns := []string{"time", "uid", "node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
+
+	var collectStatsFunc func(context.Context, *serverStats_Config, *cmdfmt.TableWrapper) error
+	if _, ok := cfg.Node.(beegfs.InvalidEntityId); ok {
+		if cfg.Sum {
+			collectStatsFunc = multiNodeAggregated
+		} else {
+			defaultColumns = defaultWithNode
+			collectStatsFunc = multiNode
+		}
+	} else {
+		collectStatsFunc = singleNode
+	}
+
+	if viper.GetBool(config.DebugKey) {
+		defaultColumns = allColumns
+	}
+
+	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+
 	// incase if the interval is given we loop here until the user presses ctrl + c
 	for {
-		w := cmdfmt.NewDeprecatedTableWriter(os.Stdout)
-
-		var err error
-		if _, ok := cfg.Node.(beegfs.InvalidEntityId); ok {
-			if cfg.Sum {
-				err = multiNodeAggregated(cmd.Context(), cfg, &w)
-			} else {
-				err = multiNode(cmd.Context(), cfg, &w)
-			}
-		} else {
-			err = singleNode(cmd.Context(), cfg, &w)
-		}
-
-		if err != nil {
+		if err := collectStatsFunc(cmd.Context(), cfg, &tbl); err != nil {
 			return err
 		}
-
-		w.Flush()
-
+		// Constantly print output as it is available:
+		tbl.PrintRemaining()
 		if cfg.Interval <= 0 {
 			break
 		}
@@ -106,8 +126,8 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 }
 
 // Queries and prints the stats for one node
-func singleNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
-	stats, err := stats.SingleServerNode(ctx, cfg.Node)
+func singleNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
+	node, stats, err := stats.SingleServerNode(ctx, cfg.Node)
 	if err != nil {
 		return err
 	}
@@ -118,33 +138,36 @@ func singleNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Write
 		stats = stats[numToKeep:]
 	}
 
-	printHeader(w, false, false)
 	for _, stat := range stats {
-		printData(w, stat)
+		printData(w, &node, stat)
 	}
-	fmt.Fprintf(w, "\n")
 
 	return nil
 }
 
 // Queries and prints latest stat entry for multiple nodes separately
-func multiNode(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
+func multiNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
 	perServerstatsResult, err := stats.MultiServerNodes(ctx, cfg.NodeType)
 	if err != nil {
 		return err
 	}
 
-	printHeader(w, true, viper.GetBool(config.DebugKey))
+	slices.SortFunc(perServerstatsResult, func(a, b stats.NodeStats) int {
+		if a.Node.Id.NodeType == b.Node.Id.NodeType {
+			return int(a.Node.Id.NumId - b.Node.Id.NumId)
+		}
+		return int(a.Node.Id.NodeType - b.Node.Id.NodeType)
+	})
+
 	for _, serverStats := range perServerstatsResult {
-		cmdfmt.PrintNodeInfoRowDeprecated(w, serverStats.Node, viper.GetBool(config.DebugKey))
-		printData(w, serverStats.Stats)
+		printData(w, &serverStats.Node, serverStats.Stats)
 	}
 
 	return nil
 }
 
 // Queries, sums up and prints the summarized stats for multiple nodes
-func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *tabwriter.Writer) error {
+func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
 	totalStats, numberOfNodes, err := stats.MultiServerNodesAggregated(ctx, cfg.NodeType)
 	if err != nil {
 		return err
@@ -157,43 +180,64 @@ func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *tabwri
 	}
 	totalStats = totalStats[l:]
 
-	fmt.Fprintf(w, "Total results for nodes: %d\n", numberOfNodes)
-	printHeader(w, false, false)
+	fmt.Printf("Total results for nodes: %d\n", numberOfNodes)
 	for _, stat := range totalStats {
-		printData(w, stat)
+		printData(w, nil, stat)
 	}
-	fmt.Fprintf(w, "\n")
 
 	return nil
 }
 
-// Prints the tables header
-func printHeader(w *tabwriter.Writer, includeNodeInfo bool, includeUid bool) {
-	if includeNodeInfo {
-		cmdfmt.PrintNodeInfoHeaderDeprecated(w, includeUid)
-	}
-
-	fmt.Fprintf(w, "Time\tQueue length\tRequests\tBusy workers\tWritten\tRead\tSent\tReceived\t\n")
-}
-
 // Prints one line of stat entry
-func printData(w *tabwriter.Writer, stat stats.Stats) {
-	fmt.Fprintf(w, "%d\t", stat.StatsTime)
-	fmt.Fprintf(w, "%d\t", stat.QueuedRequests)
-	fmt.Fprintf(w, "%d\t", stat.WorkRequests)
-	fmt.Fprintf(w, "%d\t", stat.BusyWorkers)
+func printData(w *cmdfmt.TableWrapper, node *beegfs.Node, stat stats.Stats) {
+
+	uid := "n/a"
+	id := "n/a"
+	alias := "n/a"
+
+	if node != nil {
+		uid = fmt.Sprintf("%v", node.Uid)
+		id = fmt.Sprintf("%v", node.Id)
+		alias = fmt.Sprintf("%v", node.Alias)
+	}
+	queuedReqs := fmt.Sprintf("%d", stat.QueuedRequests)
+	workReqs := fmt.Sprintf("%d", stat.WorkRequests)
+	busyWorkers := fmt.Sprintf("%d", stat.BusyWorkers)
 
 	if viper.GetBool(config.RawKey) {
-		fmt.Fprintf(w, "%d\t", stat.DiskWriteBytes)
-		fmt.Fprintf(w, "%d\t", stat.DiskReadBytes)
-		fmt.Fprintf(w, "%d\t", stat.NetSendBytes)
-		fmt.Fprintf(w, "%d\t", stat.NetRecvBytes)
+		w.Row(
+			stat.StatsTime,
+			uid,
+			id,
+			alias,
+			queuedReqs,
+			workReqs,
+			busyWorkers,
+			fmt.Sprintf("%d", stat.DiskWriteBytes),
+			fmt.Sprintf("%d", stat.DiskReadBytes),
+			fmt.Sprintf("%d", stat.NetSendBytes),
+			fmt.Sprintf("%d", stat.NetRecvBytes),
+		)
 	} else {
-		fmt.Fprintf(w, "%sB\t", unitconv.FormatPrefix(float64(stat.DiskWriteBytes), unitconv.IEC, 0))
-		fmt.Fprintf(w, "%sB\t", unitconv.FormatPrefix(float64(stat.DiskReadBytes), unitconv.IEC, 0))
-		fmt.Fprintf(w, "%sB\t", unitconv.FormatPrefix(float64(stat.NetSendBytes), unitconv.IEC, 0))
-		fmt.Fprintf(w, "%sB\t", unitconv.FormatPrefix(float64(stat.NetRecvBytes), unitconv.IEC, 0))
+		var statsTime string
+		if stat.StatsTime > math.MaxInt64 {
+			// If the timestamp is out-of-range just print it as is.
+			statsTime = fmt.Sprintf("%d", stat.StatsTime)
+		} else {
+			statsTime = time.Unix(int64(stat.StatsTime), 0).Format(time.RFC3339)
+		}
+		w.Row(
+			statsTime,
+			uid,
+			id,
+			alias,
+			queuedReqs,
+			workReqs,
+			busyWorkers,
+			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(stat.DiskWriteBytes), unitconv.IEC, 0)),
+			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(stat.DiskReadBytes), unitconv.IEC, 0)),
+			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(stat.NetSendBytes), unitconv.IEC, 0)),
+			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(stat.NetRecvBytes), unitconv.IEC, 0)),
+		)
 	}
-
-	fmt.Fprintf(w, "\n")
 }

@@ -305,6 +305,9 @@ func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEn
 		request.RST.CoolDownPeriod = *newCfg.RemoteCooldownSecs
 		isRSTConfigSpecified = true
 	}
+	// IMPORTANT: If new configuration is added here also add it to the Updates returned in the
+	// results below. Since not all configuration can be updated for files, we only return
+	// configuration updates that are allowed.
 
 	// Return early if no RST configuration is specified, because
 	// at present only RST updates are allowed for regular files.
@@ -328,8 +331,12 @@ func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEn
 	}
 
 	return SetEntryResult{
-		Path:    searchPath,
-		Status:  resp.Result,
-		Updates: newCfg,
+		Path:   searchPath,
+		Status: resp.Result,
+		Updates: SetEntryConfig{
+			// Only return configuration that is allowed to be updated in the results:
+			RemoteTargets:      newCfg.RemoteTargets,
+			RemoteCooldownSecs: newCfg.RemoteCooldownSecs,
+		},
 	}, nil
 }
