@@ -7,9 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/gobee/beegfs"
 )
 
@@ -193,14 +191,19 @@ func (f *rstsFlag) Set(value string) error {
 	}
 	rstStrings := strings.Split(value, ",")
 	rstUint32s := make([]uint32, 0, len(rstStrings))
+	rstMap := make(map[uint64]struct{})
 	for _, str := range rstStrings {
-		parsedRST, err := strconv.ParseUint(str, 10, 16)
+		parsedRST, err := strconv.ParseUint(str, 10, 32)
 		if err != nil {
-			if viper.GetBool(config.DebugKey) {
-				return fmt.Errorf("error parsing RST ID %s: %w", str, err)
-			}
-			return fmt.Errorf("invalid RST ID %s", str)
+			return fmt.Errorf("error parsing RST ID %s: %w", str, err)
 		}
+		if parsedRST == 0 {
+			return fmt.Errorf("using '0' as an RST ID is not allowed")
+		}
+		if _, ok := rstMap[parsedRST]; ok {
+			return fmt.Errorf("RST ID %d was specified multiple times", parsedRST)
+		}
+		rstMap[parsedRST] = struct{}{}
 		rstUint32s = append(rstUint32s, uint32(parsedRST))
 	}
 	*f.p = rstUint32s
