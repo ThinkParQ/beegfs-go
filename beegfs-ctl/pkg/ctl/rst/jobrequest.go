@@ -311,7 +311,7 @@ func checkEntryAndDetermineRSTs(ctx context.Context, rstID uint32, path string, 
 	if rstID != 0 {
 		rstIDs = []uint32{rstID}
 	} else if len(entry.Entry.Remote.RSTIDs) > 0 {
-		rstIDs = make([]uint32, 0, len(entry.Entry.Remote.RSTIDs))
+		rstIDs = make([]uint32, len(entry.Entry.Remote.RSTIDs))
 		copy(rstIDs, entry.Entry.Remote.RSTIDs)
 	} else {
 		return nil, ErrFileHasNoRSTs
