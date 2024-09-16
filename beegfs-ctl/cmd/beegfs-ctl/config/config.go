@@ -40,6 +40,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Bool(config.TlsDisableVerificationKey, false, "Disable TLS server verification")
 
+	cmd.PersistentFlags().Bool(config.AuthDisableKey, false, "Disable authentication")
 	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", "The file containing the authentication secret")
 
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time for each BeeMsg TCP connection attempt")

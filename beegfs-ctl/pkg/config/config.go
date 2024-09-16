@@ -2,14 +2,13 @@ package config
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"os"
 	"sync"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/gobee/beegfs/beegrpc"
 	"github.com/thinkparq/gobee/beemsg"
 	"github.com/thinkparq/gobee/beemsg/util"
 	"github.com/thinkparq/gobee/filesystem"
@@ -17,9 +16,6 @@ import (
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	pm "github.com/thinkparq/protobuf/go/management"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Viper keys for the global config. Should be used when accessing it instead of raw strings.
@@ -33,8 +29,9 @@ const (
 	BeeGFSMountPointKey = "mount-point"
 	// The timeout for a single connection attempt
 	ConnTimeoutKey = "conn-timeout"
+	// Disable BeeMsg and gRPC client to server authentication
+	AuthDisableKey = "auth-disable"
 	// File containing the authentication secret (formerly known as "connAuthFile").
-	// Disable authentication if empty or if the default file doesn't exist.
 	AuthFileKey = "auth-file"
 	// Disable TLS transport security for gRPC communication.
 	TlsDisableKey = "tls-disable"
@@ -71,40 +68,6 @@ const (
 // The global config singleton
 var globalMount filesystem.Provider
 
-// Returns a grpc.DialOption configured according to the global TLS config
-func tlsDialOption() (grpc.DialOption, error) {
-	if viper.GetBool(TlsDisableKey) {
-		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
-	} else {
-		certPool, err := x509.SystemCertPool()
-		if err != nil {
-			return nil, fmt.Errorf("couldn't load system cert pool: %w", err)
-		}
-
-		// Append custom ca certificate if provided
-		if viper.GetString(TlsCaCertKey) != "" {
-			cert, err := os.ReadFile(viper.GetString(TlsCaCertKey))
-			if err != nil {
-				// Silently ignore the default file not being found
-				if viper.IsSet(TlsCaCertKey) {
-					return nil, fmt.Errorf("reading certificate file failed: %w", err)
-				}
-			} else {
-				if !certPool.AppendCertsFromPEM(cert) {
-					return nil, fmt.Errorf("appending cert to pool failed")
-				}
-			}
-		}
-
-		creds := credentials.NewTLS(&tls.Config{
-			RootCAs:            certPool,
-			InsecureSkipVerify: viper.GetBool(TlsDisableVerificationKey),
-		})
-
-		return grpc.WithTransportCredentials(creds), nil
-	}
-}
-
 var mgmtClient pm.ManagementClient
 
 // Try to establish a connection to the managements gRPC service
@@ -113,24 +76,32 @@ func ManagementClient() (pm.ManagementClient, error) {
 		return mgmtClient, nil
 	}
 
-	addr := viper.GetString(ManagementAddrKey)
-
-	tlsDialOption, err := tlsDialOption()
-	if err != nil {
-		return nil, err
+	var cert []byte
+	var err error
+	if viper.GetString(TlsCaCertKey) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+		if err != nil {
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
+		}
 	}
 
-	// Open gRPC connection to management.
-	// Since the connection is opened asynchronously in the background, a context for timeouts is
-	// not needed here. A potential timeout on connection will be checked when making an actual
-	// request.
-	g, err := grpc.Dial(addr, tlsDialOption)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to management service on %s failed: %w", addr, err)
+	var authSecret []byte
+	if !viper.GetBool(AuthDisableKey) {
+		authSecret, err = os.ReadFile(viper.GetString(AuthFileKey))
+		if err != nil {
+			return nil, fmt.Errorf("couldn't read auth file: %w", err)
+		}
 	}
-	mgmtClient = pm.NewManagementClient(g)
 
-	return mgmtClient, nil
+	mgmtClient, err = beegrpc.NewMgmtd(
+		viper.GetString(ManagementAddrKey),
+		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
+		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
+		beegrpc.WithTLSCaCert(cert),
+		beegrpc.WithAuthSecret(authSecret),
+	)
+
+	return mgmtClient, err
 }
 
 var beeRemoteClient beeremote.BeeRemoteClient
@@ -139,20 +110,35 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 	if beeRemoteClient != nil {
 		return beeRemoteClient, nil
 	}
-	addr := viper.GetString(BeeRemoteAddrKey)
 
-	tlsDialOption, err := tlsDialOption()
-	if err != nil {
-		return nil, err
+	var cert []byte
+	var err error
+	if viper.GetString(TlsCaCertKey) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+		if err != nil {
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
+		}
 	}
 
-	g, err := grpc.Dial(addr, tlsDialOption)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to beeremote on %s failed: %w", addr, err)
+	var authSecret []byte
+	if !viper.GetBool(AuthDisableKey) {
+		authSecret, err = os.ReadFile(viper.GetString(AuthFileKey))
+		if err != nil {
+			return nil, fmt.Errorf("couldn't read auth file: %w", err)
+		}
 	}
 
-	beeRemoteClient = beeremote.NewBeeRemoteClient(g)
-	return beeRemoteClient, nil
+	conn, err := beegrpc.NewClientConn(
+		viper.GetString(ManagementAddrKey),
+		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
+		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
+		beegrpc.WithTLSCaCert(cert),
+		beegrpc.WithAuthSecret(authSecret),
+	)
+
+	beeRemoteClient = beeremote.NewBeeRemoteClient(conn)
+
+	return beeRemoteClient, err
 }
 
 // BeeGFSClient provides a standardize way to interact with a mounted BeeGFS through the
@@ -207,13 +193,10 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 
 	authSecret := int64(0)
 	// Setup BeeMsg authentication from the given file
-	if viper.GetString(AuthFileKey) != "" {
+	if !viper.GetBool(AuthDisableKey) {
 		key, err := os.ReadFile(viper.GetString(AuthFileKey))
 		if err != nil {
-			// Silently ignore the default file not being found
-			if viper.IsSet(AuthFileKey) {
-				return nil, fmt.Errorf("couldn't read auth file: %w", err)
-			}
+			return nil, fmt.Errorf("couldn't read auth file: %w", err)
 		} else {
 			authSecret = util.GenerateAuthSecret(key)
 		}
