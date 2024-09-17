@@ -1,0 +1,41 @@
+version: 2
+builds:
+  - id: beegfs_ctl
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Version={{ .Version }} -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BinaryName=beegfs -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Commit={{ .Commit }} -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BuildTime={{ .Date }}
+    binary: beegfs
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: cmd/beegfs-ctl/main.go
+
+nfpms:
+  - id: beegfs_ctl
+    package_name: beegfs
+    file_name_template: "beegfs-{{ .Version }}-{{ .Os }}.{{ .Arch }}"
+    vendor: "ThinkparQ GmbH"
+    homepage: https://www.beegfs.io
+    maintainer: BeeGFS Maintainers <packages@beegfs.com>
+    description: The BeeGFS Command-Line Control Tool.
+    provides:
+      - beegfs
+    license: BeeGFS EULA
+    formats:
+      - rpm
+      - deb
+    contents:
+      - src: ./{{ .ArtifactPath }}
+        dst: /opt/beegfs/sbin/beegfs
+        file_info:
+          mode: 04755
+          owner: root
+          group: root
+
+      - src: /opt/beegfs/sbin/beegfs
+        dst: /usr/sbin/beegfs
+        type: "symlink"
+
