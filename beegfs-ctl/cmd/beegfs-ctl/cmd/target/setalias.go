@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/target"
-	"github.com/thinkparq/gobee/beegfs"
+	backend "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 func newSetAliasCmd() *cobra.Command {

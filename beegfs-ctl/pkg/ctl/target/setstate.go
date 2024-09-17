@@ -3,7 +3,7 @@ package target
 import (
 	"context"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
 

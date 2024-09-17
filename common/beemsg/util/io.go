@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // Executes function f while blocking. Returns when f is completed or the context is cancelled.

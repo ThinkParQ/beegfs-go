@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/thinkparq/gobee/beemsg/beeserde"
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // Serializes and creates a complete on-the-wire BeeMsg (header + body).

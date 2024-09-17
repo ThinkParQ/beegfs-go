@@ -6,8 +6,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/thinkparq/gobee/beemsg/msg"
-	"github.com/thinkparq/gobee/types"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/types"
 )
 
 const (

@@ -6,10 +6,10 @@ import (
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/target"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 type PrintConfig struct {

@@ -5,7 +5,7 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
 

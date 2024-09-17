@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/thinkparq/gobee/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
 const (

@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/rst"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/rst"
 )
 
 type pushPullCfg struct {

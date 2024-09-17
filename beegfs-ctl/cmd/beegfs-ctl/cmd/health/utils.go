@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/procfs"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/procfs"
 	"go.uber.org/zap"
 )
 

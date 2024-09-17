@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/entry"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/types"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/types"
 )
 
 type entrySetCfg struct {

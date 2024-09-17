@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg/msg"
-	"github.com/thinkparq/gobee/filesystem"
-	"github.com/thinkparq/gobee/types"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
@@ -286,7 +286,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 }
 
 func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
-	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/54
+	// TODO: https://github.com/thinkparq/beegfs-ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
 	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
 	// always retrieved using the RPC.
@@ -385,7 +385,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, searchPath string) (msg
 			EntryID:       []byte("root"),
 			FileName:      []byte(filepath.Base(searchPath)),
 			EntryType:     1,
-			// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/55
+			// TODO: https://github.com/thinkparq/beegfs-ctl/issues/55
 			// Correctly set the FeatureFlags if the root metadata node is mirrored. Technically
 			// this doesn't matter, but may in the future if things change.
 			FeatureFlags: 0,

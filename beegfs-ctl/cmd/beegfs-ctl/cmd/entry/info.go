@@ -7,11 +7,11 @@ import (
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/entry"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/types"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/types"
 	"go.uber.org/zap"
 )
 
@@ -53,7 +53,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	}
 
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (WARNING: this may return large amounts of output, for example if the BeeGFS root is the provided path).")
-	// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/56
+	// TODO: https://github.com/thinkparq/beegfs-ctl/issues/56
 	// Update help text when verbose no longer just applies to the retro mode.
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "In the \"retro\" mode, print more information about each entry, such as chunk and dentry paths on the servers.")
 	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Display entry information using the \"retro\" vertical style of the original beegfs-ctl.")
@@ -262,7 +262,7 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 	return entryToPrint.String()
 }
 
-// TODO: https://github.com/ThinkParQ/beegfs-ctl/issues/56
+// TODO: https://github.com/thinkparq/beegfs-ctl/issues/56
 // Finish implementing (mainly just verbose output).
 func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	row := make([]any, 0, rowLen)

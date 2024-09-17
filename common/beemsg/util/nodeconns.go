@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // A wrapper around the queue that stores connection handles of type net.Conn

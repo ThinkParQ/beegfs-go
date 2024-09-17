@@ -4,9 +4,9 @@ import (
 	"context"
 	"slices"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // Contains one stat entry and the node it belongs to.

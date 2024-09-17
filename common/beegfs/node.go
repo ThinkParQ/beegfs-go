@@ -5,7 +5,7 @@ import (
 )
 
 // Holds BeeGFS node information, including IDs and Nics
-// TODO: Use EntityIdSet here https://github.com/ThinkParQ/gobee/issues/37
+// TODO: Use EntityIdSet here https://github.com/thinkparq/gobee/issues/37
 type Node struct {
 	// The nodes unique EntityID
 	Uid Uid

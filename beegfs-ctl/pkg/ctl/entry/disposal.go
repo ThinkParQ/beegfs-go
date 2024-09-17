@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg"
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"go.uber.org/zap"
 )
 

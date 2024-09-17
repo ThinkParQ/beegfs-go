@@ -3,7 +3,7 @@ package rst
 import (
 	"context"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
 

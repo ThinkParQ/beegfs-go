@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
 

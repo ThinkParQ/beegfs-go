@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/util"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 const (
