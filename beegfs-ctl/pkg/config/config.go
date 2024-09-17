@@ -129,7 +129,7 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 	}
 
 	conn, err := beegrpc.NewClientConn(
-		viper.GetString(ManagementAddrKey),
+		viper.GetString(BeeRemoteAddrKey),
 		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
 		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
 		beegrpc.WithTLSCaCert(cert),
