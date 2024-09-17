@@ -1,6 +1,6 @@
 module github.com/thinkparq/beegfs-go
 
-go 1.22
+go 1.23.1
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.25.2
