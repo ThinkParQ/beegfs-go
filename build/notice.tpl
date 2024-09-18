@@ -1,11 +1,12 @@
 # NOTICE
 
-This NOTICE file is provided in compliance with the open source licenses of the components used in this software.
+This NOTICE file is provided in compliance with the licenses of the components used in this software.
 
-## BeeGFS Command Line Control Tool
+## Project Information
 **Copyright (C) 2024 ThinkParQ**
 
-This software includes code and libraries from:
+This software includes third-party code and libraries. Below are the attributions and notices for
+third-party components included in this distribution, in accordance with their respective licenses.
 
 ## azillionmonkeys.com/qed/hash.html
 

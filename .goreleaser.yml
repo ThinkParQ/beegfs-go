@@ -1,0 +1,69 @@
+version: 2
+builds:
+  - id: beegfs_tools
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.Version={{ .Version }}
+      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.BinaryName=beegfs
+      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.Commit={{ .Commit }}
+      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.BuildTime={{ .Date }}
+    binary: beegfs
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: beegfs-ctl/cmd/beegfs-ctl/main.go
+    hooks:
+      post:
+        # Note post hooks run for each binary so we actually generate the script twice and just
+        # overwrite it in place. It should always be the same for arm64 and amd64 so this is fine.
+        # However when adding future post hooks ensure this is what you want.
+        - sh -c "go run beegfs-ctl/cmd/beegfs-ctl/main.go completion bash >> ./dist/beegfs_bashcomp"
+
+nfpms:
+  - id: beegfs_tools
+    package_name: beegfs-tools
+    file_name_template: "beegfs-tools-{{ .Version }}-{{ .Os }}.{{ .Arch }}"
+    vendor: "ThinkparQ GmbH"
+    homepage: https://www.beegfs.io
+    maintainer: BeeGFS Maintainers <packages@beegfs.com>
+    description: A collection of tools for managing BeeGFS.
+    provides:
+      - beegfs
+    license: BeeGFS EULA
+    formats:
+      - rpm
+      - deb
+    bindir: /opt/beegfs/sbin/
+    contents:
+      - src: /opt/beegfs/sbin/beegfs
+        dst: /usr/sbin/beegfs
+        type: "symlink"
+      - src: ./dist/beegfs_bashcomp
+        dst: /etc/bash_completion.d/beegfs-ctl
+      - src: NOTICE.md
+        dst: /usr/share/doc/beegfs-tools/NOTICE.md
+      - src: LICENSE.md
+        dst: /usr/share/doc/beegfs-tools/LICENSE.md
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+signs:
+  - artifacts: checksum
+    cmd: gpg2
+    args:
+      - "--batch"
+      - "-u"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
