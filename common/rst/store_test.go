@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/filesystem"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 

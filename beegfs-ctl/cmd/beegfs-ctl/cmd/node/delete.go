@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
-	"github.com/thinkparq/gobee/beegfs"
+	backend "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/node"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 func TestAssembleBeeMsg(t *testing.T) {

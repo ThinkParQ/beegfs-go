@@ -1,29 +1,11 @@
 # force the usage of /bin/bash instead of /bin/sh
 SHELL := /bin/bash
 
-# Name of the binary to build
-CMD = beegfs
-
-# Variables that can be overridden: 
-BUILD_DIR ?= build/dist/opt/beegfs/sbin
-
-# Build Targets
-all: build generate-notices
-
-# Use the same strategy as BeeGFS to generate a $VERSION for the binary and
-# package. The version will look like "1.0.0" if were on a commit tagged
-# "1.0.0". Otherwise it will generate a version like "1.0.0-3-g<COMMIT HASH>"
-# where "3" is the number of commits ahead of tag 1.0.0 and the <COMMIT HASH> is
-# the first ten characters of the commit hash. The only difference is appending
-# "-dev" if the current commit is dirty (i.e., has uncommitted changes).
-.PHONY: build
-build: check-go-version
-	$(eval VERSION := $(shell git describe --tags --match '*.*' --abbrev=10 --dirty="-dev"))
-	@echo "Building $* version $(VERSION)"
-	CGO_ENABLED=0 go build -ldflags="-X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Version=$(VERSION) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BinaryName=$(CMD) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.Commit=$(shell git rev-parse HEAD) -X github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/cmd.BuildTime=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')" -o $(BUILD_DIR)/$(CMD) cmd/beegfs-ctl/main.go
-	chmod 755 $(BUILD_DIR)/$*
-
-build: $(CMDS:%=build-%)
+# Generate NOTICE files for distribution with their respective binaries. IMPORTANT: When generating
+# notices for new binaries also add checks to ensure they are kept updated under check-licenses.
+.PHONY: generate-notices
+generate-notices:
+	@go-licenses report ./beegfs-ctl/cmd/beegfs-ctl --template ./beegfs-ctl/build/notice.tpl > NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 
 # Test targets:
 # Test targets may make change to the local repository (e.g. running go mod tidy) to
@@ -33,10 +15,22 @@ build: $(CMDS:%=build-%)
 .PHONY: test
 test: check-go-version check-gofmt check-linters check-go-tidy test-unit check-vulnerabilities check-licenses
 
+# This check is primarily meant to ensure when the Go version in go.mod changes, CI workflows are
+# also updated to use this version of Go.
 .PHONY: check-go-version
 check-go-version:
 	@echo "Checking Go version..."
-	@./hack/check-go-version.sh
+	@{ \
+		GO_MOD_VERSION=go$$(grep '^go ' go.mod | awk '{print $$2}'); \
+		INSTALLED_VERSION=$$(go version | { read _ _ ver _; echo $${ver}; }); \
+		if [ "$$INSTALLED_VERSION" = "$$GO_MOD_VERSION" ]; then \
+			echo "INFO: go.mod requests ($$GO_MOD_VERSION) and the build environment has $$INSTALLED_VERSION."; \
+		else \
+			echo "ERROR: go.mod requests $$GO_MOD_VERSION but the build environment has $$INSTALLED_VERSION."; \
+			exit 1; \
+		fi \
+	} || { echo >&2 "ERROR: determining version of Go failed"; exit 1; }
+
 
 # Verify that the code is formatted using gofmt: 
 # Don't run on the vendor directory to avoid false positives.
@@ -75,10 +69,6 @@ check-go-tidy: tidy
 		exit 1; \
 	fi
 
-.PHONY: generate-notices
-generate-notices:
-	@go-licenses report ./cmd/beegfs-ctl --template hack/notice.tpl > NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
-
 # For details on what licenses are disallowed see
 # https://github.com/google/go-licenses#check 
 #
@@ -104,10 +94,10 @@ check-licenses: generate-notices
 		--ignore git.beegfs.io \
 		--ignore github.com/thinkparq \
 		--ignore github.com/hashicorp/hcl
-	@if [ -n "$$(git status --porcelain NOTICE.md)" ]; then \
-        echo "NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
+	@if [ -n "$$(git status --porcelain beegfs-ctl/NOTICE.md)" ]; then \
+        echo "ERROR: The NOTICE.md file for beegfs-ctl is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
-    fi
+    fi		
 
 # Targets for installation of various prerequisites:
 .PHONY: install-tools
@@ -115,13 +105,6 @@ install-tools:
 	go install honnef.co/go/tools/cmd/staticcheck@latest
 	go install github.com/google/go-licenses@v1.6.0
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-
-# Helper targets:
-.PHONY: clean
-clean:
-	rm -f bin/*
-	rm -f build/dist/opt/beegfs/sbin/*
-	rm -rf $(PACKAGE_DIR)
 
 .PHONY: tidy
 tidy :

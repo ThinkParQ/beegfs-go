@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 func TestAddAndGet(t *testing.T) {

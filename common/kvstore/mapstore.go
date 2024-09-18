@@ -17,7 +17,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/mock"
-	"github.com/thinkparq/gobee/types"
+	"github.com/thinkparq/beegfs-go/common/types"
 )
 
 const (

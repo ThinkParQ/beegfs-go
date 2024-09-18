@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thinkparq/gobee/filesystem"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -49,7 +49,7 @@ func TestGenerateRequests(t *testing.T) {
 		},
 	}
 	testJobs := []*beeremote.Job{jobSyncUpload, jobSyncDownload}
-	// TODO: https://github.com/ThinkParQ/gobee/issues/28
+	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Also test flex.SyncJob_DOWNLOAD once we have an s3MockProvider.
 	for i, op := range []flex.SyncJob_Operation{flex.SyncJob_UPLOAD} {
 		requests, retry, err := testS3Client.GenerateWorkRequests(context.Background(), testJobs[i], 1)

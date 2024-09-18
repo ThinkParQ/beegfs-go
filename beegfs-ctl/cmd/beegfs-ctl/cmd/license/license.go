@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	licenseCmd "github.com/thinkparq/beegfs-ctl/pkg/ctl/license"
+	licenseCmd "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/license"
 	pl "github.com/thinkparq/protobuf/go/license"
 )
 

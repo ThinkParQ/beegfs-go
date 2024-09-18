@@ -11,7 +11,7 @@ import (
 	"path"
 	"reflect"
 
-	"github.com/thinkparq/gobee/configmgr"
+	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"

@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/thinkparq/gobee/filesystem"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -21,7 +21,7 @@ import (
 
 type S3Client struct {
 	config *flex.RemoteStorageTarget
-	// TODO: https://github.com/ThinkParQ/gobee/issues/28
+	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Rework client into an `s3Provider` interface type.
 	client     *s3.Client
 	mountPoint filesystem.Provider
@@ -158,7 +158,7 @@ func (rst *S3Client) CompleteWorkRequests(ctx context.Context, job *beeremote.Jo
 			if abort {
 				return rst.AbortUpload(ctx, job.ExternalId, job.Request.Path)
 			}
-			// TODO: https://github.com/ThinkParQ/gobee/issues/29
+			// TODO: https://github.com/thinkparq/gobee/issues/29
 			// There could be lots of parts. Look for ways to optimize this. Like if we could
 			// determine the total number of parts and make an appropriately sized slice up front.
 			// Or if we could just pass the RST method the unmodified map since it potentially has
@@ -189,7 +189,7 @@ func (rst *S3Client) recommendedSegments(fileSize int64) (int64, int32) {
 		// https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
 		return 1, 1
 	}
-	// TODO: https://github.com/ThinkParQ/gobee/issues/7
+	// TODO: https://github.com/thinkparq/gobee/issues/7
 	// Arbitrary selection for now. We should be smarter and take into
 	// consideration file size and number of workers for this RST type.
 	return 4, 1

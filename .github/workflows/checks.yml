@@ -6,7 +6,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     container:
-      image: golang
+      image: golang:1.23.1
       options: --user 1001
     steps:
       - name: Checkout
@@ -16,7 +16,5 @@ jobs:
         run: git config --global url."https://${{ secrets.CI_PROTOBUF_ACCESS }}@github.com/thinkparq".insteadOf https://github.com/thinkparq
       - name: Install toolchains and tools
         run: make install-tools
-      - name: Run checks
-        run: make check-gofmt check-linters check-go-tidy check-vulnerabilities check-licenses
-      - name: Run tests
-        run: make test-unit
+      - name: Run checks and unit tests
+        run: make test

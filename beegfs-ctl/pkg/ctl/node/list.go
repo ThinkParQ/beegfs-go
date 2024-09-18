@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg/msg"
-	"github.com/thinkparq/gobee/beemsg/util"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 )
 
 // The configuration passed to the GetNodeList function. Is built from command line flags in the

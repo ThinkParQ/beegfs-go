@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // Test establishing new connections to a node

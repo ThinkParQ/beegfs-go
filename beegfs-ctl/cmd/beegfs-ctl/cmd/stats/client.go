@@ -9,9 +9,9 @@ import (
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/stats"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/stats"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 type clientStats_Config struct {

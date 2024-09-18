@@ -7,11 +7,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/cmd/beegfs-ctl/util"
-	"github.com/thinkparq/beegfs-ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	backend "github.com/thinkparq/beegfs-ctl/pkg/ctl/node"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/util"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	backend "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/node"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 // Creates new list nodes command. Run when the command line tools structure is built, will be

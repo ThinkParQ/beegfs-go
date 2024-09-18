@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
 
 func TestParseClientConfigFile(t *testing.T) {

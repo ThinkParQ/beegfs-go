@@ -8,12 +8,12 @@ import (
 	"sync"
 
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-ctl/pkg/config"
-	"github.com/thinkparq/beegfs-ctl/pkg/ctl/pool"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg"
-	"github.com/thinkparq/gobee/beemsg/msg"
-	"github.com/thinkparq/gobee/filesystem"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/pool"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 )
 
 // SetEntriesConfig is used to determine how paths are provided to SetEntries() and what

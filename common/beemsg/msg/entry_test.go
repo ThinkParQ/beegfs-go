@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/gobee/beegfs"
-	"github.com/thinkparq/gobee/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
 func TestStripePatternSerialize(t *testing.T) {
