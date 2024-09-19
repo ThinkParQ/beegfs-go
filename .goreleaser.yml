@@ -21,7 +21,7 @@ builds:
         # Note post hooks run for each binary so we actually generate the script twice and just
         # overwrite it in place. It should always be the same for arm64 and amd64 so this is fine.
         # However when adding future post hooks ensure this is what you want.
-        - sh -c "go run beegfs-ctl/cmd/beegfs-ctl/main.go completion bash >> ./dist/beegfs_bashcomp"
+        - sh -c "go run beegfs-ctl/cmd/beegfs-ctl/main.go completion bash > ./dist/beegfs_bashcomp"
 
 nfpms:
   - id: beegfs_tools
@@ -37,7 +37,13 @@ nfpms:
     formats:
       - rpm
       - deb
-    bindir: /opt/beegfs/sbin/
+    scripts:
+      preinstall: ./build/preinstall.sh
+      postinstall: ./build/postinstall.sh
+    # Note binaries built above are added to bindir automatically. We use preinstall/postinstall
+    # scripts to customize ownership and permissions including adding the setgid bit to the beegfs
+    # binary so it runs with group permissions needed to access config files under /etc/beegfs.
+    bindir: "/opt/beegfs/sbin/"
     contents:
       - src: /opt/beegfs/sbin/beegfs
         dst: /usr/sbin/beegfs
