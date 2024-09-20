@@ -3,16 +3,17 @@
 The purpose of this repository is twofold:
 
 * Provide common Go packages for interacting with BeeGFS.
-* Host BeeGFS-related software written in Go, such as the BeeGFS command-line tool.
+* Host BeeGFS-related software written in Go, such as the `beegfs` command-line tool.
 
 Repository structure:
 
 * `common/`: Contains shared Go packages that can be imported by other projects. These packages
-  provide common functionality for interacting with BeeGFS and serve as building blocks for various
-  components in this repository.
-* Top-level directories (e.g., `beegfs-ctl/`): Contain components typically built into binaries,
-  such as the BeeGFS command-line tool. These components often make use of the packages available
-  under `common/`.
+  provide common "low-level" functionality for interacting with BeeGFS and along with basic
+  application components (logging, configuration, databases, etc.) and serve as building blocks
+  "higher-level" applications and libraries.
+* Top-level directories (e.g., `beegfs-ctl/`): Contain "higher-level" applications and libraries
+  built on the low-level functionality and other components in `common/`. Most developers interested
+  in integrating BeeGFS with some external application will want to start here.
 
 IMPORTANT: This repository is not be used for storing protocol buffers as those are not specific to
 projects in Go. See the [protocol buffers](https://github.com/thinkparq/protobuf) repository for
@@ -20,14 +21,13 @@ projects in Go. See the [protocol buffers](https://github.com/thinkparq/protobuf
 
 # Using beegfs-go
 
-If you're not familiar with Go, check out the ThinkParQ [Getting Started with
+The beegfs-go project is setup as a [Go module](https://go.dev/blog/using-go-modules) which is a
+collection of Go packages stored in a file tree with a `go.mod` file at its root. If you're not
+familiar with Go, check out the ThinkParQ [Getting Started with
 Go](https://github.com/ThinkParQ/developer-handbook/tree/main/getting_started/go) section of the
 developer handbook.
 
-The beegfs-go project is setup as a [Go module](https://go.dev/blog/using-go-modules) which is a
-collection of Go packages stored in a file tree with a `go.mod` file at its root.
-
-## Using Common Packages
+## Using Shared Packages
 
 If you just want to use some common functionality in your project, first run `go get
 github.com/thinkparq/beegfs-go` then import/use the shared package(s) as needed throughout your
@@ -55,8 +55,6 @@ command line `go doc` (e.g., `go doc logging`). An interactive doc site can also
 the godoc tool (`go get golang.org/x/tools/cmd/godoc`) with `godoc -http=:8080`. Some packages may
 also provide additional documentation in markdown format.
 
-If you wish to contribute see the [Common README](common/README.md) for more details.
-
 ## Working with Executables
 
 Besides common packages, this project hosts a number of components that are meant to be built into
@@ -69,14 +67,15 @@ included with each component for more details.
 
 ## Coding Standards
 
-This project generally adheres to existing standards and best practices generally accepted by the Go
+This project strives to adhere to existing standards and best practices generally accepted by the Go
 community. These include: 
 
 * [Effective Go](https://golang.org/doc/effective_go)
 * [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
 
 It is expected before submitting a pull request that `gofmt`. `golint`, and `go vet` have already
-been run to ensure some of the more common "nitpicks" have already been addressed. 
+been run to ensure some of the more common "nitpicks" have already been addressed. You could also
+run `make test` to locally execute the checks that will run in GitHub Actions.
 
 ## Documentation 
 

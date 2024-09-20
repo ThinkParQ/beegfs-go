@@ -14,8 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	tgtFrontend "github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd/target"
-	"github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/util"
+	tgtFrontend "github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmd/target"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/stats"

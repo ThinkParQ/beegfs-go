@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/util"
 	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/beegfs-ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/config"
 	backend "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/node"
 	"github.com/thinkparq/beegfs-go/common/beegfs"

@@ -4,7 +4,7 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
-	tgtFrontend "github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd/target"
+	tgtFrontend "github.com/thinkparq/beegfs-go/beegfs-ctl/internal/cmd/target"
 	tgtBackend "github.com/thinkparq/beegfs-go/beegfs-ctl/pkg/ctl/target"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 )
