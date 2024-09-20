@@ -36,12 +36,12 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Bool(config.TlsDisableKey, false, "Disable TLS for gRPC communication")
 
-	cmd.PersistentFlags().String(config.TlsCaCertKey, "/etc/beegfs/cert.pem", "Use a custom CA certificate for server verification")
+	cmd.PersistentFlags().String(config.TlsCaCertKey, "/etc/beegfs/cert.pem", "Use a CA certificate (signed or self-signed) for server verification. To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions. Leave empty to use the system's default certificate pool to verify the server.")
 
 	cmd.PersistentFlags().Bool(config.TlsDisableVerificationKey, false, "Disable TLS server verification")
 
 	cmd.PersistentFlags().Bool(config.AuthDisableKey, false, "Disable authentication")
-	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", "The file containing the authentication secret")
+	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", "The file containing the authentication secret. To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.")
 
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time for each BeeMsg TCP connection attempt")
 

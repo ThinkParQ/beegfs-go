@@ -1,11 +1,21 @@
 # force the usage of /bin/bash instead of /bin/sh
 SHELL := /bin/bash
 
-# Generate NOTICE files for distribution with their respective binaries. IMPORTANT: When generating
-# notices for new binaries also add checks to ensure they are kept updated under check-licenses.
+# Trigger a "local-only" release using goreleaser to generate OS packages that can be used locally
+# (Ref: https://goreleaser.com/quick-start/ and https://goreleaser.com/customization/snapshots/):
+.PHONY: package-all
+package-all:
+	@command -v goreleaser >/dev/null 2>&1 || { \
+		echo >&2 "ERROR: goreleaser is not installed, it can be installed with 'go install github.com/goreleaser/goreleaser/v2@latest' (see https://goreleaser.com/install/#install for additional options)."; \
+		exit 1; \
+	}
+	@goreleaser --clean --snapshot --skip sign
+	@echo "INFO: OS packages and other artifacts are available under dist/."
+
+# Generate NOTICE file.
 .PHONY: generate-notices
 generate-notices:
-	@go-licenses report ./beegfs-ctl/cmd/beegfs-ctl --template ./beegfs-ctl/build/notice.tpl > NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+	@go-licenses report ./... --template ./build/notice.tpl > NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 
 # Test targets:
 # Test targets may make change to the local repository (e.g. running go mod tidy) to
@@ -94,8 +104,8 @@ check-licenses: generate-notices
 		--ignore git.beegfs.io \
 		--ignore github.com/thinkparq \
 		--ignore github.com/hashicorp/hcl
-	@if [ -n "$$(git status --porcelain beegfs-ctl/NOTICE.md)" ]; then \
-        echo "ERROR: The NOTICE.md file for beegfs-ctl is not up to date. Please run 'make generate-notices' and commit the changes."; \
+	@if [ -n "$$(git status --porcelain NOTICE.md)" ]; then \
+        echo "ERROR: The NOTICE.md file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
     fi		
 
