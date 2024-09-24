@@ -11,7 +11,7 @@ Repository structure:
   provide common "low-level" functionality for interacting with BeeGFS and along with basic
   application components (logging, configuration, databases, etc.) and serve as building blocks
   "higher-level" applications and libraries.
-* Top-level directories (e.g., `beegfs-ctl/`): Contain "higher-level" applications and libraries
+* Top-level directories (e.g., `ctl/`): Contain "higher-level" applications and libraries
   built on the low-level functionality and other components in `common/`. Most developers interested
   in integrating BeeGFS with some external application will want to start here.
 
@@ -59,9 +59,18 @@ also provide additional documentation in markdown format.
 
 Besides common packages, this project hosts a number of components that are meant to be built into
 binaries. These components generally adhere to the unofficial [Standard Go Project
-Layout](https://github.com/golang-standards/project-layout). This means you can typically run these
-programs with a command like `go run beegfs-ctl/cmd/beegfs-ctl/main.go`. Refer to the documentation
-included with each component for more details.
+Layout](https://github.com/golang-standards/project-layout). Once you have [installed
+Go](https://go.dev/doc/install) there are a few options to run these components:
+
+* Directly build and run (best for debugging): `go run ctl/cmd/beegfs/main.go`
+
+* Install to your `$GOBIN` (best if you just want to run the applications): `go install ./ctl/cmd/beegfs/`
+  * For convenience, you can also use `make install` / `make uninstall` which manages installs at `$HOME/go/bin`. 
+
+* Build and install using OS packages: `make package-all` 
+  * Install the resulting packages using `dpkg -i <package>` or similar.
+
+Refer to the documentation included with each component for more details.
 
 # Contributing to beegfs-go
 

@@ -1,6 +1,21 @@
 # force the usage of /bin/bash instead of /bin/sh
 SHELL := /bin/bash
 
+BINARY_NAME=beegfs
+INSTALL_DIR=$(HOME)/go/bin
+
+.PHONY: install
+install:
+	@echo "Installing $(BINARY_NAME) to $(INSTALL_DIR)"
+	go install ./ctl/cmd/$(BINARY_NAME)/
+	@echo "Installation complete! Note you may need to add $(INSTALL_DIR) to your \$$PATH."
+
+.PHONY: uninstall
+uninstall:
+	@echo "Removing $(BINARY_NAME) from $(INSTALL_DIR)"
+	rm -f $(INSTALL_DIR)/$(BINARY_NAME)
+	@echo "Uninstallation complete!"
+
 # Trigger a "local-only" release using goreleaser to generate OS packages that can be used locally
 # (Ref: https://goreleaser.com/quick-start/ and https://goreleaser.com/customization/snapshots/):
 .PHONY: package-all
@@ -10,7 +25,7 @@ package-all:
 		exit 1; \
 	}
 	@goreleaser --clean --snapshot --skip sign
-	@echo "INFO: OS packages and other artifacts are available under dist/."
+	@echo "INFO: OS packages and other artifacts are available under dist/ and can be installed with `dpkg -i <PATH>`"
 
 # Generate NOTICE file.
 .PHONY: generate-notices
