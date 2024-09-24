@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 )
 
 // GetEntriesConfig is used to determine how paths are provided to GetEntries() and control what
@@ -97,7 +100,7 @@ type remoteConfig struct {
 // should be set, the caller should first initialize the various mappers. If the mappers are not
 // available value types will be set to logical defaults (like <unknown>) and reference types will
 // be nil.
-func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntryInfoResponse) Entry {
+func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntryInfoResponse) Entry {
 	e := Entry{
 		MetaOwnerNode: ownerNode,
 		ParentEntryID: string(entry.ParentEntryID),
@@ -121,14 +124,14 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 		e.MetaBuddyGroup = int(entry.OwnerID)
 	}
 
-	pool, err := storagePoolMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
+	pool, err := mappings.StoragePoolToConfig.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
 	if err == nil {
 		e.Pattern.StoragePoolName = pool.Pool.Alias.String()
 	}
 
 	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 {
 		for _, tgt := range entryInfo.Pattern.TargetIDs {
-			node, err := targetMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
+			node, err := mappings.TargetToNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
 			if err != nil {
 				e.Pattern.StorageTargets[beegfs.NumId(tgt)] = nil
 			} else {
@@ -139,8 +142,8 @@ func newEntry(entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntry
 
 	if len(entryInfo.RST.RSTIDs) != 0 {
 		for _, id := range entryInfo.RST.RSTIDs {
-			rst, err := rstMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(id)})
-			if err != nil {
+			rst, ok := mappings.RstIdToConfig[id]
+			if !ok {
 				e.Remote.Targets[id] = nil
 			} else {
 				e.Remote.Targets[id] = rst
@@ -197,24 +200,17 @@ func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 // the entry info. This approach allows callers to decide when there is an error if they should
 // immediately terminate, or continue writing out the remaining entries before handling the error.
 func GetEntries(ctx context.Context, cfg GetEntriesConfig) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
+	logger, _ := config.GetLogger()
+	log := logger.With(zap.String("component", "getEntries"))
 
-	err := initMetaBuddyMapper(ctx)
+	mappings, err := util.GetMappings(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without metadata buddy group mappings: %w", err)
+		if !errors.Is(err, util.ErrMappingRSTs) {
+			return nil, nil, err
+		}
+		// RSTs are not configured on all BeeGFS instances, silently ignore.
+		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
-
-	err = initTargetMapper(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without target-to-node mappings: %w", err)
-	}
-
-	err = initStoragePoolMapper(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without storage pool ID-to-description mappings: %w", err)
-	}
-
-	// RSTs are not configured on all BeeGFS. Silently ignore.
-	_ = initRSTMapper(ctx)
 
 	var entriesChan <-chan *GetEntryCombinedInfo
 	// At most two errors are expected. Increase if additional writers are added to the channel.
@@ -222,16 +218,16 @@ func GetEntries(ctx context.Context, cfg GetEntriesConfig) (<-chan *GetEntryComb
 
 	if cfg.PathsViaChan != nil {
 		// Read paths from the provided channel:
-		entriesChan = getEntries(ctx, cfg.PathsViaChan, cfg.Verbose, errChan)
+		entriesChan = getEntries(ctx, mappings, cfg.PathsViaChan, cfg.Verbose, errChan)
 	} else if cfg.PathsViaRecursion != "" {
 		pathsChan, err := walkDir(ctx, cfg.PathsViaRecursion, errChan)
 		if err != nil {
 			return nil, nil, err
 		}
-		entriesChan = getEntries(ctx, pathsChan, cfg.Verbose, errChan)
+		entriesChan = getEntries(ctx, mappings, pathsChan, cfg.Verbose, errChan)
 	} else {
 		pathsChan := make(chan string, 1024)
-		entriesChan = getEntries(ctx, pathsChan, cfg.Verbose, errChan)
+		entriesChan = getEntries(ctx, mappings, pathsChan, cfg.Verbose, errChan)
 		for _, e := range cfg.PathsViaList {
 			pathsChan <- e
 		}
@@ -244,7 +240,7 @@ func GetEntries(ctx context.Context, cfg GetEntriesConfig) (<-chan *GetEntryComb
 // paths as they are sent to the provided channel and sends the results to the returned channel. If
 // there are any issues getting an entry they are returned on the provided errChan and no more
 // entries are processed.
-func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan chan<- error) <-chan *GetEntryCombinedInfo {
+func getEntries(ctx context.Context, mappings *util.Mappings, paths <-chan string, verbose bool, errChan chan<- error) <-chan *GetEntryCombinedInfo {
 
 	entriesChan := make(chan *GetEntryCombinedInfo, 1024)
 	var beegfsClient filesystem.Provider
@@ -270,7 +266,7 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 					errChan <- err
 					return
 				}
-				result, err := GetEntry(ctx, searchPath, verbose, false)
+				result, err := GetEntry(ctx, mappings, searchPath, verbose, false)
 				if err != nil {
 					errChan <- err
 					return
@@ -285,12 +281,12 @@ func getEntries(ctx context.Context, paths <-chan string, verbose bool, errChan 
 	return entriesChan
 }
 
-func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
+func GetEntry(ctx context.Context, mappings *util.Mappings, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
 	// TODO: https://github.com/thinkparq/ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
 	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
 	// always retrieved using the RPC.
-	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, searchPath)
+	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, searchPath)
 	if err != nil {
 		return GetEntryCombinedInfo{}, err
 	}
@@ -313,7 +309,7 @@ func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigM
 	var entryWithParent = GetEntryCombinedInfo{
 		Path: searchPath,
 	}
-	entryWithParent.Entry = newEntry(entry, ownerNode, *resp)
+	entryWithParent.Entry = newEntry(mappings, entry, ownerNode, *resp)
 	if includeOrigMsg {
 		entryWithParent.Entry.origEntryInfoMsg = &entry
 	}
@@ -326,13 +322,13 @@ func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigM
 			// We have to make another RPC to get the parent details needed for verbose output. We can't
 			// just cache them the first time around because some of the path components may be skipped
 			// if we were able to take any shortcuts during the search.
-			parentEntry, parentOwner, err := getEntryAndOwnerFromPathViaRPC(ctx, parentSearchPath)
+			parentEntry, parentOwner, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, parentSearchPath)
 			if err != nil {
 				entryWithParent.Entry.Verbose = Verbose{
 					Err: types.MultiError{Errors: []error{err}},
 				}
 			} else {
-				entryWithParent.Parent = newEntry(parentEntry, parentOwner, msg.GetEntryInfoResponse{})
+				entryWithParent.Parent = newEntry(mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
 				entryWithParent.Entry.Verbose = newVerbose(resp.Path, entryWithParent.Entry, entryWithParent.Parent)
 				if includeOrigMsg {
 					entryWithParent.Parent.origEntryInfoMsg = &parentEntry
@@ -349,7 +345,7 @@ func GetEntry(ctx context.Context, searchPath string, verbose bool, includeOrigM
 
 // getEntryAndOwnerFromPathViaRPC() is the Go equivalent of the use unmounted code path from the C++
 // getEntryAndOwnerFromPath().
-func getEntryAndOwnerFromPathViaRPC(ctx context.Context, searchPath string) (msg.EntryInfo, beegfs.Node, error) {
+func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings, searchPath string) (msg.EntryInfo, beegfs.Node, error) {
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
@@ -408,7 +404,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, searchPath string) (msg
 		// that to the ID of the current primary metadata node.
 		var metaNodeNumID beegfs.NumId
 		if resp.EntryInfoWithDepth.EntryInfo.FeatureFlags.IsBuddyMirrored() {
-			primaryMetaNode, err := metaBuddyMapper.Get(beegfs.LegacyId{NumId: beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID), NodeType: beegfs.Meta})
+			primaryMetaNode, err := mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID), NodeType: beegfs.Meta})
 			if err != nil {
 				return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", resp.EntryInfoWithDepth.EntryInfo.OwnerID, err)
 			}

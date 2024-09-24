@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -46,6 +47,11 @@ type SyncJobResponse struct {
 // outstanding goroutines will be immediately cancelled. In all cases the channel is closed once
 // there are no more responses to receive.
 func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *SyncJobResponse, error) {
+
+	mappings, err := util.GetMappings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unable to proceed without entity mappings: %w", err)
+	}
 
 	respChan := make(chan *SyncJobResponse, cfg.ChanSize)
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/40 Support directory downloads. For
@@ -126,7 +132,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 			resp := &SyncJobResponse{
 				Path: baseRequest.Path,
 			}
-			rstIDs, err := checkEntryAndDetermineRSTs(ctx, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
+			rstIDs, err := checkEntryAndDetermineRSTs(ctx, mappings, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
 			if err != nil {
 				resp.Err = err
 				respChan <- resp
@@ -193,7 +199,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 					Path: req.Path,
 				}
 
-				rstIDs, err := checkEntryAndDetermineRSTs(ctx, req.RemoteStorageTarget, req.Path, ignoreReaders, ignoreWriters)
+				rstIDs, err := checkEntryAndDetermineRSTs(ctx, mappings, req.RemoteStorageTarget, req.Path, ignoreReaders, ignoreWriters)
 				if err != nil {
 					resp.Err = err
 					respChan <- resp
@@ -286,8 +292,8 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 // the ignoreX arguments. If rstID is set it returns a slice with only that RST otherwise it checks
 // if any RSTs are set on the entry and returns a slice with each of the RSTs, or ErrFileHasNoRSTs
 // if rstID is not set and the entry has no RSTs defined.
-func checkEntryAndDetermineRSTs(ctx context.Context, rstID uint32, path string, ignoreReaders bool, ignoreWriters bool) ([]uint32, error) {
-	entry, err := entry.GetEntry(ctx, path, false, false)
+func checkEntryAndDetermineRSTs(ctx context.Context, mappings *util.Mappings, rstID uint32, path string, ignoreReaders bool, ignoreWriters bool) ([]uint32, error) {
+	entry, err := entry.GetEntry(ctx, mappings, path, false, false)
 	if err != nil {
 		return nil, err
 	}
