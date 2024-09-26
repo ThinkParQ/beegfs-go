@@ -117,3 +117,29 @@ func (g EntityIdParser) Parse(input string) (EntityId, error) {
 
 	return InvalidEntityId{}, aliasErr
 }
+
+// EntityIdSliceParser wraps EntityIdParser and parses multiple identity IDs into a slice.
+type EntityIdSliceParser struct {
+	entityIdParser EntityIdParser
+}
+
+// Creates a new Parser for list of entity IDs. idBitSize defines the allowed id range (e.g. 16 or
+// 32 bit) and accepted defines the accepted node types.
+func NewEntityIdSliceParser(idBitSize int, accepted ...NodeType) EntityIdSliceParser {
+	return EntityIdSliceParser{
+		entityIdParser: NewEntityIdParser(idBitSize, accepted...),
+	}
+}
+
+func (p EntityIdSliceParser) Parse(input string) ([]EntityId, error) {
+	rawIDs := strings.Split(input, ",")
+	entityIDs := make([]EntityId, 0, len(rawIDs))
+	for _, rawID := range rawIDs {
+		id, err := p.entityIdParser.Parse(rawID)
+		if err != nil {
+			return nil, err
+		}
+		entityIDs = append(entityIDs, id)
+	}
+	return entityIDs, nil
+}
