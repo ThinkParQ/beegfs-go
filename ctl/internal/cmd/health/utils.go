@@ -36,23 +36,6 @@ func printClientHeader(client procfs.Client, char string) {
 	printHeader(fmt.Sprintf("Client ID: %s (beegfs://%s@%s)", client.ID, mgmtd, client.Mount.Path), char)
 }
 
-func printFooter(footerText string, width int, height int) {
-	spaces := func(n int) string {
-		if n < 0 {
-			n = 0
-		}
-		return fmt.Sprintf("%*s", n, "")
-	}
-	// Move the cursor to the bottom of the screen
-	fmt.Printf("\033[%d;1H", height)
-	// Set the background color close to #FAB800.
-	fmt.Print("\033[48;5;220m\033[30m")
-	// Print the footer, padded to the width of the terminal
-	fmt.Printf("%s%s", footerText, spaces(width-len(footerText)))
-	// Reset background color
-	fmt.Print("\033[0m")
-}
-
 // getFilteredClientList() gets the list of local BeeGFS client instances from procfs. It applies
 // the following filters before returning the list:
 //

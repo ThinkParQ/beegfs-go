@@ -1,12 +1,9 @@
 package health
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path"
 	"reflect"
 	"sort"
@@ -22,7 +19,6 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	"go.uber.org/zap"
-	"golang.org/x/term"
 )
 
 type Status int
@@ -101,45 +97,16 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 			if cmd.Flags().Changed(watchFlag) {
 				ticker := time.NewTicker(frontendCfg.watchInterval)
 				for {
-					width, height, err := term.GetSize(int(os.Stdout.Fd()))
-					if err != nil {
-						return fmt.Errorf("error determining terminal size (is stdout a terminal?): %w", err)
-					}
-
-					// This prevents refreshing the output from flickering depending on the time it
-					// takes to make various calls between print statements since they are
-					// unbuffered. Instead of immediately printing to stdout, redirect the output to
-					// a pipe so all output can be collected and printed at once. In the future we
-					// could consider reworking all modes to build/return a string, but this
-					// complicates how the health check modes currently build on each other, calling
-					// different functions to handle different parts of the health check.
-					originalStdout := os.Stdout
-					r, w, err := os.Pipe()
-					if err != nil {
-						return fmt.Errorf("error setting up internal pipe: %w", err)
-					}
-					var buf bytes.Buffer
-					os.Stdout = w
-					flushPipeAndRestoreStdout := func() {
-						w.Close()
-						io.Copy(&buf, r) // Intentionally ignoring errors as this is unlikely to fail.
-						r.Close()
-						os.Stdout = originalStdout
-						fmt.Print("\033[H\033[2J") // Clears the terminal.
-						fmt.Print(buf.String())
+					t := util.TermRefresher{}
+					if err := t.StartRefresh(); err != nil {
+						return err
 					}
 					// Run the health checks:
 					if result := runHealthCheckCmd(cmd.Context(), args, frontendCfg, procfsCfg); result != nil {
-						flushPipeAndRestoreStdout()
+						t.FinishRefresh()
 						return result
 					}
-					footer := fmt.Sprintf("Refreshing every %s until Ctrl+C or a check fails (last refresh: %s).", frontendCfg.watchInterval, time.Now().Format(time.TimeOnly))
-					if frontendCfg.ignoreFailedChecks {
-						footer = fmt.Sprintf("Refreshing every %s until Ctrl+C (last refresh: %s). WARNING: Ignoring failed checks because --%s is set.", frontendCfg.watchInterval, time.Now().Format(time.TimeOnly), ignoreFailedChecksFlag)
-					}
-					printFooter(footer, width, height)
-					// Now restore stdout and clear the terminal before printing:
-					flushPipeAndRestoreStdout()
+					t.FinishRefresh(util.WithTermFooter(fmt.Sprintf("Refreshing every %s until Ctrl+C or a check fails (last refresh: %s).", frontendCfg.watchInterval, time.Now().Format(time.TimeOnly))))
 					select {
 					case <-cmd.Context().Done():
 						return nil
@@ -270,12 +237,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 
 	// The following checks/text should be printed at the bottom. Don't add checks after this point.
 	if failedCheck && !frontendCfg.ignoreFailedChecks {
-		// Trigger a terminal bell notification (\a):
-		fmt.Print("\n\a")
-		// Flash the terminal:
-		fmt.Print("\033[?5h")
-		time.Sleep(100 * time.Millisecond)
-		fmt.Print("\033[?5l")
+		util.FlashTerminal()
 		return util.NewCtlError(fmt.Errorf("one or more checks failed"), 1)
 	}
 	return nil
