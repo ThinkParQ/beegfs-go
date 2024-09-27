@@ -25,7 +25,7 @@ package-all:
 		exit 1; \
 	}
 	@goreleaser --clean --snapshot --skip sign
-	@echo "INFO: OS packages and other artifacts are available under dist/ and can be installed with `dpkg -i <PATH>`"
+	@echo "INFO: OS packages and other artifacts are available under dist/ and can be installed with: dpkg -i <PATH>"
 
 # Generate NOTICE file.
 .PHONY: generate-notices
