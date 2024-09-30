@@ -5,23 +5,23 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w
-      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.Version={{ .Version }}
-      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.BinaryName=beegfs
-      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.Commit={{ .Commit }}
-      - -X github.com/thinkparq/beegfs-go/beegfs-ctl/cmd/beegfs-ctl/cmd.BuildTime={{ .Date }}
+      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.Version={{ .Version }}
+      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.BinaryName=beegfs
+      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.Commit={{ .Commit }}
+      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.BuildTime={{ .Date }}
     binary: beegfs
     goos:
       - linux
     goarch:
       - amd64
       - arm64
-    main: beegfs-ctl/cmd/beegfs-ctl/main.go
+    main: ctl/cmd/beegfs/main.go
     hooks:
       post:
         # Note post hooks run for each binary so we actually generate the script twice and just
         # overwrite it in place. It should always be the same for arm64 and amd64 so this is fine.
         # However when adding future post hooks ensure this is what you want.
-        - sh -c "go run beegfs-ctl/cmd/beegfs-ctl/main.go completion bash > ./dist/beegfs_bashcomp"
+        - sh -c "go run ctl/cmd/beegfs/main.go completion bash > ./dist/beegfs_bashcomp"
 
 nfpms:
   - id: beegfs_tools
@@ -49,7 +49,7 @@ nfpms:
         dst: /usr/sbin/beegfs
         type: "symlink"
       - src: ./dist/beegfs_bashcomp
-        dst: /etc/bash_completion.d/beegfs-ctl
+        dst: /etc/bash_completion.d/beegfs
       - src: NOTICE.md
         dst: /usr/share/doc/beegfs-tools/NOTICE.md
       - src: LICENSE.md
