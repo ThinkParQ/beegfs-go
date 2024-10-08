@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -13,7 +14,8 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
+	"go.uber.org/zap"
 )
 
 // SetEntriesConfig is used to determine how paths are provided to SetEntries() and what
@@ -94,14 +96,21 @@ type SetEntryResult struct {
 
 func SetEntries(ctx context.Context, cfg SetEntriesConfig) (<-chan SetEntryResult, <-chan error, error) {
 
+	logger, _ := config.GetLogger()
+	log := logger.With(zap.String("component", "setEntries"))
+
 	// Validate new configuration once:
 	if err := cfg.NewConfig.Validate(); err != nil {
 		return nil, nil, err
 	}
 
-	err := initMetaBuddyMapper(ctx)
+	mappings, err := util.GetMappings(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without metadata buddy group mappings: %w", err)
+		if !errors.Is(err, util.ErrMappingRSTs) {
+			return nil, nil, fmt.Errorf("unable to proceed without entity mappings: %w", err)
+		}
+		// RSTs are not configured on all BeeGFS instances, silently ignore.
+		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
 	var entriesChan <-chan SetEntryResult
@@ -110,16 +119,16 @@ func SetEntries(ctx context.Context, cfg SetEntriesConfig) (<-chan SetEntryResul
 
 	if cfg.PathsViaChan != nil {
 		// Read paths from the provided channel:
-		entriesChan = setEntries(ctx, cfg.NewConfig, cfg.PathsViaChan, errChan)
+		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, cfg.PathsViaChan, errChan)
 	} else if cfg.PathsViaRecursion != "" {
 		pathsChan, err := walkDir(ctx, cfg.PathsViaRecursion, errChan)
 		if err != nil {
 			return nil, nil, err
 		}
-		entriesChan = setEntries(ctx, cfg.NewConfig, pathsChan, errChan)
+		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, pathsChan, errChan)
 	} else {
 		pathsChan := make(chan string, 1024)
-		entriesChan = setEntries(ctx, cfg.NewConfig, pathsChan, errChan)
+		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, pathsChan, errChan)
 		for _, e := range cfg.PathsViaList {
 			pathsChan <- e
 		}
@@ -137,7 +146,7 @@ func SetEntries(ctx context.Context, cfg SetEntriesConfig) (<-chan SetEntryResul
 //
 // WARNING: This function is meant to be called through SetEntries() and is not safe to call
 // directly as it relies on SetEntries() for config validation to avoid needing to return an error.
-func setEntries(ctx context.Context, newConfig SetEntryConfig, paths <-chan string, errChan chan<- error) <-chan SetEntryResult {
+func setEntries(ctx context.Context, mappings *util.Mappings, newConfig SetEntryConfig, paths <-chan string, errChan chan<- error) <-chan SetEntryResult {
 	entriesChan := make(chan SetEntryResult, 1024)
 	var beegfsClient filesystem.Provider
 	var err error
@@ -180,7 +189,7 @@ func setEntries(ctx context.Context, newConfig SetEntryConfig, paths <-chan stri
 						workerCancel()
 						return
 					}
-					result, err := setEntry(ctx, newConfig, searchPath)
+					result, err := setEntry(ctx, mappings, newConfig, searchPath)
 					if err != nil {
 						errChan <- err
 						workerCancel()
@@ -204,8 +213,8 @@ func setEntries(ctx context.Context, newConfig SetEntryConfig, paths <-chan stri
 // setEntry applies the newCfg to the specified searchPath. WARNING: This function is meant to be
 // called through SetEntries() and is not safe to call directly as it relies on SetEntries() for
 // some config validation to avoid duplicate checking of the newCfg for each entry.
-func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
-	entry, err := GetEntry(ctx, searchPath, false, true)
+func setEntry(ctx context.Context, mappings *util.Mappings, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
+	entry, err := GetEntry(ctx, mappings, searchPath, false, true)
 	if err != nil {
 		return SetEntryResult{}, err
 	}
@@ -219,9 +228,9 @@ func setEntry(ctx context.Context, newCfg SetEntryConfig, searchPath string) (Se
 		return handleRegularFile(ctx, store, entry, newCfg, searchPath)
 	}
 
-	return handleDirectory(ctx, store, entry, newCfg, searchPath)
+	return handleDirectory(ctx, mappings, store, entry, newCfg, searchPath)
 }
-func handleDirectory(ctx context.Context, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
+func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
 	// Start with the current settings for this entry:
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
@@ -238,12 +247,7 @@ func handleDirectory(ctx context.Context, store *beemsg.NodeStore, entry GetEntr
 		request.Pattern.DefaultNumTargets = *newCfg.DefaultNumTargets
 	}
 	if newCfg.Pool != nil {
-		pool := pool.GetStoragePools_Result{}
-		err := initStoragePoolMapper(ctx)
-		if err != nil {
-			return SetEntryResult{}, err
-		}
-		pool, err = storagePoolMapper.Get(*newCfg.Pool)
+		pool, err := mappings.StoragePoolToConfig.Get(*newCfg.Pool)
 		if err != nil {
 			return SetEntryResult{}, fmt.Errorf("unable to retrieve the specified storage pool %v: %w", *newCfg.Pool, err)
 		}
@@ -254,11 +258,7 @@ func handleDirectory(ctx context.Context, store *beemsg.NodeStore, entry GetEntr
 	}
 	if newCfg.StripePattern != nil {
 		if *newCfg.StripePattern == beegfs.StripePatternBuddyMirror {
-			err := initMetaBuddyMapper(ctx)
-			if err != nil {
-				return SetEntryResult{}, err
-			}
-			if !newCfg.Force && len(metaBuddyMapper.mappingByUID) == 0 {
+			if !newCfg.Force && mappings.MetaBuddyGroupToPrimaryNode.Len() == 0 {
 				return SetEntryResult{}, fmt.Errorf("no buddy groups have been defined to use for stripe pattern %s (use force to override)", strings.ToLower(beegfs.StripePatternBuddyMirror.String()))
 			}
 		}

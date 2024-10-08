@@ -1,0 +1,76 @@
+package util
+
+import (
+	"fmt"
+	"math"
+
+	"github.com/spf13/pflag"
+)
+
+// I64BytesVar defines an `int64` flag that accepts input as human-readable sizes (e.g., "1GiB",
+// "128KB") and converts them into bytes. The flag is associated with a `*int64` variable, which is
+// set to the converted byte value.
+//
+// Parameters:
+//   - flags: A `pflag.FlagSet` where the flag will be registered.
+//   - p: A pointer to an `int64` variable that will hold the flag's value after parsing.
+//   - name: The name of the flag.
+//   - shorthand: A shorthand letter that can be used after a single dash.
+//   - defaultValue: The default value of the flag, provided as a string (e.g., "1GiB").
+//   - usage: A string representing the usage/help text for the flag.
+//
+// Panics:
+//   - This function panics if the default value cannot be parsed into an `int64` byte size.
+//
+// Example usage:
+//
+//	I64BytesVar(cmd.Flags(), &backendCfg.FileSize, "file-size", "s", "1GiB", "Set file size in human-readable format")
+func I64BytesVar(flags *pflag.FlagSet, p *int64, name string, shorthand string, defaultValue string, usage string) {
+	bf := newI64BytesFlag(p, defaultValue)
+	flags.VarP(bf, name, shorthand, usage)
+}
+
+// i64BytesFlag implements the `pflag.Value` interface for flags that accept human-readable byte
+// sizes and converts them to bytes (as `int64` values). It is used to define a custom flag that
+// interprets values like "1GiB", "128MB", and converts them into an appropriate number of bytes.
+// Intended to be used with I64BytesVar.
+type i64BytesFlag struct {
+	p            *int64
+	defaultValue string
+}
+
+// newI64BytesFlag creates a new instance of `i64BytesFlag`, which stores an `int64` byte value
+// converted from the provided human-readable `defaultValue` string (e.g., "1GiB"). Intended to be
+// used with I64BytesVar.
+func newI64BytesFlag(p *int64, defaultValue string) *i64BytesFlag {
+	bf := &i64BytesFlag{p: p}
+	err := bf.Set(defaultValue)
+	if err != nil {
+		panic(fmt.Sprintf("error setting default value (this is a bug): %s", err.Error()))
+	}
+	bf.defaultValue = defaultValue
+	return bf
+}
+
+func (f *i64BytesFlag) String() string {
+	return f.defaultValue
+}
+
+func (f *i64BytesFlag) Type() string {
+	return "<size><unit>"
+}
+
+func (f *i64BytesFlag) Set(value string) error {
+	sizeInBytes, err := ParseIntFromStr(value)
+	if err != nil {
+		return err
+	}
+
+	if sizeInBytes > math.MaxInt64 {
+		return fmt.Errorf("parsed size (%d bytes) is out of bounds (must be between %d bytes and %d bytes)", sizeInBytes, 0, math.MaxInt64)
+	}
+
+	finalSize := int64(sizeInBytes)
+	*f.p = finalSize
+	return nil
+}

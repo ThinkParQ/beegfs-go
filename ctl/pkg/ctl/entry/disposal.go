@@ -8,6 +8,8 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -56,9 +58,13 @@ func CleanupDisposals(ctx context.Context, cfg DisposalCfg) (<-chan DisposalResu
 		return nil, nil, fmt.Errorf("error initializing node store: %w", err)
 	}
 
-	err = initMetaBuddyMapper(ctx)
+	buddyMirrors, err := buddygroup.GetBuddyGroups(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error initializing buddy mapper: %w", err)
+		return nil, nil, fmt.Errorf("unable to get buddy groups from management: %w", err)
+	}
+	metaBGToPrimaryNode, err := util.MapMetaBuddyGroupToPrimaryNode(buddyMirrors, store)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	resultsChan := make(chan DisposalResult, 1)
@@ -72,17 +78,17 @@ func CleanupDisposals(ctx context.Context, cfg DisposalCfg) (<-chan DisposalResu
 		log:         log,
 	}
 
-	go disposalCleaner.run()
+	go disposalCleaner.run(metaBGToPrimaryNode)
 	return resultsChan, errChan, nil
 }
 
-func (d *disposalCleaner) run() {
+func (d *disposalCleaner) run(metaBGToPrimaryNode util.Mapper[beegfs.EntityIdSet]) {
 	defer close(d.resultsChan)
 	defer close(d.errChan)
 
 	nodes := d.store.GetNodes()
 	primaryMetaMirrorNodes := make(map[beegfs.NumId]beegfs.LegacyId)
-	for buddyGroup, primaryNode := range metaBuddyMapper.mappingByLegacyID {
+	for buddyGroup, primaryNode := range metaBGToPrimaryNode.LegacyIDs() {
 		primaryMetaMirrorNodes[primaryNode.LegacyId.NumId] = buddyGroup
 	}
 
