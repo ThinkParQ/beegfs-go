@@ -1,31 +1,48 @@
 package index
 
 import (
+	"fmt"
+	"os/exec"
+
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 )
 
+type createIndex_Config struct {
+	maxMemory  string
+	fsPath     string
+	indexPath  string
+	numThreads uint
+	summary    bool
+	xattrs     bool
+	maxLevel   uint
+	scanDirs   bool
+	port       uint
+	debug      bool
+	mntPath    string
+	runUpdate  bool
+}
+
 func newGenericCreateCmd() *cobra.Command {
-	cfg := index.CreateIndex_Config{}
+	cfg := createIndex_Config{}
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return index.RunPythonCreateIndex(&cfg)
+			return runPythonCreateIndex(&cfg)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.FsPath, "fs-path", "", "File system path for which index will be created (required)")
-	cmd.Flags().StringVar(&cfg.IndexPath, "index-path", "", "Index directory path (required)")
-	cmd.Flags().StringVar(&cfg.MaxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
-	cmd.Flags().UintVar(&cfg.NumThreads, "num-threads", 0, "Number of threads to create index")
-	cmd.Flags().BoolVar(&cfg.Summary, "summary", false, "Create tree summary table along with other tables")
-	cmd.Flags().BoolVar(&cfg.Xattrs, "xattrs", false, "Pull xattrs from source")
-	cmd.Flags().UintVar(&cfg.MaxLevel, "max-level", 0, "Max level to go down")
-	cmd.Flags().BoolVar(&cfg.ScanDirs, "scan-dirs", false, "Print the number of scanned directories")
-	cmd.Flags().UintVar(&cfg.Port, "port", 0, "Port number to connect with client")
-	cmd.Flags().StringVar(&cfg.MntPath, "mnt-path", "", "File system mount point path")
-	cmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Enable debugging mode")
-	cmd.Flags().BoolVar(&cfg.RunUpdate, "update", false, "Run the update index")
+	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be created")
+	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path")
+	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
+	cmd.Flags().UintVar(&cfg.numThreads, "num-threads", 0, "Number of threads to create index")
+	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Create tree summary table along with other tables")
+	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
+	cmd.Flags().UintVar(&cfg.maxLevel, "max-level", 0, "Max level to go down")
+	cmd.Flags().BoolVar(&cfg.scanDirs, "scan-dirs", false, "Print the number of scanned directories")
+	cmd.Flags().UintVar(&cfg.port, "port", 0, "Port number to connect with client")
+	cmd.Flags().StringVar(&cfg.mntPath, "mnt-path", "", "Specify the mount point of the source directory.")
+	cmd.Flags().BoolVar(&cfg.debug, "debug", false, "Enable debugging mode")
+	cmd.Flags().BoolVar(&cfg.runUpdate, "update", false, "Run the update index")
 
 	return cmd
 }
@@ -49,4 +66,57 @@ func newCreateCmd() *cobra.Command {
 `
 	return s
 
+}
+
+func runPythonCreateIndex(cfg *createIndex_Config) error {
+	args := []string{
+		"/usr/bin/bee", "index",
+	}
+
+	// Append optional arguments based on user input
+	if cfg.fsPath != "" {
+		args = append(args, "-F", cfg.fsPath)
+	}
+	if cfg.indexPath != "" {
+		args = append(args, "-I", cfg.indexPath)
+	}
+	if cfg.maxMemory != "" {
+		args = append(args, "-X", cfg.maxMemory)
+	}
+	if cfg.numThreads > 0 {
+		args = append(args, "-n", fmt.Sprint(cfg.numThreads))
+	}
+	if cfg.summary {
+		args = append(args, "-S")
+	}
+	if cfg.xattrs {
+		args = append(args, "-x")
+	}
+	if cfg.maxLevel > 0 {
+		args = append(args, "-z", fmt.Sprint(cfg.maxLevel))
+	}
+	if cfg.scanDirs {
+		args = append(args, "-C")
+	}
+	if cfg.port > 0 {
+		args = append(args, "-p", fmt.Sprint(cfg.port))
+	}
+	if cfg.mntPath != "" {
+		args = append(args, "-M", cfg.mntPath)
+	}
+	if cfg.debug {
+		args = append(args, "-V", "1")
+	}
+	if cfg.runUpdate {
+		args = append(args, "-U")
+	}
+	args = append(args, "-k")
+
+	// Execute the Python command
+	cmd := exec.Command("python3", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("error executing command: %v\nOutput: %s", err, string(output))
+	}
+	return nil
 }
