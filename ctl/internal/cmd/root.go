@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/entry"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/health"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/index"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/license"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/node"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/pool"
@@ -80,6 +81,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(quota.NewCmd())
 	cmd.AddCommand(health.NewHealthCmd())
 	cmd.AddCommand(benchmark.NewBenchmarkCmd())
+	cmd.AddCommand(index.NewCmd())
 
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
