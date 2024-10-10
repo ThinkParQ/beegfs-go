@@ -75,15 +75,15 @@ func newCreateCmd() *cobra.Command {
 // It ensures the necessary Beegfs configurations and binaries are present before attempting to create an index, preventing runtime errors.
 func checkBeegfsConfig() error {
 	if _, err := os.Stat("/usr/bin/bee"); os.IsNotExist(err) {
-		return fmt.Errorf("BeeGFS Hive binary not found at /usr/bin/bee.")
+		return fmt.Errorf("beeGFS Hive binary not found at /usr/bin/bee")
 	}
 
 	if _, err := os.Stat("/etc/beegfs/index/config"); os.IsNotExist(err) {
-		return fmt.Errorf("Beegfs Hive is not configured: /etc/beegfs/index/config not found")
+		return fmt.Errorf("beegfs Hive is not configured: /etc/beegfs/index/config not found")
 	}
 
 	if _, err := os.Stat("/etc/beegfs/index/indexEnv.conf"); os.IsNotExist(err) {
-		return fmt.Errorf("Beegfs Hive is not configured: /etc/beegfs/index/indexEnv.conf not found")
+		return fmt.Errorf("beegfs Hive is not configured: /etc/beegfs/index/indexEnv.conf not found")
 	}
 
 	return nil
