@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,9 @@ func newGenericCreateCmd() *cobra.Command {
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkBeegfsConfig(); err != nil {
+				return err
+			}
 			return runPythonCreateIndex(&cfg)
 		},
 	}
@@ -68,12 +72,28 @@ func newCreateCmd() *cobra.Command {
 
 }
 
+// It ensures the necessary Beegfs configurations and binaries are present before attempting to create an index, preventing runtime errors.
+func checkBeegfsConfig() error {
+	if _, err := os.Stat("/usr/bin/bee"); os.IsNotExist(err) {
+		return fmt.Errorf("BeeGFS Hive binary not found at /usr/bin/bee.")
+	}
+
+	if _, err := os.Stat("/etc/beegfs/index/config"); os.IsNotExist(err) {
+		return fmt.Errorf("Beegfs Hive is not configured: /etc/beegfs/index/config not found")
+	}
+
+	if _, err := os.Stat("/etc/beegfs/index/indexEnv.conf"); os.IsNotExist(err) {
+		return fmt.Errorf("Beegfs Hive is not configured: /etc/beegfs/index/indexEnv.conf not found")
+	}
+
+	return nil
+}
+
 func runPythonCreateIndex(cfg *createIndex_Config) error {
 	args := []string{
 		"/usr/bin/bee", "index",
 	}
 
-	// Append optional arguments based on user input
 	if cfg.fsPath != "" {
 		args = append(args, "-F", cfg.fsPath)
 	}
@@ -112,7 +132,6 @@ func runPythonCreateIndex(cfg *createIndex_Config) error {
 	}
 	args = append(args, "-k")
 
-	// Execute the Python command
 	cmd := exec.Command("python3", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
