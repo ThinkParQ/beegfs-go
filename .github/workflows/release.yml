@@ -35,6 +35,11 @@ jobs:
         with:
           gpg_private_key: ${{ secrets.PUBLICREPO_GPGPACKAGEKEY }}
           passphrase: ${{ secrets.PUBLICREPO_GPGPACKAGEPASSPHRASE }}
+      - name: Write private key to a file for package signing with GoReleaser
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.PUBLICREPO_GPGPACKAGEKEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" > /tmp/private-key.asc
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -54,6 +59,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+          GPG_KEY_PATH: /tmp/private-key.asc
+          NFPM_PASSPHRASE: ${{ secrets.PUBLICREPO_GPGPACKAGEPASSPHRASE }}
           GOPRIVATE: github.com/thinkparq/*
           # Your GoReleaser Pro key, if you are using the 'goreleaser-pro' distribution
           # GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}

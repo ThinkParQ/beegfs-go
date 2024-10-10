@@ -54,6 +54,9 @@ nfpms:
         dst: /usr/share/doc/beegfs-tools/NOTICE.md
       - src: LICENSE.md
         dst: /usr/share/doc/beegfs-tools/LICENSE.md
+    rpm:
+      signature:
+        key_file: "{{ .Env.GPG_KEY_PATH }}"
 
 changelog:
   sort: asc

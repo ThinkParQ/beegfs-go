@@ -16,15 +16,17 @@ uninstall:
 	rm -f $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Uninstallation complete!"
 
-# Trigger a "local-only" release using goreleaser to generate OS packages that can be used locally
-# (Ref: https://goreleaser.com/quick-start/ and https://goreleaser.com/customization/snapshots/):
+# Trigger a "local-only" release using GoReleaser to generate OS packages that can be used locally
+# (Ref: https://goreleaser.com/quick-start/ and https://goreleaser.com/customization/snapshots/).
+# Note signing is skipped for building local packages, but GPG_KEY_PATH must still be set or
+# GoReleaser will complain about the missing environment variable.
 .PHONY: package-all
 package-all:
 	@command -v goreleaser >/dev/null 2>&1 || { \
 		echo >&2 "ERROR: goreleaser is not installed, it can be installed with 'go install github.com/goreleaser/goreleaser/v2@latest' (see https://goreleaser.com/install/#install for additional options)."; \
 		exit 1; \
 	}
-	@goreleaser --clean --snapshot --skip sign
+	@GPG_KEY_PATH="" goreleaser --clean --snapshot --skip sign
 	@echo "INFO: OS packages and other artifacts are available under dist/ and can be installed with: dpkg -i <PATH>"
 
 # Generate NOTICE file.
