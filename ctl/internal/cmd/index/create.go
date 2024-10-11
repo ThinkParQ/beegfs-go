@@ -23,6 +23,12 @@ type createIndex_Config struct {
 	runUpdate  bool
 }
 
+const (
+	beeBinary   = "/usr/bin/bee"
+	indexConfig = "/etc/beegfs/index/config"
+	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
+)
+
 func newGenericCreateCmd() *cobra.Command {
 	cfg := createIndex_Config{}
 
@@ -74,16 +80,16 @@ func newCreateCmd() *cobra.Command {
 
 // It ensures the necessary Beegfs configurations and binaries are present before attempting to create an index, preventing runtime errors.
 func checkBeegfsConfig() error {
-	if _, err := os.Stat("/usr/bin/bee"); os.IsNotExist(err) {
-		return fmt.Errorf("beeGFS Hive binary not found at /usr/bin/bee")
+	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
+		return fmt.Errorf("beeGFS Hive binary not found at %s", beeBinary)
 	}
 
-	if _, err := os.Stat("/etc/beegfs/index/config"); os.IsNotExist(err) {
-		return fmt.Errorf("beegfs Hive is not configured: /etc/beegfs/index/config not found")
+	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
+		return fmt.Errorf("beegfs Hive is not configured: %s not found", indexConfig)
 	}
 
-	if _, err := os.Stat("/etc/beegfs/index/indexEnv.conf"); os.IsNotExist(err) {
-		return fmt.Errorf("beegfs Hive is not configured: /etc/beegfs/index/indexEnv.conf not found")
+	if _, err := os.Stat(indexEnv); os.IsNotExist(err) {
+		return fmt.Errorf("beegfs Hive is not configured: %s not found", indexEnv)
 	}
 
 	return nil
@@ -91,7 +97,7 @@ func checkBeegfsConfig() error {
 
 func runPythonCreateIndex(cfg *createIndex_Config) error {
 	args := []string{
-		"/usr/bin/bee", "index",
+		beeBinary, "index",
 	}
 
 	if cfg.fsPath != "" {
@@ -137,5 +143,6 @@ func runPythonCreateIndex(cfg *createIndex_Config) error {
 	if err != nil {
 		return fmt.Errorf("error executing command: %v\nOutput: %s", err, string(output))
 	}
+	fmt.Println(string(output))
 	return nil
 }
