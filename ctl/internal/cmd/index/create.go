@@ -1,14 +1,17 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 
 	"github.com/spf13/cobra"
 )
 
-type createIndex_Config struct {
+type createIndexConfig struct {
 	maxMemory  string
 	fsPath     string
 	indexPath  string
@@ -29,12 +32,18 @@ const (
 	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
 )
 
+var (
+	validPath   = regexp.MustCompile(`^/[\w/.-]+$`)
+	validMemory = regexp.MustCompile(`^\d+(MB|GB|TB|G|M|T)$`)
+	validPort   = regexp.MustCompile(`^\d{1,5}$`)
+)
+
 func newGenericCreateCmd() *cobra.Command {
-	cfg := createIndex_Config{}
+	cfg := createIndexConfig{}
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeegfsConfig(); err != nil {
+			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
 			return runPythonCreateIndex(&cfg)
@@ -60,44 +69,67 @@ func newGenericCreateCmd() *cobra.Command {
 func newCreateCmd() *cobra.Command {
 	s := newGenericCreateCmd()
 	s.Use = "create"
-	s.Short = "Generates a BeeGFS Hive index"
-	s.Long = `Generate  a  Hive-index by walking the source directory.
-	The index can be created inside the source directory or separate index directory.
-	Breadth first readdirplus walk of input tree to list the tree, or create an output
-	db and/or output files of encountered directories and or files. This program has
-	two primary uses: to find suspect directories that have changed in some way that
-	need to be used to incrementally  update a Hive index from source file system changes
-	and to create a full dump of all directories and or files/links either in walk order
-	(directory then all files in that dir, etc.) or striding inodes into multiple files
-	to merge against attribute list files that are also inode strided.
+	s.Short = "Generates the index"
+	s.Long = `Generate the index by walking the source directory.
 
-	Example: Create an index for the file system located at /mnt/fs, limiting memory usage to 8GB.
-  	$ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
+The index can be created inside the source directory or separate index directory.
+Breadth first readdirplus walk of input tree to list the tree, or create an output
+db and/or output files of encountered directories and or files. This program has
+two primary uses: to find suspect directories that have changed in some way that
+need to be used to incrementally  update a Hive index from source file system changes
+and to create a full dump of all directories and or files/links either in walk order
+(directory then all files in that dir, etc.) or striding inodes into multiple files
+to merge against attribute list files that are also inode strided.
+
+Example: Create an index for the file system located at /mnt/fs, limiting memory usage to 8GB.
+$ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 `
 	return s
 
 }
 
-// It ensures the necessary Beegfs configurations and binaries are present before attempting to create an index, preventing runtime errors.
-func checkBeegfsConfig() error {
+func checkBeeGFSConfig() error {
 	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		return fmt.Errorf("beeGFS Hive binary not found at %s", beeBinary)
+		return fmt.Errorf("hive binary not found at %s", beeBinary)
 	}
 
 	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
-		return fmt.Errorf("beegfs Hive is not configured: %s not found", indexConfig)
+		return fmt.Errorf("hive is not configured: %s not found", indexConfig)
 	}
 
 	if _, err := os.Stat(indexEnv); os.IsNotExist(err) {
-		return fmt.Errorf("beegfs Hive is not configured: %s not found", indexEnv)
+		return fmt.Errorf("hive is not configured: %s not found", indexEnv)
 	}
 
 	return nil
 }
 
-func runPythonCreateIndex(cfg *createIndex_Config) error {
+func validateInputs(cfg *createIndexConfig) error {
+	if cfg.fsPath != "" && !validPath.MatchString(cfg.fsPath) {
+		return errors.New("invalid file system path")
+	}
+	if cfg.indexPath != "" && !validPath.MatchString(cfg.indexPath) {
+		return errors.New("invalid index path")
+	}
+	if cfg.mntPath != "" && !validPath.MatchString(cfg.mntPath) {
+		return errors.New("invalid mount path")
+	}
+	if cfg.maxMemory != "" && !validMemory.MatchString(cfg.maxMemory) {
+		return errors.New("invalid max memory format")
+	}
+	if cfg.port > 0 && !validPort.MatchString(strconv.Itoa(int(cfg.port))) {
+		return errors.New("invalid port number")
+	}
+	return nil
+}
+
+func runPythonCreateIndex(cfg *createIndexConfig) error {
+	if err := validateInputs(cfg); err != nil {
+		return err
+	}
+
 	args := []string{
-		beeBinary, "index",
+		"index",
 	}
 
 	if cfg.fsPath != "" {
@@ -138,11 +170,16 @@ func runPythonCreateIndex(cfg *createIndex_Config) error {
 	}
 	args = append(args, "-k")
 
-	cmd := exec.Command("python3", args...)
-	output, err := cmd.CombinedOutput()
+	cmd := exec.Command(beeBinary, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error executing command: %v\nOutput: %s", err, string(output))
+		return fmt.Errorf("error starting command: %v", err)
 	}
-	fmt.Println(string(output))
+	err = cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("error executing beeBinary: %v", err)
+	}
 	return nil
 }
