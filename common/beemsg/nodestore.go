@@ -29,7 +29,7 @@ type NodeStore struct {
 
 	// Settings
 	connTimeout time.Duration
-	authSecret  int64
+	authSecret  uint64
 
 	// Locks the store. Must be taken before accessing any of the maps.
 	mutex sync.RWMutex
@@ -40,7 +40,7 @@ type NodeStore struct {
 // The user should call `Cleanup()` to free allocated resources (e.g. TCP sockets) when the store is
 // no longer required.
 // Setting authSecret to 0 disables BeeMsg authentication.
-func NewNodeStore(connTimeout time.Duration, authSecret int64) *NodeStore {
+func NewNodeStore(connTimeout time.Duration, authSecret uint64) *NodeStore {
 	return &NodeStore{
 		nodesByUid:  make(map[beegfs.Uid]*beegfs.Node),
 		uidByAlias:  make(map[beegfs.Alias]beegfs.Uid),

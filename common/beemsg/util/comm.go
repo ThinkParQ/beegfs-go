@@ -104,7 +104,7 @@ type connResult struct {
 // Setting authSecret to 0 disables authentication.
 // Note that timeout controls the timeout per connection attempt while the context controls the
 // global timeout. Thus, timeout should be significantly shorter than the global timeout.
-func ConnectTCP(ctx context.Context, addrs []string, authSecret int64, timeout time.Duration) (net.Conn, error) {
+func ConnectTCP(ctx context.Context, addrs []string, authSecret uint64, timeout time.Duration) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
 	}

@@ -1,12 +1,17 @@
 package util
 
-func GenerateAuthSecret(input []byte) int64 {
-	length := len(input)
+import (
+	"crypto/sha256"
+	"encoding/binary"
+)
 
-	high := int64(HsiehHash(input[0 : length/2]))
-	low := int64(HsiehHash(input[length/2 : length]))
+// Generates sha256 hash from the input byte slice and returns the 64 bit auth secret containing
+// the 8 most significant bytes of the hash in little endian order. Matches the behavior of other
+// implementations.
+func GenerateAuthSecret(input []byte) uint64 {
+	h := sha256.New()
+	h.Write(input)
+	secret := binary.LittleEndian.Uint64(h.Sum(nil)[0:8])
 
-	hash := (high << 32) | low
-
-	return hash
+	return secret
 }

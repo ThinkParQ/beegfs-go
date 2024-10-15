@@ -191,7 +191,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	nodeStoreMu.Lock()
 	defer nodeStoreMu.Unlock()
 
-	authSecret := int64(0)
+	authSecret := uint64(0)
 	// Setup BeeMsg authentication from the given file
 	if !viper.GetBool(AuthDisableKey) {
 		key, err := os.ReadFile(viper.GetString(AuthFileKey))
