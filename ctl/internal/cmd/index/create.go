@@ -1,7 +1,6 @@
 package index
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +8,8 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
 type createIndexConfig struct {
@@ -53,14 +54,11 @@ func newGenericCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be created")
 	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path")
 	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
-	cmd.Flags().UintVar(&cfg.numThreads, "num-threads", 0, "Number of threads to create index")
 	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Create tree summary table along with other tables")
 	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
 	cmd.Flags().UintVar(&cfg.maxLevel, "max-level", 0, "Max level to go down")
 	cmd.Flags().BoolVar(&cfg.scanDirs, "scan-dirs", false, "Print the number of scanned directories")
 	cmd.Flags().UintVar(&cfg.port, "port", 0, "Port number to connect with client")
-	cmd.Flags().StringVar(&cfg.mntPath, "mnt-path", "", "Specify the mount point of the source directory.")
-	cmd.Flags().BoolVar(&cfg.debug, "debug", false, "Enable debugging mode")
 	cmd.Flags().BoolVar(&cfg.runUpdate, "update", false, "Run the update index")
 
 	return cmd
@@ -106,19 +104,19 @@ func checkBeeGFSConfig() error {
 
 func validateInputs(cfg *createIndexConfig) error {
 	if cfg.fsPath != "" && !validPath.MatchString(cfg.fsPath) {
-		return errors.New("invalid file system path")
+		return fmt.Errorf("invalid file system path")
 	}
 	if cfg.indexPath != "" && !validPath.MatchString(cfg.indexPath) {
-		return errors.New("invalid index path")
+		return fmt.Errorf("invalid index path")
 	}
 	if cfg.mntPath != "" && !validPath.MatchString(cfg.mntPath) {
-		return errors.New("invalid mount path")
+		return fmt.Errorf("invalid mount path")
 	}
 	if cfg.maxMemory != "" && !validMemory.MatchString(cfg.maxMemory) {
-		return errors.New("invalid max memory format")
+		return fmt.Errorf("invalid max memory format")
 	}
 	if cfg.port > 0 && !validPort.MatchString(strconv.Itoa(int(cfg.port))) {
-		return errors.New("invalid port number")
+		return fmt.Errorf("invalid port number")
 	}
 	return nil
 }
@@ -141,9 +139,7 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	if cfg.maxMemory != "" {
 		args = append(args, "-X", cfg.maxMemory)
 	}
-	if cfg.numThreads > 0 {
-		args = append(args, "-n", fmt.Sprint(cfg.numThreads))
-	}
+	args = append(args, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
 	if cfg.summary {
 		args = append(args, "-S")
 	}
@@ -159,10 +155,18 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	if cfg.port > 0 {
 		args = append(args, "-p", fmt.Sprint(cfg.port))
 	}
-	if cfg.mntPath != "" {
-		args = append(args, "-M", cfg.mntPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
 	}
-	if cfg.debug {
+	beegfsClient, err := config.BeeGFSClient(cwd)
+	if err != nil {
+		return err
+	}
+	if cfg.mntPath != "" {
+		args = append(args, "-M", beegfsClient.GetMountPath())
+	}
+	if viper.GetBool(config.DebugKey) {
 		args = append(args, "-V", "1")
 	}
 	if cfg.runUpdate {
@@ -173,7 +177,7 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	cmd := exec.Command(beeBinary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return fmt.Errorf("error starting command: %v", err)
 	}
