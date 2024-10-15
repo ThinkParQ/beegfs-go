@@ -13,18 +13,16 @@ import (
 )
 
 type createIndexConfig struct {
-	maxMemory  string
-	fsPath     string
-	indexPath  string
-	numThreads uint
-	summary    bool
-	xattrs     bool
-	maxLevel   uint
-	scanDirs   bool
-	port       uint
-	debug      bool
-	mntPath    string
-	runUpdate  bool
+	maxMemory string
+	fsPath    string
+	indexPath string
+	summary   bool
+	xattrs    bool
+	maxLevel  uint
+	scanDirs  bool
+	port      uint
+	mntPath   string
+	runUpdate bool
 }
 
 const (
@@ -109,6 +107,15 @@ func validateInputs(cfg *createIndexConfig) error {
 	if cfg.indexPath != "" && !validPath.MatchString(cfg.indexPath) {
 		return fmt.Errorf("invalid index path")
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	beegfsClient, err := config.BeeGFSClient(cwd)
+	if err != nil {
+		return err
+	}
+	cfg.mntPath = beegfsClient.GetMountPath()
 	if cfg.mntPath != "" && !validPath.MatchString(cfg.mntPath) {
 		return fmt.Errorf("invalid mount path")
 	}
@@ -155,16 +162,8 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	if cfg.port > 0 {
 		args = append(args, "-p", fmt.Sprint(cfg.port))
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	beegfsClient, err := config.BeeGFSClient(cwd)
-	if err != nil {
-		return err
-	}
 	if cfg.mntPath != "" {
-		args = append(args, "-M", beegfsClient.GetMountPath())
+		args = append(args, "-M", cfg.mntPath)
 	}
 	if viper.GetBool(config.DebugKey) {
 		args = append(args, "-V", "1")
@@ -177,7 +176,7 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	cmd := exec.Command(beeBinary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	err = cmd.Start()
+	err := cmd.Start()
 	if err != nil {
 		return fmt.Errorf("error starting command: %v", err)
 	}
