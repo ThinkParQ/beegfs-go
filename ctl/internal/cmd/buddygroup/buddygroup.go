@@ -2,6 +2,7 @@ package buddygroup
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/buddygroup/resync"
 )
 
 func NewCmd() *cobra.Command {
@@ -16,6 +17,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newSetAliasCmd())
 	cmd.AddCommand(newDeleteBuddyGroupCmd())
 	cmd.AddCommand(newMirrorRootInodeCmd())
+	cmd.AddCommand(resync.NewResyncCmd())
 
 	return cmd
 }
