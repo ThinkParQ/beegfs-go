@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -24,18 +23,6 @@ type createIndexConfig struct {
 	mntPath   string
 	runUpdate bool
 }
-
-const (
-	beeBinary   = "/usr/bin/bee"
-	indexConfig = "/etc/beegfs/index/config"
-	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
-)
-
-var (
-	validPath   = regexp.MustCompile(`^/[\w/.-]+$`)
-	validMemory = regexp.MustCompile(`^\d+(MB|GB|TB|G|M|T)$`)
-	validPort   = regexp.MustCompile(`^\d{1,5}$`)
-)
 
 func newGenericCreateCmd() *cobra.Command {
 	cfg := createIndexConfig{}
@@ -84,23 +71,7 @@ $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 
 }
 
-func checkBeeGFSConfig() error {
-	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		return fmt.Errorf("hive binary not found at %s", beeBinary)
-	}
-
-	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
-		return fmt.Errorf("hive is not configured: %s not found", indexConfig)
-	}
-
-	if _, err := os.Stat(indexEnv); os.IsNotExist(err) {
-		return fmt.Errorf("hive is not configured: %s not found", indexEnv)
-	}
-
-	return nil
-}
-
-func validateInputs(cfg *createIndexConfig) error {
+func validateCreateInputs(cfg *createIndexConfig) error {
 	if cfg.fsPath != "" && !validPath.MatchString(cfg.fsPath) {
 		return fmt.Errorf("invalid file system path")
 	}
@@ -129,7 +100,7 @@ func validateInputs(cfg *createIndexConfig) error {
 }
 
 func runPythonCreateIndex(cfg *createIndexConfig) error {
-	if err := validateInputs(cfg); err != nil {
+	if err := validateCreateInputs(cfg); err != nil {
 		return err
 	}
 
