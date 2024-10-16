@@ -89,16 +89,13 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 				features = append(features, fmt.Sprintf("  - %s", f))
 			}
 		}
-		var tpe string
 		var color string
 		switch license.Data.Type {
 		case pl.CertType_CERT_TYPE_CUSTOMER:
-			tpe = "SP"
 			if license.Result == pl.VerifyResult_VERIFY_VALID {
 				color = "\033[32m" // Green if license is valid and custmer license
 			}
 		case pl.CertType_CERT_TYPE_TEMPORARY:
-			tpe = "TMP"
 			if license.Result == pl.VerifyResult_VERIFY_VALID {
 				color = "\033[33m" // Yellow if license is valid and temporary license
 			}
@@ -106,7 +103,7 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		if license.Result == pl.VerifyResult_VERIFY_INVALID {
 			color = "\033[31m" // Red if license is invalid
 		}
-		header := fmt.Sprintf("BeeGFS Customer License Certificate %s-%04d", tpe, license.Data.Serial)
+		header := fmt.Sprintf("BeeGFS Customer License Certificate %s", license.Data.CommonName)
 		// All BeeGFS license certificates are valid from 00:00 UTC-14 until 23:59 UTC+12, so we
 		// adjust for that in the output
 		validFrom := license.Data.ValidFrom.AsTime().Add(14 * time.Hour)
