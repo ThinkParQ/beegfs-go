@@ -13,5 +13,7 @@ func NewCmd() *cobra.Command {
 
 	cmd.AddCommand(newCreateCmd())
 
+	cmd.AddCommand(newLsCmd())
+
 	return cmd
 }
