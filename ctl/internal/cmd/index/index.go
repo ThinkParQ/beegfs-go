@@ -13,6 +13,7 @@ func NewCmd() *cobra.Command {
 
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newFindCmd())
+	cmd.AddCommand(newLsCmd())
 	cmd.AddCommand(newStatCmd())
 	cmd.AddCommand(newStatsCmd())
 	cmd.AddCommand(newQueryCmd())
