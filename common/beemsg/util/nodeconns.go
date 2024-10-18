@@ -56,7 +56,7 @@ func (nc *NodeConns) CleanUp() {
 // Setting authSecret to 0 disables BeeMsg authentication.
 // Note that timeout controls the timeout per connection attempt while the context controls the
 // global timeout. Thus, timeout should be significantly shorter than the global timeout.
-func (conns *NodeConns) RequestTCP(ctx context.Context, addrs []string, authSecret int64,
+func (conns *NodeConns) RequestTCP(ctx context.Context, addrs []string, authSecret uint64,
 	timeout time.Duration, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 
 	// Loop through established connections in the connection queue until one works

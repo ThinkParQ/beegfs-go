@@ -5,7 +5,7 @@ import "github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 // Authenticates a TCP connection. Must be sent before sending any other messages. beemsg.NodeStore
 // handles this automatically, no extra action needed.
 type AuthenticateChannel struct {
-	AuthSecret int64
+	AuthSecret uint64
 }
 
 func (m *AuthenticateChannel) MsgId() uint16 {
