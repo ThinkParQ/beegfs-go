@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -36,8 +35,8 @@ func newGenericCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be created")
-	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path")
+	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be created [default: IndexEnv.conf]")
+	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path [default: IndexEnv.conf]")
 	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
 	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Create tree summary table along with other tables")
 	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
@@ -72,12 +71,6 @@ $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 }
 
 func validateCreateInputs(cfg *createIndexConfig) error {
-	if cfg.fsPath != "" && !validPath.MatchString(cfg.fsPath) {
-		return fmt.Errorf("invalid file system path")
-	}
-	if cfg.indexPath != "" && !validPath.MatchString(cfg.indexPath) {
-		return fmt.Errorf("invalid index path")
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -87,15 +80,7 @@ func validateCreateInputs(cfg *createIndexConfig) error {
 		return err
 	}
 	cfg.mntPath = beegfsClient.GetMountPath()
-	if cfg.mntPath != "" && !validPath.MatchString(cfg.mntPath) {
-		return fmt.Errorf("invalid mount path")
-	}
-	if cfg.maxMemory != "" && !validMemory.MatchString(cfg.maxMemory) {
-		return fmt.Errorf("invalid max memory format")
-	}
-	if cfg.port > 0 && !validPort.MatchString(strconv.Itoa(int(cfg.port))) {
-		return fmt.Errorf("invalid port number")
-	}
+
 	return nil
 }
 
