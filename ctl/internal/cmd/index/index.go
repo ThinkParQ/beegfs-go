@@ -12,6 +12,6 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newCreateCmd())
-
+	cmd.AddCommand(newFindCmd())
 	return cmd
 }
