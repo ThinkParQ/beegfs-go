@@ -23,61 +23,53 @@ type createStatsConfig struct {
 	version      bool
 }
 
-var RECURSIVE = map[string]bool{
-	"depth":      true,
-	"filesize":   true,
-	"filecount":  true,
-	"linkcount":  true,
-	"dircount":   true,
-	"leaf-dirs":  true,
-	"leaf-depth": true,
-	"leaf-files": true,
-	"leaf-links": true,
+type statConfig struct {
+	recursive  bool
+	cumulative bool
+	others     bool
 }
 
-var CUMULATIVE = map[string]bool{
-	"total-filesize":     true,
-	"total-filecount":    true,
-	"total-linkcount":    true,
-	"total-dircount":     true,
-	"total-leaf-files":   true,
-	"total-leaf-links":   true,
-	"files-per-level":    true,
-	"links-per-level":    true,
-	"dirs-per-level":     true,
-	"average-leaf-files": true,
-	"average-leaf-links": true,
+var STAT_CONFIG = map[string]statConfig{
+	"depth":              {recursive: true},
+	"filesize":           {recursive: true},
+	"filecount":          {recursive: true},
+	"linkcount":          {recursive: true},
+	"dircount":           {recursive: true},
+	"leaf-dirs":          {recursive: true},
+	"leaf-depth":         {recursive: true},
+	"leaf-files":         {recursive: true},
+	"leaf-links":         {recursive: true},
+	"total-filesize":     {cumulative: true},
+	"total-filecount":    {cumulative: true},
+	"total-linkcount":    {cumulative: true},
+	"total-dircount":     {cumulative: true},
+	"total-leaf-files":   {cumulative: true},
+	"total-leaf-links":   {cumulative: true},
+	"files-per-level":    {cumulative: true},
+	"links-per-level":    {cumulative: true},
+	"dirs-per-level":     {cumulative: true},
+	"average-leaf-files": {cumulative: true},
+	"average-leaf-links": {cumulative: true},
+	"median-leaf-files":  {others: true},
+	"duplicate-names":    {others: true},
 }
 
-var OTHERS = map[string]bool{
-	"median-leaf-files": true,
-	"duplicate-names":   true,
+var validOrders = []string{
+	"ASC", "DESC", "least", "most", "ASCENDING", "DESCENDING",
 }
 
-var validOrders = map[string]bool{
-	"ASC":        true,
-	"DESC":       true,
-	"least":      true,
-	"most":       true,
-	"ASCENDING":  true,
-	"DESCENDING": true,
-}
-
-var STATS = mergeMaps(RECURSIVE, CUMULATIVE, OTHERS)
-
-func mergeMaps(maps ...map[string]bool) map[string]bool {
-	merged := make(map[string]bool)
-	for _, m := range maps {
-		for k := range m {
-			merged[k] = true
+func isValidOrder(order string) bool {
+	for _, valid := range validOrders {
+		if valid == order {
+			return true
 		}
 	}
-	return merged
+	return false
 }
 
 func getStatChoices() string {
-	keys := make([]string, 0, len(STATS))
-	for k := range STATS {
+	keys := make([]string, 0, len(STAT_CONFIG))
+	for k := range STAT_CONFIG {
 		keys = append(keys, k)
 	}
 	return strings.Join(keys, ", ")
@@ -96,19 +88,19 @@ func newGenericStatsCmd() *cobra.Command {
 				return fmt.Errorf("stat argument is required")
 			}
 			cfg.stat = args[0]
-			if _, valid := STATS[cfg.stat]; !valid {
+			if _, valid := STAT_CONFIG[cfg.stat]; !valid {
 				return fmt.Errorf("invalid stat '%s', must be one of: %v", cfg.stat, getStatChoices())
 			}
-			if cfg.recursive && CUMULATIVE[cfg.stat] {
+			statCfg := STAT_CONFIG[cfg.stat]
+			if cfg.recursive && statCfg.cumulative {
 				return fmt.Errorf("--recursive/-r has no effect on \"%s\" statistic", cfg.stat)
 			}
-			if cfg.cumulative && RECURSIVE[cfg.stat] {
+			if cfg.cumulative && statCfg.recursive {
 				return fmt.Errorf("--cumulative/-c has no effect on \"%s\" statistic", cfg.stat)
 			}
-			if (cfg.recursive || cfg.cumulative) && OTHERS[cfg.stat] {
+			if (cfg.recursive || cfg.cumulative) && statCfg.others {
 				return fmt.Errorf("--recursive/-r and --cumulative/-c have no effect on \"%s\" statistic", cfg.stat)
 			}
-
 			if len(args) > 1 {
 				cfg.path = args[1]
 			} else {
@@ -168,7 +160,7 @@ positional arguments:
 }
 
 func validateStatsInputs(cfg *createStatsConfig) error {
-	if !validOrders[cfg.order] {
+	if !isValidOrder(cfg.order) {
 		return fmt.Errorf("invalid order: %s. Must be one of ASC, DESC, least, or most", cfg.order)
 	}
 	return nil
