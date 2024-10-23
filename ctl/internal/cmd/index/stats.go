@@ -100,13 +100,13 @@ func newGenericStatsCmd() *cobra.Command {
 				return fmt.Errorf("invalid stat '%s', must be one of: %v", cfg.stat, getStatChoices())
 			}
 			if cfg.recursive && CUMULATIVE[cfg.stat] {
-				return fmt.Errorf("--recursive/-r has no effect on \"%s\" statistic\n", cfg.stat)
+				return fmt.Errorf("--recursive/-r has no effect on \"%s\" statistic", cfg.stat)
 			}
 			if cfg.cumulative && RECURSIVE[cfg.stat] {
-				return fmt.Errorf("--cumulative/-c has no effect on \"%s\" statistic\n", cfg.stat)
+				return fmt.Errorf("--cumulative/-c has no effect on \"%s\" statistic", cfg.stat)
 			}
 			if (cfg.recursive || cfg.cumulative) && OTHERS[cfg.stat] {
-				return fmt.Errorf("--recursive/-r and --cumulative/-c have no effect on \"%s\" statistic\n", cfg.stat)
+				return fmt.Errorf("--recursive/-r and --cumulative/-c have no effect on \"%s\" statistic", cfg.stat)
 			}
 
 			if len(args) > 1 {
