@@ -3,6 +3,7 @@ package beegrpc
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	pl "github.com/thinkparq/protobuf/go/license"
@@ -49,7 +50,7 @@ func (m *Mgmtd) VerifyLicense(ctx context.Context, requestedFeature string) ([]z
 	}
 
 	licenseDetail := []zap.Field{
-		zap.Any("certificate", fmt.Sprintf("SP-%d", license.Data.Serial)),
+		zap.Any("certificate", license.Data.CommonName),
 		zap.Any("licensedTo", license.Data.Organization),
 		zap.Any("viaPartner", license.Data.ParentData.Organization),
 		zap.Any("validFrom", license.Data.ValidFrom.AsTime().Add(14*time.Hour).Format("2006-01-02")),
@@ -63,6 +64,7 @@ func (m *Mgmtd) VerifyLicense(ctx context.Context, requestedFeature string) ([]z
 	featureLicensed := false
 	for _, gotFeature := range license.Data.DnsNames {
 		if gotFeature == requestedFeature {
+			os.Setenv("BEEGFS_LICENSED_FEATURE", requestedFeature)
 			featureLicensed = true
 			break
 		}

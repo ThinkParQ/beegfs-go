@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -32,7 +33,6 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().MarkHidden(config.DisableEmojisKey)
 
 	cmd.PersistentFlags().Int(config.NumWorkersKey, runtime.GOMAXPROCS(0), "The maximum number of workers to use when a command can complete work in parallel (default: number of CPUs).")
-	cmd.PersistentFlags().MarkHidden(config.NumWorkersKey)
 
 	cmd.PersistentFlags().Bool(config.TlsDisableKey, false, "Disable TLS for gRPC communication")
 
@@ -57,6 +57,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	viper.SetEnvPrefix("beegfs")
 	// Environment variables cannot use "-", replace with "_"
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	os.Setenv("BEEGFS_BINARY_NAME", "beegfs")
 
 	// Bind all persistent pflags to viper
 	cmd.PersistentFlags().VisitAll(func(flag *pflag.Flag) {

@@ -68,10 +68,10 @@ const (
 // The global config singleton
 var globalMount filesystem.Provider
 
-var mgmtClient pm.ManagementClient
+var mgmtClient *beegrpc.Mgmtd
 
 // Try to establish a connection to the managements gRPC service
-func ManagementClient() (pm.ManagementClient, error) {
+func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtClient != nil {
 		return mgmtClient, nil
 	}
