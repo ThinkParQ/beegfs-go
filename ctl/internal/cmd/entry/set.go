@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 )
 
@@ -150,11 +151,11 @@ func runEntrySetCmd(cmd *cobra.Command, args []string, frontendCfg entrySetCfg, 
 	if args[0] == "-" {
 		pathsChan := make(chan string, 1024)
 		backendCfg.PathsViaChan = pathsChan
-		d, err := getDelimiterFromString(frontendCfg.stdinDelimiter)
+		d, err := util.GetStdinDelimiterFromString(frontendCfg.stdinDelimiter)
 		if err != nil {
 			return err
 		}
-		readPathsFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
+		util.ReadFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
 	} else if frontendCfg.recurse {
 		if !frontendCfg.confirmBulkUpdates {
 			return fmt.Errorf("the recurse mode updates the specified entry and ALL child entries, if you're sure this is what you want add the --yes flag")

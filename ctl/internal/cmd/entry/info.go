@@ -10,6 +10,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"go.uber.org/zap"
@@ -75,11 +76,11 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	if args[0] == "-" {
 		pathsChan := make(chan string, 1024)
 		backendCfg.PathsViaChan = pathsChan
-		d, err := getDelimiterFromString(frontendCfg.stdinDelimiter)
+		d, err := util.GetStdinDelimiterFromString(frontendCfg.stdinDelimiter)
 		if err != nil {
 			return err
 		}
-		readPathsFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
+		util.ReadFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
 	} else if frontendCfg.recurse {
 		backendCfg.PathsViaRecursion = args[0]
 	} else {
