@@ -153,3 +153,17 @@ func ParseUint64RangeFromStr(input string, minLower uint64, maxUpper uint64) (ui
 
 	return lower, upper, nil
 }
+
+// I64FormatPrefixWithUnlimited is a wrapper around unitconv.FormatPrefix that allows the maximum
+// value for a int64 to be interpreted as unlimited. This is helpful for modes like quotas where
+// setting the limit to unlimited just sets the limit to the int64 max. The option withB can be set
+// to control if the string should be suffixed with a "B" where the unit represents bytes.
+func I64FormatPrefixWithUnlimited(val int64, m unitconv.Mode, prec int, withB bool) string {
+	if val == math.MaxInt64 {
+		return UnlimitedText
+	}
+	if withB {
+		return unitconv.FormatPrefix(float64(val), m, prec) + "B"
+	}
+	return unitconv.FormatPrefix(float64(val), m, prec)
+}

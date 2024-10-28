@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
@@ -17,6 +18,12 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/quota"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
+)
+
+const (
+	// quotaPrecision defines the number of decimal places to include in the output, controlling the
+	// precision of quota-related values.
+	quotaPrecision = 2
 )
 
 func NewCmd() *cobra.Command {
@@ -278,8 +285,7 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			if viper.GetBool(config.RawKey) {
 				space = fmt.Sprintf("%d", limits.GetSpaceLimit())
 			} else {
-				space = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(limits.GetSpaceLimit()),
-					unitconv.IEC, 0))
+				space = util.I64FormatPrefixWithUnlimited(limits.GetSpaceLimit(), unitconv.IEC, quotaPrecision, true)
 			}
 		}
 
@@ -288,7 +294,7 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			if viper.GetBool(config.RawKey) {
 				inode = fmt.Sprintf("%d", limits.GetInodeLimit())
 			} else {
-				inode = unitconv.FormatPrefix(float64(limits.GetInodeLimit()), unitconv.SI, 0)
+				inode = util.I64FormatPrefixWithUnlimited(limits.GetInodeLimit(), unitconv.SI, quotaPrecision, false)
 			}
 		}
 
@@ -421,8 +427,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 				if viper.GetBool(config.RawKey) {
 					space = fmt.Sprintf("%d/", entry.GetSpaceUsed())
 				} else {
-					space = fmt.Sprintf("%sB/", unitconv.FormatPrefix(float64(entry.GetSpaceUsed()),
-						unitconv.IEC, 0))
+					space = fmt.Sprintf("%s/", util.I64FormatPrefixWithUnlimited(entry.GetSpaceUsed(),
+						unitconv.IEC, quotaPrecision, true))
 				}
 			}
 		}
@@ -431,11 +437,10 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 				if viper.GetBool(config.RawKey) {
 					space += fmt.Sprintf("%d", entry.GetSpaceLimit())
 				} else {
-					space += fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(entry.GetSpaceLimit()),
-						unitconv.IEC, 0))
+					space += util.I64FormatPrefixWithUnlimited(entry.GetSpaceLimit(), unitconv.IEC, quotaPrecision, true)
 				}
 			} else {
-				space += "∞"
+				space += util.UnlimitedText
 			}
 		} else {
 			space += "?"
@@ -447,8 +452,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 				if viper.GetBool(config.RawKey) {
 					inode = fmt.Sprintf("%d/", entry.GetInodeUsed())
 				} else {
-					inode = fmt.Sprintf("%s/", unitconv.FormatPrefix(float64(entry.GetInodeUsed()),
-						unitconv.SI, 0))
+					inode = fmt.Sprintf("%s/", util.I64FormatPrefixWithUnlimited(entry.GetInodeUsed(),
+						unitconv.SI, quotaPrecision, false))
 				}
 			}
 		}
@@ -457,10 +462,10 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 				if viper.GetBool(config.RawKey) {
 					inode += fmt.Sprintf("%d", entry.GetInodeLimit())
 				} else {
-					inode += unitconv.FormatPrefix(float64(entry.GetInodeLimit()), unitconv.SI, 0)
+					inode += util.I64FormatPrefixWithUnlimited(entry.GetInodeLimit(), unitconv.SI, quotaPrecision, false)
 				}
 			} else {
-				inode += "∞"
+				inode += util.UnlimitedText
 			}
 		} else {
 			inode += "?"
@@ -488,6 +493,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 func parseLimit(s string) (*int64, error) {
 	var res = new(int64)
 	if s == "unlimited" {
+		*res = math.MaxInt64
+	} else if s == "reset" {
 		*res = -1
 	} else if s == "" {
 		res = nil
@@ -496,6 +503,10 @@ func parseLimit(s string) (*int64, error) {
 		if err != nil {
 			return nil, err
 		}
+		if parsed > math.MaxInt64 {
+			return nil, fmt.Errorf("the provided limit (%d) is larger than the maximum allowed (%d)", parsed, math.MaxInt64)
+		}
+
 		*res = int64(parsed)
 	}
 
