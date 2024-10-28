@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
 )
@@ -53,12 +54,12 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		userSpaceLimit := ""
 		if p.UserSpaceLimit != nil {
 			if *p.UserSpaceLimit == -1 {
-				userSpaceLimit = "∞"
+				userSpaceLimit = util.UnlimitedText
 			} else {
 				if viper.GetBool(config.RawKey) {
 					userSpaceLimit = fmt.Sprint(*p.UserSpaceLimit)
 				} else {
-					userSpaceLimit = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*p.UserSpaceLimit), unitconv.IEC, 0))
+					userSpaceLimit = util.I64FormatPrefixWithUnlimited(*p.UserSpaceLimit, unitconv.IEC, 0, true)
 				}
 			}
 		}
@@ -66,12 +67,12 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		userInodeLimit := ""
 		if p.UserInodeLimit != nil {
 			if *p.UserInodeLimit == -1 {
-				userInodeLimit = "∞"
+				userInodeLimit = util.UnlimitedText
 			} else {
 				if viper.GetBool(config.RawKey) {
 					userInodeLimit = fmt.Sprint(*p.UserInodeLimit)
 				} else {
-					userInodeLimit = unitconv.FormatPrefix(float64(*p.UserInodeLimit), unitconv.SI, 0)
+					userInodeLimit = util.I64FormatPrefixWithUnlimited(*p.UserInodeLimit, unitconv.SI, 0, false)
 				}
 			}
 		}
@@ -79,12 +80,12 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		groupSpaceLimit := ""
 		if p.GroupSpaceLimit != nil {
 			if *p.GroupSpaceLimit == -1 {
-				groupSpaceLimit = "∞"
+				groupSpaceLimit = util.UnlimitedText
 			} else {
 				if viper.GetBool(config.RawKey) {
 					groupSpaceLimit = fmt.Sprint(*p.GroupSpaceLimit)
 				} else {
-					groupSpaceLimit = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*p.GroupSpaceLimit), unitconv.IEC, 0))
+					groupSpaceLimit = util.I64FormatPrefixWithUnlimited(*p.GroupSpaceLimit, unitconv.IEC, 0, true)
 				}
 			}
 		}
@@ -92,12 +93,12 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		groupInodeLimit := ""
 		if p.GroupInodeLimit != nil {
 			if *p.GroupInodeLimit == -1 {
-				groupInodeLimit = "∞"
+				groupInodeLimit = util.UnlimitedText
 			} else {
 				if viper.GetBool(config.RawKey) {
 					groupInodeLimit = fmt.Sprint(*p.GroupInodeLimit)
 				} else {
-					groupInodeLimit = unitconv.FormatPrefix(float64(*p.GroupInodeLimit), unitconv.SI, 0)
+					groupInodeLimit = util.I64FormatPrefixWithUnlimited(*p.GroupInodeLimit, unitconv.SI, 0, false)
 				}
 			}
 		}
