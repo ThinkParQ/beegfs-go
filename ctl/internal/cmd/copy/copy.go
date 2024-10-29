@@ -9,9 +9,9 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/bflag"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/util"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
 	"go.uber.org/zap"
 )
 

@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/buddygroup"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/pool"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/target"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )

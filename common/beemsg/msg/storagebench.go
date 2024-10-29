@@ -1,8 +1,8 @@
 package msg
 
 import (
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/beeserde"
 )
 
 type StorageBenchControlMsg struct {

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"syscall"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/util"
 	"go.uber.org/zap"
 )
 

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
 )
 
 // GetConfigFile returns the path to the client configuration file for the provided active BeeGFS mount

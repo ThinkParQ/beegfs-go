@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/procfs"
 )
 
 const (

@@ -12,10 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/benchmark"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/util"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/benchmark"
 )
 
 type frontendCfg struct {

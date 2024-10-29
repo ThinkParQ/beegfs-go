@@ -30,14 +30,14 @@ developer handbook.
 ## Using Shared Packages
 
 If you just want to use some common functionality in your project, first run `go get
-github.com/thinkparq/beegfs-go` then import/use the shared package(s) as needed throughout your
+github.com/thinkparq/beegfs-go/v8` then import/use the shared package(s) as needed throughout your
 project. The beegfs-go project is meant to be used as a Go module meaning you can (and should) pin
 your `go.mod` file to a particular stable version of beegfs-go.
 
 Individual modules can then be imported, for example to use the logging package:
 
 ```go
-import "github.com/thinkparq/beegfs-go/common/logging"
+import "github.com/thinkparq/beegfs-go/v8/common/logging"
 
 myConfig := logging.Config{
     Type: "stdout",
@@ -111,4 +111,4 @@ so they don't run by default. Build constraints that are in use:
 | beegfs     | BeeGFS must be mounted /mnt/beegfs |
 
 To specify a constraint use `-tags=<constraint>`, for example: `go test
-github.com/thinkparq/beegfs-go/common/ioctl -tags=integration`
+github.com/thinkparq/beegfs-go/v8/common/ioctl -tags=integration`

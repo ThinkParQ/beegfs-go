@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/thinkparq/beegfs-go/ctl/internal/cmd"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd"
 )
 
 func main() {

@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
 

@@ -1,6 +1,6 @@
 package msg
 
-import "github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
+import "github.com/thinkparq/beegfs-go/v8/common/beemsg/beeserde"
 
 // A BeeGFS message
 type Msg interface {

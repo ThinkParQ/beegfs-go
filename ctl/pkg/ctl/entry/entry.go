@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
-	"github.com/thinkparq/beegfs-go/common/types"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/v8/common/filesystem"
+	"github.com/thinkparq/beegfs-go/v8/common/types"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )

@@ -11,13 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
-	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	tgtFrontend "github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd/target"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/util"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/procfs"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/stats"
+	tgtBackend "github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/target"
 	"go.uber.org/zap"
 )
 

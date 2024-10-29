@@ -7,10 +7,10 @@ import (
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/util"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/pool"
 )
 
 func newListCmd() *cobra.Command {

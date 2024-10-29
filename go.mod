@@ -1,4 +1,4 @@
-module github.com/thinkparq/beegfs-go
+module github.com/thinkparq/beegfs-go/v8
 
 go 1.23.1
 

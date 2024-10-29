@@ -4,9 +4,9 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
-	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	tgtFrontend "github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd/target"
+	tgtBackend "github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/target"
 )
 
 func newDFCmd() *cobra.Command {

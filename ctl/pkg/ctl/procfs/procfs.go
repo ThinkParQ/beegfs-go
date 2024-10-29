@@ -13,8 +13,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
 	"go.uber.org/zap"
 )
 

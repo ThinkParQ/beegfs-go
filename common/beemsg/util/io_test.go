@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/beeserde"
 )
 
 type testMsg struct {

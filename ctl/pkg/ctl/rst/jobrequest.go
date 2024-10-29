@@ -10,9 +10,9 @@ import (
 	"sync"
 
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"

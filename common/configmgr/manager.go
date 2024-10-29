@@ -15,7 +15,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/types"
+	"github.com/thinkparq/beegfs-go/v8/common/types"
 	"go.uber.org/zap"
 )
 

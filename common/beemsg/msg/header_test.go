@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/beeserde"
 )
 
 func TestHeaderSerialization(t *testing.T) {

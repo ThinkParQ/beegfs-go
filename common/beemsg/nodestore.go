@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/common/beemsg/util"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/util"
 )
 
 // The node store. Stores node objects and mappings to them as well as connection settings. All

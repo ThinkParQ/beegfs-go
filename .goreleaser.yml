@@ -5,10 +5,10 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w
-      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.Version={{ .Version }}
-      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.BinaryName=beegfs
-      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.Commit={{ .Commit }}
-      - -X github.com/thinkparq/beegfs-go/ctl/internal/cmd.BuildTime={{ .Date }}
+      - -X github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd.Version={{ .Version }}
+      - -X github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd.BinaryName=beegfs
+      - -X github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd.Commit={{ .Commit }}
+      - -X github.com/thinkparq/beegfs-go/v8/ctl/internal/cmd.BuildTime={{ .Date }}
     binary: beegfs
     goos:
       - linux

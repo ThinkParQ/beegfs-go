@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 
-	"github.com/thinkparq/beegfs-go/common/beemsg/util"
+	"github.com/thinkparq/beegfs-go/v8/common/beemsg/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

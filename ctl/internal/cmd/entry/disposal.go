@@ -4,10 +4,10 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/types"
-	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/v8/common/beegfs"
+	"github.com/thinkparq/beegfs-go/v8/common/types"
+	"github.com/thinkparq/beegfs-go/v8/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/v8/ctl/pkg/ctl/entry"
 )
 
 type entryDisposalCfg struct {
