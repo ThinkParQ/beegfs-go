@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -88,6 +89,12 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	defer tbl.PrintRemaining()
 	hasUnreachableNode := false
 
+	// This shouldn't happen since a valid management address in the format <ip>:<port> is required.
+	grpcPort := "invalid"
+	if grpcAddr := strings.Split(viper.GetString(config.ManagementAddrKey), ":"); len(grpcAddr) == 2 {
+		grpcPort = grpcAddr[1]
+	}
+
 	// Print and process node list
 	for _, node := range nodes {
 
@@ -99,7 +106,17 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 				nics += "\n"
 				reachableNics += "\n"
 			}
-			nics += fmt.Sprintf("%s:%s (%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr)
+			if node.Node.Id.NodeType == beegfs.Management {
+				// This is a little hacky because it assumes the gRPC management server is listening
+				// on all the same interfaces as BeeMsg. Currently there is no way to configure
+				// different interfaces for BeeMsg versus gRPC but this might change and someone
+				// might forget to update this logic. However there isn't currently a good way to
+				// get this information from the management so its better to include it like this
+				// until things change and other services are also using gRPC.
+				nics += fmt.Sprintf("%s:%s (%s,%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr, grpcPort)
+			} else {
+				nics += fmt.Sprintf("%s:%s (%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr)
+			}
 			if nic.Reachable {
 				hasReachableNic = hasReachableNic || nic.Reachable
 				reachableNics += "yes"
