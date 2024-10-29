@@ -4,8 +4,8 @@ import "github.com/spf13/cobra"
 
 func NewRSTCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "rst",
-		Aliases: []string{"remote-storage-target"},
+		Use:     "remote",
+		Aliases: []string{"remote-storage-target", "rst"},
 		Short:   "Interact with Remote Storage Targets.",
 	}
 

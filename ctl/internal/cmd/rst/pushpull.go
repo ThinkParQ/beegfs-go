@@ -37,7 +37,7 @@ WARNING: When uploading multiple entries, any entries that do not have RSTs conf
 			return runPushOrPullCmd(cmd, frontendCfg, backendCfg)
 		},
 	}
-	cmd.Flags().Uint32Var(&backendCfg.RSTID, "rst", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Uint32Var(&backendCfg.RSTID, "remote-target", 0, "Perform a one time push to the specified Remote Storage Target ID.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the RST even if another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
@@ -67,8 +67,8 @@ func newPullCmd() *cobra.Command {
 			return runPushOrPullCmd(cmd, frontendCfg, backendCfg)
 		},
 	}
-	cmd.Flags().Uint32Var(&backendCfg.RSTID, "rst", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
-	cmd.MarkFlagRequired("rst")
+	cmd.Flags().Uint32Var(&backendCfg.RSTID, "remote-target", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
+	cmd.MarkFlagRequired("remote-target")
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "When downloading a file, if a file already exists at the specified path in BeeGFS, an error is returned by default. Optionally the file can be overwritten instead. Note files are always uploaded and will be overwritten unless the RST has file/object versioning enabled.")
 	cmd.Flags().StringVar(&backendCfg.RemotePath, "remote-path", "", "By default when downloading files/objects, the path where the file should be downloaded in BeeGFS is assumed to also be the file path/object key in the RST. Optionally the remote path can be specified to restore a file in an RST to a different location in BeeGFS (this is ignored for uploads).")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the RST even if another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
