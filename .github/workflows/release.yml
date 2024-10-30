@@ -3,9 +3,10 @@ name: goreleaser
 
 on:
   push:
-    # run only against tags
+    # Releases including packages and other artifacts should only be built for BeeGFS releases.
+    # Tagging a release of the Go module should not trigger the release workflow.
     tags:
-      - "*"
+      - "v8.*"
 
 permissions:
   # Required to publish releases.
