@@ -146,7 +146,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			if viper.GetBool(config.RawKey) {
 				inodesTotal = fmt.Sprintf("%d", *t.TotalInodes)
 			} else {
-				inodesTotal = fmt.Sprintf("%s", unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1))
+				inodesTotal = unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1)
 			}
 		}
 		inodesUsed := "-"
@@ -154,7 +154,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			if viper.GetBool(config.RawKey) {
 				inodesUsed = fmt.Sprintf("%d", *t.TotalInodes-*t.FreeInodes)
 			} else {
-				inodesUsed = fmt.Sprintf("%s", unitconv.FormatPrefix(float64(*t.TotalInodes)-float64(*t.FreeInodes), unitconv.SI, 1))
+				inodesUsed = unitconv.FormatPrefix(float64(*t.TotalInodes)-float64(*t.FreeInodes), unitconv.SI, 1)
 			}
 			inodesUsed += fmt.Sprintf(" (%.2f%%)", 100-(float64(*t.FreeInodes)/float64(*t.TotalInodes))*100)
 		}
@@ -163,7 +163,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			if viper.GetBool(config.RawKey) {
 				inodesFree = fmt.Sprintf("%d", *t.FreeInodes)
 			} else {
-				inodesFree = fmt.Sprintf("%s", unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1))
+				inodesFree = unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1)
 			}
 		}
 
