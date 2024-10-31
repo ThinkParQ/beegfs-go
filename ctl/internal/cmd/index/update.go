@@ -6,45 +6,46 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-type updateIndexConfig struct {
-	maxMemory string
-	fsPath    string
-	indexPath string
-	summary   bool
-	xattrs    bool
-	version   bool
-	maxLevel  uint
-	scanDirs  bool
-	port      uint
-	mntPath   string
-}
+const updateCmd = "index"
 
 func newGenericUpdateCmd() *cobra.Command {
-	cfg := updateIndexConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonUpdateIndex(&cfg)
+			return runPythonUpdateIndex(bflagSet)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be updated [default: IndexEnv.conf]")
-	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path [default: IndexEnv.conf]")
-	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
-	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Update tree summary table along with other tables")
-	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
-	cmd.Flags().BoolVar(&cfg.version, "version", false, "BeeGFS Hive Index Version")
-	cmd.Flags().UintVar(&cfg.maxLevel, "max-level", 0, "Max level to go down")
-	cmd.Flags().BoolVar(&cfg.scanDirs, "scan-dirs", false, "Print the number of scanned directories")
-	cmd.Flags().UintVar(&cfg.port, "port", 0, "Port number to connect with client")
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("fs-path", "F",
+			"File system path for which index will be updated [default: UpdateEnv.conf]", "-F", ""),
+		bflag.Flag("index-path", "I",
+			"File system path for which index will be updated [default: UpdateEnv.conf]", "-I", ""),
+		bflag.GlobalFlag(config.BeeGFSMountPointKey, "-M"),
+		bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
+		bflag.GlobalFlag(config.NumWorkersKey, "-n"),
+		bflag.Flag("summary", "s", "Create tree summary table along with other tables", "-s", false),
+		bflag.Flag("only-summary", "S", "Create only tree summary table", "-S", false),
+		bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
+		bflag.Flag("max-level", "z", "Max level to go down", "-z", 0),
+		bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
+		bflag.Flag("port", "p", "Port number to connect with client", "-p", 0),
+		bflag.Flag("update", "U", "Run the update index", "-U", true),
+		bflag.Flag("version", "v", "BeeGFS Hive Index Version", "-v", false),
+		bflag.GlobalFlag(config.DebugKey, "-V=1"),
+		bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
+	}
 
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+	cmd.Flags().MarkHidden("update")
 	return cmd
 }
 
@@ -68,65 +69,12 @@ operations can be captured and replayed on the index directory by bee update.
 	return s
 }
 
-func validateUpdateInputs(cfg *updateIndexConfig) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	beegfsClient, err := config.BeeGFSClient(cwd)
-	if err != nil {
-		return err
-	}
-	cfg.mntPath = beegfsClient.GetMountPath()
-	return nil
-}
-
-func runPythonUpdateIndex(cfg *updateIndexConfig) error {
-	if err := validateUpdateInputs(cfg); err != nil {
-		return err
-	}
-
-	args := []string{
-		"index",
-	}
-
-	if cfg.fsPath != "" {
-		args = append(args, "-F", cfg.fsPath)
-	}
-	if cfg.indexPath != "" {
-		args = append(args, "-I", cfg.indexPath)
-	}
-	if cfg.maxMemory != "" {
-		args = append(args, "-X", cfg.maxMemory)
-	}
-	args = append(args, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
-	if cfg.summary {
-		args = append(args, "-S")
-	}
-	if cfg.xattrs {
-		args = append(args, "-x")
-	}
-	if cfg.version {
-		args = append(args, "-v")
-	}
-	if cfg.maxLevel > 0 {
-		args = append(args, "-z", fmt.Sprint(cfg.maxLevel))
-	}
-	if cfg.scanDirs {
-		args = append(args, "-C")
-	}
-	if cfg.port > 0 {
-		args = append(args, "-p", fmt.Sprint(cfg.port))
-	}
-	if cfg.mntPath != "" {
-		args = append(args, "-M", cfg.mntPath)
-	}
-	if viper.GetBool(config.DebugKey) {
-		args = append(args, "-V", "1")
-	}
-	args = append(args, "-U")
-
-	cmd := exec.Command(beeBinary, args...)
+func runPythonUpdateIndex(bflagSet *bflag.FlagSet) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+1)
+	allArgs = append(allArgs, updateCmd)
+	allArgs = append(allArgs, wrappedArgs...)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
