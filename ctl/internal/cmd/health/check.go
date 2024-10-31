@@ -197,7 +197,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		printDF(targets, tgtFrontend.PrintConfig{Capacity: true, State: true})
 	}
 
-	fmt.Print(hint("HINT: This mode does not check file system consistency. Run beegfs-fsck if any server services were unexpected restarted.\n"))
+	fmt.Print(hint("HINT: This mode does not check file system consistency. To check for file system inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n"))
 
 	fmt.Println()
 
@@ -237,7 +237,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 
 	// The following checks/text should be printed at the bottom. Don't add checks after this point.
 	if failedCheck && !frontendCfg.ignoreFailedChecks {
-		util.FlashTerminal()
+		util.TerminalAlert()
 		return util.NewCtlError(fmt.Errorf("one or more checks failed"), 1)
 	}
 	return nil

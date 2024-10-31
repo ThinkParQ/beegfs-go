@@ -49,7 +49,7 @@ func newListCmd() *cobra.Command {
 // exported for reuse in other packages like health that need to print the target list.
 func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 
-	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "capacity pool", "space", "% free space", "inodes", "% free inodes"}
+	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
 	defaultColumns := []string{"id", "alias", "on node", "pool"}
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
@@ -58,7 +58,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency")
 		}
 		if cfg.Capacity {
-			defaultColumns = append(defaultColumns, "capacity pool", "space", "% free space", "inodes", "% free inodes")
+			defaultColumns = append(defaultColumns, "capacity pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
 		}
 	}
 
@@ -115,50 +115,56 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			lastContact = fmt.Sprintf("%ds ago", *t.LastContactS)
 		}
 
-		space := "-/"
-		if t.FreeSpaceBytes != nil {
-			if viper.GetBool(config.RawKey) {
-				space = fmt.Sprintf("%d/", *t.FreeSpaceBytes)
-			} else {
-				space = fmt.Sprintf("%sB/", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
-			}
-		}
+		spaceTotal := "-"
 		if t.TotalSpaceBytes != nil {
 			if viper.GetBool(config.RawKey) {
-				space += fmt.Sprintf("%d\t", *t.TotalSpaceBytes)
+				spaceTotal = fmt.Sprintf("%d", *t.TotalSpaceBytes)
 			} else {
-				space += fmt.Sprintf("%sB\t", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 1))
+				spaceTotal = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 1))
 			}
-		} else {
-			space += "-"
 		}
-
-		percentSpaceFree := "-"
+		spaceUsed := "-"
 		if t.FreeSpaceBytes != nil && t.TotalSpaceBytes != nil {
-			percentSpaceFree = fmt.Sprintf("%.2f%%", (float64(*t.FreeSpaceBytes)/float64(*t.TotalSpaceBytes))*100)
-		}
-
-		inodes := "-/"
-		if t.FreeInodes != nil {
 			if viper.GetBool(config.RawKey) {
-				inodes = fmt.Sprintf("%d/", *t.FreeInodes)
+				spaceUsed = fmt.Sprintf("%d", *t.TotalSpaceBytes-*t.FreeSpaceBytes)
 			} else {
-				inodes = fmt.Sprintf("%s/", unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1))
+				spaceUsed = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes)-float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
+			}
+			spaceUsed += fmt.Sprintf(" (%.2f%%)", 100-(float64(*t.FreeSpaceBytes)/float64(*t.TotalSpaceBytes))*100)
+		}
+		spaceFree := "-"
+		if t.FreeSpaceBytes != nil {
+			if viper.GetBool(config.RawKey) {
+				spaceFree = fmt.Sprintf("%d", *t.FreeSpaceBytes)
+			} else {
+				spaceFree = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
 			}
 		}
+
+		inodesTotal := "-"
 		if t.TotalInodes != nil {
 			if viper.GetBool(config.RawKey) {
-				inodes += fmt.Sprintf("%d\t", *t.TotalInodes)
+				inodesTotal = fmt.Sprintf("%d", *t.TotalInodes)
 			} else {
-				inodes += fmt.Sprintf("%s\t", unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1))
+				inodesTotal = unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1)
 			}
-		} else {
-			inodes += "-"
 		}
-
-		percentInodesFree := "-"
+		inodesUsed := "-"
 		if t.FreeInodes != nil && t.TotalInodes != nil {
-			percentInodesFree = fmt.Sprintf("%.2f%%", (float64(*t.FreeInodes)/float64(*t.TotalInodes))*100)
+			if viper.GetBool(config.RawKey) {
+				inodesUsed = fmt.Sprintf("%d", *t.TotalInodes-*t.FreeInodes)
+			} else {
+				inodesUsed = unitconv.FormatPrefix(float64(*t.TotalInodes)-float64(*t.FreeInodes), unitconv.SI, 1)
+			}
+			inodesUsed += fmt.Sprintf(" (%.2f%%)", 100-(float64(*t.FreeInodes)/float64(*t.TotalInodes))*100)
+		}
+		inodesFree := "-"
+		if t.FreeInodes != nil {
+			if viper.GetBool(config.RawKey) {
+				inodesFree = fmt.Sprintf("%d", *t.FreeInodes)
+			} else {
+				inodesFree = unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1)
+			}
 		}
 
 		tbl.Row(
@@ -171,10 +177,12 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			lastContact,
 			t.ConsistencyState,
 			t.CapacityPool,
-			space,
-			percentSpaceFree,
-			inodes,
-			percentInodesFree,
+			spaceTotal,
+			spaceUsed,
+			spaceFree,
+			inodesTotal,
+			inodesUsed,
+			inodesFree,
 		)
 	}
 }

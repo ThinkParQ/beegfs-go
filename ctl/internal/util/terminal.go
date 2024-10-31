@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"golang.org/x/term"
 )
@@ -111,12 +110,9 @@ func (t *TermRefresher) printFooter(footerText string, width int, height int) {
 	fmt.Print("\033[0m")
 }
 
-// FlashTerminal() triggers a terminal bell notification and flashes the terminal.
-func FlashTerminal() {
+// TerminalAlert() triggers a terminal bell notification which will trigger an audible or visual
+// alarm, depending on terminal configuration.
+func TerminalAlert() {
 	// Trigger a terminal bell notification (\a):
 	fmt.Print("\n\a")
-	// Flash the terminal:
-	fmt.Print("\033[?5h")
-	time.Sleep(100 * time.Millisecond)
-	fmt.Print("\033[?5l")
 }

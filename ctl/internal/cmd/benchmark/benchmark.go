@@ -180,7 +180,7 @@ func storageBenchDispatcher(ctx context.Context, frontendCfg *frontendCfg, backe
 			if frontendCfg.wait {
 				printStorageBenchResults(results, *frontendCfg)
 			}
-			util.FlashTerminal()
+			util.TerminalAlert()
 			return nil
 		}
 		select {
