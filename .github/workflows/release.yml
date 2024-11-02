@@ -44,6 +44,18 @@ jobs:
         # Make sure the runner has access to the internal repos repo using an access token
         # This must be after the step to setup Go which also installs git.
         run: git config --global url."https://${{ secrets.CI_PROTOBUF_ACCESS }}@github.com/thinkparq".insteadOf https://github.com/thinkparq
+        # The way GoReleaser gets the previous changelog tag does not work consistently if we are
+        # pushing different tags to version the Go module API versus the built BeeGFS binaries. This
+        # approach ensures the tag that triggered the workflow is used as the current version, and
+        # sets the previous tag based on the most recent semantic version before the current tag.
+        # Ref: https://goreleaser.com/cookbooks/set-a-custom-git-tag/
+      - name: Get current and previous tags
+        id: tags
+        run: |
+          git fetch --tags
+          echo "GORELEASER_CURRENT_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+          previous_tag=$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$' | grep -v "${{ github.ref_name }}" | head -n 1)
+          echo "GORELEASER_PREVIOUS_TAG=${previous_tag}" >> $GITHUB_ENV
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
