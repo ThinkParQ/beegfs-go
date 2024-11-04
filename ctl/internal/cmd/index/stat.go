@@ -6,21 +6,21 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-type statIndexConfig struct {
-	beegfs bool
-	path   string
-}
+const statCmd = "stat"
+
+var path string
 
 func newGenericStatCmd() *cobra.Command {
-	cfg := statIndexConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				cfg.path = args[0]
+				path = args[0]
 			} else {
 				cwd, err := os.Getwd()
 				if err != nil {
@@ -30,16 +30,19 @@ func newGenericStatCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				cfg.path = beegfsClient.GetMountPath()
+				path = beegfsClient.GetMountPath()
 			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonStatIndex(&cfg)
+			return runPythonStatIndex(bflagSet, path)
 		},
 	}
-
-	cmd.Flags().BoolVar(&cfg.beegfs, "beegfs", false, "Print BeeGFS Metadata for the File")
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("beegfs", "", "Print BeeGFS Metadata for the File",
+			"--beegfs", false),
+	}
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 
 	return cmd
 }
@@ -60,18 +63,13 @@ $ beegfs index stat --beegfs README
 
 }
 
-func runPythonStatIndex(cfg *statIndexConfig) error {
-	args := []string{
-		"stat",
-	}
-
-	if cfg.beegfs {
-		args = append(args, "--beegfs")
-	}
-	if cfg.path != "" {
-		args = append(args, cfg.path)
-	}
-	cmd := exec.Command(beeBinary, args...)
+func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
+	allArgs = append(allArgs, statCmd)
+	allArgs = append(allArgs, wrappedArgs...)
+	allArgs = append(allArgs, path)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
