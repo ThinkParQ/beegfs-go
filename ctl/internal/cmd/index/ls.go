@@ -6,50 +6,21 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-type createLsConfig struct {
-	beegfs        bool
-	all           bool
-	almostAll     bool
-	blockSize     string
-	ignoreBackups bool
-	fullTime      bool
-	noGroup       bool
-	humanReadable bool
-	inode         bool
-	longListing   bool
-	reverse       bool
-	recursive     bool
-	size          bool
-	sortLargest   bool
-	timeStyle     string
-	mtime         bool
-	noSort        bool
-	path          string
-	delim         string
-	inMemoryName  string
-	nlinkWidth    int
-	sizeWidth     int
-	userWidth     int
-	groupWidth    int
-	version       bool
-}
+const lsCmd = "ls"
 
-func fullTimeAction(cfg *createLsConfig) {
-	cfg.longListing = true
-	cfg.beegfs = true
-	cfg.timeStyle = "full-iso"
-}
+var path string
 
 func newGenericLsCmd() *cobra.Command {
-	cfg := createLsConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				cfg.path = args[0]
+				path = args[0]
 			} else {
 				cwd, err := os.Getwd()
 				if err != nil {
@@ -59,47 +30,44 @@ func newGenericLsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				cfg.path = beegfsClient.GetMountPath()
+				path = beegfsClient.GetMountPath()
 			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonLsIndex(&cfg)
+			return runPythonLsIndex(bflagSet, path)
 		},
 	}
 
-	cmd.PersistentFlags().BoolP("help", "", false, "Help for ls")
-	cmd.Flags().BoolVarP(&cfg.beegfs, "beegfs", "b", false, "Print BeeGFS metadata for the file(s)")
-	cmd.Flags().BoolVarP(&cfg.all, "all", "a", false, "Do not ignore entries starting with .")
-	cmd.Flags().BoolVarP(&cfg.almostAll, "almost-all", "A", false, "Do not list implied . and ..")
-	cmd.Flags().StringVar(&cfg.blockSize, "block-size", "", "{K,KB,KiB,M,MB,"+
-		"MiB,G,GB,GiB,T,TB,TiB,P,PB,PiB,E,EB,EiB,Z,ZB,ZiB,Y,YB,YiB}, With -l,"+
-		" scale sizes by SIZE when printing them")
-	cmd.Flags().BoolVarP(&cfg.ignoreBackups, "ignore-backups", "B", false, "Do not list implied entries ending with ~")
-	cmd.Flags().BoolVar(&cfg.fullTime, "full-time", false, "Like -l --time-style=full-iso")
-	cmd.Flags().BoolVarP(&cfg.noGroup, "no-group", "G", false, "In a long listing, don't print group names")
-	cmd.Flags().BoolVarP(&cfg.humanReadable, "human-readable", "h", false, "With -l and -s, print sizes like 1K 234M 2G etc.")
-	cmd.Flags().BoolVarP(&cfg.inode, "inode", "i", false, "Print the index number of each file")
-	cmd.Flags().BoolVarP(&cfg.longListing, "long-listing", "l", false, "Use a long listing format")
-	cmd.Flags().BoolVarP(&cfg.reverse, "reverse", "r", false, "Reverse order while sorting")
-	cmd.Flags().BoolVarP(&cfg.recursive, "recursive", "R", false, "List subdirectories recursively")
-	cmd.Flags().BoolVarP(&cfg.size, "size", "s", false, "Print the allocated size of each file, in blocks")
-	cmd.Flags().BoolVarP(&cfg.sortLargest, "sort-largest", "S", false, "Sort by file size, largest first")
-	cmd.Flags().BoolVarP(&cfg.version, "version", "v", false, "BeeGFS Hive Index Version")
-	cmd.Flags().StringVar(&cfg.timeStyle, "time-style", "", "Time/date format with -l")
-	cmd.Flags().BoolVarP(&cfg.mtime, "mtime", "t", false, "Sort by modification time, newest first")
-	cmd.Flags().BoolVarP(&cfg.noSort, "no-sort", "U", false, "Do not sort; list entries in directory order")
-	cmd.Flags().StringVar(&cfg.delim, "delim", " ", "Delimiter separating output columns")
-	cmd.Flags().StringVar(&cfg.inMemoryName, "in-memory-name", "out", "In-memory name (hidden argument)")
-	cmd.Flags().IntVar(&cfg.nlinkWidth, "nlink-width", 2, "Width of nlink column")
-	cmd.Flags().IntVar(&cfg.sizeWidth, "size-width", 10, "Width of size column")
-	cmd.Flags().IntVar(&cfg.userWidth, "user-width", 5, "Width of user column")
-	cmd.Flags().IntVar(&cfg.groupWidth, "group-width", 5, "Width of group column")
-	err := cmd.Flags().MarkHidden("in-memory-name")
-	if err != nil {
-		return nil
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("beegfs", "b", "Print BeeGFS metadata for the file(s)", "--beegfs", false),
+		bflag.Flag("all", "a", "Do not ignore entries starting with .", "-a", false),
+		bflag.Flag("almost-all", "A", "Do not list implied . and ..", "-A", false),
+		bflag.Flag("block-size", "", "{K,KB,KiB,M,MB,MiB,G,GB,GiB,T,TB,TiB,P,PB,PiB,E,EB,EiB,Z,ZB,ZiB,Y,YB,YiB}, With -l, scale sizes by SIZE when printing them", "--block-size", ""),
+		bflag.Flag("ignore-backups", "B", "Do not list implied entries ending with ~", "--ignore-backups", false),
+		bflag.Flag("full-time", "", "Like -l --time-style=full-iso", "--full-time", false),
+		bflag.Flag("no-group", "G", "In a long listing, don't print group names", "--no-group", false),
+		bflag.Flag("human-readable", "h", "With -l and -s, print sizes like 1K 234M 2G etc.", "-h", false),
+		bflag.Flag("inode", "i", "Print the index number of each file", "-i", false),
+		bflag.Flag("long-listing", "l", "Use a long listing format", "-l", false),
+		bflag.Flag("reverse", "r", "Reverse order while sorting", "-r", false),
+		bflag.Flag("recursive", "R", "List subdirectories recursively", "-R", false),
+		bflag.Flag("size", "s", "Print the allocated size of each file, in blocks", "-s", false),
+		bflag.Flag("sort-largest", "S", "Sort by file size, largest first", "--sort=size", false),
+		bflag.Flag("version", "v", "BeeGFS Hive Index Version", "--version", false),
+		bflag.Flag("time-style", "", "Time/date format with -l", "--time-style", ""),
+		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "--mtime", false),
+		bflag.Flag("no-sort", "U", "Do not sort; list entries in directory order", "-U", false),
+		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
+		bflag.Flag("in-memory-name", "", "In-memory name", "--in-memory-name", "out"),
+		bflag.Flag("nlink-width", "", "Width of nlink column", "--nlink-width", 2),
+		bflag.Flag("size-width", "", "Width of size column", "--size-width", 10),
+		bflag.Flag("user-width", "", "Width of user column", "--user-width", 5),
+		bflag.Flag("group-width", "", "Width of group column", "--group-width", 5),
 	}
-
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+	cmd.PersistentFlags().BoolP("help", "", false, "Help for ls")
+	cmd.Flags().MarkHidden("in-memory-name")
 	return cmd
 }
 
@@ -119,121 +87,12 @@ $ beegfs index ls /mnt/index
 
 }
 
-func validateLsInputs(cfg *createLsConfig) error {
-	if cfg.fullTime {
-		fullTimeAction(cfg)
-	}
-	if cfg.delim != "" {
-		if err := getChar(cfg.delim); err != nil {
-			return err
-		}
-	}
-	if err := getNonNegative(cfg.nlinkWidth); err != nil {
-		return err
-	}
-	if err := getNonNegative(cfg.sizeWidth); err != nil {
-		return err
-	}
-	if err := getNonNegative(cfg.userWidth); err != nil {
-		return err
-	}
-	if err := getNonNegative(cfg.groupWidth); err != nil {
-		return err
-	}
-	if cfg.blockSize != "" {
-		if err := validateBlockSize(cfg.blockSize); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func runPythonLsIndex(cfg *createLsConfig) error {
-	if err := validateLsInputs(cfg); err != nil {
-		return err
-	}
-
-	args := []string{
-		"ls",
-	}
-
-	if cfg.beegfs {
-		args = append(args, "--beegfs")
-	}
-	if cfg.all {
-		args = append(args, "-a")
-	}
-	if cfg.almostAll {
-		args = append(args, "-A")
-	}
-	if cfg.blockSize != "" {
-		args = append(args, "--block-size", cfg.blockSize)
-	}
-	if cfg.ignoreBackups {
-		args = append(args, "--ignore-backups")
-	}
-	if cfg.fullTime {
-		args = append(args, "--full-time")
-	}
-	if cfg.noGroup {
-		args = append(args, "--no-group")
-	}
-	if cfg.humanReadable {
-		args = append(args, "-h")
-	}
-	if cfg.inode {
-		args = append(args, "-i")
-	}
-	if cfg.longListing {
-		args = append(args, "-l")
-	}
-	if cfg.reverse {
-		args = append(args, "-r")
-	}
-	if cfg.recursive {
-		args = append(args, "-R")
-	}
-	if cfg.size {
-		args = append(args, "-s")
-	}
-	if cfg.sortLargest {
-		args = append(args, "--sort=size")
-	}
-	if cfg.version {
-		args = append(args, "--version")
-	}
-	if cfg.timeStyle != "" {
-		args = append(args, "--time-style", cfg.timeStyle)
-	}
-	if cfg.mtime {
-		args = append(args, "--mtime")
-	}
-	if cfg.noSort {
-		args = append(args, "-U")
-	}
-	if cfg.path != "" {
-		args = append(args, cfg.path)
-	}
-	if cfg.delim != "" {
-		args = append(args, "--delim", cfg.delim)
-	}
-	if cfg.inMemoryName != "" {
-		args = append(args, "--in-memory-name", cfg.inMemoryName)
-	}
-	if cfg.nlinkWidth > 0 {
-		args = append(args, "--nlink-width", fmt.Sprint(cfg.nlinkWidth))
-	}
-	if cfg.sizeWidth > 0 {
-		args = append(args, "--size-width", fmt.Sprint(cfg.sizeWidth))
-	}
-	if cfg.userWidth > 0 {
-		args = append(args, "--user-width", fmt.Sprint(cfg.userWidth))
-	}
-	if cfg.groupWidth > 0 {
-		args = append(args, "--group-width", fmt.Sprint(cfg.groupWidth))
-	}
-
-	cmd := exec.Command(beeBinary, args...)
+func runPythonLsIndex(bflagSet *bflag.FlagSet, path string) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+1)
+	allArgs = append(allArgs, lsCmd, path)
+	allArgs = append(allArgs, wrappedArgs...)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
