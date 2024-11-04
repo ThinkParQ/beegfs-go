@@ -4,39 +4,39 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-type upgradeIndexConfig struct {
-	indexPath string
-	dbVersion int
-	backup    bool
-	delete    bool
-	restore   bool
-}
+const dbUpgradeCmd = "db-upgrade"
 
 func newGenericUpgradeCmd() *cobra.Command {
-	cfg := upgradeIndexConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonUpgradeIndex(&cfg)
+			return runPythonUpgradeIndex(bflagSet)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path [default: IndexEnv.conf]")
-	cmd.Flags().IntVar(&cfg.dbVersion, "db-version", 0,
-		"Upgrade/Downgrade database schema to the target Hive Index database version")
-	cmd.Flags().BoolVar(&cfg.backup, "backup", false, "Backup database files while upgrading/downgrading database schema")
-	cmd.Flags().BoolVar(&cfg.delete, "delete", false, "Delete backup database files recursively from index directory path")
-	cmd.Flags().BoolVar(&cfg.restore, "restore", false, "Restore backup database files recursively from index directory path")
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("index-path", "", "Index directory path [default: IndexEnv.conf]", "-I", ""),
+		bflag.Flag("db-version", "",
+			"Upgrade/Downgrade database schema to the target Hive Index database version", "-T", 0),
+		bflag.Flag("backup", "",
+			"Backup database files while upgrading/downgrading database schema", "-b", false),
+		bflag.Flag("delete", "",
+			"Delete backup database files recursively from index directory path", "-d", false),
+		bflag.Flag("restore", "",
+			"Restore backup database files recursively from index directory path", "-r", false),
+	}
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	err := cmd.MarkFlagRequired("db-version")
 	if err != nil {
 		fmt.Println(err)
@@ -67,29 +67,12 @@ take backup before database upgrade
 	return s
 }
 
-func runPythonUpgradeIndex(cfg *upgradeIndexConfig) error {
-	args := []string{
-		"db-upgrade",
-	}
-
-	if cfg.dbVersion != 0 {
-		args = append(args, "-T", strconv.Itoa(cfg.dbVersion))
-	}
-	if cfg.indexPath != "" {
-		args = append(args, "-I", cfg.indexPath)
-	}
-	if cfg.backup {
-		args = append(args, "-b")
-	}
-	if cfg.delete {
-		args = append(args, "-d")
-	}
-	if cfg.restore {
-		args = append(args, "-r")
-	}
-	args = append(args, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
-
-	cmd := exec.Command(beeBinary, args...)
+func runPythonUpgradeIndex(bflagSet *bflag.FlagSet) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
+	allArgs = append(allArgs, dbUpgradeCmd, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
+	allArgs = append(allArgs, wrappedArgs...)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
