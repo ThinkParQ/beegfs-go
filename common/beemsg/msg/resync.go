@@ -4,7 +4,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
-// Requests target resyc stats
+// Requests target resync stats
 type GetStorageResyncStats struct {
 	TargetID uint16
 }

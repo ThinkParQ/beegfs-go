@@ -11,7 +11,9 @@ func NewResyncCmd() *cobra.Command {
 		Long:  "Manage and query resync of a  target from its buddy.",
 	}
 
-	cmd.AddCommand(newResycStatsCmd())
+	cmd.AddCommand(newResyncStatsCmd())
+	cmd.AddCommand(newStartCmd())
+	cmd.AddCommand(newRestartCmd())
 
 	return cmd
 }
