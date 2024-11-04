@@ -16,7 +16,6 @@ type createIndexConfig struct {
 	indexPath string
 	summary   bool
 	xattrs    bool
-	version   bool
 	maxLevel  uint
 	scanDirs  bool
 	port      uint
@@ -41,7 +40,6 @@ func newGenericCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
 	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Create tree summary table along with other tables")
 	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
-	cmd.Flags().BoolVar(&cfg.version, "version", false, "BeeGFS Hive Index Version")
 	cmd.Flags().UintVar(&cfg.maxLevel, "max-level", 0, "Max level to go down")
 	cmd.Flags().BoolVar(&cfg.scanDirs, "scan-dirs", false, "Print the number of scanned directories")
 	cmd.Flags().UintVar(&cfg.port, "port", 0, "Port number to connect with client")
@@ -110,9 +108,6 @@ func runPythonCreateIndex(cfg *createIndexConfig) error {
 	}
 	if cfg.xattrs {
 		args = append(args, "-x")
-	}
-	if cfg.version {
-		args = append(args, "-v")
 	}
 	if cfg.maxLevel > 0 {
 		args = append(args, "-z", fmt.Sprint(cfg.maxLevel))
