@@ -6,28 +6,27 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 )
 
-type queryIndexConfig struct {
-	dbPath   string
-	sqlQuery string
-}
+const queryCmd = "query-index"
 
 func newGenericQueryCmd() *cobra.Command {
-	cfg := queryIndexConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonQueryIndex(&cfg)
+			return runPythonQueryIndex(bflagSet)
 		},
 	}
-
-	cmd.Flags().StringVar(&cfg.dbPath, "db-path", "", "path to dir containing .bdm.db")
-	cmd.Flags().StringVar(&cfg.sqlQuery, "sql-query", "", "Provide sql query")
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("db-path", "", "path to dir containing .bdm.db", "-I", ""),
+		bflag.Flag("sql-query", "", "Provide sql query", "-s", ""),
+	}
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 
 	return cmd
 }
@@ -53,39 +52,12 @@ beegfs index query --db-path /index/dir1/ --sql-query "select * from entries"
 	return s
 }
 
-func validateQueryInputs(cfg *queryIndexConfig) error {
-	if cfg.dbPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		beegfsClient, err := config.BeeGFSClient(cwd)
-		if err != nil {
-			return err
-		}
-		cfg.dbPath = beegfsClient.GetMountPath()
-	}
-
-	return nil
-}
-
-func runPythonQueryIndex(cfg *queryIndexConfig) error {
-	if err := validateQueryInputs(cfg); err != nil {
-		return err
-	}
-
-	args := []string{
-		"query-index",
-	}
-
-	if cfg.dbPath != "" {
-		args = append(args, "-I", cfg.dbPath)
-	}
-	if cfg.sqlQuery != "" {
-		args = append(args, "-s", cfg.sqlQuery)
-	}
-
-	cmd := exec.Command(beeBinary, args...)
+func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+1)
+	allArgs = append(allArgs, queryCmd)
+	allArgs = append(allArgs, wrappedArgs...)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
