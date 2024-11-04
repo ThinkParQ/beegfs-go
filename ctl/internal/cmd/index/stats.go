@@ -4,79 +4,23 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
+const statsCmd = "stats"
+
+var path, stat string
+
 type createStatsConfig struct {
-	recursive    bool
-	cumulative   bool
-	order        string
-	delim        string
-	numResults   uint
-	uid          string
-	inMemoryName string
-	stat         string
-	path         string
-	version      bool
-}
-
-type statConfig struct {
-	recursive  bool
-	cumulative bool
-	others     bool
-}
-
-var STAT_CONFIG = map[string]statConfig{
-	"depth":              {recursive: true},
-	"filesize":           {recursive: true},
-	"filecount":          {recursive: true},
-	"linkcount":          {recursive: true},
-	"dircount":           {recursive: true},
-	"leaf-dirs":          {recursive: true},
-	"leaf-depth":         {recursive: true},
-	"leaf-files":         {recursive: true},
-	"leaf-links":         {recursive: true},
-	"total-filesize":     {cumulative: true},
-	"total-filecount":    {cumulative: true},
-	"total-linkcount":    {cumulative: true},
-	"total-dircount":     {cumulative: true},
-	"total-leaf-files":   {cumulative: true},
-	"total-leaf-links":   {cumulative: true},
-	"files-per-level":    {cumulative: true},
-	"links-per-level":    {cumulative: true},
-	"dirs-per-level":     {cumulative: true},
-	"average-leaf-files": {cumulative: true},
-	"average-leaf-links": {cumulative: true},
-	"median-leaf-files":  {others: true},
-	"duplicate-names":    {others: true},
-}
-
-var validOrders = []string{
-	"ASC", "DESC", "least", "most", "ASCENDING", "DESCENDING",
-}
-
-func isValidOrder(order string) bool {
-	for _, valid := range validOrders {
-		if valid == order {
-			return true
-		}
-	}
-	return false
-}
-
-func getStatChoices() string {
-	keys := make([]string, 0, len(STAT_CONFIG))
-	for k := range STAT_CONFIG {
-		keys = append(keys, k)
-	}
-	return strings.Join(keys, ", ")
+	delim string
 }
 
 func newGenericStatsCmd() *cobra.Command {
 	cfg := createStatsConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		Args: cobra.MinimumNArgs(1),
@@ -87,22 +31,9 @@ func newGenericStatsCmd() *cobra.Command {
 			if len(args) < 1 {
 				return fmt.Errorf("stat argument is required")
 			}
-			cfg.stat = args[0]
-			if _, valid := STAT_CONFIG[cfg.stat]; !valid {
-				return fmt.Errorf("invalid stat '%s', must be one of: %v", cfg.stat, getStatChoices())
-			}
-			statCfg := STAT_CONFIG[cfg.stat]
-			if cfg.recursive && statCfg.cumulative {
-				return fmt.Errorf("--recursive/-r has no effect on \"%s\" statistic", cfg.stat)
-			}
-			if cfg.cumulative && statCfg.recursive {
-				return fmt.Errorf("--cumulative/-c has no effect on \"%s\" statistic", cfg.stat)
-			}
-			if (cfg.recursive || cfg.cumulative) && statCfg.others {
-				return fmt.Errorf("--recursive/-r and --cumulative/-c have no effect on \"%s\" statistic", cfg.stat)
-			}
+			stat = args[0]
 			if len(args) > 1 {
-				cfg.path = args[1]
+				path = args[1]
 			} else {
 				cwd, err := os.Getwd()
 				if err != nil {
@@ -112,24 +43,27 @@ func newGenericStatsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				cfg.path = beegfsClient.GetMountPath()
+				path = beegfsClient.GetMountPath()
 			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonExecStats(&cfg)
+			return runPythonExecStats(bflagSet, &cfg, stat, path)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&cfg.recursive, "recursive", "r", false, "Run command recursively")
-	cmd.Flags().BoolVarP(&cfg.cumulative, "cumulative", "c", false, "Return cumulative values")
-	cmd.Flags().StringVar(&cfg.order, "order", "ASC", "Sort output (if applicable)")
+	copyFlags := []bflag.FlagWrapper{
+		bflag.Flag("recursive", "r", "Run command recursively", "-r", false),
+		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
+		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
+		bflag.Flag("num-results", "", "Limit the number of results", "--num-results", 0),
+		bflag.Flag("uid", "", "Restrict to user", "--uid", ""),
+		bflag.Flag("user", "", "Restrict to user", "--user", ""),
+		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
+		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
+	}
+	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	cmd.Flags().StringVar(&cfg.delim, "delim", " ", "Delimiter separating output columns")
-	cmd.Flags().UintVar(&cfg.numResults, "num-results", 0, "Limit the number of results")
-	cmd.Flags().StringVar(&cfg.uid, "uid", "", "Restrict to user")
-	cmd.Flags().StringVar(&cfg.uid, "user", "", "Restrict to user")
-	cmd.Flags().BoolVarP(&cfg.version, "version", "v", false, "Version of the find command.")
-	cmd.Flags().StringVar(&cfg.inMemoryName, "in-memory-name", "out", "In-memory name")
 	cmd.MarkFlagsMutuallyExclusive("uid", "user")
 	err := cmd.Flags().MarkHidden("in-memory-name")
 	if err != nil {
@@ -159,54 +93,16 @@ positional arguments:
 
 }
 
-func validateStatsInputs(cfg *createStatsConfig) error {
-	if !isValidOrder(cfg.order) {
-		return fmt.Errorf("invalid order: %s. Must be one of ASC, DESC, least, or most", cfg.order)
-	}
-	return nil
-}
-
-func runPythonExecStats(cfg *createStatsConfig) error {
-	if err := validateStatsInputs(cfg); err != nil {
-		return err
-	}
-
-	args := []string{
-		"stats",
-	}
-
-	if cfg.stat != "" {
-		args = append(args, cfg.stat)
-	}
-	if cfg.path != "" {
-		args = append(args, cfg.path)
-	}
-	if cfg.recursive {
-		args = append(args, "-r")
-	}
-	if cfg.cumulative {
-		args = append(args, "-c")
-	}
-	if cfg.order != "" {
-		args = append(args, "--order", cfg.order)
-	}
+func runPythonExecStats(bflagSet *bflag.FlagSet, cfg *createStatsConfig, stat,
+	path string) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+4)
+	allArgs = append(allArgs, statsCmd, stat, path)
 	if cfg.delim != "" {
-		args = append(args, "--delim", cfg.delim)
+		allArgs = append(allArgs, "--delim", cfg.delim)
 	}
-	if cfg.numResults > 0 {
-		args = append(args, "--num-results", fmt.Sprintf("%d", cfg.numResults))
-	}
-	if cfg.version {
-		args = append(args, "--version")
-	}
-	if cfg.uid != "" {
-		args = append(args, "--uid", cfg.uid)
-	}
-	if cfg.inMemoryName != "" {
-		args = append(args, "--in-memory-name", cfg.inMemoryName)
-	}
-
-	cmd := exec.Command(beeBinary, args...)
+	allArgs = append(allArgs, wrappedArgs...)
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
