@@ -1,6 +1,7 @@
 package resync
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,13 +16,13 @@ type startResync_config struct {
 	timespan     time.Duration
 }
 
-func newStartCmd() *cobra.Command {
+func newStartResyncCmd() *cobra.Command {
 	var err error
 	cfg := startResync_config{buddyGroup: beegfs.InvalidEntityId{}, restart: false}
 
 	cmd := &cobra.Command{
 		Use:   "start <buddy-group>",
-		Short: "Starts a resync of a storage or metadata target from its buddy.",
+		Short: "Starts a resync of a storage or metadata target from its buddy target.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.buddyGroup, err = beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
@@ -34,16 +35,15 @@ func newStartCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&cfg.timestampSec, "timestamp", -1,
-		"Timestamp in UNIX epoch format, representing the time from which to resync until now.")
+		"Override last buddy communication timestamp. (Only for storage buddy group)")
 	cmd.Flags().DurationVar(&cfg.timespan, "timespan", -1*time.Second,
-		"Resync all entries modified from the specified time until now.")
+		"Resync entries modified in the given timespan.  (Only for storage buddy group)")
 	cmd.MarkFlagsMutuallyExclusive("timestamp", "timespan")
 
 	return cmd
 }
 
 func runStartResyncCmd(cmd *cobra.Command, cfg *startResync_config) error {
-
 	if cfg.timespan >= 0 {
 		cfg.timestampSec = time.Now().Add(-cfg.timespan).Unix()
 	}
@@ -53,5 +53,6 @@ func runStartResyncCmd(cmd *cobra.Command, cfg *startResync_config) error {
 		return err
 	}
 
+	fmt.Println("Successfully sent resync request.")
 	return nil
 }

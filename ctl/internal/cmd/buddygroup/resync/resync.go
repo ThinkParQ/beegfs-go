@@ -12,7 +12,7 @@ func NewResyncCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newResyncStatsCmd())
-	cmd.AddCommand(newStartCmd())
+	cmd.AddCommand(newStartResyncCmd())
 	cmd.AddCommand(newRestartCmd())
 
 	return cmd

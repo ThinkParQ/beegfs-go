@@ -9,7 +9,6 @@ import (
 )
 
 func StartResync(ctx context.Context, group beegfs.EntityId, timestampSec int64, restart bool) error {
-
 	client, err := config.ManagementClient()
 	if err != nil {
 		return err

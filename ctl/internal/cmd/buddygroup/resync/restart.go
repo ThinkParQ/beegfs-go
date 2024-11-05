@@ -14,7 +14,6 @@ func newRestartCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "restart <buddy-group>",
 		Short: "Restarts a resync of a storage target from its buddy. (Restart resync for meta targets are not supported).",
-		Long:  "Restarts a resync of a storage target from its buddy. Meta targets resync cannot be aborted or restarted.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.buddyGroup, err = beegfs.NewEntityIdParser(16, beegfs.Storage).Parse(args[0])
@@ -27,9 +26,9 @@ func newRestartCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&cfg.timestampSec, "timestamp", -1,
-		"Timestamp in UNIX epoch format, representing the time from which to resync until now.")
+		"Override last buddy communication timestamp. (Only for storage buddy group)")
 	cmd.Flags().DurationVar(&cfg.timespan, "timespan", -1*time.Second,
-		"Resync all entries modified from the specified time until now.")
+		"Resync entries modified in the given timespan.  (Only for storage buddy group)")
 
 	cmd.MarkFlagsMutuallyExclusive("timestamp", "timespan")
 	cmd.MarkFlagsOneRequired("timestamp", "timespan")

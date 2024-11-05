@@ -120,7 +120,7 @@ func GetStorageResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (Sto
 // Query the node for the given target
 func getNode(ctx context.Context, pTarget beegfs.EntityIdSet) (beegfs.EntityIdSet, beegfs.EntityIdSet, error) {
 	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "storageBench"))
+	log := logger.With(zap.String("component", "resync"))
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
@@ -138,7 +138,7 @@ func getNode(ctx context.Context, pTarget beegfs.EntityIdSet) (beegfs.EntityIdSe
 	return node, pTarget, nil
 }
 
-// Query primary target from the buddy group
+// Query primary target for the buddy group
 func GetPrimaryTarget(ctx context.Context, buddyGroup beegfs.EntityId) (beegfs.EntityIdSet, error) {
 	groups, err := buddygroup.GetBuddyGroups(ctx)
 	if err != nil {
