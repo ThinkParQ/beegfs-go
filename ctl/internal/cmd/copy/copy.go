@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	beegfsCopyPath = "/opt/beegfs/sbin/beegfs-copy/bin/beegfs-copy"
+	beegfsCopyPath = "/opt/beegfs/sbin/beegfs-copy"
 	featureString  = "io.beegfs.copy"
 )
 
