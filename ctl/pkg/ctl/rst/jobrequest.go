@@ -293,7 +293,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 // if any RSTs are set on the entry and returns a slice with each of the RSTs, or ErrFileHasNoRSTs
 // if rstID is not set and the entry has no RSTs defined.
 func checkEntryAndDetermineRSTs(ctx context.Context, mappings *util.Mappings, rstID uint32, path string, ignoreReaders bool, ignoreWriters bool) ([]uint32, error) {
-	entry, err := entry.GetEntry(ctx, mappings, path, false, false)
+	entry, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, path)
 	if err != nil {
 		return nil, err
 	}

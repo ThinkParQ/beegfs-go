@@ -9,7 +9,6 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -17,21 +16,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// GetEntriesConfig is used to determine how paths are provided to GetEntries() and control what
-// output is returned for each entry. The PathsViaX fields are mutually exclusive, and if multiple
-// are specified they are prioritized from top to bottom.
-type GetEntriesConfig struct {
-	// The stdin mechanism allows the caller to provide multiple paths over a channel. This allows
-	// paths to be sent to GetEntries() while simultaneously returning results for each path. This
-	// is useful when GetEntries() is used as part of a larger pipeline. The caller should close the
-	// channel once all paths are done to cleanup.
-	PathsViaChan <-chan string
-	// Provide a single path to walking a directory tree and return all sub-entries.
-	PathsViaRecursion string
-	// Specify one or more paths.
-	PathsViaList []string
-	// Return extra detail about each entry.
-	Verbose bool
+type GetEntriesCfg struct {
+	Verbose        bool
+	IncludeOrigMsg bool
 }
 
 // GetEntryCombinedInfo returns all information needed to print details about an entry in BeeGFS.
@@ -190,110 +177,47 @@ func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 	return getEntryVerbose
 }
 
-// GetEntries accepts a context and a GetEntriesConfig that controls how paths are provided and what
-// detail about each entry should be returned.
-//
-// If anything goes wrong during the initial setup an error will be returned, otherwise GetEntries
-// will immediately return channels where results and errors are written asynchronously. The
-// entriesChan will return entry info and be closed once the info for all requested entries is
-// returned or after an error. The error channel returns any errors walking the directory or getting
-// the entry info. This approach allows callers to decide when there is an error if they should
-// immediately terminate, or continue writing out the remaining entries before handling the error.
-func GetEntries(ctx context.Context, cfg GetEntriesConfig) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
+// GetEntries accepts a context, an input method that controls how paths are provided, and a
+// GetEntriesCfg that determines what detail about each entry should be returned. If anything
+// goes wrong during the initial setup an error will be returned, otherwise GetEntries will
+// immediately return channels where results and errors are written asynchronously. The entriesChan
+// will return entry info and be closed once the info for all requested entries is returned or after
+// an error. The error channel returns any errors walking the directory or getting the entry info.
+// This approach allows callers to decide when there is an error if they should immediately
+// terminate, or continue writing out the remaining entries before handling the error.
+func GetEntries(ctx context.Context, pm InputMethod, cfg GetEntriesCfg) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
 	logger, _ := config.GetLogger()
 	log := logger.With(zap.String("component", "getEntries"))
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
 		if !errors.Is(err, util.ErrMappingRSTs) {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("unable to proceed without entity mappings: %w", err)
 		}
 		// RSTs are not configured on all BeeGFS instances, silently ignore.
 		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
-	var entriesChan <-chan *GetEntryCombinedInfo
-	// At most two errors are expected. Increase if additional writers are added to the channel.
-	errChan := make(chan error, 2)
-
-	if cfg.PathsViaChan != nil {
-		// Read paths from the provided channel:
-		entriesChan = getEntries(ctx, mappings, cfg.PathsViaChan, cfg.Verbose, errChan)
-	} else if cfg.PathsViaRecursion != "" {
-		pathsChan, err := walkDir(ctx, cfg.PathsViaRecursion, errChan)
-		if err != nil {
-			return nil, nil, err
-		}
-		entriesChan = getEntries(ctx, mappings, pathsChan, cfg.Verbose, errChan)
-	} else {
-		pathsChan := make(chan string, 1024)
-		entriesChan = getEntries(ctx, mappings, pathsChan, cfg.Verbose, errChan)
-		for _, e := range cfg.PathsViaList {
-			pathsChan <- e
-		}
-		close(pathsChan)
+	processEntry := func(path string) (*GetEntryCombinedInfo, error) {
+		return GetEntry(ctx, mappings, cfg, path)
 	}
-	return entriesChan, errChan, nil
+
+	return processEntries(ctx, pm, true, processEntry)
 }
 
-// Returns a channel where the entry info for each path will be sent. It asynchronously processes
-// paths as they are sent to the provided channel and sends the results to the returned channel. If
-// there are any issues getting an entry they are returned on the provided errChan and no more
-// entries are processed.
-func getEntries(ctx context.Context, mappings *util.Mappings, paths <-chan string, verbose bool, errChan chan<- error) <-chan *GetEntryCombinedInfo {
-
-	entriesChan := make(chan *GetEntryCombinedInfo, 1024)
-	var beegfsClient filesystem.Provider
-	var err error
-	go func() {
-		defer close(entriesChan)
-		for {
-			select {
-			case path, ok := <-paths:
-				if !ok {
-					return
-				}
-				// Automatically initialize the BeeGFS client with the first path.
-				if beegfsClient == nil {
-					beegfsClient, err = config.BeeGFSClient(path)
-					if err != nil {
-						errChan <- err
-						return
-					}
-				}
-				searchPath, err := beegfsClient.GetRelativePathWithinMount(path)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				result, err := GetEntry(ctx, mappings, searchPath, verbose, false)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				entriesChan <- &result
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return entriesChan
-}
-
-func GetEntry(ctx context.Context, mappings *util.Mappings, searchPath string, verbose bool, includeOrigMsg bool) (GetEntryCombinedInfo, error) {
+func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {
 	// TODO: https://github.com/thinkparq/ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
 	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
 	// always retrieved using the RPC.
-	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, searchPath)
+	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, path)
 	if err != nil {
-		return GetEntryCombinedInfo{}, err
+		return nil, err
 	}
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return GetEntryCombinedInfo{}, fmt.Errorf("error accessing the node store: %w", err)
+		return nil, fmt.Errorf("error accessing the node store: %w", err)
 	}
 
 	request := &msg.GetEntryInfoRequest{
@@ -303,22 +227,22 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, searchPath string, v
 
 	err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
 	if err != nil {
-		return GetEntryCombinedInfo{}, fmt.Errorf("error getting entry info from node: %w", err)
+		return nil, fmt.Errorf("error getting entry info from node: %w", err)
 	}
 
 	var entryWithParent = GetEntryCombinedInfo{
-		Path: searchPath,
+		Path: path,
 	}
 	entryWithParent.Entry = newEntry(mappings, entry, ownerNode, *resp)
-	if includeOrigMsg {
+	if cfg.IncludeOrigMsg {
 		entryWithParent.Entry.origEntryInfoMsg = &entry
 	}
 
-	if verbose {
-		if searchPath != "/" {
+	if cfg.Verbose {
+		if path != "/" {
 			// Unless the searchPath is the root directory, always drop the trailing slash to allow
 			// filepath.Dir to determine the parent of the file/directory indicated by searchPath.
-			parentSearchPath := filepath.Dir(strings.TrimSuffix(searchPath, "/"))
+			parentSearchPath := filepath.Dir(strings.TrimSuffix(path, "/"))
 			// We have to make another RPC to get the parent details needed for verbose output. We can't
 			// just cache them the first time around because some of the path components may be skipped
 			// if we were able to take any shortcuts during the search.
@@ -330,7 +254,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, searchPath string, v
 			} else {
 				entryWithParent.Parent = newEntry(mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
 				entryWithParent.Entry.Verbose = newVerbose(resp.Path, entryWithParent.Entry, entryWithParent.Parent)
-				if includeOrigMsg {
+				if cfg.IncludeOrigMsg {
 					entryWithParent.Parent.origEntryInfoMsg = &parentEntry
 				}
 			}
@@ -340,7 +264,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, searchPath string, v
 		}
 	}
 
-	return entryWithParent, nil
+	return &entryWithParent, nil
 }
 
 // getEntryAndOwnerFromPathViaRPC() is the Go equivalent of the use unmounted code path from the C++
