@@ -29,7 +29,7 @@ func NewCopyCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var frontendCfg frontendCfg
 	cmd := &cobra.Command{
-		Use:     "copy <source> [<source>] <destination>",
+		Use:     "copy -m <machine-file> <source> [<source>] <destination>",
 		Args:    cobra.MinimumNArgs(2),
 		Aliases: []string{"cp"},
 		Short:   "Copy files and directories in parallel.",
@@ -96,9 +96,13 @@ should take measures to perform additional verification the source and destinati
 		bflag.GlobalFlag(config.NumWorkersKey, "-t"),
 		bflag.Flag("nodes", "n", "Start this many from machine file. If set to zero all nodes will be used.", "-n", 0),
 		bflag.Flag("keep-atime", "a", "Do not modify the access time of the source file(s).", "-a", false),
-		bflag.Flag("chunksize", "c", "Chunk size for copy operations (in MB).", "-c", ""),
+		bflag.Flag("chunksize", "c", `Chunk size for copy operations (in MB).
+If this option is not specified the default chunk size is 128 MB.`,
+			"-c", 0),
 		bflag.Flag("keep-mtime", "k", "Keep the original modification time from the source in the destination.", "-k", false),
-		bflag.Flag("partition-threshold", "p", "Partition copy threshold (in MB).", "-p", ""),
+		bflag.Flag("partition-threshold", "p", `Partition copy threshold (in MB).
+If this option is not specified the default value is 1000 MB.`,
+			"-p", 0),
 		bflag.Flag("list-diff", "l", `Do not make any changes and just list differences between the source and destination paths. 
 This mode will list missing files and directories, and files with different sizes or older
 modification times in the destination. Only one source path is accepted, and can be either 
@@ -116,12 +120,12 @@ destination have different modification times.`,
 			"-d", false),
 		bflag.Flag("statistics", "s", "Print thread statistics.", "-s", false),
 		// Note I have yet to find a good way to detect if the debug flag is set and automatically set "-v 3".
-		bflag.Flag("verbose", "v", "Increase output verbosity. Levels 1-3 are supported.", "-v", ""),
+		bflag.Flag("verbose", "v", "Increase output verbosity. Levels 1-3 are supported.", "-v", 0),
 	}
 
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\\n", `Change the string delimiter used to determine individual paths when read from stdin.
-		For example use --stdin-delimiter=\"\\x00\" for NULL.`)
+For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().IntVar(&frontendCfg.batchSize, "stdin-batch", 1024, "At most this many paths will be read from stdin before triggering the parallel copy. Setting to higher values will consume more memory.")
 	cmd.MarkFlagRequired("machine-file")
 	cmd.Flags().MarkHidden("copy-help")
