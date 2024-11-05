@@ -30,7 +30,7 @@ func NewCopyCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var frontendCfg frontendCfg
 	cmd := &cobra.Command{
-		Use:     "copy <source> [<source>] <destination>",
+		Use:     "copy -m <machine-file> <source> [<source>] <destination>",
 		Args:    cobra.MinimumNArgs(2),
 		Aliases: []string{"cp"},
 		Short:   "Copy files and directories in parallel.",
@@ -158,12 +158,12 @@ should take measures to perform additional verification the source and destinati
 		bflag.Flag("nodes", "n", "Start the copy using this many nodes from the machine file (selected top to bottom). The default (0) will use all nodes.", "-n", 0),
 		bflag.Flag("keep-atime", "a", `Do not modify the access time of the source file(s). 
 This only works if supported and enabled on the source file system.`, "-a", false),
-		bflag.Flag("chunksize", "c", "Chunk size for copy operations (in MB).", "-c", ""),
+		bflag.Flag("chunksize", "c", "Chunk size for copy operations (in MB).", "-c", 128),
 		bflag.Flag("keep-mtime", "k", `Keep the original modification time from the source in the destination. 
 This only works if supported and enabled on the destination file system.`, "-k", false),
 		bflag.Flag("partition-threshold", "p", `Partition copy threshold (in MB).
 To accelerate the copy operation, large files are partitioned and copied using multiple threads.
-Files with a size below the partition-threshold are processed by a single thread.`, "-p", "1000MB"),
+Files with a size below the partition-threshold are processed by a single thread.`, "-p", 1000),
 		bflag.Flag("list-diff", "l", `Do not make any changes and just list differences between the source and destination paths. 
 This mode will list missing files and directories, and files with different sizes or older
 modification times in the destination. Only one source path is accepted, and can be either 
@@ -189,7 +189,7 @@ destination have different modification times.`,
 
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\\n", `Change the string delimiter used to determine individual paths when read from stdin.
-		For example use --stdin-delimiter=\"\\x00\" for NULL.`)
+For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().IntVar(&frontendCfg.batchSize, "stdin-batch", 1024, "At most this many paths will be read from stdin before triggering the parallel copy. Setting to higher values will consume more memory.")
 	cmd.MarkFlagRequired("machine-file")
 	cmd.Flags().MarkHidden("copy-help")
