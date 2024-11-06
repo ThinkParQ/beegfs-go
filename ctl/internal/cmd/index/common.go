@@ -16,7 +16,7 @@ var path string
 
 func checkBeeGFSConfig() error {
 	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		//lint:ignore ST1005 we want to capitalize BeeGFS in the error string
+		//nolint:golint // we want to capitalize BeeGFS in the error string
 		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexConfig)
 	}
 
