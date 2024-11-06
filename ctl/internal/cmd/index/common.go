@@ -12,9 +12,12 @@ const (
 	updateEnv   = "/etc/beegfs/index/updateEnv.conf"
 )
 
+var path string
+
 func checkBeeGFSConfig() error {
 	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		return fmt.Errorf("%s: Hive Index Binary not found at %s", "BeeGFS", beeBinary)
+		//lint:ignore ST1005 we want to capitalize BeeGFS in the error string
+		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexConfig)
 	}
 
 	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {

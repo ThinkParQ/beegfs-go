@@ -12,7 +12,7 @@ import (
 
 const statsCmd = "stats"
 
-var path, stat string
+var stat string
 
 type createStatsConfig struct {
 	delim string

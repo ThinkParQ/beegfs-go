@@ -12,8 +12,6 @@ import (
 
 const findCmd = "find"
 
-var path string
-
 type findIndexConfig struct {
 	size  string
 	delim string

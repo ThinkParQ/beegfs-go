@@ -12,8 +12,6 @@ import (
 
 const statCmd = "stat"
 
-var path string
-
 func newGenericStatCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 

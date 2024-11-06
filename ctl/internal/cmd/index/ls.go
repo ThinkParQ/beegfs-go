@@ -12,8 +12,6 @@ import (
 
 const lsCmd = "ls"
 
-var path string
-
 func newGenericLsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
