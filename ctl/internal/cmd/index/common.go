@@ -43,15 +43,18 @@ func checkBeeGFSConfig() error {
 	}
 
 	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
-		return fmt.Errorf("%s Hive Index is not configured: %s not found", "BeeGFS", indexConfig)
+		//nolint:golint // we want to capitalize BeeGFS in the error string
+		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexConfig)
 	}
 
 	if _, err := os.Stat(indexEnv); os.IsNotExist(err) {
-		return fmt.Errorf("%s Hive Index is not configured: %s not found", "BeeGFS", indexEnv)
+		//nolint:golint // we want to capitalize BeeGFS in the error string
+		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexEnv)
 	}
 
 	if _, err := os.Stat(updateEnv); os.IsNotExist(err) {
-		return fmt.Errorf("%s Hive Index is not configured: %s not found", "BeeGFS", updateEnv)
+		//nolint:golint // we want to capitalize BeeGFS in the error string
+		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", updateEnv)
 	}
 
 	return nil
