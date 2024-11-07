@@ -23,7 +23,7 @@ func newGenericQueryCmd() *cobra.Command {
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("db-path", "", "path to dir containing .bdm.db", "-I", ""),
+		bflag.Flag("db-path", "", "Path to the directory containing the database (.bdm.db file)", "-I", ""),
 		bflag.Flag("sql-query", "", "Provide sql query", "-s", ""),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
@@ -34,20 +34,17 @@ func newGenericQueryCmd() *cobra.Command {
 func newQueryCmd() *cobra.Command {
 	s := newGenericQueryCmd()
 	s.Use = "query"
-	s.Short = "Query a database file"
-	s.Long = `Run an SQL query against a table in a single level directory
-Hive db - just point it at the directory containing the database(.bdm.db).
+	s.Short = "Run an SQL query on a database file."
 
-When  providing  SQL  statements to bee you can put more than one SQL
-statement in the same string using semicolons at the end of each statement, 
-however the only SQL statement that will have output displayed if you have
-chosen to display output is the last SQL statement in the string. 
-This enables complex things like attaching an  input  database  to join with
-on each query (issued at ever level/directory found), 
-or other highly powerful but complex things.
+	s.Long = `Execute an SQL query on a single-level Hive database file (.bdm.db) within a specified directory.
+
+You can provide multiple SQL statements in a single string, separated by semicolons. Only the output 
+of the last SQL statement in the string will be displayed. This allows you to 
+perform complex operations, such as attaching an input database to join data across queries or applying 
+queries at various levels within a directory structure.
 
 Example:
-beegfs index query --db-path /index/dir1/ --sql-query "select * from entries"
+beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 `
 	return s
 }
@@ -62,11 +59,11 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }

@@ -49,19 +49,16 @@ func newGenericUpgradeCmd() *cobra.Command {
 func newUpgradeCmd() *cobra.Command {
 	s := newGenericUpgradeCmd()
 	s.Use = "db-upgrade"
-	s.Short = "BeeGFS Hive index database upgrade"
-	s.Long = `Upgrade or Downgrade BeeGFS Hive Index database schema.
+	s.Short = "Upgrades or downgrades the BeeGFS Hive index database schema."
 
-The BeeGFS Hive Index database upgrade utility is designed to update the
-database schema to a specific BeeGFS Hive Index version. 
-Only root users can upgrade the BeeGFS Hive Index database schema through SQL
-scripts. SQL scripts default config directory is “/opt/beegfs/db”. 
-If there are multiple SQL scripts present in the script directory then the
-utility sorts all scripts in ascending order and executes one by one on each
-database file.
+	s.Long = `Upgrade or downgrade the BeeGFS Hive Index database schema to a specified version.
 
-Example: Upgrade to database version "2" through SQL script query config and
-take backup before database upgrade
+This utility allows for updating the BeeGFS Hive Index database schema to a particular version, 
+using SQL scripts. Only root users can perform schema upgrades. By default, SQL script configurations 
+are located in "/opt/beegfs/db." If multiple SQL scripts are found in the script directory, the utility 
+sorts them in ascending order and executes each in sequence on the database files.
+
+Example: Upgrade the database to version "2" with a backup prior to the update:
 # beegfs index db-upgrade --db-version "2" --index-path /mnt/index --backup
 `
 	return s
@@ -77,11 +74,11 @@ func runPythonUpgradeIndex(bflagSet *bflag.FlagSet) error {
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }

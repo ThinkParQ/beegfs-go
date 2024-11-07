@@ -48,17 +48,21 @@ func newGenericStatCmd() *cobra.Command {
 func newStatCmd() *cobra.Command {
 	s := newGenericStatCmd()
 	s.Use = "stat"
-	s.Short = "Display file status"
-	s.Long = `Displays file and directory metadata information.
+	s.Short = "Displays file or directory metadata information."
 
-Example: View the Stat of a File
+	s.Long = `Retrieve metadata information for files and directories.
+
+This command displays detailed status information, similar to the standard "stat" command, 
+including metadata attributes for files and directories. Additional options allow retrieval 
+of BeeGFS-specific metadata if available.
+
+Example: Display the status of a file
 $ beegfs index stat README
 
-View the BeeGFS Stat of a File
+Example: Display BeeGFS-specific metadata for a file
 $ beegfs index stat --beegfs README
 `
 	return s
-
 }
 
 func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
@@ -72,11 +76,11 @@ func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }

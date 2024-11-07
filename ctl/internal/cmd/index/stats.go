@@ -76,21 +76,25 @@ func newGenericStatsCmd() *cobra.Command {
 func newStatsCmd() *cobra.Command {
 	s := newGenericStatsCmd()
 	s.Use = "stats"
-	s.Short = "Calculates stats of index directory"
-	s.Long = `Generate the index by walking the source directory.
+	s.Short = "Calculate statistics of the index directory."
 
-The stats subcommand allows users to obtain filesystem statistics
-like the total number of files, directories or links in the directory hierarchy,
-files, directories, or links per level, maximum and minimum file sizes..
+	s.Long = `Generates statistics by traversing the index directory hierarchy.
 
-Example: Get the total number of files under a directory
+The stats subcommand provides various filesystem statistics, such as the total 
+count of files, directories, or links, as well as distribution per level, maximum 
+and minimum file sizes, and other key metrics.
+
+Example: Get the total file count in a directory
 $ beegfs index stats total-filecount
 
-positional arguments:
-  {depth,filesize,filecount,linkcount,dircount,leaf-dirs,leaf-depth,leaf-files,leaf-links,total-filesize,total-filecount,total-linkcount,total-dircount,total-leaf-files,total-leaf-links,files-per-level,links-per-level,dirs-per-level,average-leaf-files,average-leaf-links,median-leaf-files,duplicate-names}
+Positional arguments:
+  {depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth, 
+   leaf-files, leaf-links, total-filesize, total-filecount, total-linkcount, 
+   total-dircount, total-leaf-files, total-leaf-links, files-per-level, 
+   links-per-level, dirs-per-level, average-leaf-files, average-leaf-links, 
+   median-leaf-files, duplicate-names}
 `
 	return s
-
 }
 
 func runPythonExecStats(bflagSet *bflag.FlagSet, cfg *createStatsConfig, stat,
@@ -107,11 +111,11 @@ func runPythonExecStats(bflagSet *bflag.FlagSet, cfg *createStatsConfig, stat,
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }

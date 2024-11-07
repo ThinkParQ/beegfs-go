@@ -94,14 +94,15 @@ func newGenericFindCmd() *cobra.Command {
 func newFindCmd() *cobra.Command {
 	s := newGenericFindCmd()
 	s.Use = "find"
-	s.Short = "Finds files in the index"
-	s.Long = `Allows users to get results by running queries over the index directory.
+	s.Short = "Searches for files in the index."
 
-find has very similar options to GNU find, 
-Hive’s find is way faster than running actual find commands over the filesystem.
+	s.Long = `Search for files in the index directory using query options.
 
-Example: Get the list of files which are greater than 1GB in size
-$ beegfs index find -size=+1G
+This command provides similar options to GNU find, but Hive's find is significantly faster 
+than running traditional find commands on the filesystem.
+
+Example: List files in the index directory that are larger than 1GB.
+$ beegfs index find -size +1G
 `
 	return s
 }
@@ -122,7 +123,7 @@ func runPythonFindIndex(bflagSet *bflag.FlagSet, cfg *findIndexConfig, path stri
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {

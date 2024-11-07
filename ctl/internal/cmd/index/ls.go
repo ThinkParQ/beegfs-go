@@ -72,17 +72,17 @@ func newGenericLsCmd() *cobra.Command {
 func newLsCmd() *cobra.Command {
 	s := newGenericLsCmd()
 	s.Use = "ls"
-	s.Short = "Lists the contents"
-	s.Long = `Lists the contents of the index directory.
+	s.Short = "Lists the contents of the index directory."
 
-It functions similarly to standard ls commands and supports both absolute and relative paths. 
-You can run this command from the index directory or a filesystem directory when using relative paths.
+	s.Long = `Displays the contents of the index directory.
 
-Example: List the contents of the index directory located at /mnt/index.
+This command works similarly to the standard "ls" command, supporting both absolute and relative paths. 
+You can use it from within the index directory or from a filesystem directory when specifying relative paths.
+
+Example: List the contents of the index directory at /mnt/index.
 $ beegfs index ls /mnt/index
 `
 	return s
-
 }
 
 func runPythonLsIndex(bflagSet *bflag.FlagSet, path string) error {
@@ -95,11 +95,11 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, path string) error {
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }
