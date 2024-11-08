@@ -12,7 +12,7 @@ import (
 func newResyncStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats <buddy-group>",
-		Short: "Retrieves statistics on a running resync",
+		Short: "Retrieves statistics for running or completed resyncs.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			buddyGroup, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])

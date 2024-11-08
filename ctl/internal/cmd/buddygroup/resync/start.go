@@ -22,7 +22,7 @@ func newStartResyncCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "start <buddy-group>",
-		Short: "Starts a resync of a storage or metadata target from its buddy target.",
+		Short: "Start a resync of a storage or metadata target from its buddy target.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.buddyGroup, err = beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
@@ -35,9 +35,9 @@ func newStartResyncCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&cfg.timestampSec, "timestamp", -1,
-		"Override last buddy communication timestamp. (Only for storage buddy group)")
+		"Override last buddy communication timestamp with a specific Unix timestamp (storage targets only).")
 	cmd.Flags().DurationVar(&cfg.timespan, "timespan", -1*time.Second,
-		"Resync entries modified in the given timespan.  (Only for storage buddy group)")
+		"Resync entries modified in the given timespan, for example 1d for the last day or 1h for the last hour (storage targets only).")
 	cmd.MarkFlagsMutuallyExclusive("timestamp", "timespan")
 
 	return cmd
@@ -53,6 +53,6 @@ func runStartResyncCmd(cmd *cobra.Command, cfg *startResync_config) error {
 		return err
 	}
 
-	fmt.Println("Successfully sent resync request.")
+	fmt.Println("Successfully sent resync request. Progress can be monitored with 'beegfs mirror resync stats'.")
 	return nil
 }
