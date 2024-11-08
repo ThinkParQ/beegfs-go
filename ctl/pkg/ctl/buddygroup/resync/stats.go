@@ -10,7 +10,6 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	buddygroup "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
-	"go.uber.org/zap"
 )
 
 type StorageResyncStats_Result struct {
@@ -119,15 +118,11 @@ func GetStorageResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (Sto
 
 // Query the node for the given target
 func getNode(ctx context.Context, pTarget beegfs.EntityIdSet) (beegfs.EntityIdSet, beegfs.EntityIdSet, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "resync"))
-
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
 		if !errors.Is(err, util.ErrMappingRSTs) {
 			return beegfs.EntityIdSet{}, beegfs.EntityIdSet{}, err
 		}
-		log.Debug("remote storage target mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
 	node, err := mappings.TargetToNode.Get(pTarget.Alias)
@@ -143,10 +138,6 @@ func GetPrimaryTarget(ctx context.Context, buddyGroup beegfs.EntityId) (beegfs.E
 	groups, err := buddygroup.GetBuddyGroups(ctx)
 	if err != nil {
 		return beegfs.EntityIdSet{}, err
-	}
-
-	if buddyGroup == nil {
-		return beegfs.EntityIdSet{}, nil
 	}
 
 	for _, g := range groups {
