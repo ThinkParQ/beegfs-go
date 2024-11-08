@@ -48,7 +48,7 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 		printStorageResults(result)
 
 	default:
-		return fmt.Errorf("invalid target %s, Only meta and storage are supported", primary)
+		return fmt.Errorf("invalid target %s, only meta and storage targets are supported", primary)
 	}
 
 	return nil
