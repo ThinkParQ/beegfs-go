@@ -24,7 +24,6 @@ func newGenericUpdateCmd() *cobra.Command {
 	}
 
 	bflagSet = bflag.NewFlagSet(commonIndexFlags, cmd)
-	cmd.Flags().MarkHidden("update")
 	return cmd
 }
 

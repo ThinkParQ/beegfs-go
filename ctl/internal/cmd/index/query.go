@@ -23,8 +23,8 @@ func newGenericQueryCmd() *cobra.Command {
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("db-path", "", "Path to the directory containing the database (.bdm.db file)", "-I", ""),
-		bflag.Flag("sql-query", "", "Provide sql query", "-s", ""),
+		bflag.Flag("db-path", "I", "Path to the directory containing the database (.bdm.db file)", "-I", ""),
+		bflag.Flag("sql-query", "s", "Provide sql query", "-s", ""),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 

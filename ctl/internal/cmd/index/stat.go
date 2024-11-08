@@ -37,8 +37,10 @@ func newGenericStatCmd() *cobra.Command {
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("beegfs", "", "Print BeeGFS Metadata for the File",
-			"--beegfs", false),
+		bflag.Flag("beegfs", "b", "Print BeeGFS Metadata for the File", "--beegfs", false),
+		bflag.Flag("debug-values", "H", "Show assigned input values (for debugging)", "-H", false),
+		bflag.Flag("terse", "j", "Print the information in terse form", "-j", false),
+		bflag.Flag("format", "f", "Use the specified FORMAT instead of the default; output a newline after each use of FORMAT", "-f", ""),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 

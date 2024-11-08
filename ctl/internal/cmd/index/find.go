@@ -68,6 +68,9 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("path", "", "File name matches shell pattern pattern.", "-path", ""),
 		bflag.Flag("readable", "", "Matches files which are readable.", "-readable", false),
 		bflag.Flag("samefile", "", "File refers to the same inode as name.", "-samefile", ""),
+		bflag.Flag("fprint", "", "Output file prefix (Creates file <output>.tid)", "-fprint", false),
+		bflag.Flag("printf", "", "print format on the standard output, "+
+			"similar to GNU find", "-printf", false),
 		bflag.Flag("true", "", "Always true.", "-true", false),
 		bflag.Flag("type", "", "File is of type c.", "-type", ""),
 		bflag.Flag("uid", "", "File's numeric user ID is N.", "-uid", ""),

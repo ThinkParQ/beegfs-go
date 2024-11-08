@@ -24,7 +24,6 @@ func newGenericCreateCmd() *cobra.Command {
 	}
 
 	bflagSet = bflag.NewFlagSet(commonIndexFlags, cmd)
-	cmd.Flags().MarkHidden("create")
 	return cmd
 }
 

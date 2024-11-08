@@ -54,7 +54,7 @@ func newGenericLsCmd() *cobra.Command {
 		bflag.Flag("sort-largest", "S", "Sort by file size, largest first", "--sort=size", false),
 		bflag.Flag("version", "v", "BeeGFS Hive Index Version", "--version", false),
 		bflag.Flag("time-style", "", "Time/date format with -l", "--time-style", ""),
-		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "--mtime", false),
+		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "-t", false),
 		bflag.Flag("no-sort", "U", "Do not sort; list entries in directory order", "-U", false),
 		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
 		bflag.Flag("in-memory-name", "", "In-memory name", "--in-memory-name", "out"),

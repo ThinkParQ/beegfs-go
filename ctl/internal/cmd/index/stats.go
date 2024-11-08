@@ -56,7 +56,7 @@ func newGenericStatsCmd() *cobra.Command {
 		bflag.Flag("recursive", "r", "Run command recursively", "-r", false),
 		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
 		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
-		bflag.Flag("num-results", "", "Limit the number of results", "--num-results", 0),
+		bflag.Flag("num-results", "n", "Limit the number of results", "--num-results", 0),
 		bflag.Flag("uid", "", "Restrict to user", "--uid", ""),
 		bflag.Flag("user", "", "Restrict to user", "--user", ""),
 		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
