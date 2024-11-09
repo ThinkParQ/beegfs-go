@@ -169,7 +169,7 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 	}
 
 	if resp.Result != beegfs.OpsErr_SUCCESS && resp.Result != beegfs.OpsErr_NOTADIR {
-		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates for path %s: %w", path, resp.Result)
 	}
 
 	return SetEntryResult{
@@ -219,7 +219,7 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 	}
 
 	if resp.Result != beegfs.OpsErr_SUCCESS {
-		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates on path %s: %w", searchPath, resp.Result)
 	}
 
 	return SetEntryResult{
