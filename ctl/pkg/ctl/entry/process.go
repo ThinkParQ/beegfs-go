@@ -162,7 +162,9 @@ func startProcessing[ResultT any](
 					if !ok {
 						return
 					}
-					// Automatically initialize the BeeGFS client with the first path.
+					// Automatically initialize the BeeGFS client with the first path. If this is
+					// ever moved, be aware some processEntry functions depend on having a properly
+					// initialized BeeGFSClient using the absolute path, and may need to be updated.
 					if beegfsClient == nil {
 						beegfsClient, err = config.BeeGFSClient(path)
 						if err != nil {

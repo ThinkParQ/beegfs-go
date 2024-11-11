@@ -59,7 +59,7 @@ func (p *EntityIdSlicePFlag) Type() string {
 }
 
 func (p *EntityIdSlicePFlag) String() string {
-	return "unspecified"
+	return "<unspecified>"
 }
 
 func (p *EntityIdSlicePFlag) Set(input string) error {

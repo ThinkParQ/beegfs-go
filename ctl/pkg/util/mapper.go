@@ -31,6 +31,7 @@ type Mappings struct {
 	TargetToEntityIdSet         Mapper[beegfs.EntityIdSet]
 	StoragePoolToConfig         Mapper[pool.GetStoragePools_Result]
 	MetaBuddyGroupToPrimaryNode Mapper[beegfs.EntityIdSet]
+	StorageTargetsToBuddyGroup  Mapper[beegfs.EntityIdSet]
 	RstIdToConfig               map[uint32]*flex.RemoteStorageTarget
 }
 
@@ -68,6 +69,10 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 		return mappings, fmt.Errorf("unable to get buddy groups from management: %w", err)
 	}
 	mappings.MetaBuddyGroupToPrimaryNode, err = MapMetaBuddyGroupToPrimaryNode(buddyMirrors, store)
+	if err != nil {
+		return mappings, err
+	}
+	mappings.StorageTargetsToBuddyGroup, err = MapStorageTargetsToBuddyGroup(buddyMirrors)
 	if err != nil {
 		return mappings, err
 	}
@@ -278,6 +283,27 @@ func MapMetaBuddyGroupToPrimaryNode(buddyMirrors []buddygroup.GetBuddyGroups_Res
 		buddyMapper.byUID[m.BuddyGroup.Uid] = entityIdSet
 		buddyMapper.byAlias[m.BuddyGroup.Alias] = entityIdSet
 		buddyMapper.byLegacyID[m.BuddyGroup.LegacyId] = entityIdSet
+	}
+	return buddyMapper, nil
+}
+
+// Map primary and secondary storage target entity IDs to the entity ID set of the buddy group they
+// are in (provided they are in a buddy group).
+func MapStorageTargetsToBuddyGroup(buddyMirrors []buddygroup.GetBuddyGroups_Result) (Mapper[beegfs.EntityIdSet], error) {
+	var buddyMapper = Mapper[beegfs.EntityIdSet]{}
+	buddyMapper.byUID = make(map[beegfs.Uid]beegfs.EntityIdSet)
+	buddyMapper.byAlias = make(map[beegfs.Alias]beegfs.EntityIdSet)
+	buddyMapper.byLegacyID = make(map[beegfs.LegacyId]beegfs.EntityIdSet)
+	for _, m := range buddyMirrors {
+		if m.NodeType != beegfs.Storage {
+			continue
+		}
+		buddyMapper.byUID[m.PrimaryTarget.Uid] = m.BuddyGroup
+		buddyMapper.byAlias[m.PrimaryTarget.Alias] = m.BuddyGroup
+		buddyMapper.byLegacyID[m.PrimaryTarget.LegacyId] = m.BuddyGroup
+		buddyMapper.byUID[m.SecondaryTarget.Uid] = m.BuddyGroup
+		buddyMapper.byAlias[m.SecondaryTarget.Alias] = m.BuddyGroup
+		buddyMapper.byLegacyID[m.SecondaryTarget.LegacyId] = m.BuddyGroup
 	}
 	return buddyMapper, nil
 }
