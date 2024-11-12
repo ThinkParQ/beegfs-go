@@ -18,17 +18,21 @@ func (m *GetStorageResyncStats) Serialize(s *beeserde.Serializer) {
 }
 
 type GetStorageResyncStatsResp struct {
-	State           BuddyResyncJobState
-	StartTime       int64
-	EndTime         int64
+	State     BuddyResyncJobState
+	StartTime int64
+	EndTime   int64
+	// Counts the total number of file chunks (files) discovered during the directory traversal.
 	DiscoveredFiles uint64
-	DiscoveredDirs  uint64
-	MatchedFiles    uint64
-	MatchedDirs     uint64
-	SyncedFiles     uint64
-	SyncedDirs      uint64
-	ErrorFiles      uint64
-	ErrorDirs       uint64
+	// Counts the total number of directories discovered during traversal.
+	DiscoveredDirs uint64
+	// Tracks the number of file chunks identified as sync candidates based on modification time.
+	MatchedFiles uint64
+	// Tracks the number of directories identified as sync candidates based on modification time.
+	MatchedDirs uint64
+	SyncedFiles uint64
+	SyncedDirs  uint64
+	ErrorFiles  uint64
+	ErrorDirs   uint64
 }
 
 func (m *GetStorageResyncStatsResp) Deserialize(d *beeserde.Deserializer) {
@@ -63,20 +67,36 @@ func (m *GetMetaResyncStats) Serialize(s *beeserde.Serializer) {
 }
 
 type GetMetaResyncStatsResp struct {
-	State             BuddyResyncJobState
-	StartTime         int64
-	EndTime           int64
-	DiscoveredDirs    uint64
-	GatherErrors      uint64
-	SyncedDirs        uint64
-	SyncedFiles       uint64
-	ErrorDirs         uint64
-	ErrorFiles        uint64
-	SessionsToSync    uint64
-	SyncedSessions    uint64
+	State     BuddyResyncJobState
+	StartTime int64
+	EndTime   int64
+	// number of directories that have been discovered for sync processing within the dentry structure
+	DiscoveredDirs uint64
+	// number of errors when crawling directories by BuddyResyncerGatherSlave
+	GatherErrors uint64
+	// number of directory that has been resynced.
+	// If a directory is deleted before the sync, it is still counted to maintain consistency in tracking
+	// all intended sync operations.
+	SyncedDirs uint64
+	// sum of all files in metadata server's buddymir directory and
+	// DiscoveredDirs (needed to resync xattrs of dirs by treating them as files)
+	SyncedFiles uint64
+	// count of errors encountered during directory synchronization, such as issues with opening,
+	// locking, or accessing directories..
+	ErrorDirs uint64
+	// count of errors encountered during file synchronization, including errors from missing files,
+	// failed stat operations, etc
+	ErrorFiles uint64
+	// tracks the number of client sessions to sync
+	SessionsToSync uint64
+	// tracks the number of client sessions synched
+	SyncedSessions uint64
+	// boolean flag in beemsg to track if there was any error during synchronization
 	SessionSyncErrors uint8
-	ModObjectsSynced  uint64
-	ModSyncErrors     uint64
+	//  modification objects synced
+	ModObjectsSynced uint64
+	// modification sync errors
+	ModSyncErrors uint64
 }
 
 func (m *GetMetaResyncStatsResp) Deserialize(d *beeserde.Deserializer) {

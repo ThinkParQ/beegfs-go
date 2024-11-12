@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
 )
 
@@ -54,7 +55,7 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 	return nil
 }
 
-func printMetaResults(result backend.MetaResyncStats_Result) {
+func printMetaResults(result msg.GetMetaResyncStatsResp) {
 	fmt.Println("Status")
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
@@ -80,7 +81,7 @@ func printMetaResults(result backend.MetaResyncStats_Result) {
 	fmt.Println("--------------------")
 	fmt.Printf("Sessions to Sync: %d\n", result.SessionsToSync)
 	fmt.Printf("Sessions Synced: %d\n", result.SyncedSessions)
-	fmt.Printf("Session Sync Errors: %t\n", result.SessionSyncErrors)
+	fmt.Printf("Session Sync Errors: %t\n", result.SessionSyncErrors != 0)
 
 	fmt.Println("\nModified Object Sync")
 	fmt.Println("--------------------")
@@ -88,7 +89,7 @@ func printMetaResults(result backend.MetaResyncStats_Result) {
 	fmt.Printf("Modified Object Sync Errors: %d\n", result.ModSyncErrors)
 }
 
-func printStorageResults(result backend.StorageResyncStats_Result) {
+func printStorageResults(result msg.GetStorageResyncStatsResp) {
 	fmt.Println("Status")
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
@@ -100,8 +101,8 @@ func printStorageResults(result backend.StorageResyncStats_Result) {
 	fmt.Printf("Files Discovered: %d\n", result.DiscoveredFiles)
 	fmt.Printf("Directories Discovered: %d\n", result.DiscoveredDirs)
 
-	fmt.Println("\nMatching Results")
-	fmt.Println("----------------")
+	fmt.Println("\nSync candidates")
+	fmt.Println("---------------")
 	fmt.Printf("Files Matched: %d\n", result.MatchedFiles)
 	fmt.Printf("Directories Matched: %d\n", result.MatchedDirs)
 
