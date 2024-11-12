@@ -67,6 +67,7 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("path", "", "File name matches shell pattern pattern.", "-path", ""),
 		bflag.Flag("readable", "", "Matches files which are readable.", "-readable", false),
 		bflag.Flag("samefile", "", "File refers to the same inode as name.", "-samefile", ""),
+		bflag.Flag("size", "", "File's size matches the specified criteria.", "-size", "", bflag.WithEquals()),
 		bflag.Flag("fprint", "", "Output file prefix (Creates file <output>.tid)", "-fprint", false),
 		bflag.Flag("printf", "", "print format on the standard output, "+
 			"similar to GNU find", "-printf", false),
@@ -79,9 +80,8 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("smallest", "", "Top n smallest files.", "--smallest", false),
 		bflag.Flag("largest", "", "Top n largest files.", "--largest", false),
 		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
-		bflag.Flag("delim", "", "File's size matches the specified criteria.", "--delim", " "),
+		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
 	}
-	cmd.Flags().StringVar(&cfg.size, "size", "", "File's size matches the specified criteria.")
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	err := cmd.Flags().MarkHidden("in-memory-name")
 	if err != nil {
@@ -109,11 +109,8 @@ $ beegfs index find --size +1G
 
 func runPythonFindIndex(bflagSet *bflag.FlagSet, cfg *findIndexConfig, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+3)
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, findCmd, path)
-	if len(cfg.size) > 0 {
-		allArgs = append(allArgs, fmt.Sprintf("-size=%s", cfg.size))
-	}
 	allArgs = append(allArgs, wrappedArgs...)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
