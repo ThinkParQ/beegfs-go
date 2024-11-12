@@ -51,7 +51,7 @@ func newGenericLsCmd() *cobra.Command {
 		bflag.Flag("reverse", "r", "Reverse order while sorting", "-r", false),
 		bflag.Flag("recursive", "R", "List subdirectories recursively", "-R", false),
 		bflag.Flag("size", "s", "Print the allocated size of each file, in blocks", "-s", false),
-		bflag.Flag("sort-largest", "S", "Sort by file size, largest first", "--sort=size", false),
+		bflag.Flag("sort-largest", "S", "Sort by file size, largest first", "-S", false),
 		bflag.Flag("version", "v", "BeeGFS Hive Index Version", "--version", false),
 		bflag.Flag("time-style", "", "Time/date format with -l", "--time-style", ""),
 		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "-t", false),
