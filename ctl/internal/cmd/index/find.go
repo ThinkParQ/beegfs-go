@@ -13,8 +13,7 @@ import (
 const findCmd = "find"
 
 type findIndexConfig struct {
-	size  string
-	delim string
+	size string
 }
 
 func newGenericFindCmd() *cobra.Command {
@@ -77,13 +76,11 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("user", "", "File is owned by user uname.", "-user", ""),
 		bflag.Flag("writable", "", "Matches files which are writable.", "-writable", false),
 		bflag.Flag("num-results", "", "First n results.", "--num-results", 0),
-		bflag.Flag("smallest", "", "Top n smallest files.", "--smallest",
-			false),
+		bflag.Flag("smallest", "", "Top n smallest files.", "--smallest", false),
 		bflag.Flag("largest", "", "Top n largest files.", "--largest", false),
-		bflag.Flag("in-memory-name", "", "In-memory name for processing.",
-			"--in-memory-name", "out"),
+		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
+		bflag.Flag("delim", "", "File's size matches the specified criteria.", "--delim", " "),
 	}
-	cmd.Flags().StringVar(&cfg.delim, "delim", " ", "Delimiter separating output columns.")
 	cmd.Flags().StringVar(&cfg.size, "size", "", "File's size matches the specified criteria.")
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	err := cmd.Flags().MarkHidden("in-memory-name")
@@ -105,20 +102,17 @@ This command provides similar options to GNU find, but Hive's find is significan
 than running traditional find commands on the filesystem.
 
 Example: List files in the index directory that are larger than 1GB.
-$ beegfs index find -size +1G
+$ beegfs index find --size +1G
 `
 	return s
 }
 
 func runPythonFindIndex(bflagSet *bflag.FlagSet, cfg *findIndexConfig, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+4)
+	allArgs := make([]string, 0, len(wrappedArgs)+3)
 	allArgs = append(allArgs, findCmd, path)
 	if len(cfg.size) > 0 {
 		allArgs = append(allArgs, fmt.Sprintf("-size=%s", cfg.size))
-	}
-	if cfg.delim != "" {
-		allArgs = append(allArgs, "--delim", cfg.delim)
 	}
 	allArgs = append(allArgs, wrappedArgs...)
 	cmd := exec.Command(beeBinary, allArgs...)

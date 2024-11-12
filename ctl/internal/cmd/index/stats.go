@@ -14,12 +14,7 @@ const statsCmd = "stats"
 
 var stat string
 
-type createStatsConfig struct {
-	delim string
-}
-
 func newGenericStatsCmd() *cobra.Command {
-	cfg := createStatsConfig{}
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
@@ -48,7 +43,7 @@ func newGenericStatsCmd() *cobra.Command {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonExecStats(bflagSet, &cfg, stat, path)
+			return runPythonExecStats(bflagSet, stat, path)
 		},
 	}
 
@@ -57,14 +52,12 @@ func newGenericStatsCmd() *cobra.Command {
 		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
 		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
 		bflag.Flag("num-results", "n", "Limit the number of results", "--num-results", 0),
-		bflag.Flag("uid", "", "Restrict to user", "--uid", ""),
-		bflag.Flag("user", "", "Restrict to user", "--user", ""),
+		bflag.Flag("uid", "", "Restrict to a user uid", "--uid", ""),
 		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
 		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
+		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
-	cmd.Flags().StringVar(&cfg.delim, "delim", " ", "Delimiter separating output columns")
-	cmd.MarkFlagsMutuallyExclusive("uid", "user")
 	err := cmd.Flags().MarkHidden("in-memory-name")
 	if err != nil {
 		return nil
@@ -97,14 +90,10 @@ Positional arguments:
 	return s
 }
 
-func runPythonExecStats(bflagSet *bflag.FlagSet, cfg *createStatsConfig, stat,
-	path string) error {
+func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+4)
+	allArgs := make([]string, 0, len(wrappedArgs)+3)
 	allArgs = append(allArgs, statsCmd, stat, path)
-	if cfg.delim != "" {
-		allArgs = append(allArgs, "--delim", cfg.delim)
-	}
 	allArgs = append(allArgs, wrappedArgs...)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout

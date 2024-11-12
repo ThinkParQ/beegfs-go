@@ -26,14 +26,15 @@ func newGenericUpgradeCmd() *cobra.Command {
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("index-path", "", "Index directory path [default: IndexEnv.conf]", "-I", ""),
-		bflag.Flag("db-version", "",
+		bflag.Flag("index-path", "I",
+			"Index directory path [default: IndexEnv.conf]", "-I", ""),
+		bflag.Flag("db-version", "T",
 			"Upgrade/Downgrade database schema to the target Hive Index database version", "-T", 0),
-		bflag.Flag("backup", "",
+		bflag.Flag("backup", "b",
 			"Backup database files while upgrading/downgrading database schema", "-b", false),
-		bflag.Flag("delete", "",
+		bflag.Flag("delete", "d",
 			"Delete backup database files recursively from index directory path", "-d", false),
-		bflag.Flag("restore", "",
+		bflag.Flag("restore", "r",
 			"Restore backup database files recursively from index directory path", "-r", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
