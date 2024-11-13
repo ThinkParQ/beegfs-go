@@ -6,139 +6,63 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 )
 
-type createIndexConfig struct {
-	maxMemory string
-	fsPath    string
-	indexPath string
-	summary   bool
-	xattrs    bool
-	maxLevel  uint
-	scanDirs  bool
-	port      uint
-	mntPath   string
-	runUpdate bool
-}
+const createCmd = "index"
 
 func newGenericCreateCmd() *cobra.Command {
-	cfg := createIndexConfig{}
+	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonCreateIndex(&cfg)
+			return runPythonCreateIndex(bflagSet)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.fsPath, "fs-path", "", "File system path for which index will be created [default: IndexEnv.conf]")
-	cmd.Flags().StringVar(&cfg.indexPath, "index-path", "", "Index directory path [default: IndexEnv.conf]")
-	cmd.Flags().StringVar(&cfg.maxMemory, "max-memory", "", "Max memory usage (e.g. 8GB, 1G)")
-	cmd.Flags().BoolVar(&cfg.summary, "summary", false, "Create tree summary table along with other tables")
-	cmd.Flags().BoolVar(&cfg.xattrs, "xattrs", false, "Pull xattrs from source")
-	cmd.Flags().UintVar(&cfg.maxLevel, "max-level", 0, "Max level to go down")
-	cmd.Flags().BoolVar(&cfg.scanDirs, "scan-dirs", false, "Print the number of scanned directories")
-	cmd.Flags().UintVar(&cfg.port, "port", 0, "Port number to connect with client")
-	cmd.Flags().BoolVar(&cfg.runUpdate, "update", false, "Run the update index")
-
+	bflagSet = bflag.NewFlagSet(commonIndexFlags, cmd)
 	return cmd
 }
 
 func newCreateCmd() *cobra.Command {
 	s := newGenericCreateCmd()
 	s.Use = "create"
-	s.Short = "Generates the index"
-	s.Long = `Generate the index by walking the source directory.
+	s.Short = "Generates an index for the specified file system."
+	s.Long = `Generate an index by traversing the source directory.
 
-The index can be created inside the source directory or separate index directory.
-Breadth first readdirplus walk of input tree to list the tree, or create an output
-db and/or output files of encountered directories and or files. This program has
-two primary uses: to find suspect directories that have changed in some way that
-need to be used to incrementally  update a Hive index from source file system changes
-and to create a full dump of all directories and or files/links either in walk order
-(directory then all files in that dir, etc.) or striding inodes into multiple files
-to merge against attribute list files that are also inode strided.
+The index can be created within the source directory or in a separate index directory.
+The program performs a breadth-first readdirplus traversal to list the contents, or it creates
+an output database and/or files listing directories and files it encounters. This program serves two main purposes:
 
-Example: Create an index for the file system located at /mnt/fs, limiting memory usage to 8GB.
+1. To identify directories with changes, allowing incremental updates to a Hive index from changes in the source file system.
+2. To create a comprehensive dump of directories, files, and links. You can choose to output in traversal order
+   (each directory followed by its files) or to stride inodes across multiple files for merging with inode-strided attribute lists.
+
+Example: Create an index for the file system at /mnt/fs, limiting memory usage to 8GB:
 $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 `
 	return s
-
 }
 
-func validateCreateInputs(cfg *createIndexConfig) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	beegfsClient, err := config.BeeGFSClient(cwd)
-	if err != nil {
-		return err
-	}
-	cfg.mntPath = beegfsClient.GetMountPath()
-
-	return nil
-}
-
-func runPythonCreateIndex(cfg *createIndexConfig) error {
-	if err := validateCreateInputs(cfg); err != nil {
-		return err
-	}
-
-	args := []string{
-		"index",
-	}
-
-	if cfg.fsPath != "" {
-		args = append(args, "-F", cfg.fsPath)
-	}
-	if cfg.indexPath != "" {
-		args = append(args, "-I", cfg.indexPath)
-	}
-	if cfg.maxMemory != "" {
-		args = append(args, "-X", cfg.maxMemory)
-	}
-	args = append(args, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
-	if cfg.summary {
-		args = append(args, "-S")
-	}
-	if cfg.xattrs {
-		args = append(args, "-x")
-	}
-	if cfg.maxLevel > 0 {
-		args = append(args, "-z", fmt.Sprint(cfg.maxLevel))
-	}
-	if cfg.scanDirs {
-		args = append(args, "-C")
-	}
-	if cfg.port > 0 {
-		args = append(args, "-p", fmt.Sprint(cfg.port))
-	}
-	if cfg.mntPath != "" {
-		args = append(args, "-M", cfg.mntPath)
-	}
-	if viper.GetBool(config.DebugKey) {
-		args = append(args, "-V", "1")
-	}
-	if cfg.runUpdate {
-		args = append(args, "-U")
-	}
-	args = append(args, "-k")
-
-	cmd := exec.Command(beeBinary, args...)
+func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
+	wrappedArgs := bflagSet.WrappedArgs()
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
+	allArgs = append(allArgs, createCmd)
+	allArgs = append(allArgs, wrappedArgs...)
+	allArgs = append(allArgs, "-k")
+	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return fmt.Errorf("error starting command: %v", err)
+		return fmt.Errorf("unable to start index command: %w", err)
 	}
 	err = cmd.Wait()
 	if err != nil {
-		return fmt.Errorf("error executing beeBinary: %v", err)
+		return fmt.Errorf("error executing index command: %w", err)
 	}
 	return nil
 }

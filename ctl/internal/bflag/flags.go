@@ -89,6 +89,22 @@ type flagValue interface {
 	string | int | bool
 }
 
+type flagConfig struct {
+	withEquals bool
+}
+
+type flagOpt (func(*flagConfig))
+
+// WithEquals() causes string and integer flags to be passed to the wrapped application as
+// `WrappedArg=Value`. This is helpful if the wrapped application requires an equal sign or if you
+// need to pass a flag like `--size=-1G` that if passed like `--size -1G` may interpret -1G as a
+// flag instead of a value.
+func WithEquals() flagOpt {
+	return func(fc *flagConfig) {
+		fc.withEquals = true
+	}
+}
+
 // Flag is a generic function that creates and returns wrapped flags inferring the flag type from
 // the default value. Note the following rules when specifying the defaultValue if no wrapped arg
 // should be returned if the flag is not specified by the user:
@@ -100,7 +116,15 @@ type flagValue interface {
 // These rules are also applied to user provided input. As a special case boolean flags are always
 // only returned if the associated value is true, and then they will be returned as simply the
 // configured WrappedArg, for example "-f" NOT "-f=true".
-func Flag[T flagValue](name, shorthand, usage, wrappedArg string, defaultValue T) FlagWrapper {
+func Flag[T flagValue](name, shorthand, usage, wrappedArg string, defaultValue T, opts ...flagOpt) FlagWrapper {
+
+	cfg := &flagConfig{
+		withEquals: false,
+	}
+
+	for _, opt := range opts {
+		opt(cfg)
+	}
 
 	baseFlag := baseFlag{
 		Name:       name,
@@ -117,12 +141,14 @@ func Flag[T flagValue](name, shorthand, usage, wrappedArg string, defaultValue T
 			baseFlag: baseFlag,
 			Default:  dVal,
 			Value:    new(string),
+			config:   *cfg,
 		}
 	case int:
 		return &intFlag{
 			baseFlag: baseFlag,
 			Default:  dVal,
 			Value:    new(int),
+			config:   *cfg,
 		}
 	case bool:
 		return &boolFlag{
@@ -142,6 +168,7 @@ type stringFlag struct {
 	baseFlag
 	Default string
 	Value   *string
+	config  flagConfig
 }
 
 func (f *stringFlag) bindPFlag(cmd *cobra.Command) {
@@ -154,6 +181,9 @@ func (f *stringFlag) bindPFlag(cmd *cobra.Command) {
 
 func (f *stringFlag) toWrappedArg() []string {
 	if f.Value != nil && *f.Value != "" {
+		if f.config.withEquals {
+			return []string{fmt.Sprintf("%s=%s", f.WrappedArg, *f.Value)}
+		}
 		return []string{f.WrappedArg, *f.Value}
 	}
 	return nil
@@ -163,6 +193,7 @@ type intFlag struct {
 	baseFlag
 	Default int
 	Value   *int
+	config  flagConfig
 }
 
 func (f *intFlag) bindPFlag(cmd *cobra.Command) {
@@ -175,6 +206,9 @@ func (f *intFlag) bindPFlag(cmd *cobra.Command) {
 
 func (f *intFlag) toWrappedArg() []string {
 	if f.Value != nil {
+		if f.config.withEquals {
+			return []string{fmt.Sprintf("%s=%d", f.WrappedArg, *f.Value)}
+		}
 		return []string{f.WrappedArg, strconv.Itoa(*f.Value)}
 	}
 	return nil
