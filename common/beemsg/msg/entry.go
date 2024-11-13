@@ -425,6 +425,46 @@ func (m *SetDirPatternResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
 
+type MakeFileWithPatternRequest struct {
+	UserID      uint32
+	GroupID     uint32
+	Mode        int32
+	Umask       int32
+	ParentInfo  EntryInfo
+	NewFileName []byte
+	Pattern     StripePattern
+	RST         RemoteStorageTarget
+}
+
+func (m *MakeFileWithPatternRequest) MsgId() uint16 {
+	return 2053
+}
+
+func (m *MakeFileWithPatternRequest) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.UserID)
+	beeserde.SerializeInt(s, m.GroupID)
+	beeserde.SerializeInt(s, m.Mode)
+	beeserde.SerializeInt(s, m.Umask)
+	m.ParentInfo.Serialize(s)
+	beeserde.SerializeCStr(s, m.NewFileName, 4)
+	m.Pattern.Serialize(s)
+	m.RST.Serialize(s)
+}
+
+type MakeFileWithPatternResponse struct {
+	Result    beegfs.OpsErr
+	EntryInfo EntryInfo
+}
+
+func (m *MakeFileWithPatternResponse) MsgId() uint16 {
+	return 2054
+}
+
+func (m *MakeFileWithPatternResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
+	m.EntryInfo.Deserialize(d)
+}
+
 type SetFilePatternRequest struct {
 	EntryInfo EntryInfo
 	RST       RemoteStorageTarget
