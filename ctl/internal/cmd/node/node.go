@@ -8,7 +8,7 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
-		Short: "Query and manage nodes.",
+		Short: "Query and manage nodes",
 		Long:  "Contains commands related to node management.",
 	}
 

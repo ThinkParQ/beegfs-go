@@ -30,7 +30,7 @@ func newServerStatsCmd() *cobra.Command {
 
 	var cmd = &cobra.Command{
 		Use:   "server [<node>]",
-		Short: "Show IO statistics for BeeGFS servers.",
+		Short: "Show IO statistics for BeeGFS servers",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				id, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])

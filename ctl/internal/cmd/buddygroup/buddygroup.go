@@ -8,7 +8,7 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mirror",
-		Short: "Query and manage mirroring and buddy groups.",
+		Short: "Query and manage mirroring and buddy groups",
 		Long:  "Contains commands related to mirroring and buddy group management.",
 	}
 

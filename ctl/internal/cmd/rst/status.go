@@ -25,7 +25,7 @@ func newStatusCmd() *cobra.Command {
 	backendCfg := rst.GetJobsConfig{}
 	cmd := &cobra.Command{
 		Use:   "status <path>",
-		Short: "Get the status of jobs for a file or directory path.",
+		Short: "Get the status of jobs for a file or directory path",
 		Long:  "Get the status of jobs for a file or directory path. Jobs for each path are grouped together and sorted by RST then when they were created.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {

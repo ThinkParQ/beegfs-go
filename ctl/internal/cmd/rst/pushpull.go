@@ -19,8 +19,8 @@ func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := rst.SyncJobRequestCfg{}
 	cmd := &cobra.Command{
-		Use:   "push --rst=<id> <path>",
-		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target.",
+		Use:   "push <path>",
+		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
 		Long: `Upload a file or directory in BeeGFS to a Remote Storage Target.
 By default the Remote Storage Target where entries are pushed is determined by the RST ID(s) set on each entry.
 Optionally an RST ID can be provided to perform a one-time push to that RST.
@@ -51,8 +51,8 @@ func newPullCmd() *cobra.Command {
 		Download: true,
 	}
 	cmd := &cobra.Command{
-		Use:   "pull --rst=<id> <path>",
-		Short: "Download a file to BeeGFS from a Remote Storage Target.",
+		Use:   "pull --remote-target=<id> <path>",
+		Short: "Download a file to BeeGFS from a Remote Storage Target",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)

@@ -137,7 +137,7 @@ func AliasFromString(s string) (Alias, error) {
 type InvalidEntityId struct{}
 
 func (n InvalidEntityId) String() string {
-	return "<invalid>"
+	return "<unspecified>"
 }
 
 // Converts into the protobuf representation

@@ -91,3 +91,23 @@ func (fs MockFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 func (fs MockFS) WalkDir(path string, fn fs.WalkDirFunc) error {
 	return fmt.Errorf("not implemented")
 }
+
+func (fs MockFS) CopyXAttrsToFile(srcPath, dstPath string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) CopyContentsToFile(srcPath, dstPath string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) OverwriteFile(srcPath, dstPath string) error {
+	return fmt.Errorf("not implemented")
+}

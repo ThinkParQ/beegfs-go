@@ -18,7 +18,7 @@ func newCancelCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "cancel <path>",
-		Short: "Cancel job(s) for a file path.",
+		Short: "Cancel job(s) for a file path",
 		Long:  "Cancel job(s) for a file path. By default all incomplete jobs are cancelled.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {

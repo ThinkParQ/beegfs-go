@@ -16,7 +16,7 @@ func newListCmd() *cobra.Command {
 	cfg := rst.GetRSTCfg{}
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List Remote Storage Targets and their configuration.",
+		Short: "List Remote Storage Targets and their configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg)
 		},

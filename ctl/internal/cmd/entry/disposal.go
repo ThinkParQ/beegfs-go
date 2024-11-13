@@ -20,7 +20,7 @@ func newEntryDisposalCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "dispose-unused",
-		Short: "Cleanup files that have been unlinked by users while they were still open.",
+		Short: "Cleanup files that have been unlinked by users while they were still open",
 		Long: `Cleanup files that have been unlinked by users while they were still open.
 Generally manually disposing files not required unless a metadata service stopped unexpectedly before the unlinked file(s) were closed on all clients.`,
 		RunE: func(cmd *cobra.Command, args []string) error {

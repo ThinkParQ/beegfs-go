@@ -10,7 +10,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"go.uber.org/zap"
@@ -27,21 +26,19 @@ type entryInfoCfg struct {
 func newEntryInfoCmd() *cobra.Command {
 
 	frontendCfg := entryInfoCfg{}
-	backendCfg := entry.GetEntriesConfig{}
+	backendCfg := entry.GetEntriesCfg{}
 	cmd := &cobra.Command{
 		Use:   "info <path> [<path>] ...",
-		Short: "Get details about one or more entries in BeeGFS.",
+		Short: "Get details about one or more entries in BeeGFS",
 		Long: `Get details about one or more entries in BeeGFS.
 
 Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
-Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
+Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry info -').
 		`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
-			} else if len(args) > 1 && frontendCfg.recurse {
-				return fmt.Errorf("only one path can be specified when recursively printing entries")
 			}
 			return nil
 		},
@@ -66,28 +63,18 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	return cmd
 }
 
-func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg, backendCfg entry.GetEntriesConfig) error {
+func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg, backendCfg entry.GetEntriesCfg) error {
 
 	logger, _ := config.GetLogger()
 	log := logger.With(zap.String("component", "runEntryInfoCmd"))
 
 	// Setup the method for sending paths to the backend:
-	stdinErrChan := make(chan error, 1)
-	if args[0] == "-" {
-		pathsChan := make(chan string, 1024)
-		backendCfg.PathsViaChan = pathsChan
-		d, err := util.GetStdinDelimiterFromString(frontendCfg.stdinDelimiter)
-		if err != nil {
-			return err
-		}
-		util.ReadFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
-	} else if frontendCfg.recurse {
-		backendCfg.PathsViaRecursion = args[0]
-	} else {
-		backendCfg.PathsViaList = args
+	method, err := entry.DetermineInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	if err != nil {
+		return err
 	}
 
-	entriesChan, errChan, err := entry.GetEntries(cmd.Context(), backendCfg)
+	entriesChan, errChan, err := entry.GetEntries(cmd.Context(), method, backendCfg)
 	if err != nil {
 		return err
 	}

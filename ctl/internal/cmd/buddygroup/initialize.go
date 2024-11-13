@@ -12,8 +12,8 @@ func newMirrorRootInodeCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize mirroring for the root directory (this operation cannot be undone).",
-		Long: `Initialize  mirroring for the root directory.
+		Short: "Initialize mirroring for the root directory (this operation cannot be undone)",
+		Long: `Initialize mirroring for the root directory.
 
 WARNING: This command cannot be undone. Please make sure that the following conditions are met before initializing root directory mirroring:
 * Metadata server mirror groups have been created.

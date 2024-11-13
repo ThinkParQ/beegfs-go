@@ -85,7 +85,7 @@ func newCheckCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check [<mount-path>] ...",
-		Short: "Runs a series of checks against BeeGFS to verify its health.",
+		Short: "Runs a series of checks against BeeGFS to verify its health",
 		Long: fmt.Sprintf(`Runs a series of checks against BeeGFS to verify its health.
 
 If there are multiple file systems mounted to this client, only one can be checked at a time. 

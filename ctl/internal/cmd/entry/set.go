@@ -1,6 +1,7 @@
 package entry
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -14,7 +15,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
-	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 )
 
@@ -28,13 +28,11 @@ type entrySetCfg struct {
 func newEntrySetCmd() *cobra.Command {
 
 	frontendCfg := entrySetCfg{}
-	backendCfg := entry.SetEntriesConfig{
-		NewConfig: entry.SetEntryConfig{},
-	}
+	backendCfg := entry.SetEntryCfg{}
 
 	cmd := &cobra.Command{
 		Use:   "set <path> [<path>] ...",
-		Short: "Configure stripe patterns, storage pools, remote storage targets, and more.",
+		Short: "Configure stripe patterns, storage pools, remote storage targets, and more",
 		Long: `Configure stripe patterns, storage pools, remote storage targets, and more. 
 New configurations will apply only to new files and sub-directories of the specified path(s), with the exception of Remote Storage Targets,
 which can be updated for existing files at any time. Enable the --verbose flag to view detailed configuration changes for each entry.
@@ -51,14 +49,12 @@ This enables normal users to change the default number of targets and chunksize 
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
-			} else if len(args) > 1 && frontendCfg.recurse {
-				return fmt.Errorf("only one path can be specified when recursively updating entries")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			return runEntrySetCmd(cmd, args, frontendCfg, backendCfg)
+			return runEntrySetCmd(cmd.Context(), args, frontendCfg, backendCfg)
 		},
 	}
 
@@ -75,23 +71,23 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print what configuration was updated for each entry.")
 
 	// Entry options
-	cmd.Flags().Var(newChunksizeFlag(&backendCfg.NewConfig.Chunksize), "chunksize", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
-	cmd.Flags().Var(newPoolFlag(&backendCfg.NewConfig.Pool), "pool", `Use the specified storage pool for all new files in this directory. 
+	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunksize", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
+	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory. 
 				Can be specified as the alias, numerical ID, or unique ID of the pool.
 				NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
-	cmd.Flags().Var(newStripePatternFlag(&backendCfg.NewConfig.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
+	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 				When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
 				NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
-	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.NewConfig.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
+	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
 				If the stripe pattern is 'buddymirror' this is the number of mirror groups.`)
-	cmd.Flags().VarP(newRstsFlag(&backendCfg.NewConfig.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
+	cmd.Flags().VarP(newRstsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
 				All desired IDs must be specified. Specify 'none' to unset all RSTs.`)
-	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.NewConfig.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
+	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/18
 	// Unmark this as hidden once automatic uploads are supported.
 	cmd.Flags().MarkHidden("remote-cooldown")
 	// Advanced options
-	cmd.Flags().BoolVar(&backendCfg.NewConfig.Force, "force", false, "Allow some configuration checks to be overridden.")
+	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd
@@ -141,31 +137,23 @@ func runEntrySetHelp(cmd *cobra.Command, args []string) {
 	w.Flush()
 }
 
-func runEntrySetCmd(cmd *cobra.Command, args []string, frontendCfg entrySetCfg, backendCfg entry.SetEntriesConfig) error {
+func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg, backendCfg entry.SetEntryCfg) error {
 
 	actorEUID := syscall.Geteuid()
-	backendCfg.NewConfig.ActorEUID = &actorEUID
+	backendCfg.ActorEUID = &actorEUID
 
 	// Setup the method for sending paths to the backend:
-	stdinErrChan := make(chan error, 1)
-	if args[0] == "-" {
-		pathsChan := make(chan string, 1024)
-		backendCfg.PathsViaChan = pathsChan
-		d, err := util.GetStdinDelimiterFromString(frontendCfg.stdinDelimiter)
-		if err != nil {
-			return err
-		}
-		util.ReadFromStdin(cmd.Context(), d, pathsChan, stdinErrChan)
-	} else if frontendCfg.recurse {
+	if frontendCfg.recurse {
 		if !frontendCfg.confirmBulkUpdates {
 			return fmt.Errorf("the recurse mode updates the specified entry and ALL child entries, if you're sure this is what you want add the --yes flag")
 		}
-		backendCfg.PathsViaRecursion = args[0]
-	} else {
-		backendCfg.PathsViaList = args
+	}
+	method, err := entry.DetermineInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	if err != nil {
+		return err
 	}
 
-	entriesChan, errChan, err := entry.SetEntries(cmd.Context(), backendCfg)
+	entriesChan, errChan, err := entry.SetEntries(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -208,7 +196,7 @@ run:
 		tbl.PrintRemaining()
 		fmt.Printf("Processed %d entries.\n", count-1)
 	} else {
-		fmt.Printf("Processed %d entries.\nConfiguration Updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg.NewConfig))
+		fmt.Printf("Processed %d entries.\nConfiguration Updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg))
 	}
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
@@ -219,7 +207,7 @@ run:
 
 // sprintfNewEntryConfig() combines all non-nil/empty fields from the newConfig into a comma
 // separated string. This is meant for printing what configuration updates were applied.
-func sprintfNewEntryConfig(newConfig entry.SetEntryConfig) string {
+func sprintfNewEntryConfig(newConfig entry.SetEntryCfg) string {
 	val := reflect.ValueOf(newConfig)
 	typ := reflect.TypeOf(newConfig)
 	// We can't specify the size of the slice upfront because we don't know how many fields

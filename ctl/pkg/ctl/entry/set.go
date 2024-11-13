@@ -6,40 +6,20 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"sync"
 
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
 )
 
-// SetEntriesConfig is used to determine how paths are provided to SetEntries() and what
-// configuration is set on each entry. The PathsViaX fields are mutually exclusive, and if multiple
-// are specified they are prioritized from top to bottom.
-type SetEntriesConfig struct {
-	// The stdin mechanism allows the caller to provide multiple paths over a channel. This allows
-	// paths to be sent to SetEntries() while simultaneously returning results for each path. This
-	// is useful when SetEntries() is used as part of a larger pipeline. The caller should close the
-	// channel once all paths are handled to cleanup.
-	PathsViaChan <-chan string
-	// Provide a single path to trigger walking a directory tree and updating all sub-entries.
-	PathsViaRecursion string
-	// Specify one or more paths.
-	PathsViaList []string
-	// The configuration to set on each entry.
-	NewConfig SetEntryConfig
-}
-
 // Equivalent of the original MODESETPATTERN args. Fields that are nil are unmodified.
 //
 // IMPORTANT: When updating this struct, add any fields that can only be modified by root to the
 // checks in Validate().
-type SetEntryConfig struct {
+type SetEntryCfg struct {
 	// The effective user ID of the calling process. Must be provided or an error will be returned.
 	// This is specified as a pointer to prevent bugs where the EUID is not set correctly being
 	// interpreted as the default value of an int (0) which would result in the EUID being root.
@@ -56,7 +36,7 @@ type SetEntryConfig struct {
 }
 
 // Validates the specified ActorEUID has permissions to make the requested updates.
-func (config *SetEntryConfig) Validate() error {
+func (config *SetEntryCfg) validate() error {
 	if config.ActorEUID != nil {
 		if *config.ActorEUID < 0 || *config.ActorEUID > math.MaxUint32 {
 			return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", *config.ActorEUID)
@@ -91,16 +71,15 @@ func (config *SetEntryConfig) Validate() error {
 type SetEntryResult struct {
 	Path    string
 	Status  beegfs.OpsErr
-	Updates SetEntryConfig
+	Updates SetEntryCfg
 }
 
-func SetEntries(ctx context.Context, cfg SetEntriesConfig) (<-chan SetEntryResult, <-chan error, error) {
-
+func SetEntries(ctx context.Context, pm InputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, <-chan error, error) {
 	logger, _ := config.GetLogger()
 	log := logger.With(zap.String("component", "setEntries"))
 
 	// Validate new configuration once:
-	if err := cfg.NewConfig.Validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, nil, err
 	}
 
@@ -113,108 +92,21 @@ func SetEntries(ctx context.Context, cfg SetEntriesConfig) (<-chan SetEntryResul
 		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
-	var entriesChan <-chan SetEntryResult
-	// At most two errors are expected. Increase if additional writers are added to the channel.
-	errChan := make(chan error, 2)
-
-	if cfg.PathsViaChan != nil {
-		// Read paths from the provided channel:
-		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, cfg.PathsViaChan, errChan)
-	} else if cfg.PathsViaRecursion != "" {
-		pathsChan, err := walkDir(ctx, cfg.PathsViaRecursion, errChan)
-		if err != nil {
-			return nil, nil, err
-		}
-		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, pathsChan, errChan)
-	} else {
-		pathsChan := make(chan string, 1024)
-		entriesChan = setEntries(ctx, mappings, cfg.NewConfig, pathsChan, errChan)
-		for _, e := range cfg.PathsViaList {
-			pathsChan <- e
-		}
-		close(pathsChan)
+	processEntry := func(path string) (SetEntryResult, error) {
+		return setEntry(ctx, mappings, cfg, path)
 	}
-	return entriesChan, errChan, nil
+
+	return processEntries(ctx, pm, false, processEntry)
 }
 
-// Applies the provided newConfig to any path(s) sent to the provided paths channel. When the global
-// config allows for multiple workers, updates to individual entries are processed in parallel.
-// Returns a channel where the results of each path updates are sent. If there are any issues
-// updating entries they are returned on the provided errChan and no more new entries are processed.
-// Note because it updates paths in parallel, the order in which paths are provided and results are
-// returned is not guaranteed.
-//
-// WARNING: This function is meant to be called through SetEntries() and is not safe to call
-// directly as it relies on SetEntries() for config validation to avoid needing to return an error.
-func setEntries(ctx context.Context, mappings *util.Mappings, newConfig SetEntryConfig, paths <-chan string, errChan chan<- error) <-chan SetEntryResult {
-	entriesChan := make(chan SetEntryResult, 1024)
-	var beegfsClient filesystem.Provider
-	var err error
-	// Spawn a goroutine that manages one or more workers that handle processing updates to each path.
-	go func() {
-		// Because multiple workers may write to this channel it is closed by the parent goroutine
-		// once all workers return.
-		defer close(entriesChan)
-		numWorkers := viper.GetInt(config.NumWorkersKey)
-		if numWorkers > 1 {
-			// One worker will be dedicated for the walkDir function unless there is only one CPU.
-			numWorkers = viper.GetInt(config.NumWorkersKey) - 1
-		}
-		wg := sync.WaitGroup{}
-		// If any of the workers encounter an error, this context is used to signal to the other
-		// workers they should exit early.
-		workerCtx, workerCancel := context.WithCancel(context.Background())
-		applyUpdatesFunc := func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-workerCtx.Done():
-					return
-				case path, ok := <-paths:
-					if !ok {
-						return
-					}
-					// Automatically initialize the BeeGFS client with the first path.
-					if beegfsClient == nil {
-						beegfsClient, err = config.BeeGFSClient(path)
-						if err != nil {
-							errChan <- err
-							workerCancel()
-							return
-						}
-					}
-					searchPath, err := beegfsClient.GetRelativePathWithinMount(path)
-					if err != nil {
-						errChan <- err
-						workerCancel()
-						return
-					}
-					result, err := setEntry(ctx, mappings, newConfig, searchPath)
-					if err != nil {
-						errChan <- err
-						workerCancel()
-						return
-					}
-					entriesChan <- result
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-		for range numWorkers {
-			wg.Add(1)
-			go applyUpdatesFunc()
-		}
-		wg.Wait()
-	}()
-	return entriesChan
-}
-
-// setEntry applies the newCfg to the specified searchPath. WARNING: This function is meant to be
-// called through SetEntries() and is not safe to call directly as it relies on SetEntries() for
-// some config validation to avoid duplicate checking of the newCfg for each entry.
-func setEntry(ctx context.Context, mappings *util.Mappings, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
-	entry, err := GetEntry(ctx, mappings, searchPath, false, true)
+// setEntry applies the SetEntryRequest to the specified searchPath. WARNING: This function is meant
+// to be called through SetEntries() and is not safe to call directly as it relies on SetEntries()
+// for some config validation to avoid duplicate checking of the request for each entry.
+func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, path string) (SetEntryResult, error) {
+	entry, err := GetEntry(ctx, mappings, GetEntriesCfg{
+		Verbose:        false,
+		IncludeOrigMsg: true,
+	}, path)
 	if err != nil {
 		return SetEntryResult{}, err
 	}
@@ -224,51 +116,50 @@ func setEntry(ctx context.Context, mappings *util.Mappings, newCfg SetEntryConfi
 		return SetEntryResult{}, err
 	}
 
-	if entry.Entry.Type == beegfs.EntryRegularFile {
-		return handleRegularFile(ctx, store, entry, newCfg, searchPath)
+	if entry.Entry.Type == beegfs.EntryDirectory {
+		return handleDirectory(ctx, mappings, store, entry, cfg, path)
 	}
-
-	return handleDirectory(ctx, mappings, store, entry, newCfg, searchPath)
+	return handleFile(ctx, store, entry, cfg, path)
 }
-func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
+func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, path string) (SetEntryResult, error) {
 	// Start with the current settings for this entry:
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
 		Pattern:   entry.Entry.Pattern.StripePattern,
 		RST:       entry.Entry.Remote.RemoteStorageTarget,
 	}
-	request.SetUID(uint32(*newCfg.ActorEUID))
+	request.SetUID(uint32(*cfg.ActorEUID))
 
 	// Only update any settings defined in newCfg:
-	if newCfg.Chunksize != nil {
-		request.Pattern.Chunksize = *newCfg.Chunksize
+	if cfg.Chunksize != nil {
+		request.Pattern.Chunksize = *cfg.Chunksize
 	}
-	if newCfg.DefaultNumTargets != nil {
-		request.Pattern.DefaultNumTargets = *newCfg.DefaultNumTargets
+	if cfg.DefaultNumTargets != nil {
+		request.Pattern.DefaultNumTargets = *cfg.DefaultNumTargets
 	}
-	if newCfg.Pool != nil {
-		pool, err := mappings.StoragePoolToConfig.Get(*newCfg.Pool)
+	if cfg.Pool != nil {
+		pool, err := mappings.StoragePoolToConfig.Get(*cfg.Pool)
 		if err != nil {
-			return SetEntryResult{}, fmt.Errorf("unable to retrieve the specified storage pool %v: %w", *newCfg.Pool, err)
+			return SetEntryResult{}, fmt.Errorf("unable to retrieve the specified storage pool %v: %w", *cfg.Pool, err)
 		}
-		if !newCfg.Force && len(pool.Targets) == 0 {
+		if !cfg.Force && len(pool.Targets) == 0 {
 			return SetEntryResult{}, fmt.Errorf("storage pool with ID %d does not contain any targets (use force to override)", pool.Pool.LegacyId.NumId)
 		}
 		request.Pattern.StoragePoolID = uint16(pool.Pool.LegacyId.NumId)
 	}
-	if newCfg.StripePattern != nil {
-		if *newCfg.StripePattern == beegfs.StripePatternBuddyMirror {
-			if !newCfg.Force && mappings.MetaBuddyGroupToPrimaryNode.Len() == 0 {
+	if cfg.StripePattern != nil {
+		if *cfg.StripePattern == beegfs.StripePatternBuddyMirror {
+			if !cfg.Force && mappings.MetaBuddyGroupToPrimaryNode.Len() == 0 {
 				return SetEntryResult{}, fmt.Errorf("no buddy groups have been defined to use for stripe pattern %s (use force to override)", strings.ToLower(beegfs.StripePatternBuddyMirror.String()))
 			}
 		}
-		request.Pattern.Type = *newCfg.StripePattern
+		request.Pattern.Type = *cfg.StripePattern
 	}
-	if newCfg.RemoteTargets != nil {
-		request.RST.RSTIDs = newCfg.RemoteTargets
+	if cfg.RemoteTargets != nil {
+		request.RST.RSTIDs = cfg.RemoteTargets
 	}
-	if newCfg.RemoteCooldownSecs != nil {
-		request.RST.CoolDownPeriod = *newCfg.RemoteCooldownSecs
+	if cfg.RemoteCooldownSecs != nil {
+		request.RST.CoolDownPeriod = *cfg.RemoteCooldownSecs
 	}
 
 	var resp = &msg.SetDirPatternResponse{}
@@ -278,17 +169,18 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 	}
 
 	if resp.Result != beegfs.OpsErr_SUCCESS && resp.Result != beegfs.OpsErr_NOTADIR {
-		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates for path %s: %w", path, resp.Result)
 	}
 
 	return SetEntryResult{
-		Path:    searchPath,
+		Path:    path,
 		Status:  resp.Result,
-		Updates: newCfg,
+		Updates: cfg,
 	}, nil
 }
 
-func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEntryCombinedInfo, newCfg SetEntryConfig, searchPath string) (SetEntryResult, error) {
+// Handles regular files and all non-directory types (e.g., symlinks).
+func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
 	// Start with the current settings for this entry
 	request := &msg.SetFilePatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
@@ -297,12 +189,12 @@ func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEn
 
 	// Determine whether any RST related fields are provided in newCfg
 	isRSTConfigSpecified := false
-	if newCfg.RemoteTargets != nil {
-		request.RST.RSTIDs = newCfg.RemoteTargets
+	if cfg.RemoteTargets != nil {
+		request.RST.RSTIDs = cfg.RemoteTargets
 		isRSTConfigSpecified = true
 	}
-	if newCfg.RemoteCooldownSecs != nil {
-		request.RST.CoolDownPeriod = *newCfg.RemoteCooldownSecs
+	if cfg.RemoteCooldownSecs != nil {
+		request.RST.CoolDownPeriod = *cfg.RemoteCooldownSecs
 		isRSTConfigSpecified = true
 	}
 	// IMPORTANT: If new configuration is added here also add it to the Updates returned in the
@@ -315,7 +207,7 @@ func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEn
 		return SetEntryResult{
 			Path:    searchPath,
 			Status:  beegfs.OpsErr_NOTSUPP,
-			Updates: newCfg,
+			Updates: cfg,
 		}, nil
 	}
 
@@ -327,16 +219,16 @@ func handleRegularFile(ctx context.Context, store *beemsg.NodeStore, entry GetEn
 	}
 
 	if resp.Result != beegfs.OpsErr_SUCCESS {
-		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates: %w", resp.Result)
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates on path %s: %w", searchPath, resp.Result)
 	}
 
 	return SetEntryResult{
 		Path:   searchPath,
 		Status: resp.Result,
-		Updates: SetEntryConfig{
+		Updates: SetEntryCfg{
 			// Only return configuration that is allowed to be updated in the results:
-			RemoteTargets:      newCfg.RemoteTargets,
-			RemoteCooldownSecs: newCfg.RemoteCooldownSecs,
+			RemoteTargets:      cfg.RemoteTargets,
+			RemoteCooldownSecs: cfg.RemoteCooldownSecs,
 		},
 	}, nil
 }

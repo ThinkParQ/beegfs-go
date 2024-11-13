@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+const (
+	// When working with extended attributes, a buffer of this size is allocated to store values
+	// then dynamically grown as needed.
+	initialXattrValBufferSize = 1024
 )
 
 // The use of an interface is mostly to allow file system operations to be
@@ -61,6 +71,15 @@ type Provider interface {
 	// Filesystem. Note WalkDir may return an absolute path, thus the paths it returns should be
 	// sanitized with GetRelativePathWithinMount() if needed.
 	WalkDir(path string, fn fs.WalkDirFunc) error
+	// CopyXAttrsToFile copies the xattrs from srcPath to dstPath. If there are no xattrs or if the BeeGFS
+	// instance does not have user xattrs enabled, no error is returned.
+	CopyXAttrsToFile(srcPath, dstPath string) error
+	CopyContentsToFile(srcPath, dstPath string) error
+	CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error
+	// CopyTimestamps sets the atime/mtime in fromStat on dstPath.
+	CopyTimestamps(fromStat fs.FileInfo, dstPath string) error
+	// Atomically renames srcPath to dstPath overwriting the dstPath with srcPath's contents.
+	OverwriteFile(srcPath, dstPath string) error
 }
 
 // NewFromMountPoint accepts an exact path where a file system is mounted. It detects the file
@@ -199,4 +218,149 @@ func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc) error {
 	root := fs.MountPoint + path
 	return filepath.WalkDir(root, fn)
+}
+
+func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
+	srcPath = filepath.Join(fs.MountPoint, srcPath)
+	dstPath = filepath.Join(fs.MountPoint, dstPath)
+
+	// The VFS imposes a 255-byte limit on attribute names.
+	// Ref: https://man7.org/linux/man-pages/man7/xattr.7.html
+	buf := make([]byte, 255)
+	n, err := unix.Listxattr(srcPath, buf)
+	if err != nil {
+		// Testing shows if the client and/or meta don't have xattr support enabled, no error is
+		// returned and the number of xattrs is simply zero. However some sources online suggest
+		// file systems might return "operation not supported" when attempting to list xattrs on a
+		// file system that does not support them, so we handle that error here in case BeeGFS
+		// starts returning it in the future. Note BeeGFS does return ENOTSUP if a client with
+		// xattrs enabled tries to talk to a meta with xattrs disabled.
+		if errors.Is(err, unix.ENOTSUP) {
+			return nil
+		}
+		return fmt.Errorf("error getting xattrs for path: %w", err)
+	}
+
+	if n == 0 {
+		return nil
+	}
+	// Limit the buffer to what actually contains valid xattrs.
+	xattrs := buf[:n]
+
+	// Allocate a buffer for xattr values here. It will be dynamically resized if needed.
+	valBuf := make([]byte, initialXattrValBufferSize)
+
+	i := 0
+	for i < len(xattrs) {
+		// Xattrs are null-terminated, find the end of the current xattr name.
+		end := i
+		for end < len(xattrs) && xattrs[end] != 0 {
+			end++
+		}
+		if end >= len(xattrs) {
+			break
+		}
+		xattr := string(xattrs[i:end])
+
+		// Query the required buffer size:
+		size, err := unix.Getxattr(srcPath, xattr, nil)
+		if err != nil {
+			return fmt.Errorf("error getting size of xattr %s: %w", xattr, err)
+		}
+		// If needed grow the buffer:
+		if size > len(valBuf) {
+			valBuf = make([]byte, size)
+		}
+		// Get the value of this attribute:
+		vlen, err := unix.Getxattr(srcPath, xattr, valBuf)
+		if err != nil {
+			return fmt.Errorf("error getting xattr %s: %w", xattr, err)
+		}
+		// Set the xattr on the destination path:
+		err = unix.Setxattr(dstPath, xattr, valBuf[:vlen], 0)
+		if err != nil {
+			return fmt.Errorf("error setting xattr %s (value: %s): %w", xattr, valBuf[:vlen], err)
+		}
+		i = end + 1
+	}
+
+	return nil
+}
+
+func (fs BeeGFS) CopyContentsToFile(srcPath, dstPath string) error {
+	srcPath = filepath.Join(fs.MountPoint, srcPath)
+	dstPath = filepath.Join(fs.MountPoint, dstPath)
+
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("error opening source path: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(dstPath, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("error opening destination path: %w", err)
+	}
+	defer dstFile.Close()
+
+	// 32 KB buffer - if needed this could be optimized based on a hint like chunksize.
+	buffer := make([]byte, 32*1024)
+	_, err = io.CopyBuffer(dstFile, srcFile, buffer)
+	if err != nil {
+		return fmt.Errorf("error copying source to destination path: %w", err)
+	}
+
+	return nil
+}
+
+func (fs BeeGFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
+	dstPath = filepath.Join(fs.MountPoint, dstPath)
+
+	linuxStat, ok := fromStat.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unable to cast FileInfo to syscall.Stat_t (is the underlying OS Linux?)")
+	}
+
+	// Change ownership then the mode otherwise there would be a brief security issue if suid/sgid
+	// bits are set.
+	if err := os.Chown(dstPath, int(linuxStat.Uid), int(linuxStat.Gid)); err != nil {
+		return fmt.Errorf("error changing ownership on destination path: %w", err)
+	}
+
+	if err := os.Chmod(dstPath, fromStat.Mode()); err != nil {
+		return fmt.Errorf("error changing mode on destination path: %w", err)
+	}
+
+	return nil
+}
+
+func (fs BeeGFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
+	dstPath = filepath.Join(fs.MountPoint, dstPath)
+
+	linuxStat, ok := fromStat.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unable to cast FileInfo to syscall.Stat_t (is the underlying OS Linux?)")
+	}
+
+	atime := time.Unix(int64(linuxStat.Atim.Sec), int64(linuxStat.Atim.Nsec))
+	mtime := time.Unix(int64(linuxStat.Mtim.Sec), int64(linuxStat.Mtim.Nsec))
+	if err := os.Chtimes(dstPath, atime, mtime); err != nil {
+		return fmt.Errorf("error copying timestamps to destination path: %w", err)
+	}
+
+	return nil
+}
+
+func (fs BeeGFS) OverwriteFile(srcPath, dstPath string) error {
+	srcPath = filepath.Join(fs.MountPoint, srcPath)
+	dstPath = filepath.Join(fs.MountPoint, dstPath)
+	// Directly use the Renameat2 syscall to atomically overwrite. If os.Remove then os.Rename was
+	// used there would be a small window between removing and renaming where things could fail and
+	// the srcPath is deleted before the dstPath is renamed which could cause data loss if an
+	// application automatically cleans up dstPath on failure.
+	err := unix.Renameat2(unix.AT_FDCWD, srcPath, unix.AT_FDCWD, dstPath, 0)
+	if err != nil {
+		return fmt.Errorf("failed to atomically rename: %w", err)
+	}
+	return nil
 }
