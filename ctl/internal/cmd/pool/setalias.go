@@ -11,7 +11,7 @@ import (
 func newSetAliasCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-alias <storage-pool> <alias>",
-		Short: "Set storage pool aliases.",
+		Short: "Set storage pool aliases",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			eid, err := beegfs.NewEntityIdParser(16, beegfs.Storage).Parse(args[0])

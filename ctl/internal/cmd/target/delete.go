@@ -19,7 +19,7 @@ func newDeleteCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete <target>",
-		Short: "Delete a storage target.",
+		Short: "Delete a storage target",
 		Long: `Delete a storage target.
 
 WARNING: If this target is still referenced in existing directory stripe patterns, creating files in that directory will fail until either the directory is updated or a new target with the same ID is created. Note if you reuse the same target ID in the future, it will automatically be used by any existing directories with that target ID, which might be undesirable.

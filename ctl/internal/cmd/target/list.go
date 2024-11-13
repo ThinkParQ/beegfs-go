@@ -25,7 +25,7 @@ func newListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List BeeGFS targets.",
+		Short: "List BeeGFS targets",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targets, err := target.GetTargets(cmd.Context())
 			if err != nil {

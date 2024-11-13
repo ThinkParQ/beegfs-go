@@ -7,7 +7,7 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "target",
-		Short: "Query and manage targets.",
+		Short: "Query and manage targets",
 		Long:  "Contains commands related to target management.",
 	}
 

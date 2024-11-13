@@ -33,7 +33,7 @@ func NewCopyCmd() *cobra.Command {
 		Use:     "copy -m <machine-file> <source> [<source>] <destination>",
 		Args:    cobra.MinimumNArgs(2),
 		Aliases: []string{"cp"},
-		Short:   "Copy files and directories in parallel.",
+		Short:   "Copy files and directories in parallel",
 		Long: `Copy files and directories in parallel.
 
 SPECIFYING PATHS:

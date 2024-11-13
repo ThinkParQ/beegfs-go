@@ -19,7 +19,7 @@ func newDeletePoolCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete <pool>",
-		Short: "Delete a storage pool.",
+		Short: "Delete a storage pool",
 		Long: `Delete a storage pool.
 
 WARNING: If this pool ID is still referenced in existing directory stripe patterns, creating files in that directory will fail until either the directory is updated or a new pool with the same ID is created. Note if you reuse the same pool ID in the future, it will automatically be used by any existing directories with that pool ID, which might be undesirable.

@@ -35,7 +35,7 @@ func Execute() int {
 	// The root command.
 	cmd := &cobra.Command{
 		Use:   BinaryName,
-		Short: "The BeeGFS command line control tool.",
+		Short: "The BeeGFS command line control tool",
 		Long: fmt.Sprintf(`%s
 %s
 This tool allows you to inspect, configure, and monitor BeeGFS.

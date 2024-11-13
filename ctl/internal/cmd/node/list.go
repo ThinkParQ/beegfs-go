@@ -28,7 +28,7 @@ func newListCmd() *cobra.Command {
 	// Define cobra command
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List BeeGFS nodes.",
+		Short: "List BeeGFS nodes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg, reachabilityError)
 		},

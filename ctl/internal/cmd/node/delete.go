@@ -19,7 +19,7 @@ func newDeleteCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete <node>",
-		Short: "Delete a node.",
+		Short: "Delete a node",
 		Long: `Delete a node.
 
 WARNING: Deleting non-empty nodes will break your file system. Don't do this unless you know what you are doing.

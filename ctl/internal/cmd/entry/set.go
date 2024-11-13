@@ -32,7 +32,7 @@ func newEntrySetCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "set <path> [<path>] ...",
-		Short: "Configure stripe patterns, storage pools, remote storage targets, and more.",
+		Short: "Configure stripe patterns, storage pools, remote storage targets, and more",
 		Long: `Configure stripe patterns, storage pools, remote storage targets, and more. 
 New configurations will apply only to new files and sub-directories of the specified path(s), with the exception of Remote Storage Targets,
 which can be updated for existing files at any time. Enable the --verbose flag to view detailed configuration changes for each entry.

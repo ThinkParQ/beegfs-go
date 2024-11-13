@@ -7,8 +7,8 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "index",
-		Short: "Allows to create/update and run operations on the Filesystem Index.",
-		Long:  "BeeGFS Hive index tool allows to create/update and run different metadata operations on the Index.",
+		Short: "Create/update and run operations on the the file system index",
+		Long:  "Create/update and run different metadata operations against the the file system index.",
 	}
 
 	cmd.AddCommand(newCreateCmd())

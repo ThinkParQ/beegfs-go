@@ -29,7 +29,7 @@ func newMigrateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Migrate files and directories to the specified storage pool.",
+		Short: "Migrate files and directories to the specified storage pool",
 		Long: `Migrate files and directories to the specified storage pool.
 Files are only migrated if they have chunks on one or more of the specified targets.
 Migration occurs by creating a temporary file with new targets from the specified storage pool.

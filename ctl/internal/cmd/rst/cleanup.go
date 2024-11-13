@@ -16,7 +16,7 @@ func newCleanupCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "cleanup <path>",
-		Short: "Cleanup (delete) jobs for a file path.",
+		Short: "Cleanup (delete) jobs for a file path",
 		Long:  "Cleanup (delete) jobs for a file path. By default all incomplete jobs are deleted.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {

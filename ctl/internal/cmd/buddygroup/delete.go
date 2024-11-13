@@ -19,7 +19,7 @@ func newDeleteBuddyGroupCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "delete <group>",
-		Short: "Delete a storage buddy group.",
+		Short: "Delete a storage buddy group",
 		Long: `Delete a storage buddy group.
 WARNING: Incorrect use of this command can corrupt your system. Please make sure that one of the following conditions is met before removing a group:
 

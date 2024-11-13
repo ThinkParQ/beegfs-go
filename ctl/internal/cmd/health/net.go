@@ -27,7 +27,7 @@ func newNetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "network [<mount-path>] ...",
 		Aliases: []string{"net"},
-		Short:   "Show all local network connections currently established to BeeGFS server nodes (beegfs-net).",
+		Short:   "Show all local network connections currently established to BeeGFS server nodes (beegfs-net)",
 		Long: `Show all local network connections currently established to BeeGFS server nodes (beegfs-net).
 
 If there are multiple BeeGFS mount points, connections will be displayed for each.

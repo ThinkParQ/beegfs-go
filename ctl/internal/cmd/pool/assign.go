@@ -24,7 +24,7 @@ func newAssignPoolCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "assign <pool>",
-		Short: "Assign targets and buddy groups to a storage pool.",
+		Short: "Assign targets and buddy groups to a storage pool",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spp := beegfs.NewEntityIdParser(16, beegfs.Storage)

@@ -7,7 +7,7 @@ import (
 func NewEntryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "entry",
-		Short: "Interact with files and directories in BeeGFS.",
+		Short: "Interact with files and directories in BeeGFS",
 	}
 
 	cmd.AddCommand(newEntryInfoCmd(), newEntrySetCmd(), newEntryDisposalCmd(), newMigrateCmd())

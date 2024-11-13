@@ -29,7 +29,7 @@ func newEntryInfoCmd() *cobra.Command {
 	backendCfg := entry.GetEntriesCfg{}
 	cmd := &cobra.Command{
 		Use:   "info <path> [<path>] ...",
-		Short: "Get details about one or more entries in BeeGFS.",
+		Short: "Get details about one or more entries in BeeGFS",
 		Long: `Get details about one or more entries in BeeGFS.
 
 Specifying Paths:

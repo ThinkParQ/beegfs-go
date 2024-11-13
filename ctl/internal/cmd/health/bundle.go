@@ -117,7 +117,7 @@ var supportBundleContents = []supportFile{
 func newBundleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bundle <path>",
-		Short: "Create a bundle containing information about this BeeGFS instance useful for troubleshooting.",
+		Short: "Create a bundle containing information about this BeeGFS instance useful for troubleshooting",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return errors.New("provide a single path where the bundle should be created")

@@ -70,7 +70,7 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 func newClientStatsCmd() *cobra.Command {
 	s := newGenericClientStatsCmd(false)
 	s.Use = "client"
-	s.Short = "Show IO statistics for BeeGFS clients."
+	s.Short = "Show IO statistics for BeeGFS clients"
 	s.Long = `Show IO statistics for BeeGFS clients.
   This command queries statistics for client requests from the servers and
   presents them in a sorted list, ordered by sum of requests per client.

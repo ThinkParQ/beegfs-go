@@ -32,7 +32,7 @@ func NewBenchmarkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "benchmark",
 		Aliases: []string{"bench"},
-		Short:   "Run, manage, and query file system benchmarks.",
+		Short:   "Run, manage, and query file system benchmarks",
 		Long: `Run, manage, and query file system benchmarks.
 By default operations are performed against all nodes and targets. Optionally a subset of nodes or targets can be specified instead.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
