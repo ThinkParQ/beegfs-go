@@ -52,7 +52,6 @@ jobs:
       - name: Get current and previous tags
         id: tags
         run: |
-          git fetch --tags
           echo "GORELEASER_CURRENT_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
           previous_tag=$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$' | grep -v "${{ github.ref_name }}" | head -n 1)
           echo "GORELEASER_PREVIOUS_TAG=${previous_tag}" >> $GITHUB_ENV
