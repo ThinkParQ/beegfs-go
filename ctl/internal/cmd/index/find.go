@@ -12,12 +12,7 @@ import (
 
 const findCmd = "find"
 
-type findIndexConfig struct {
-	size string
-}
-
 func newGenericFindCmd() *cobra.Command {
-	cfg := findIndexConfig{}
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
@@ -38,7 +33,7 @@ func newGenericFindCmd() *cobra.Command {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonFindIndex(bflagSet, &cfg, path)
+			return runPythonFindIndex(bflagSet, path)
 		},
 	}
 
@@ -107,7 +102,7 @@ $ beegfs index find --size +1G
 	return s
 }
 
-func runPythonFindIndex(bflagSet *bflag.FlagSet, cfg *findIndexConfig, path string) error {
+func runPythonFindIndex(bflagSet *bflag.FlagSet, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, findCmd, path)
