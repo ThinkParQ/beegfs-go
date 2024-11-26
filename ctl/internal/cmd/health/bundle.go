@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -118,6 +119,14 @@ func newBundleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bundle <path>",
 		Short: "Create a bundle containing information about this BeeGFS instance useful for troubleshooting",
+		Long: `Create a bundle containing information about this BeeGFS instance useful for troubleshooting.
+The resulting bundle will be created at <path>/<current-timestamp>-beegfs-support-bundle.tar.gz.
+
+Note the timestamp is in RFC3339 format and includes colons which may be treated specially by some tools like tar.
+For example with tar when extracting a bundle from the same directory you must prepend the current directory prefix (./):
+
+	tar -zxf ./2024-11-26T19:11:25Z-beegfs-support-bundle.tar.gz
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return errors.New("provide a single path where the bundle should be created")
@@ -136,7 +145,15 @@ func newBundleCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("error bundling data into a tarball at %s: %w", tmpBundlePath, err)
 			}
-			fmt.Printf("Successfully created support bundle at: %s%s\n\n", tmpBundlePath, bundleExtension)
+			fmt.Printf("Successfully created support bundle at: %s%s\n", tmpBundlePath, bundleExtension)
+			fmt.Printf(`
+Note the bundle filename contains the current timestamp in RFC3339 format which contains colons (:).
+When specifying the path relative to the current working directory, it may be required to prefix the filename with './':
+ 
+	tar -zxf ./%s%s
+
+This will ensure the file is treated as a local path and avoids errors like "gzip: stdin: unexpected end of file".
+`, path.Base(tmpBundlePath), bundleExtension)
 			return nil
 		},
 	}
