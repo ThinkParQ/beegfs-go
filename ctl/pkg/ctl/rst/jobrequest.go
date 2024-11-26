@@ -132,11 +132,22 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 			resp := &SyncJobResponse{
 				Path: baseRequest.Path,
 			}
-			rstIDs, err := checkEntryAndDetermineRSTs(ctx, mappings, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
-			if err != nil {
-				resp.Err = err
-				respChan <- resp
-				return
+			var rstIDs []uint32
+
+			// If the path already exists in BeeGFS check if the entry has any existing sessions.
+			// This could happen for uploads, or downloads if the user asked to overwrite an
+			// existing file.
+			if pathStat != nil {
+				rstIDs, err = checkEntryAndDetermineRSTs(ctx, mappings, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
+				if err != nil {
+					resp.Err = err
+					respChan <- resp
+					return
+				}
+			} else {
+				// Otherwise the requested operation doesn't require an existing entry. Just use the
+				// RST provided by the user.
+				rstIDs = []uint32{baseRequest.RemoteStorageTarget}
 			}
 			for _, rst := range rstIDs {
 				baseRequest.RemoteStorageTarget = rst
@@ -315,6 +326,10 @@ func checkEntryAndDetermineRSTs(ctx context.Context, mappings *util.Mappings, rs
 
 	var rstIDs []uint32
 	if rstID != 0 {
+		// If the user provided an RST we MUST always use that RST ID and ONLY that RST ID otherwise
+		// this would cause weird behavior when downloading and overwriting an existing files that
+		// had RSTs set, because we might try and create multiple downloads from different RSTs that
+		// would all clobber each other and certainly wouldn't be what the user wanted.
 		rstIDs = []uint32{rstID}
 	} else if len(entry.Entry.Remote.RSTIDs) > 0 {
 		rstIDs = make([]uint32, len(entry.Entry.Remote.RSTIDs))
