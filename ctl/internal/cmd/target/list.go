@@ -58,7 +58,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency")
 		}
 		if cfg.Capacity {
-			defaultColumns = append(defaultColumns, "capacity pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
+			defaultColumns = append(defaultColumns, "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
 		}
 	}
 
