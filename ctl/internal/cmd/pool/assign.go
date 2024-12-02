@@ -56,9 +56,9 @@ func newAssignPoolCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringArrayVarP(&targets, "target", "t", nil, "Targets to move to the pool")
-	cmd.Flags().StringArrayVarP(&groups, "group", "g", nil, "Buddy groups to move to the pool")
-	cmd.MarkFlagsOneRequired("target", "group")
+	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the pool")
+	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the pool")
+	cmd.MarkFlagsOneRequired("targets", "groups")
 
 	return cmd
 }

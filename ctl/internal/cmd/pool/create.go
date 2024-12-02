@@ -57,8 +57,8 @@ func newCreatePoolCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Uint16Var(&cfg.poolId, "num-id", 0, "Set the numeric id of the new pool. Auto-generated if unspecified.")
-	cmd.Flags().StringArrayVarP(&targets, "target", "t", nil, "Targets to move to the new pool")
-	cmd.Flags().StringArrayVarP(&groups, "group", "g", nil, "Buddy groups to move to the new pool")
+	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the new pool")
+	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the new pool")
 
 	return cmd
 }
@@ -93,6 +93,10 @@ func runCreatePoolCmd(cmd *cobra.Command, cfg createPool_Config) error {
 		fmt.Printf("Pool created, but received no id info from the server. Please verify the creation using the `pool list` command.\n")
 	} else {
 		fmt.Printf("Pool created: %s\n", res)
+	}
+
+	if len(targets) == 0 && len(groups) == 0 {
+		fmt.Printf("\nWARNING: No targets or buddy groups were initially assigned to this pool.\nCreating files in directories assigned to this pool will fail until targets/mirrors are assigned with 'beegfs pool assign'.\n")
 	}
 
 	return nil
