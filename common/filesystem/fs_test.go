@@ -31,24 +31,26 @@ func tempPathForTesting(path string) (string, func(t require.TestingT), error) {
 
 }
 
-func TestCreatePreallocatedFile(t *testing.T) {
+// The following tests do not require an actual BeeGFS file system, but rather test general file
+// system agnostic functionality. They initialize the required structs directly instead of using
+// NewFromMountPoint() which would fail unless BeeGFS was actually mounted.
+
+func TestBeeGFSCreatePreallocatedFile(t *testing.T) {
 	testDir, cleanup, err := tempPathForTesting(baseTestDir)
 	require.NoError(t, err)
 	defer cleanup(t)
-	mount, err := NewFromMountPoint(testDir)
-	require.NoError(t, err)
+	mount := BeeGFS{MountPoint: testDir}
 	assert.NoError(t, mount.CreatePreallocatedFile(testFileName, 2<<10, false))
 }
 
-func TestWriteAndReadFileParts(t *testing.T) {
+func TestBeeGFSWriteAndReadFileParts(t *testing.T) {
 	const (
 		expectedFileLen = 37
 	)
 	testDir, cleanup, err := tempPathForTesting(baseTestDir)
 	require.NoError(t, err)
 	defer cleanup(t)
-	mount, err := NewFromMountPoint(testDir)
-	require.NoError(t, err)
+	mount := BeeGFS{MountPoint: testDir}
 	err = mount.CreatePreallocatedFile(testFileName, expectedFileLen, false)
 	require.NoError(t, err)
 	// The expected base64 encoded SHA256 hash of the resulting file.

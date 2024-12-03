@@ -88,21 +88,18 @@ type Provider interface {
 func NewFromMountPoint(path string) (Provider, error) {
 
 	if path == "" || path == "/" {
-		return nil, fmt.Errorf("invalid mount point provided (cannot be empty or '/'): %s", path)
+		return nil, fmt.Errorf("%w: %s", ErrInitFSClient, path)
 	}
-
-	fsInfo, err := os.Stat(path)
+	var stat unix.Statfs_t
+	err := unix.Statfs(path, &stat)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to determine file system type for path %s using statfs: %w", path, err)
 	}
-
-	if !fsInfo.IsDir() {
-		return nil, fmt.Errorf("path is not a directory")
+	// This is the BEEGFS_MAGIC number as defined in FhgfsOpsSuper.h.
+	if stat.Type == 0x19830326 {
+		return BeeGFS{MountPoint: path}, nil
 	}
-	// TODO: https://github.com/ThinkParQ/bee-remote/issues/35
-	// Possibly expand our list of checks once we have functionality that relies on this actually being a BeeGFS file system.
-	// For example we could make sure this is the root of a BeeGFS file system.
-	return BeeGFS{MountPoint: path}, nil
+	return nil, ErrUnsupportedFileSystem
 }
 
 // NewFromPath() automatically initializes a file system provider from the provided path. This works
@@ -118,15 +115,15 @@ func NewFromPath(path string) (Provider, error) {
 	for {
 		currentStat, err := os.Stat(absPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
 		parentPath := filepath.Dir(absPath)
 		if parentPath == absPath {
-			return nil, fmt.Errorf("path inside an unsupported mount point provided (cannot be the root directory '/'")
+			return nil, fmt.Errorf("%w: %s", ErrInitFSClient, path)
 		}
 		parentStat, err := os.Stat(parentPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
 		if currentStat.Sys().(*syscall.Stat_t).Dev != parentStat.Sys().(*syscall.Stat_t).Dev {
 			mountPath = absPath
