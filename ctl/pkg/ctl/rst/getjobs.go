@@ -2,10 +2,11 @@ package rst
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
@@ -31,14 +32,10 @@ type GetJobsResponse struct {
 func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsResponse) error {
 
 	beegfs, err := config.BeeGFSClient(cfg.Path)
-	if err != nil {
+	if err != nil && !errors.Is(err, filesystem.ErrUnmounted) {
 		return err
 	}
 	pathInMount, err := beegfs.GetRelativePathWithinMount(cfg.Path)
-	if err != nil {
-		return err
-	}
-	pathStat, err := beegfs.Stat(pathInMount)
 	if err != nil {
 		return err
 	}
@@ -50,19 +47,26 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 
 	switch {
 	case cfg.JobID != "":
-		if pathStat.IsDir() {
-			return fmt.Errorf("specifying a job ID is only allowed if the provided path is a file (not a directory)")
-		}
+		// If the user provides a job ID, we can at most update a single path. If for some reason
+		// they provided a directory, they will simply get a not found error. We don't verify if the
+		// specified path is a directory in case a file was deleted and a new directory created with
+		// the same name, which would prevent updating updating the previously executed job.
 		request.Query = &beeremote.GetJobsRequest_ByJobIdAndPath{
 			ByJobIdAndPath: &beeremote.GetJobsRequest_QueryIdAndPath{
 				JobId: cfg.JobID,
 				Path:  pathInMount,
 			},
 		}
-	case pathStat.IsDir():
-		request.Query = &beeremote.GetJobsRequest_ByPathPrefix{ByPathPrefix: pathInMount}
 	default:
-		request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: pathInMount}
+		// Currently we don't support querying by exact path:
+		//
+		//   request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: pathInMount}
+		//
+		// This is to avoid corner cases where a user had a directory containing files that were
+		// uploaded, but then later deleted or renamed the directory and replaced it with an
+		// identically named file, making it impossible to display jobs for the previously uploaded
+		// files under the now deleted directory.
+		request.Query = &beeremote.GetJobsRequest_ByPathPrefix{ByPathPrefix: pathInMount}
 	}
 
 	beeRemote, err := config.BeeRemoteClient()

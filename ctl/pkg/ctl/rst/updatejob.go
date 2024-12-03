@@ -2,8 +2,9 @@ package rst
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
@@ -15,25 +16,24 @@ type UpdateJobCfg struct {
 	NewState beeremote.UpdateJobRequest_NewState
 }
 
+// UpdateJobs updates the state of all jobs at the specified path. This function intentionally does
+// not check if the provided path still exists in BeeGFS because a job could be triggered then the
+// file deleted/renamed. For similar reasons it does not check if the path is a directory (which
+// shouldn't normally have jobs), since it is possible a file was uploaded, deleted, then a
+// directory created in its place with the same name. In all of these cases we need to be able to
+// update any existing jobs for any path. If no jobs exist, Remote will simply return not found.
+//
+// TODO (https://github.com/ThinkParQ/bee-remote/issues/15): Support updating multiple paths based
+// on a provided prefix.
 func UpdateJobs(ctx context.Context, cfg UpdateJobCfg) (*beeremote.UpdateJobResponse, error) {
 
-	pathInMount := cfg.Path
-	if !cfg.Force {
-		beegfs, err := config.BeeGFSClient(cfg.Path)
-		if err != nil {
-			return nil, err
-		}
-		pathInMount, err = beegfs.GetRelativePathWithinMount(cfg.Path)
-		if err != nil {
-			return nil, err
-		}
-		pathStat, err := beegfs.Stat(pathInMount)
-		if err != nil {
-			return nil, err
-		}
-		if pathStat.IsDir() {
-			return nil, fmt.Errorf("updating jobs by directory is not supported (yet)")
-		}
+	beegfs, err := config.BeeGFSClient(cfg.Path)
+	if err != nil && !errors.Is(err, filesystem.ErrUnmounted) {
+		return nil, err
+	}
+	pathInMount, err := beegfs.GetRelativePathWithinMount(cfg.Path)
+	if err != nil {
+		return nil, err
 	}
 
 	request := &beeremote.UpdateJobRequest{

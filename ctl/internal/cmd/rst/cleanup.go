@@ -1,10 +1,13 @@
 package rst
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
@@ -30,13 +33,8 @@ func newCleanupCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only cleanup the specified job.")
-	cmd.Flags().BoolVar(&cfg.Force, "force", false, `
-	By default completed jobs are skipped when cleaning up so they can be used to determine when a path was synchronized with an RST.
-	Optionally completed jobs can be forcibly cleaned up (generally you will want to use the jobID flag to limit what jobs are deleted).
-	This mode skips verifying the path stills exists to allow cleaning up jobs for deleted paths.
-	IMPORTANT: Only relative paths inside BeeGFS can be used for forced updates. 
-	For example given the absolute path "/mnt/beegfs/myfile" you would specify "/myfile".
-	`)
+	cmd.Flags().BoolVar(&cfg.Force, "force", false, `By default completed jobs are skipped when cleaning up so they can be used to determine when a path was synchronized with an RST.
+	Optionally completed jobs can be forcibly cleaned up (generally you will want to use the jobID flag to limit what jobs are deleted).`)
 	return cmd
 }
 
@@ -44,6 +42,9 @@ func runCleanupCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 
 	response, err := rst.UpdateJobs(cmd.Context(), cfg)
 	if err != nil {
+		if errors.Is(err, filesystem.ErrInitFSClient) {
+			return fmt.Errorf("%w (hint: use the --%s=none flag to interact with files that no longer exist or if BeeGFS is not mounted)", err, config.BeeGFSMountPointKey)
+		}
 		return err
 	}
 

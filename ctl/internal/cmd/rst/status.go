@@ -1,12 +1,14 @@
 package rst
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -14,7 +16,7 @@ import (
 
 type statusConfig struct {
 	history int
-	noTable bool
+	retro   bool
 	detail  bool
 	width   int
 }
@@ -26,7 +28,7 @@ func newStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status <path>",
 		Short: "Get the status of jobs for a file or directory path",
-		Long:  "Get the status of jobs for a file or directory path. Jobs for each path are grouped together and sorted by RST then when they were created.",
+		Long:  "Get the status of jobs for a file or directory path.\nJobs for each path are grouped together and sorted by remote target then by when they were created.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -41,7 +43,7 @@ func newStatusCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&backendCfg.JobID, "job-id", "", "If a file path is specified, only return results for this specific job.")
 	cmd.Flags().IntVar(&frontendCfg.history, "history", 1, "Limit the number of jobs returned for each path+RST combination (defaults to only the most recently created job).")
-	cmd.Flags().BoolVar(&frontendCfg.noTable, "no-table", false, "Don't print output in a table and return all possible fields grouping jobs for each path by RST and sorting by when they were created.")
+	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Don't print output in a table and return all possible fields grouping jobs for each path by RST and sorting by when they were created.")
 	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 30, "Set the maximum width of some columns before they overflow.")
 	return cmd
@@ -52,6 +54,9 @@ func runGetStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rs
 	responses := make(chan *rst.GetJobsResponse, 1024)
 	err := rst.GetJobs(cmd.Context(), backendCfg, responses)
 	if err != nil {
+		if errors.Is(err, filesystem.ErrInitFSClient) {
+			return fmt.Errorf("%w (hint: use the --%s=none flag to interact with files that no longer exist or if BeeGFS is not mounted)", err, config.BeeGFSMountPointKey)
+		}
 		return err
 	}
 
@@ -107,7 +112,7 @@ writeResponses:
 			totalPaths++
 
 			// Print output using a table:
-			if !frontendCfg.noTable {
+			if !frontendCfg.retro {
 				for _, rst := range rstsForPath {
 					for i, job := range jobsPerRST[rst] {
 						if i >= frontendCfg.history {
