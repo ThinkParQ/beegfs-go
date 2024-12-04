@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
@@ -137,20 +136,42 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 	if cfg.DefaultNumTargets != nil {
 		request.Pattern.DefaultNumTargets = *cfg.DefaultNumTargets
 	}
+	// Important to check if the pool was updated before determining the stripe pattern
+	// configuration because eligible patterns are determined based on the pool configuration.
 	if cfg.Pool != nil {
 		pool, err := mappings.StoragePoolToConfig.Get(*cfg.Pool)
 		if err != nil {
 			return SetEntryResult{}, fmt.Errorf("unable to retrieve the specified storage pool %v: %w", *cfg.Pool, err)
 		}
+		// We don't need to check both the targets and buddy groups because targets should always be
+		// assigned to the same pool as their buddy groups.
 		if !cfg.Force && len(pool.Targets) == 0 {
 			return SetEntryResult{}, fmt.Errorf("storage pool with ID %d does not contain any targets (use force to override)", pool.Pool.LegacyId.NumId)
 		}
 		request.Pattern.StoragePoolID = uint16(pool.Pool.LegacyId.NumId)
 	}
 	if cfg.StripePattern != nil {
-		if *cfg.StripePattern == beegfs.StripePatternBuddyMirror {
-			if !cfg.Force && mappings.MetaBuddyGroupToPrimaryNode.Len() == 0 {
-				return SetEntryResult{}, fmt.Errorf("no buddy groups have been defined to use for stripe pattern %s (use force to override)", strings.ToLower(beegfs.StripePatternBuddyMirror.String()))
+		if !cfg.Force {
+			// To avoid later errors creating files in this directory, ensure the assigned pool is
+			// eligible for use with the requested stripe pattern.
+			var poolID beegfs.EntityId
+			if cfg.Pool != nil {
+				poolID = *cfg.Pool
+			} else {
+				poolID = beegfs.LegacyId{
+					NumId:    beegfs.NumId(entry.Entry.Pattern.StoragePoolID),
+					NodeType: beegfs.Storage,
+				}
+			}
+			if pool, err := mappings.StoragePoolToConfig.Get(poolID); err == nil {
+				if *cfg.StripePattern == beegfs.StripePatternBuddyMirror && len(pool.BuddyGroups) == 0 {
+					return SetEntryResult{}, fmt.Errorf("refusing to set stripe pattern %s on path %s because its assigned storage pool %s does not contain any buddy groups (use force to override)", cfg.StripePattern, path, pool.Pool.String())
+				} else if *cfg.StripePattern == beegfs.StripePatternRaid0 && len(pool.Targets) == 0 {
+					return SetEntryResult{}, fmt.Errorf("refusing to set stripe pattern %s on path %s because its assigned storage pool %s does not contain any targets (use force to override)", cfg.StripePattern, path, pool.Pool.String())
+				}
+				// Otherwise allow the pattern to be updated.
+			} else {
+				return SetEntryResult{}, fmt.Errorf("error looking up pool with ID %s for path %s: %w", poolID, path, err)
 			}
 		}
 		request.Pattern.Type = *cfg.StripePattern
