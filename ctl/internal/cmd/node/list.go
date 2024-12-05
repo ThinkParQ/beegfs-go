@@ -41,6 +41,7 @@ func newListCmd() *cobra.Command {
 		"Include the list of network addresses/interfaces the nodes reported to the management service.")
 	cmd.Flags().BoolVar(&cfg.ReachabilityCheck, "reachability-check", false,
 		"Check each node is alive and responding to requests (from the local machine).")
+	cmd.Flags().MarkHidden("reachability-check")
 	cmd.Flags().DurationVar(&cfg.ReachabilityTimeout, "reachability-timeout", 1*time.Second,
 		"Define the waiting time for responses when using --reachability-check.")
 	cmd.Flags().BoolVar(&reachabilityError, "reachability-error", false,
