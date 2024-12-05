@@ -26,8 +26,7 @@ By default the Remote Storage Target where entries are pushed is determined by t
 Optionally an RST ID can be provided to perform a one-time push to that RST.
 When uploading multiple entries, any entries that do not have RSTs configured are ignored.
 
-WARNING: Files are always uploaded and existing files overwritten unless the RST has file/object versioning enabled.
-		`,
+WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -60,7 +59,7 @@ func newPullCmd() *cobra.Command {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
 			}
 			if backendCfg.RSTID == 0 {
-				return fmt.Errorf("invalid rst. The rst id must be greater than zero")
+				return fmt.Errorf("invalid remote target (must be greater than zero)")
 			}
 			return nil
 		},

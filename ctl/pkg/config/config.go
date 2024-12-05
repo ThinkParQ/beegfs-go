@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -26,7 +27,7 @@ const (
 	// BeeRemotes gRPC listening address
 	BeeRemoteAddrKey = "bee-remote-addr"
 	// A BeeGFS mount point on the local file system
-	BeeGFSMountPointKey = "mount-point"
+	BeeGFSMountPointKey = "mount"
 	// The timeout for a single connection attempt
 	ConnTimeoutKey = "conn-timeout"
 	// Disable BeeMsg and gRPC client to server authentication
@@ -141,11 +142,21 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 	return beeRemoteClient, err
 }
 
-// BeeGFSClient provides a standardize way to interact with a mounted BeeGFS through the
-// globalMount. If BeeGFSMountPoint is not set, it requires a path inside BeeGFS and will handle
-// determining where BeeGFS is mounted and initializing the globalMount the first time it is called.
+// BeeGFSClient provides a standardize way to interact with a mounted or unmounted BeeGFS instance
+// through the globalMount.
+//
+// If BeeGFSMountPoint is not set, it requires a path inside BeeGFS and will handle determining
+// where BeeGFS is mounted and initializing the globalMount the first time it is called.
+//
+// If the user wishes to interact with an unmounted BeeGFS instance they must specify
+// BeeGFSMountPoint as "none". The use of none will never conflict with a legitimate mount point,
+// because this should always be specified as an absolute path including a leading slash. When the
+// user has specified there is no mount point, an "unmounted" file system along with ErrUnmounted is
+// returned allowing BeeGFSClient can be used by all modes regardless if they require BeeGFS to be
+// actually mounted.
+//
 // When BeeGFSMountPoint is set it always initializes and returns the globalMount based on that
-// mount point.
+// mount point and will return an error if BeeGFS is not mounted.
 //
 // Callers can always use relative paths inside BeeGFS with the filesystem. If a caller does not
 // know if it is has an relative or absolute path, the Filesystem.GetRelativePathWithinMount(path)
@@ -156,12 +167,21 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 //
 //   - If BeeGFSMountPoint is specified, users can use absolute or relative paths inside BeeGFS from any cwd.
 //     Note absolute paths only work if they are inside the same mount point as BeeGFSMountPoint.
+//   - If BeeGFSMountPoint is set to "none", then all paths are considered relative to the BeeGFS root directory.
 //   - If BeeGFSMountPoint is NOT specified, users can only use relative paths when the cwd is somewhere in BeeGFS.
 func BeeGFSClient(path string) (filesystem.Provider, error) {
 	if globalMount == nil {
 		var err error
 		if viper.IsSet(BeeGFSMountPointKey) {
-			globalMount, err = filesystem.NewFromPath(viper.GetString(BeeGFSMountPointKey))
+			mp := viper.GetString(BeeGFSMountPointKey)
+			if mp == "none" {
+				globalMount = filesystem.UnmountedFS{}
+				return globalMount, filesystem.ErrUnmounted
+			}
+			if !filepath.IsAbs(mp) {
+				return nil, fmt.Errorf("the specified value for %s does not appear to be an absolute path", BeeGFSMountPointKey)
+			}
+			globalMount, err = filesystem.NewFromPath(mp)
 		} else {
 			globalMount, err = filesystem.NewFromPath(path)
 		}

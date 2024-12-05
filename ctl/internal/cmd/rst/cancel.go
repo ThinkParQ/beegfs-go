@@ -1,14 +1,15 @@
 package rst
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func newCancelCmd() *cobra.Command {
@@ -33,18 +34,13 @@ func newCancelCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only update the specified job.")
-	cmd.Flags().BoolVar(&cfg.Force, "force", false, `
-	Use force to attempt to cancel a job and all work requests regardless of their current state.
-	This mode skips verifying the path stills exists to allow cancelling up jobs for deleted paths.
+	cmd.Flags().BoolVar(&cfg.Force, "force", false, `Use force to attempt to cancel a job and all work requests regardless of their current state.
 	This attempts to be as thorough as possible and will ignore errors it encounters along the way to complete the following:
 	(a) Always verifies worker nodes are no longer running work requests even if they were already cancelled.
 	(b) Aborts outstanding external transfers (such as multipart uploads), even if some work requests could not be definitely cancelled.
 	(c) Updates the job state to cancelled so it can be cleaned up (deleted).
 	The force flag can also be used to cancel completed jobs, which are normally ignored by job updates.
-	Force cancelling already completed jobs should generally never be necessary during normal operation.
-	IMPORTANT: Only relative paths inside BeeGFS can be used for forced updates. 
-	For example given the absolute path "/mnt/beegfs/myfile" you would specify "/myfile".
-	`)
+	Force cancelling already completed jobs should generally never be necessary during normal operation.`)
 
 	return cmd
 }
@@ -53,10 +49,8 @@ func runCancelCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 
 	response, err := rst.UpdateJobs(cmd.Context(), cfg)
 	if err != nil {
-		if sts, ok := status.FromError(err); ok {
-			if sts.Code() == codes.NotFound && cfg.Force {
-				return fmt.Errorf("%w\n(hint: forced job updates can only be made using relative paths)", err)
-			}
+		if errors.Is(err, filesystem.ErrInitFSClient) {
+			return fmt.Errorf("%w (hint: use the --%s=none flag to interact with files that no longer exist or if BeeGFS is not mounted)", err, config.BeeGFSMountPointKey)
 		}
 		return err
 	}

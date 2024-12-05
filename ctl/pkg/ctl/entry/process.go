@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -88,16 +89,16 @@ func processEntries[ResultT any](
 	if method.pathsViaStdin {
 		pathsChan := make(chan string, 1024)
 		go util.ReadFromStdin(ctx, method.stdinDelimiter, pathsChan, errChan)
-		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry)
+		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry, true)
 	} else if method.pathsViaRecursion != "" {
 		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errChan)
 		if err != nil {
 			return nil, nil, err
 		}
-		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry)
+		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry, false)
 	} else {
 		pathsChan := make(chan string, 1024)
-		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry)
+		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry, true)
 		go func() {
 			// Writing to the channel needs to happen in a separate Goroutine so entriesChan can be
 			// returned immediately. Otherwise if the number of paths is larger than the entriesChan
@@ -125,6 +126,9 @@ func startProcessing[ResultT any](
 	errs chan<- error,
 	singleWorker bool,
 	processEntry func(path string) (ResultT, error),
+	// Some processing methods do not work when BeeGFS is not mounted. Specifically recursion is not
+	// possible since there is no file system tree mounted to recurse through.
+	allowUnmounted bool,
 ) <-chan ResultT {
 
 	results := make(chan ResultT, 1024)
@@ -167,7 +171,7 @@ func startProcessing[ResultT any](
 					// initialized BeeGFSClient using the absolute path, and may need to be updated.
 					if beegfsClient == nil {
 						beegfsClient, err = config.BeeGFSClient(path)
-						if err != nil {
+						if err != nil && !(errors.Is(err, filesystem.ErrUnmounted) && allowUnmounted) {
 							errs <- err
 							workerCancel()
 							return
