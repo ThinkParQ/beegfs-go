@@ -10,6 +10,6 @@ func NewEntryCmd() *cobra.Command {
 		Short: "Interact with files and directories in BeeGFS",
 	}
 
-	cmd.AddCommand(newEntryInfoCmd(), newEntrySetCmd(), newEntryDisposalCmd(), newMigrateCmd())
+	cmd.AddCommand(newEntryInfoCmd(), newEntrySetCmd(), newEntryDisposalCmd(), newMigrateCmd(), newCreateCmd())
 	return cmd
 }
