@@ -250,10 +250,9 @@ type permissionsFlag struct {
 	p **int32
 }
 
-func newPermissionsFlag(p **int32) *permissionsFlag {
+func newPermissionsFlag(p **int32, defaultPerm int32) *permissionsFlag {
 	// This actually sets the default.
 	if *p == nil {
-		defaultPerm := int32(0644)
 		*p = &defaultPerm
 	}
 	return &permissionsFlag{p: p}

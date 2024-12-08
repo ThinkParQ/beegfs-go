@@ -17,18 +17,21 @@ func newCreateCmd() *cobra.Command {
 	}
 	cmd.AddCommand(
 		newCreateFileCmd(),
+		newCreateDirCmd(),
 	)
 	return cmd
 }
 
 func newCreateFileCmd() *cobra.Command {
-	backendCfg := entry.CreateFileCfg{}
+	backendCfg := entry.CreateEntryCfg{
+		FileCfg: &entry.CreateFileCfg{},
+	}
 	cmd := &cobra.Command{
 		Use:   "file <path> [<path>] ...",
 		Short: "Create a file in BeeGFS with specific configuration",
 		Long: `Create a file in BeeGFS with specific configuration.
 Unless specified, striping configuration is inherited from the parent directory.
-WARNING: Files and directories created using this mode do not trigger file system modification events.`,
+WARNING: Files created using this mode do not trigger file system modification events.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -37,36 +40,74 @@ WARNING: Files and directories created using this mode do not trigger file syste
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			results, err := entry.CreateFile(cmd.Context(), backendCfg)
+			results, err := entry.CreateEntry(cmd.Context(), backendCfg)
 			if err != nil {
 				return err
 			}
 			return PrintCreateEntryResult(results)
 		},
 	}
-	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Ignore if the specified targets/buddy groups are not in the same pool as the entry.")
-	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunksize", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
-	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
+	cmd.Flags().BoolVar(&backendCfg.FileCfg.Force, "force", false, "Ignore if the specified targets/buddy groups are not in the same pool as the entry.")
+	cmd.Flags().Var(newChunksizeFlag(&backendCfg.FileCfg.Chunksize), "chunksize", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
+	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.FileCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
 	If the stripe pattern is 'buddymirror' this is the number of mirror groups.`)
-	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.TargetIDs, 16, beegfs.Storage), "targets", `Comma-separated list of targets to use for the new file (only applies to new files).
+	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.FileCfg.TargetIDs, 16, beegfs.Storage), "targets", `Comma-separated list of targets to use for the new file (only applies to new files).
 	The number of targets may be longer than the num-targets parameter, but cannot be less.
 	When the stripe pattern is set to buddy mirror, this argument expects buddy group IDs instead of target IDs.
 	If the targets/groups are not in the same storage pool that will be assigned to the new file, the force flag must be set.`)
-	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use targets from this storage pool when creating the file. 
+	cmd.Flags().Var(newPoolFlag(&backendCfg.FileCfg.Pool), "pool", `Use targets from this storage pool when creating the file. 
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
 	NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
-	cmd.Flags().Var(newPermissionsFlag(&backendCfg.Permissions), "permissions", "The octal access permissions for user, group, and others.")
+	cmd.Flags().Var(newPermissionsFlag(&backendCfg.Permissions, 0644), "permissions", "The octal access permissions for user, group, and others.")
 	cmd.Flags().Var(newUserFlag(&backendCfg.UserID), "uid", "User ID of the file owner. Defaults to the current effective user ID.")
 	cmd.Flags().Var(newGroupFlag(&backendCfg.GroupID), "gid", "Group ID of the file owner. Defaults to the current effective group ID.")
-	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
+	cmd.Flags().Var(newStripePatternFlag(&backendCfg.FileCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 	When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
 	NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
-	cmd.Flags().VarP(newRstsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
-	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
+	cmd.Flags().VarP(newRstsFlag(&backendCfg.FileCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
+	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.FileCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/18
 	// Unmark this as hidden once automatic uploads are supported.
 	cmd.Flags().MarkHidden("remote-cooldown")
 	cmd.MarkFlagsMutuallyExclusive("pool", "targets")
+
+	return cmd
+}
+
+func newCreateDirCmd() *cobra.Command {
+	backendCfg := entry.CreateEntryCfg{
+		DirCfg: &entry.CreateDirCfg{},
+	}
+
+	cmd := &cobra.Command{
+		Use:     "directory <path> [<path>] ...",
+		Aliases: []string{"dir"},
+		Short:   "Create a directory in BeeGFS with specific configuration",
+		Long: `Create a directory in BeeGFS with specific configuration.
+By default if the parent directory is mirrored, the new directory will also be mirrored.
+Optionally the new directory can always be unmirrored or created on specific metadata node(s).
+WARNING: Directories created using this mode do not trigger file system modification events.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
+			}
+			backendCfg.Paths = args
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			results, err := entry.CreateEntry(cmd.Context(), backendCfg)
+			if err != nil {
+				return err
+			}
+			return PrintCreateEntryResult(results)
+		},
+	}
+	cmd.Flags().Var(newPermissionsFlag(&backendCfg.Permissions, 0755), "permissions", "The octal access permissions for user, group, and others.")
+	cmd.Flags().Var(newUserFlag(&backendCfg.UserID), "uid", "User ID of the file owner. Defaults to the current effective user ID.")
+	cmd.Flags().Var(newGroupFlag(&backendCfg.GroupID), "gid", "Group ID of the file owner. Defaults to the current effective group ID.")
+	cmd.Flags().BoolVar(&backendCfg.DirCfg.NoMirror, "no-mirror", false, "Do not mirror metadata, even if the parent directory has mirroring enabled.")
+	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.DirCfg.Nodes, 16, beegfs.Meta), "nodes", `Comma-separated list of metadata nodes to choose from for the new directory.
+	When using mirroring, this is the buddy mirror group ID, rather than a node ID.`)
 
 	return cmd
 }

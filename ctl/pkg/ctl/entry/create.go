@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -17,14 +18,23 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 )
 
-type CreateFileCfg struct {
+// CreateEntryCfg contains all configuration that is required when creating new entries in BeeGFS.
+// The specific type of entry to create is determined depending if FileCfg or DirCfg is set. If both
+// are set, FileCfg will take precedence.
+type CreateEntryCfg struct {
 	Paths []string
-	Force bool
 	// Fields that must always be specified by the user:
 	Permissions *int32
 	UserID      *uint32
 	GroupID     *uint32
-	// Fields that may be inherited from the parent directory if not explicitly set:
+	FileCfg     *CreateFileCfg
+	DirCfg      *CreateDirCfg
+}
+
+// CreateFileCfg contains optional configuration that can be set when creating a new file. By
+// default configuration is inherited from the parent directory.
+type CreateFileCfg struct {
+	Force              bool
 	StripePattern      *beegfs.StripePatternType
 	Chunksize          *uint32
 	DefaultNumTargets  *uint32
@@ -32,6 +42,12 @@ type CreateFileCfg struct {
 	TargetIDs          []beegfs.EntityId
 	RemoteTargets      []uint32
 	RemoteCooldownSecs *uint16
+}
+
+// CreateDirCfg contains optional configuration that can be set when creating a new directory.
+type CreateDirCfg struct {
+	Nodes    []beegfs.EntityId
+	NoMirror bool
 }
 
 type CreateEntryResult struct {
@@ -48,7 +64,11 @@ type CreateEntryResult struct {
 //
 // IMPORTANT: It DOES NOT set NewFileName, relying on the caller to set this when making individual
 // requests for each new entry.
-func generateAndVerifyMakeFileReq(userCfg *CreateFileCfg, parent *GetEntryCombinedInfo, mappings *util.Mappings) (*msg.MakeFileWithPatternRequest, error) {
+func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombinedInfo, mappings *util.Mappings) (*msg.MakeFileWithPatternRequest, error) {
+
+	if userCfg.FileCfg == nil {
+		return nil, errors.New("user config does not contain file configuration (probably this is a bug)")
+	}
 
 	// Verify/set basic settings that must be set with all requests:
 	if userCfg.UserID == nil {
@@ -65,8 +85,9 @@ func generateAndVerifyMakeFileReq(userCfg *CreateFileCfg, parent *GetEntryCombin
 	request := &msg.MakeFileWithPatternRequest{
 		UserID:  *userCfg.UserID,
 		GroupID: *userCfg.GroupID,
-		// The mode must contain the "file" flag (otherwise you will get a vague internal error).
-		Mode:       *userCfg.Permissions | syscall.S_IFREG,
+		// Trim invalid flags from mode and ensure it contains the "file" flag (otherwise you will
+		// get a vague internal error).
+		Mode:       (*userCfg.Permissions & 07777) | syscall.S_IFREG,
 		Umask:      0000,
 		ParentInfo: *parent.Entry.origEntryInfoMsg,
 		// Start with the parent pattern and RST config.
@@ -76,26 +97,26 @@ func generateAndVerifyMakeFileReq(userCfg *CreateFileCfg, parent *GetEntryCombin
 	}
 
 	// Specific checks are performed based on the pattern, set that first:
-	if userCfg.StripePattern != nil {
-		request.Pattern.Type = *userCfg.StripePattern
+	if userCfg.FileCfg.StripePattern != nil {
+		request.Pattern.Type = *userCfg.FileCfg.StripePattern
 	}
 
 	// Set the chunksize if requested:
-	if userCfg.Chunksize != nil {
-		request.Pattern.Chunksize = *userCfg.Chunksize
+	if userCfg.FileCfg.Chunksize != nil {
+		request.Pattern.Chunksize = *userCfg.FileCfg.Chunksize
 	}
 
 	// Set the default number of targets if requested:
-	if userCfg.DefaultNumTargets != nil {
-		request.Pattern.DefaultNumTargets = *userCfg.DefaultNumTargets
+	if userCfg.FileCfg.DefaultNumTargets != nil {
+		request.Pattern.DefaultNumTargets = *userCfg.FileCfg.DefaultNumTargets
 	}
 
 	// Set the pool if requested:
 	var storagePool pool.GetStoragePools_Result
-	if userCfg.Pool != nil {
-		storagePool, err = mappings.StoragePoolToConfig.Get(*userCfg.Pool)
+	if userCfg.FileCfg.Pool != nil {
+		storagePool, err = mappings.StoragePoolToConfig.Get(*userCfg.FileCfg.Pool)
 		if err != nil {
-			return nil, fmt.Errorf("error looking up the specified pool %s: %w", *userCfg.Pool, err)
+			return nil, fmt.Errorf("error looking up the specified pool %s: %w", *userCfg.FileCfg.Pool, err)
 		}
 		request.Pattern.StoragePoolID = uint16(storagePool.Pool.LegacyId.NumId)
 	} else {
@@ -106,19 +127,19 @@ func generateAndVerifyMakeFileReq(userCfg *CreateFileCfg, parent *GetEntryCombin
 			NumId:    beegfs.NumId(parent.Entry.Pattern.StoragePoolID),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("error looking up pool for parent entry %s: %w", *userCfg.Pool, err)
+			return nil, fmt.Errorf("error looking up pool for parent entry %s: %w", *userCfg.FileCfg.Pool, err)
 		}
 		// No need to do anything else, the parent pool is already set above on the request.
 	}
 
 	// Set specific targets/buddy groups if requested:
-	if len(userCfg.TargetIDs) > 0 {
-		if userCfg.DefaultNumTargets != nil && int(*userCfg.DefaultNumTargets) > len(userCfg.TargetIDs) {
+	if len(userCfg.FileCfg.TargetIDs) > 0 {
+		if userCfg.FileCfg.DefaultNumTargets != nil && int(*userCfg.FileCfg.DefaultNumTargets) > len(userCfg.FileCfg.TargetIDs) {
 			return nil, fmt.Errorf("requested number of targets is greater than the number of targets/buddy groups that were specified")
 		}
 		// Make sure the targets or buddy groups specified by the user are actually valid and
 		// compatible with the configured stripe pattern:
-		request.Pattern.TargetIDs, err = checkAndGetTargets(userCfg.Force, mappings, storagePool, request.Pattern.Type, userCfg.TargetIDs)
+		request.Pattern.TargetIDs, err = checkAndGetTargets(userCfg.FileCfg.Force, mappings, storagePool, request.Pattern.Type, userCfg.FileCfg.TargetIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -135,11 +156,11 @@ func generateAndVerifyMakeFileReq(userCfg *CreateFileCfg, parent *GetEntryCombin
 	}
 
 	// Set specific RST config if requested:
-	if len(userCfg.RemoteTargets) > 0 {
-		request.RST.RSTIDs = userCfg.RemoteTargets
+	if len(userCfg.FileCfg.RemoteTargets) > 0 {
+		request.RST.RSTIDs = userCfg.FileCfg.RemoteTargets
 	}
-	if userCfg.RemoteCooldownSecs != nil {
-		request.RST.CoolDownPeriod = *userCfg.RemoteCooldownSecs
+	if userCfg.FileCfg.RemoteCooldownSecs != nil {
+		request.RST.CoolDownPeriod = *userCfg.FileCfg.RemoteCooldownSecs
 	}
 
 	// Return the request
@@ -204,7 +225,65 @@ func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.Ge
 	return ids, nil
 }
 
-func CreateFile(ctx context.Context, cfg CreateFileCfg) ([]CreateEntryResult, error) {
+func generateAndVerifyMkDirRequest(userCfg *CreateEntryCfg, parent *GetEntryCombinedInfo, nodeStore *beemsg.NodeStore, mappings *util.Mappings) (*msg.MkDirRequest, error) {
+	if userCfg.DirCfg == nil {
+		return nil, errors.New("user config does not contain directory configuration (probably this is a bug)")
+	}
+
+	// Verify/set basic settings that must be set with all requests:
+	if userCfg.UserID == nil {
+		return nil, fmt.Errorf("user ID must be set")
+	}
+	if userCfg.GroupID == nil {
+		return nil, fmt.Errorf("group ID must be set")
+	}
+	if userCfg.Permissions == nil {
+		return nil, fmt.Errorf("permissions must be set")
+	}
+
+	var err error
+	request := &msg.MkDirRequest{
+		UserID:  *userCfg.UserID,
+		GroupID: *userCfg.GroupID,
+		// Trim invalid flags from mode and ensure it contains the "dir" flag (otherwise you will
+		// get a vague internal error).
+		Mode:           (*userCfg.Permissions & 07777) | syscall.S_IFDIR,
+		Umask:          0000,
+		ParentInfo:     *parent.Entry.origEntryInfoMsg,
+		NoMirror:       userCfg.DirCfg.NoMirror,
+		PreferredNodes: make([]uint16, 0, len(userCfg.DirCfg.Nodes)),
+	}
+
+	if len(userCfg.DirCfg.Nodes) > 0 {
+		for _, entityID := range userCfg.DirCfg.Nodes {
+			// If the parent is mirrored and the user has not explicitly set no mirror, then the
+			// Node list is actually a list of buddy groups. If the parent is not mirrored or the
+			// user has set no mirror, these are meta node IDs instead.
+			if parent.Entry.FeatureFlags.IsBuddyMirrored() && !userCfg.DirCfg.NoMirror {
+				buddyGroup, err := mappings.MetaBuddyGroupToPrimaryNode.Get(entityID)
+				if err != nil {
+					return nil, fmt.Errorf("unable to look up specified buddy group: %w", err)
+				}
+				if buddyGroup.LegacyId.NodeType != beegfs.Meta {
+					return nil, fmt.Errorf("requested buddy group %s is not a metadata buddy group", entityID)
+				}
+				request.PreferredNodes = append(request.PreferredNodes, uint16(buddyGroup.LegacyId.NumId))
+			} else {
+				node, err := nodeStore.GetNode(entityID)
+				if err != nil {
+					return nil, fmt.Errorf("unable to look up requested node in the node store: %w", err)
+				}
+				if node.Id.NodeType != beegfs.Meta {
+					return nil, fmt.Errorf("requested node %s is not a metadata node", entityID)
+				}
+				request.PreferredNodes = append(request.PreferredNodes, uint16(node.Id.NumId))
+			}
+		}
+	}
+	return request, err
+}
+
+func CreateEntry(ctx context.Context, cfg CreateEntryCfg) ([]CreateEntryResult, error) {
 	results := make([]CreateEntryResult, 0, len(cfg.Paths))
 	if os.Geteuid() != 0 {
 		return results, errors.New("only root may use this mode")
@@ -238,7 +317,7 @@ func CreateFile(ctx context.Context, cfg CreateFileCfg) ([]CreateEntryResult, er
 	}
 
 	// baseRequest is generated once for all files created in a particular directory.
-	var baseRequest *msg.MakeFileWithPatternRequest
+	var baseRequest msg.SerializableMsg
 	// currentParent is the path to the parent directory that baseRequest is valid for.
 	// When the parent of the path we're handling does not match the currentParent,
 	// we must get entry info for the new parent and regenerate the base request.
@@ -258,30 +337,50 @@ func CreateFile(ctx context.Context, cfg CreateFileCfg) ([]CreateEntryResult, er
 			if err != nil {
 				return results, fmt.Errorf("unable to get entry info for parent path %s: %w", parent, err)
 			}
-			baseRequest, err = generateAndVerifyMakeFileReq(&cfg, parentEntry, mappings)
+
+			if cfg.FileCfg != nil {
+				baseRequest, err = generateAndVerifyMakeFileReq(&cfg, parentEntry, mappings)
+			} else if cfg.DirCfg != nil {
+				baseRequest, err = generateAndVerifyMkDirRequest(&cfg, parentEntry, nodeStore, mappings)
+			} else {
+				return nil, errors.New("user request does not contain file or directory configuration (probably this is a bug)")
+			}
 			if err != nil {
 				return results, fmt.Errorf("invalid configuration for path %s: %w", path, err)
 			}
 		}
-		if baseRequest == nil {
-			return results, fmt.Errorf("base request is unexpectedly nil (this is probably a bug)")
-		}
-		if parentEntry == nil {
-			return results, fmt.Errorf("parent entry is unexpectedly nil (this is probably a bug)")
+
+		var resp msg.DeserializableMsg
+		switch req := baseRequest.(type) {
+		case *msg.MakeFileWithPatternRequest:
+			req.NewFileName = []byte(filepath.Base(path))
+			resp = &msg.MakeFileWithPatternResponse{}
+		case *msg.MkDirRequest:
+			req.NewDirName = []byte(filepath.Base(path))
+			resp = &msg.MkDirResp{}
+		default:
+			return nil, fmt.Errorf("unknown request type (this is probably a bug): %t", baseRequest)
 		}
 
-		baseRequest.NewFileName = []byte(filepath.Base(path))
-		var resp = &msg.MakeFileWithPatternResponse{}
 		err = nodeStore.RequestTCP(ctx, parentEntry.Entry.MetaOwnerNode.Uid, baseRequest, resp)
 		if err != nil {
 			return results, err
 		}
 
-		results = append(results, CreateEntryResult{
-			Path:         path,
-			Status:       resp.Result,
-			RawEntryInfo: resp.EntryInfo,
-		})
+		switch resp := resp.(type) {
+		case *msg.MakeFileWithPatternResponse:
+			results = append(results, CreateEntryResult{
+				Path:         path,
+				Status:       resp.Result,
+				RawEntryInfo: resp.EntryInfo,
+			})
+		case *msg.MkDirResp:
+			results = append(results, CreateEntryResult{
+				Path:         path,
+				Status:       resp.Result,
+				RawEntryInfo: resp.EntryInfo,
+			})
+		}
 	}
 
 	return results, nil
