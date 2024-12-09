@@ -71,15 +71,15 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print what configuration was updated for each entry.")
 
 	// Entry options
-	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunksize", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
+	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
 	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory. 
 				Can be specified as the alias, numerical ID, or unique ID of the pool.
 				NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
-				When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
+				When the pattern is set to "mirrored", each target will be mirrored on a corresponding mirror target.
 				NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
 	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
-				If the stripe pattern is 'buddymirror' this is the number of mirror groups.`)
+				If the stripe pattern is "mirrored" this is the number of mirror groups.`)
 	cmd.Flags().VarP(newRstsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
 				All desired IDs must be specified. Specify 'none' to unset all RSTs.`)
 	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
