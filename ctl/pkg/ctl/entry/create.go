@@ -40,6 +40,7 @@ type CreateFileCfg struct {
 	DefaultNumTargets  *uint32
 	Pool               *beegfs.EntityId
 	TargetIDs          []beegfs.EntityId
+	BuddyGroups        []beegfs.EntityId
 	RemoteTargets      []uint32
 	RemoteCooldownSecs *uint16
 }
@@ -134,12 +135,24 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 
 	// Set specific targets/buddy groups if requested:
 	if len(userCfg.FileCfg.TargetIDs) > 0 {
+		// If the user specified target IDs, infer they want the pattern to be RAID0:
+		request.Pattern.Type = beegfs.StripePatternRaid0
 		if userCfg.FileCfg.DefaultNumTargets != nil && int(*userCfg.FileCfg.DefaultNumTargets) > len(userCfg.FileCfg.TargetIDs) {
-			return nil, fmt.Errorf("requested number of targets is greater than the number of targets/buddy groups that were specified")
+			return nil, fmt.Errorf("requested number of targets is greater than the number of targets that were specified")
 		}
-		// Make sure the targets or buddy groups specified by the user are actually valid and
-		// compatible with the configured stripe pattern:
+		// Make sure the targets specified by the user are actually valid:
 		request.Pattern.TargetIDs, err = checkAndGetTargets(userCfg.FileCfg.Force, mappings, storagePool, request.Pattern.Type, userCfg.FileCfg.TargetIDs)
+		if err != nil {
+			return nil, err
+		}
+	} else if len(userCfg.FileCfg.BuddyGroups) > 0 {
+		// If the user specified buddy groups, infer they want the pattern to be mirrored:
+		request.Pattern.Type = beegfs.StripePatternBuddyMirror
+		if userCfg.FileCfg.DefaultNumTargets != nil && int(*userCfg.FileCfg.DefaultNumTargets) > len(userCfg.FileCfg.BuddyGroups) {
+			return nil, fmt.Errorf("requested number of targets is greater than the number of buddy groups that were specified")
+		}
+		// Make sure the buddy groups specified by the user are actually valid:
+		request.Pattern.TargetIDs, err = checkAndGetTargets(userCfg.FileCfg.Force, mappings, storagePool, request.Pattern.Type, userCfg.FileCfg.BuddyGroups)
 		if err != nil {
 			return nil, err
 		}

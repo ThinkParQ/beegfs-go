@@ -37,7 +37,7 @@ func (f *chunksizeFlag) String() string {
 }
 
 func (f *chunksizeFlag) Type() string {
-	return "bytes"
+	return "<bytes>"
 }
 
 func (f *chunksizeFlag) Set(value string) error {
@@ -116,7 +116,7 @@ func (f *stripePatternFlag) String() string {
 }
 
 func (f *stripePatternFlag) Type() string {
-	return "pattern"
+	return "<pattern>"
 }
 
 func (f *stripePatternFlag) Set(value string) error {
@@ -146,7 +146,7 @@ func (f *numTargetsFlag) String() string {
 }
 
 func (f *numTargetsFlag) Type() string {
-	return "int"
+	return "<number>"
 }
 
 func (f *numTargetsFlag) Set(value string) error {
@@ -266,7 +266,7 @@ func (f *permissionsFlag) String() string {
 }
 
 func (f *permissionsFlag) Type() string {
-	return "permissions"
+	return "<permissions>"
 }
 
 func (f *permissionsFlag) Set(value string) error {
@@ -301,7 +301,7 @@ func (f *userFlag) String() string {
 }
 
 func (f *userFlag) Type() string {
-	return "int"
+	return "<id>"
 }
 
 func (f *userFlag) Set(value string) error {
@@ -335,7 +335,7 @@ func (f *groupFlag) String() string {
 }
 
 func (f *groupFlag) Type() string {
-	return "int"
+	return "<id>"
 }
 
 func (f *groupFlag) Set(value string) error {
