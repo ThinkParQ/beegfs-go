@@ -29,6 +29,7 @@ type Mappings struct {
 	NodeToTargets               Mapper[[]beegfs.EntityIdSet]
 	TargetToNode                Mapper[beegfs.EntityIdSet]
 	TargetToEntityIdSet         Mapper[beegfs.EntityIdSet]
+	StorageBuddyToEntityIdSet   Mapper[beegfs.EntityIdSet]
 	StoragePoolToConfig         Mapper[pool.GetStoragePools_Result]
 	MetaBuddyGroupToPrimaryNode Mapper[beegfs.EntityIdSet]
 	StorageTargetsToBuddyGroup  Mapper[beegfs.EntityIdSet]
@@ -68,6 +69,7 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 	if err != nil {
 		return mappings, fmt.Errorf("unable to get buddy groups from management: %w", err)
 	}
+	mappings.StorageBuddyToEntityIdSet = MapStorageBuddyToEntityIdSet(buddyMirrors)
 	mappings.MetaBuddyGroupToPrimaryNode, err = MapMetaBuddyGroupToPrimaryNode(buddyMirrors, store)
 	if err != nil {
 		return mappings, err
@@ -239,6 +241,23 @@ func MapTargetToEntityIdSet(targets []target.GetTargets_Result) Mapper[beegfs.En
 		targetMapper.byLegacyID[t.Target.LegacyId] = t.Target
 	}
 	return targetMapper
+}
+
+// Map storage buddy groups to their full entity ID set.
+func MapStorageBuddyToEntityIdSet(buddyMirrors []buddygroup.GetBuddyGroups_Result) Mapper[beegfs.EntityIdSet] {
+	var buddyMapper = Mapper[beegfs.EntityIdSet]{}
+	buddyMapper.byUID = make(map[beegfs.Uid]beegfs.EntityIdSet)
+	buddyMapper.byAlias = make(map[beegfs.Alias]beegfs.EntityIdSet)
+	buddyMapper.byLegacyID = make(map[beegfs.LegacyId]beegfs.EntityIdSet)
+	for _, m := range buddyMirrors {
+		if m.NodeType != beegfs.Storage {
+			continue
+		}
+		buddyMapper.byUID[m.BuddyGroup.Uid] = m.BuddyGroup
+		buddyMapper.byAlias[m.BuddyGroup.Alias] = m.BuddyGroup
+		buddyMapper.byLegacyID[m.BuddyGroup.LegacyId] = m.BuddyGroup
+	}
+	return buddyMapper
 }
 
 // Map storage pool entity IDs to the full configuration details of that storage pool.

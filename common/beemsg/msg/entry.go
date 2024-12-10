@@ -8,6 +8,58 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
+// MkDirRequest (MkDirMsg) is currently only used for creating files using CTL. That use case does
+// not need to trigger a file system modification event, and does not set the Flag_BuddyMirrorSecond
+// flag. If this message needs to be used for other purposes serialization of those fields may need
+// to be implemented.
+type MkDirRequest struct {
+	UserID         uint32
+	GroupID        uint32
+	Mode           int32
+	Umask          int32
+	ParentInfo     EntryInfo
+	NewDirName     []byte
+	PreferredNodes []uint16
+	NoMirror       bool
+	// Not implemented:
+	// FileEvent        struct{}
+	// CreatedEntryInfo struct{}
+	// ParentTimestamps struct{}
+}
+
+func (m *MkDirRequest) MsgId() uint16 {
+	return 2001
+}
+func (m *MkDirRequest) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.UserID)
+	beeserde.SerializeInt(s, m.GroupID)
+	beeserde.SerializeInt(s, m.Mode)
+	beeserde.SerializeInt(s, m.Umask)
+	m.ParentInfo.Serialize(s)
+	beeserde.SerializeCStr(s, m.NewDirName, 4)
+	beeserde.SerializeSeq(s, m.PreferredNodes, true, func(out uint16) {
+		beeserde.SerializeInt(s, out)
+	})
+	if m.NoMirror {
+		// Equivalent of MKDIRMSG_FLAG_NOMIRROR in C++
+		s.MsgFeatureFlags |= 1
+	}
+}
+
+type MkDirResp struct {
+	Result    beegfs.OpsErr
+	EntryInfo EntryInfo
+}
+
+func (m *MkDirResp) MsgId() uint16 {
+	return 2002
+}
+
+func (m *MkDirResp) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
+	m.EntryInfo.Deserialize(d)
+}
+
 // UnlinkFileRequest is currently only used for cleaning up disposal files. That use case does not
 // need to trigger a file system modification event, and does not set the Flag_BuddyMirrorSecond
 // flag. If this message needs to be used for other purposes serialization of those fields may need

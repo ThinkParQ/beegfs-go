@@ -3,6 +3,7 @@ package entry
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -36,7 +37,7 @@ func (f *chunksizeFlag) String() string {
 }
 
 func (f *chunksizeFlag) Type() string {
-	return "bytes"
+	return "<bytes>"
 }
 
 func (f *chunksizeFlag) Set(value string) error {
@@ -115,7 +116,7 @@ func (f *stripePatternFlag) String() string {
 }
 
 func (f *stripePatternFlag) Type() string {
-	return "pattern"
+	return "<pattern>"
 }
 
 func (f *stripePatternFlag) Set(value string) error {
@@ -145,7 +146,7 @@ func (f *numTargetsFlag) String() string {
 }
 
 func (f *numTargetsFlag) Type() string {
-	return "int"
+	return "<number>"
 }
 
 func (f *numTargetsFlag) Set(value string) error {
@@ -235,7 +236,6 @@ func (f *rstCooldownFlag) Set(value string) error {
 		return fmt.Errorf("invalid duration %s: %w", value, err)
 	}
 
-	fmt.Println(parsedTime.Seconds())
 	if parsedTime.Seconds() > math.MaxUint16 {
 		return fmt.Errorf("cooldown cannot be greater than %d", math.MaxUint16)
 	}
@@ -243,5 +243,107 @@ func (f *rstCooldownFlag) Set(value string) error {
 	cd := uint16(parsedTime.Seconds())
 	cooldown := uint16(cd)
 	*f.p = &cooldown
+	return nil
+}
+
+type permissionsFlag struct {
+	p **int32
+}
+
+func newPermissionsFlag(p **int32, defaultPerm int32) *permissionsFlag {
+	// This actually sets the default.
+	if *p == nil {
+		*p = &defaultPerm
+	}
+	return &permissionsFlag{p: p}
+}
+
+func (f *permissionsFlag) String() string {
+	if *f.p == nil {
+		return ""
+	}
+	return fmt.Sprintf("%#o", **f.p)
+}
+
+func (f *permissionsFlag) Type() string {
+	return "<permissions>"
+}
+
+func (f *permissionsFlag) Set(value string) error {
+	// Base 8 because we expect permissions are specified in octal.
+	p, err := strconv.ParseInt(value, 8, 32)
+	if err != nil {
+		return err
+	}
+	perm := int32(p)
+	*f.p = &perm
+	return nil
+}
+
+type userFlag struct {
+	p **uint32
+}
+
+func newUserFlag(p **uint32) *userFlag {
+	// This actually sets the default.
+	if *p == nil {
+		defaultUID := uint32(os.Geteuid())
+		*p = &defaultUID
+	}
+	return &userFlag{p: p}
+}
+
+func (f *userFlag) String() string {
+	if *f.p == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", **f.p)
+}
+
+func (f *userFlag) Type() string {
+	return "<id>"
+}
+
+func (f *userFlag) Set(value string) error {
+	v, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return err
+	}
+	flag := uint32(v)
+	*f.p = &flag
+	return nil
+}
+
+type groupFlag struct {
+	p **uint32
+}
+
+func newGroupFlag(p **uint32) *groupFlag {
+	// This actually sets the default.
+	if *p == nil {
+		defaultGID := uint32(os.Getegid())
+		*p = &defaultGID
+	}
+	return &groupFlag{p: p}
+}
+
+func (f *groupFlag) String() string {
+	if *f.p == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", **f.p)
+}
+
+func (f *groupFlag) Type() string {
+	return "<id>"
+}
+
+func (f *groupFlag) Set(value string) error {
+	v, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return err
+	}
+	flag := uint32(v)
+	*f.p = &flag
 	return nil
 }
