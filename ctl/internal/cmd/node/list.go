@@ -27,8 +27,9 @@ func newListCmd() *cobra.Command {
 
 	// Define cobra command
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List BeeGFS nodes",
+		Use:         "list",
+		Short:       "List BeeGFS nodes",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg, reachabilityError)
 		},

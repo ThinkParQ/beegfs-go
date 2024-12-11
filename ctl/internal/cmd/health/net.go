@@ -37,6 +37,7 @@ Thus the lack of connections (<none>) to a particular server does not indicate a
 By default this command will first use "df" to force the client module to establish connections to storage nodes.
 This can cause the command to block if any storage nodes are unreachable (use --skip-df if needed).
 		`,
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runNetCmd(cmd, args, frontendCfg, backendCfg)
 		},

@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -44,8 +43,8 @@ WARNING: When updating multiple entries, non-directory entries will be silently 
 
 Required Permissions:
 This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config. 
-This enables normal users to change the default number of targets and chunksize for directories they own. All other options can only be changed by root.
-				`,
+This enables normal users to change the default number of targets and chunksize for directories they own. All other options can only be changed by root.`,
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -138,9 +137,6 @@ func runEntrySetHelp(cmd *cobra.Command, args []string) {
 }
 
 func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg, backendCfg entry.SetEntryCfg) error {
-
-	actorEUID := syscall.Geteuid()
-	backendCfg.ActorEUID = &actorEUID
 
 	// Setup the method for sending paths to the backend:
 	if frontendCfg.recurse {

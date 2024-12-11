@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"syscall"
@@ -298,9 +297,6 @@ func generateAndVerifyMkDirRequest(userCfg *CreateEntryCfg, parent *GetEntryComb
 
 func CreateEntry(ctx context.Context, cfg CreateEntryCfg) ([]CreateEntryResult, error) {
 	results := make([]CreateEntryResult, 0, len(cfg.Paths))
-	if os.Geteuid() != 0 {
-		return results, errors.New("only root may use this mode")
-	}
 	if len(cfg.Paths) == 0 {
 		return results, fmt.Errorf("unable to create entry (no path specified)")
 	}

@@ -66,6 +66,11 @@ const (
 	PageSizeKey = "page-size"
 )
 
+// Viper values for certain configuration values.
+const (
+	BeeGFSMountPointNone = "none"
+)
+
 // The global config singleton
 var globalMount filesystem.Provider
 
@@ -174,7 +179,7 @@ func BeeGFSClient(path string) (filesystem.Provider, error) {
 		var err error
 		if viper.IsSet(BeeGFSMountPointKey) {
 			mp := viper.GetString(BeeGFSMountPointKey)
-			if mp == "none" {
+			if mp == BeeGFSMountPointNone {
 				globalMount = filesystem.UnmountedFS{}
 				return globalMount, filesystem.ErrUnmounted
 			}

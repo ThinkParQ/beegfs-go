@@ -212,12 +212,11 @@ func MigrateEntries(ctx context.Context, pm InputMethod, cfg MigrateCfg) (<-chan
 
 	if cfg.UpdateDirs {
 		migration.setDir = &SetEntryCfg{
-			ActorEUID: &euid,
-			Pool:      &cfg.DstPool,
+			Pool: &cfg.DstPool,
 		}
-		// migrateEntry uses setEntry() directory to minimize overhead. Validate the request once
-		// for all workers.
-		if err := migration.setDir.validate(); err != nil {
+		// migrateEntry uses setEntry() directory to minimize overhead. Call setAndValidateEUID()
+		// once for all workers.
+		if err := migration.setDir.setAndValidateEUID(); err != nil {
 			return nil, nil, fmt.Errorf("unable to update directory stripe patterns: %w", err)
 		}
 	}

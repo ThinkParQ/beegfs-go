@@ -40,6 +40,7 @@ func walkDir(ctx context.Context, startingPath string, errChan chan<- error) (<-
 		if err != nil {
 			errChan <- err
 			close(pathChan)
+			return
 		}
 		close(pathChan)
 	}()

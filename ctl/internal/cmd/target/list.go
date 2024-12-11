@@ -24,8 +24,9 @@ func newListCmd() *cobra.Command {
 	cfg := PrintConfig{StoragePool: beegfs.InvalidEntityId{}}
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List BeeGFS targets",
+		Use:         "list",
+		Short:       "List BeeGFS targets",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targets, err := target.GetTargets(cmd.Context())
 			if err != nil {

@@ -3,7 +3,6 @@ package entry
 import (
 	"context"
 	"fmt"
-	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -79,10 +78,6 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 }
 
 func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, backendCfg entry.MigrateCfg) error {
-
-	if actorEUID := syscall.Geteuid(); actorEUID != 0 {
-		return fmt.Errorf("only root can use the migrate mode")
-	}
 
 	// Setup the method for sending paths to the backend:
 	if frontendCfg.recurse {

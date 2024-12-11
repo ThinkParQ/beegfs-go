@@ -118,7 +118,7 @@ func newSetLimitsCmd() *cobra.Command {
 	cfg := setLimitsCmdConfig{}
 
 	cmd := &cobra.Command{
-		Use:   "set-limits",
+		Use:   "set-limits <pool>",
 		Short: "Set explicit quota limits for users and groups",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -332,8 +332,9 @@ func newListUsageCmd() *cobra.Command {
 	cfg := listUsageConfig{pool: beegfs.InvalidEntityId{}}
 
 	cmd := &cobra.Command{
-		Use:   "list-usage",
-		Short: "List quota usage per user or group together with their effective limit",
+		Use:         "list-usage",
+		Short:       "List quota usage per user or group together with their effective limit",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListUsageCmd(cmd, cfg)
 		},
@@ -386,7 +387,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 		return err
 	}
 
-	refreshPeriod := ""
+	// If no quotas were returned, this will never be set.
+	refreshPeriod := "?"
 
 	tbl := cmdfmt.NewTableWrapper(
 		[]string{"id", "type", "pool", "space", "inode"},
@@ -403,7 +405,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 		}
 
 		// The first entry comes with the refresh period field
-		if refreshPeriod == "" {
+		if refreshPeriod == "?" {
 			p := resp.GetRefreshPeriodS()
 			if p == 0 {
 				refreshPeriod = "?"
