@@ -64,6 +64,11 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, `The number of table rows before the header is repeated and the output is flushed to stdout.
 	If set to 0, prints no header and immediately flushes every row.`)
 
+	cmd.PersistentFlags().Bool(config.PrintJsonKey, false, fmt.Sprintf(`Print output normally rendered using a table as JSON instead (experimental). 
+	If the number of entries returned is greater than %s multiple JSON lists be returned (increase %s if needed).`, config.PageSizeKey, config.PageSizeKey))
+	cmd.PersistentFlags().Bool(config.PrintJsonPrettyKey, false, fmt.Sprintf(`Print output normally rendered using a table as JSON instead (experimental). 
+	If the number of entries returned is greater than %s multiple JSON lists will be returned (increase %s if needed).`, config.PageSizeKey, config.PageSizeKey))
+
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")
 	// Environment variables cannot use "-", replace with "_"

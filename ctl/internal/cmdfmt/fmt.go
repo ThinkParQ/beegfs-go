@@ -10,8 +10,16 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
+// Writer is a condensed version of table.Writer that allows implementing alternative ways besides
+// tables to write out structured data.
+type Writer interface {
+	AppendRow(row table.Row, configs ...table.RowConfig)
+	Render() string
+	SetColumnConfigs(configs []table.ColumnConfig)
+}
+
 type TableWrapper struct {
-	tableWriter table.Writer
+	tableWriter Writer
 	columns     []string
 	printCols   []string
 	pageSize    uint
@@ -67,41 +75,46 @@ func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWra
 // Creates a new internal TableWriter to prepare printing a new page
 func (w *TableWrapper) replaceTableWriter() {
 
-	// Set the style. We use a very simple style with only spaces as separators to make parsing
-	// easier.
-	tbl := table.NewWriter()
-	tbl.SetStyle(table.Style{
-		Box: table.BoxStyle{
-			PaddingRight:  "  ",
-			PageSeparator: "\n",
-		},
-		Format: table.FormatOptions{
-			// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
-			// initForRenderSuppressColumns() does not ignore control characters. This was fixed
-			// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
-			// a new go-pretty release is tagged. But it also results in hidden characters being
-			// added to columns which are included if a user copies text, which can lead to weird
-			// behavior (for example copying a unix timestamp to a timestamp converter website).
-			// We should leave this disabled unless it becomes necessary.
-			//
-			// Direction: text.LeftToRight,
-			Footer: text.FormatUpper,
-			Header: text.FormatUpper,
-		},
-	})
+	if viper.IsSet(config.PrintJsonKey) || viper.GetBool(config.PrintJsonPrettyKey) {
+		w.tableWriter = newJSONPrinter(viper.GetBool(config.PrintJsonPrettyKey))
+	} else {
+		// Otherwise print using a stylized table. Use a very simple style with only spaces as
+		// separators to make parsing easier.
+		tbl := table.NewWriter()
+		tbl.SetStyle(table.Style{
+			Box: table.BoxStyle{
+				PaddingRight:  "  ",
+				PageSeparator: "\n",
+			},
+			Format: table.FormatOptions{
+				// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
+				// initForRenderSuppressColumns() does not ignore control characters. This was fixed
+				// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
+				// a new go-pretty release is tagged. But it also results in hidden characters being
+				// added to columns which are included if a user copies text, which can lead to weird
+				// behavior (for example copying a unix timestamp to a timestamp converter website).
+				// We should leave this disabled unless it becomes necessary.
+				//
+				// Direction: text.LeftToRight,
+				Footer: text.FormatUpper,
+				Header: text.FormatUpper,
+			},
+		})
 
-	if !w.config.WithEmptyColumns {
-		tbl.SuppressEmptyColumns()
-	}
-
-	// Don't print a header if the page size is zero:
-	if w.pageSize > 0 {
-		// Build the header
-		row := table.Row{}
-		for _, h := range w.columns {
-			row = append(row, strings.ToLower(h))
+		if !w.config.WithEmptyColumns {
+			tbl.SuppressEmptyColumns()
 		}
-		tbl.AppendHeader(row)
+
+		// Don't print a header if the page size is zero:
+		if w.pageSize > 0 {
+			// Build the header
+			row := table.Row{}
+			for _, h := range w.columns {
+				row = append(row, strings.ToLower(h))
+			}
+			tbl.AppendHeader(row)
+		}
+		w.tableWriter = tbl
 	}
 
 	colCfg := []table.ColumnConfig{}
@@ -110,7 +123,8 @@ func (w *TableWrapper) replaceTableWriter() {
 	for i, name := range w.columns {
 		// The column number is used here because Name does not work if there is no header (as is
 		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
-		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true})
+		// The name is still included here because it is required when printing JSON.
+		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true, Name: name})
 		for _, cName := range w.printCols {
 			if cName == name || cName == "all" {
 				colCfg[len(colCfg)-1].Hidden = false
@@ -119,13 +133,11 @@ func (w *TableWrapper) replaceTableWriter() {
 		}
 	}
 
-	tbl.SetColumnConfigs(colCfg)
-
-	w.tableWriter = tbl
+	w.tableWriter.SetColumnConfigs(colCfg)
 }
 
-// Appends a Row to the TableWriter if used, prints row to stdout otherwise. Auto prints the table
-// if pageSize rows have been added. If the pageSize is zero the row is immediately printed.
+// Appends a Row to the TableWriter. Auto prints the table if pageSize rows have been added. If the
+// pageSize is zero the row is immediately printed.
 func (w *TableWrapper) Row(fields ...any) {
 	w.tableWriter.AppendRow(fields)
 	w.rowCount += 1

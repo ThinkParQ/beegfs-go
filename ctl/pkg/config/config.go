@@ -63,7 +63,9 @@ const (
 	// how often output is actually flushed to stdout. Not applied automatically. If set to 0,
 	// should not print a header at all and flush each row automatically (this requires NOT using
 	// the go-pretty table printer and just print columns separated by spaces).
-	PageSizeKey = "page-size"
+	PageSizeKey        = "page-size"
+	PrintJsonKey       = "json"
+	PrintJsonPrettyKey = "json-pretty"
 )
 
 // Viper values for certain configuration values.
