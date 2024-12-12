@@ -19,7 +19,6 @@ import (
 // Defines all the global flags and binds them to the backends config singleton
 func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool(config.DebugKey, false, "Print additional details that are normally hidden.")
-	cmd.PersistentFlags().MarkHidden(config.DebugKey)
 
 	cmd.PersistentFlags().Bool(config.RawKey, false, "Print raw values without SI or IEC prefixes (except durations).")
 
@@ -36,7 +35,6 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	Some modes require specifying '%s', for example to interact with paths that no longer exist in BeeGFS.`, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
 
 	cmd.PersistentFlags().Bool(config.DisableEmojisKey, false, "If emojis should be omitted throughout various output.")
-	cmd.PersistentFlags().MarkHidden(config.DisableEmojisKey)
 
 	cmd.PersistentFlags().Int(config.NumWorkersKey, runtime.GOMAXPROCS(0), "The maximum number of workers to use when a command can complete work in parallel (default: number of CPUs).")
 

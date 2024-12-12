@@ -86,6 +86,10 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		attachPersistentPreRunE(child)
 	}
 
+	// Override the help template to allow the output to be customized including skipping printing
+	// persistent (global) flags so they are only printed for the root "beegfs" command.
+	cmd.SetHelpTemplate(helpTemplate)
+
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
 	if err != nil {
@@ -146,3 +150,41 @@ func isCommandAuthorized(cmd *cobra.Command) error {
 	}
 	return nil
 }
+
+var helpTemplate = `{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}{{end}}
+
+Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+Examples:
+{{.Example}}{{end}}{{if .HasAvailableSubCommands}}{{$cmds := .Commands}}{{if eq (len .Groups) 0}}
+
+Available Commands:{{range $cmds}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{else}}{{range $group := .Groups}}
+
+{{.Title}}{{range $cmds}}{{if (and (eq .GroupID $group.ID) (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if not .AllChildCommandsHaveGroup}}
+
+Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+{{if (eq .Name "beegfs")}}
+Global Flags:
+{{ else }}
+Flags:
+{{end}}
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
+{{if (eq .Name "beegfs")}}
+Global flags also apply to all sub-commands and can be set persistently using environment variables:
+
+  export BEEGFS_MGMTD_ADDR=hostname
+
+To persist configuration across sessions/reboots set it in your .bashrc file or similar.
+{{ else }}
+See "beegfs help" for a list of global flags that also apply to this command.
+{{end}}
+`

@@ -25,7 +25,7 @@ const (
 	// Managements gRPC listening address
 	ManagementAddrKey = "mgmtd-addr"
 	// BeeRemotes gRPC listening address
-	BeeRemoteAddrKey = "bee-remote-addr"
+	BeeRemoteAddrKey = "remote-addr"
 	// A BeeGFS mount point on the local file system
 	BeeGFSMountPointKey = "mount"
 	// The timeout for a single connection attempt
