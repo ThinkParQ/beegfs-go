@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	licenseCmd "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
 	pl "github.com/thinkparq/protobuf/go/license"
 )
@@ -61,7 +63,6 @@ func NewCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&cfg.Reload, "reload", false,
 		"Reload and re-verify license certificate on the server")
-	cmd.Flags().BoolVar(&cfg.Json, "json", false, "Output as JSON")
 
 	return cmd
 }
@@ -76,9 +77,12 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 	if license.Result == pl.VerifyResult_VERIFY_ERROR {
 		return errors.New(license.Message)
 	}
-	if cfg.Json {
+	if viper.GetBool(config.PrintJsonPrettyKey) {
 		pretty, _ := json.MarshalIndent(license, "", "  ")
 		fmt.Printf("%s\n", pretty)
+	} else if viper.GetBool(config.PrintJsonKey) {
+		json, _ := json.Marshal(license)
+		fmt.Printf("%s\n", json)
 	} else {
 		var features []string
 		var numservers string
