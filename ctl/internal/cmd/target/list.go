@@ -68,7 +68,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 		}
 	}
 
-	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 	defer tbl.PrintRemaining()
 
 	for _, t := range targets {
@@ -199,7 +199,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 			}
 		}
 
-		tbl.Row(
+		tbl.AddItem(
 			t.Target.Uid,
 			t.Target.LegacyId,
 			t.Target.Alias,

@@ -107,7 +107,7 @@ func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg,
 	// the end when running in verbose mode (to avoid the headers printing out). If this is ever
 	// used to print other output adjust how/where tbl.PrintRemaining() is called as needed.
 	allColumns := []string{"path", "status", "configuration updates"}
-	tbl := cmdfmt.NewTableWrapper(allColumns, allColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	count := 0
 
@@ -125,7 +125,7 @@ run:
 				if result.Status == beegfs.OpsErr_SUCCESS {
 					configUpdates = sprintfNewEntryConfig(result.Updates)
 				}
-				tbl.Row(result.Path, result.Status, configUpdates)
+				tbl.AddItem(result.Path, result.Status, configUpdates)
 			}
 		case err, ok := <-errChan:
 			if ok {

@@ -96,7 +96,7 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 	}
 
 	allColumns := []string{"path", "status", "original ids", "errors"}
-	tbl := cmdfmt.NewTableWrapper(allColumns, allColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	var migrateStats = &entry.MigrateStats{}
 
@@ -110,9 +110,9 @@ run:
 			}
 			if printVerbosely {
 				if result.Err != nil {
-					tbl.Row(result.Path, result.Status, result.StartingIDs, result.Err)
+					tbl.AddItem(result.Path, result.Status, result.StartingIDs, result.Err)
 				} else {
-					tbl.Row(result.Path, result.Status, result.StartingIDs, "none")
+					tbl.AddItem(result.Path, result.Status, result.StartingIDs, "none")
 				}
 			}
 			migrateStats.Update(result.Status)

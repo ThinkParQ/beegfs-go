@@ -18,7 +18,7 @@ import (
 // fits neatly into the table format.
 type jobsTable struct {
 	wrappingWidth int
-	tbl           cmdfmt.TableWrapper
+	tbl           cmdfmt.Printomatic
 }
 
 type jobTableCfg struct {
@@ -82,7 +82,7 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 	}
 	return jobsTable{
 		wrappingWidth: cfg.columnWidth,
-		tbl:           cmdfmt.NewTableWrapper(allJobAndWorkColumns, cfg.defaultJobColumns),
+		tbl:           cmdfmt.NewPrintomatic(allJobAndWorkColumns, cfg.defaultJobColumns),
 	}
 }
 
@@ -102,7 +102,7 @@ func (t *jobsTable) Row(job *beeremote.JobResult) {
 		operation = fmt.Sprintf("%v", job.Job.GetRequest().GetType())
 	}
 
-	t.tbl.Row(
+	t.tbl.AddItem(
 		convertJobStateToEmoji(job.Job.GetStatus().GetState()),
 		job.Job.GetRequest().GetPath(),
 		job.Job.GetRequest().GetRemoteStorageTarget(),
@@ -123,7 +123,7 @@ func (t *jobsTable) Row(job *beeremote.JobResult) {
 // listing jobs that may or may not have been actually created. It only populates the path and
 // status message field based on the error, putting a question mark/unknown in the ok field.
 func (t *jobsTable) MinimalRow(path string, err error) {
-	t.tbl.Row(
+	t.tbl.AddItem(
 		convertJobStateToEmoji(beeremote.Job_UNKNOWN),
 		path,
 		"-",

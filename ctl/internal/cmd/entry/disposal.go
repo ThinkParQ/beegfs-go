@@ -41,7 +41,7 @@ func runEntryDisposalCmd(cmd *cobra.Command, frontendCfg entryDisposalCfg, backe
 	}
 
 	allColumns := []string{"metadata node", "entry", "disposal result"}
-	tbl := cmdfmt.NewTableWrapper(allColumns, allColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	statsDisposedFiles := 0
 	statsTotalFiles := 0
 	multiErr := &types.MultiError{}
@@ -63,7 +63,7 @@ run:
 			}
 
 			if frontendCfg.printFiles {
-				tbl.Row(
+				tbl.AddItem(
 					fmt.Sprintf("%s (%d)", result.Node.Alias, result.Node.Id.NumId),
 					result.EntryID,
 					disposalResult,

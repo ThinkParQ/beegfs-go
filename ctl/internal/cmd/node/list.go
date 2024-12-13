@@ -87,7 +87,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 		}
 	}
 
-	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 	defer tbl.PrintRemaining()
 	hasUnreachableNode := false
 
@@ -132,7 +132,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 		}
 		hasUnreachableNode = hasUnreachableNode || !hasReachableNic
 
-		tbl.Row(
+		tbl.AddItem(
 			node.Node.Uid,
 			node.Node.Id,
 			node.Node.Alias,
