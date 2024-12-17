@@ -17,8 +17,9 @@ func newListCmd() *cobra.Command {
 	var withLimits bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List storage pools",
+		Use:         "list",
+		Short:       "List storage pools",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return RunListCmd(cmd, pool.GetStoragePools_Config{WithLimits: withLimits})
 		},

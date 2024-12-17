@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -22,7 +23,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/stats"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
 	cmdConfig "github.com/thinkparq/beegfs-go/ctl/internal/config"
-	util "github.com/thinkparq/beegfs-go/ctl/internal/util"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
@@ -50,12 +51,7 @@ BeeGFS is crafted with 💛 by contributors worldwide.
 Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		`, longHelpHeader, strings.Repeat("=", len(longHelpHeader))),
 		SilenceUsage: true,
-		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if viper.GetInt(config.NumWorkersKey) < 1 {
-				return fmt.Errorf("the number of workers must be at least 1")
-			}
-			return nil
-		},
+		// PersistentPreRunE: // Do not set here, see attachPersistentPreRunE() to modify instead.
 	}
 
 	// Normalize flags to lowercase - makes the program accept case insensitive flags
@@ -85,6 +81,15 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(index.NewCmd())
 	cmd.AddCommand(copy.NewCopyCmd())
 
+	// This must run AFTER all commands are added.
+	for _, child := range cmd.Commands() {
+		attachPersistentPreRunE(child)
+	}
+
+	// Override the help template to allow the output to be customized including skipping printing
+	// persistent (global) flags so they are only printed for the root "beegfs" command.
+	cmd.SetHelpTemplate(helpTemplate)
+
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(context.Background())
 	if err != nil {
@@ -100,3 +105,86 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 
 	return 0
 }
+
+// attachPersistentPreRunE ensures checkCommand() is executed before running all commands. It is not
+// sufficient to simply set checkCommand as the PersistentPreRunE of the root command, because it
+// would be overridden if a command defined its own PersistentPreRunE. This approach ensures
+// checkCommand always runs before the PersistentPreRunE defined on each sub-command.
+func attachPersistentPreRunE(cmd *cobra.Command) {
+	original := cmd.PersistentPreRunE
+	cmd.PersistentPreRunE = func(c *cobra.Command, args []string) error {
+		if err := checkCommand(c); err != nil {
+			return err
+		}
+		if original != nil {
+			return original(c, args)
+		}
+		return nil
+	}
+}
+
+// checkCommand() implements any checks that should run for all commands after all configuration is
+// known and the only thing remaining is to execute the command.
+func checkCommand(cmd *cobra.Command) error {
+	if viper.GetInt(config.NumWorkersKey) < 1 {
+		return fmt.Errorf("the number of workers must be at least 1")
+	}
+	return isCommandAuthorized(cmd)
+}
+
+// isCommandAuthorized enforces "opt-out" user authorization requiring commands to explicitly
+// declare using an annotation they can be run by users that do not have root privileges.
+func isCommandAuthorized(cmd *cobra.Command) error {
+	if _, ok := cmd.Annotations["authorization.AllowAllUsers"]; ok {
+		if mount := viper.GetString(config.BeeGFSMountPointKey); mount == config.BeeGFSMountPointNone {
+			// By forcing non-root users to interact with BeeGFS through a mount point Linux will
+			// handle verifying users have permissions for the entries they want to interact with.
+			// Otherwise users could guess file names and use CTL to see if those files exist.
+			return fmt.Errorf("only root can interact with an unmounted file system")
+		}
+		return nil
+	}
+	euid := syscall.Geteuid()
+	if euid != 0 {
+		return fmt.Errorf("only root can use this command")
+	}
+	return nil
+}
+
+var helpTemplate = `{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}{{end}}
+
+Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+Examples:
+{{.Example}}{{end}}{{if .HasAvailableSubCommands}}{{$cmds := .Commands}}{{if eq (len .Groups) 0}}
+
+Available Commands:{{range $cmds}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{else}}{{range $group := .Groups}}
+
+{{.Title}}{{range $cmds}}{{if (and (eq .GroupID $group.ID) (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if not .AllChildCommandsHaveGroup}}
+
+Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+{{if (eq .Name "beegfs")}}
+Global Flags:
+{{ else }}
+Flags:
+{{end}}
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
+{{if (eq .Name "beegfs")}}
+Global flags also apply to all sub-commands and can be set persistently using environment variables:
+
+  export BEEGFS_MGMTD_ADDR=hostname
+
+To persist configuration across sessions/reboots set it in your .bashrc file or similar.
+{{ else }}
+See "beegfs help" for a list of global flags that also apply to this command.
+{{end}}
+`

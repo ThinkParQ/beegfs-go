@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
@@ -57,11 +56,6 @@ type StorageBenchResult struct {
 // ExecuteStorageBenchAction is used to interact with the storage bench functionality of storage
 // nodes. It takes action based on the provided benchConfig.
 func ExecuteStorageBenchAction(ctx context.Context, benchConfig *StorageBenchConfig) ([]StorageBenchResult, error) {
-
-	euid := syscall.Geteuid()
-	if euid != 0 {
-		return nil, fmt.Errorf("only root can use storage bench")
-	}
 
 	logger, _ := config.GetLogger()
 	log := logger.With(zap.String("component", "storageBench"))

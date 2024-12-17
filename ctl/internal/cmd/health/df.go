@@ -11,9 +11,10 @@ import (
 
 func newDFCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "capacity",
-		Aliases: []string{"df"},
-		Short:   "Show available disk space and inodes on metadata and storage targets (beegfs-df)",
+		Use:         "capacity",
+		Aliases:     []string{"df"},
+		Short:       "Show available disk space and inodes on metadata and storage targets (beegfs-df)",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targets, err := tgtBackend.GetTargets(cmd.Context())
 			if err != nil {

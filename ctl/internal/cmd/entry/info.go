@@ -34,8 +34,8 @@ func newEntryInfoCmd() *cobra.Command {
 
 Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
-Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry info -').
-		`,
+Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry info -').`,
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)

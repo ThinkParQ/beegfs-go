@@ -19,7 +19,6 @@ import (
 // Defines all the global flags and binds them to the backends config singleton
 func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool(config.DebugKey, false, "Print additional details that are normally hidden.")
-	cmd.PersistentFlags().MarkHidden(config.DebugKey)
 
 	cmd.PersistentFlags().Bool(config.RawKey, false, "Print raw values without SI or IEC prefixes (except durations).")
 
@@ -27,16 +26,15 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().String(config.BeeRemoteAddrKey, "127.0.0.1:9010", "The gRPC network address and port of the BeeRemote node.")
 
-	cmd.PersistentFlags().String(config.BeeGFSMountPointKey, "auto", `Generally the path where BeeGFS is mounted is determined automatically from the provided path(s).
-	The default behavior requires using absolute paths or the current working directory to be somewhere in BeeGFS.
-	Optionally use this option to specify the absolute path where BeeGFS is mounted to also be able to use paths relative to the root directory.
-	Alternatively set this option to 'none' if BeeGFS is not mounted locally or you want to interact with BeeGFS directly.
+	cmd.PersistentFlags().String(config.BeeGFSMountPointKey, "auto", fmt.Sprintf(`Generally the path where BeeGFS is mounted is determined automatically from the provided path(s).
+	Both absolute and relative paths inside BeeGFS are supported (e.g., "./myfile" if the cwd is somewhere in BeeGFS or "/mnt/beegfs/myfile").
+	Optionally specify the absolute path where BeeGFS is mounted to also be able to use paths relative to the BeeGFS root directory.
+	Alternatively set this option to '%s' if BeeGFS is not mounted locally or you want to interact with BeeGFS directly.
 	This will skip all local path resolution logic and require paths to be specified relative to the BeeGFS root directory.
 	Not all modes (such as migrate) and functionality (such as path recursion) is available using option 'none'.
-	Some modes require specifying 'none', for example to interact with paths that no longer exist in BeeGFS.`)
+	Some modes require specifying '%s', for example to interact with paths that no longer exist in BeeGFS.`, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
 
 	cmd.PersistentFlags().Bool(config.DisableEmojisKey, false, "If emojis should be omitted throughout various output.")
-	cmd.PersistentFlags().MarkHidden(config.DisableEmojisKey)
 
 	cmd.PersistentFlags().Int(config.NumWorkersKey, runtime.GOMAXPROCS(0), "The maximum number of workers to use when a command can complete work in parallel (default: number of CPUs).")
 

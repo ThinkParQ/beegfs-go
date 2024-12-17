@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
@@ -19,10 +20,8 @@ import (
 // IMPORTANT: When updating this struct, add any fields that can only be modified by root to the
 // checks in Validate().
 type SetEntryCfg struct {
-	// The effective user ID of the calling process. Must be provided or an error will be returned.
-	// This is specified as a pointer to prevent bugs where the EUID is not set correctly being
-	// interpreted as the default value of an int (0) which would result in the EUID being root.
-	ActorEUID *int
+	// actorUID must be initialized by calling SetEntryCfg.setAndValidateEUID().
+	actorEUID *uint32
 	// Allow bypassing some configuration checks.
 	Force bool
 	// Entry metadata updates:
@@ -34,37 +33,37 @@ type SetEntryCfg struct {
 	RemoteCooldownSecs *uint16
 }
 
-// Validates the specified ActorEUID has permissions to make the requested updates.
-func (config *SetEntryCfg) validate() error {
-	if config.ActorEUID != nil {
-		if *config.ActorEUID < 0 || *config.ActorEUID > math.MaxUint32 {
-			return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", *config.ActorEUID)
-		}
-		// Checking user permissions when the chunksize or pattern changes is left up to the
-		// metadata server which may allow users to update their own directories if
-		// sysAllowUserSetPattern=true. All other configuration updates are rejected by the meta
-		// server, but currently may be silently discarded which may confuse users about why changes
-		// were not applied. Note if sysAllowUserSetPattern=false all updates by a non-root user are
-		// rejected with a meaningful error, however we have no way of knowing what the server's
-		// sysAllowUserSetPattern option is set to, so we always also check permissions locally.
-		if *config.ActorEUID != 0 {
-			if config.Pool != nil {
-				return fmt.Errorf("only root can configure pools")
-			}
-			if config.StripePattern != nil {
-				return fmt.Errorf("only root can configure stripe patterns")
-			}
-			if len(config.RemoteTargets) > 0 {
-				return fmt.Errorf("only root can configure remote targets")
-			}
-			if config.RemoteCooldownSecs != nil {
-				return fmt.Errorf("only root can configure the remote cooldown")
-			}
-		}
-		return nil
-	} else {
-		return fmt.Errorf("the effective user ID must be specified")
+// Validates the effective UID has permissions to make the requested updates.
+func (config *SetEntryCfg) setAndValidateEUID() error {
+
+	euid := syscall.Geteuid()
+	if euid < 0 || euid > math.MaxUint32 {
+		return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", euid)
 	}
+	u32euid := uint32(euid)
+	config.actorEUID = &u32euid
+	// Checking user permissions when the chunksize or pattern changes is left up to the
+	// metadata server which may allow users to update their own directories if
+	// sysAllowUserSetPattern=true. All other configuration updates are rejected by the meta
+	// server, but currently may be silently discarded which may confuse users about why changes
+	// were not applied. Note if sysAllowUserSetPattern=false all updates by a non-root user are
+	// rejected with a meaningful error, however we have no way of knowing what the server's
+	// sysAllowUserSetPattern option is set to, so we always also check permissions locally.
+	if *config.actorEUID != 0 {
+		if config.Pool != nil {
+			return fmt.Errorf("only root can configure pools")
+		}
+		if config.StripePattern != nil {
+			return fmt.Errorf("only root can configure stripe patterns")
+		}
+		if len(config.RemoteTargets) > 0 {
+			return fmt.Errorf("only root can configure remote targets")
+		}
+		if config.RemoteCooldownSecs != nil {
+			return fmt.Errorf("only root can configure the remote cooldown")
+		}
+	}
+	return nil
 }
 
 type SetEntryResult struct {
@@ -78,7 +77,7 @@ func SetEntries(ctx context.Context, pm InputMethod, cfg SetEntryCfg) (<-chan Se
 	log := logger.With(zap.String("component", "setEntries"))
 
 	// Validate new configuration once:
-	if err := cfg.validate(); err != nil {
+	if err := cfg.setAndValidateEUID(); err != nil {
 		return nil, nil, err
 	}
 
@@ -127,7 +126,7 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 		Pattern:   entry.Entry.Pattern.StripePattern,
 		RST:       entry.Entry.Remote.RemoteStorageTarget,
 	}
-	request.SetUID(uint32(*cfg.ActorEUID))
+	request.SetUID(*cfg.actorEUID)
 
 	// Only update any settings defined in newCfg:
 	if cfg.Chunksize != nil {

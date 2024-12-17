@@ -25,7 +25,7 @@ const (
 	// Managements gRPC listening address
 	ManagementAddrKey = "mgmtd-addr"
 	// BeeRemotes gRPC listening address
-	BeeRemoteAddrKey = "bee-remote-addr"
+	BeeRemoteAddrKey = "remote-addr"
 	// A BeeGFS mount point on the local file system
 	BeeGFSMountPointKey = "mount"
 	// The timeout for a single connection attempt
@@ -64,6 +64,11 @@ const (
 	// should not print a header at all and flush each row automatically (this requires NOT using
 	// the go-pretty table printer and just print columns separated by spaces).
 	PageSizeKey = "page-size"
+)
+
+// Viper values for certain configuration values.
+const (
+	BeeGFSMountPointNone = "none"
 )
 
 // The global config singleton
@@ -174,7 +179,7 @@ func BeeGFSClient(path string) (filesystem.Provider, error) {
 		var err error
 		if viper.IsSet(BeeGFSMountPointKey) {
 			mp := viper.GetString(BeeGFSMountPointKey)
-			if mp == "none" {
+			if mp == BeeGFSMountPointNone {
 				globalMount = filesystem.UnmountedFS{}
 				return globalMount, filesystem.ErrUnmounted
 			}
