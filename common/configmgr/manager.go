@@ -19,6 +19,12 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	FlagConfigFile = "cfg-file"
+	FlagVersion    = "version"
+	FlagDumpConfig = "developer.dump-config"
+)
+
 // Configurable defines an interface for managing application configurations.
 // Implementing this interface allows the configuration for different
 // applications to be managed using common configuration manager implementation
@@ -87,7 +93,7 @@ type ConfigManager struct {
 
 // New creates a new ConfigManager that is setup to parse configuration based on
 // the provided flagset and environment variable prefix. If the flagset includes
-// a cfg-file flag, configuration from that file will also be used. It does not
+// a ConfigFileFlag flag, configuration from that file will also be used. It does not
 // know anything about the actual application configuration, accepting instead
 // the Configurable interface which is used to unmarshal the provided
 // configuration sources into the specific type that represents the applications
@@ -117,9 +123,9 @@ func New(flags *pflag.FlagSet, envVarPrefix string, config Configurable, decodeH
 	return cfgMgr, nil
 }
 
-// Listener is a component (for example a certain package in the application)
-// that supports dynamic configuration updates and can be added to ConfigManager
-// using the AddListener function. For example the [gobee.logger] package is a listener.
+// Listener is a component (for example a certain package in the application) that supports dynamic
+// configuration updates and can be added to ConfigManager using the AddListener function. For
+// example the [beegfs-go.logger] package is a listener.
 type Listener interface {
 	// UpdateConfiguration is used to provide a Configurable to a listener. We
 	// use "any" here instead of "Configurable" to give applications flexibility
@@ -209,28 +215,26 @@ func (cm *ConfigManager) Manage(ctx context.Context, log *zap.Logger) {
 	}
 }
 
-// updateConfiguration combines the following configuration sources. The
-// following precedence order is respected (1) command line flags, (2)
-// environmental variables, (3) a configuration file, (4) default values.
-// For all configuration except for anything provided as a slice (notably
-// subscribers), defaults are specified as part of the pflag definitions
-// in main.go. For subscribers, defaults are defined as part of the
-// subscriber implementation in the `new<TYPE>subscriber()` method.
+// updateConfiguration combines the following configuration sources. The following precedence order
+// is respected (1) command line flags, (2) environmental variables, (3) a configuration file, (4)
+// default values. Defaults are expected to be specified as part of the pflag definitions in
+// main.go. For configuration parameters that are not set using flags (notably slices of things) it
+// is expected the application handles applying default configuration values or returning an error
+// either as part of the validateConfig() function or after the final configuration is applied to a
+// particular component.
 //
-// It takes these configuration sources and unmarshals the resulting
-// configuration into the provided Configurable. It then uses the
-// updateAllowed() and validateConfig() implemented on a particular
-// Configurable, to determine if the new configuration is valid. If these checks
-// fail the current configuration set on ConfigMgr will not be updated, and an
-// error returned to be handled by the caller. Otherwise it will set
-// cm.currentConfig equal to the new configuration.
+// updateConfiguration then takes these configuration sources and unmarshals the resulting
+// configuration into the provided Configurable. It then uses the updateAllowed() and
+// validateConfig() implemented on a particular Configurable, to determine if the new configuration
+// is valid. If these checks fail the current configuration set on ConfigMgr will not be updated,
+// and an error returned to be handled by the caller. Otherwise it will set cm.currentConfig equal
+// to the new configuration.
 //
-// If validation succeeds it will attempt to propagate the configuration update
-// to other components of the app that support dynamic configuration updates. It
-// does this by calling UpdateConfiguration() on all configured listeners. If
-// there is an error dynamically updating the configuration for any component,
-// the component is expected to return a meaningful error. Any error(s) will be
-// aggregated and returned to the caller for handling.
+// If validation succeeds it will attempt to propagate the configuration update to other components
+// of the app that support dynamic configuration updates. It does this by calling
+// UpdateConfiguration() on all configured listeners. If there is an error dynamically updating the
+// configuration for any component, the component is expected to return a meaningful error. Any
+// error(s) will be aggregated and returned to the caller for handling.
 func (cm *ConfigManager) updateConfiguration() error {
 
 	cm.updateInProgress.Lock()
@@ -250,23 +254,6 @@ func (cm *ConfigManager) updateConfiguration() error {
 		return fmt.Errorf("rejecting configuration update: unable to parse command line flags: %s", err)
 	}
 
-	// Allow specifying subscribers using a --subscribers flag. We do this by
-	// transforming the flags into TOML format. Then later on we can just use
-	// viper.Unmarshal to get the corresponding Golang structs. This avoids
-	// having to write a custom unmarshaller. Note the flag we use to specify
-	// subscribers cannot be the same as what is in the TOML file (subscriber).
-	// This is because we need a way to allow users to specify multiple
-	// subscribers in a single string, that is different from the actual slice
-	// of subscribers that is unmarshalled from the final configuration.
-	subscribersFromFlags := v.GetString("subscribers")
-	if len(subscribersFromFlags) > 0 {
-		tomlString := parseTOMLSubscribersFromString(subscribersFromFlags)
-
-		if err := v.ReadConfig(strings.NewReader(tomlString)); err != nil {
-			return fmt.Errorf("rejecting configuration update: unable to parse subscribers from command line flags (check flag values are enclosed in \"double\" quotes (--flag=\"value\") and all strings within flag values contained in 'single' quotes (--flag=\"key='value'\"): %w", err)
-		}
-	}
-
 	// While Viper allows you to override values it reads from a config file
 	// with environment variables, it does not appear to provide a way to just
 	// read in configuration from environment variables.  We don't want to
@@ -281,63 +268,31 @@ func (cm *ConfigManager) updateConfiguration() error {
 	// updates so we can check configuration before it is reapplied. This is
 	// partially why we don't use Viper to persist the configuration and
 	// require going through ConfigMgr instead of using Get() throughout the app.
-	subscribersFromEnv := false
 	for _, envVar := range os.Environ() {
 		pair := strings.SplitN(envVar, "=", 2)
 		key := pair[0]
-		val := pair[1]
 
 		if strings.HasPrefix(key, cm.envVarPrefix) {
 			viperKey := strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(key, cm.envVarPrefix)), "__", ".")
 			viperKey = strings.ReplaceAll(viperKey, "_", "-")
-
-			if viperKey == "subscribers" {
-				// We do not want to allow subscribers to be specified multiple
-				// ways, so we first check if they were also specified using flags.
-				if len(subscribersFromFlags) > 0 {
-					return fmt.Errorf("rejecting configuration update: subscribers cannot be set using both flags and environment variables")
-				}
-				// Use the same approach as we do for flags to get a list of subscribers:
-				subscribersFromEnv = true
-				tomlString := parseTOMLSubscribersFromString(val)
-				if err := v.ReadConfig(strings.NewReader(tomlString)); err != nil {
-					return fmt.Errorf("rejecting configuration update: unable to parse subscribers from environment variable (check the value is contained in \"double\" quotes? and all strings within the value are contained in 'single' quotes like \"id=1,name='subscriber',type='grpc'\"): %w", err)
-				}
-			} else if viperKey == "subscriber" {
-				return fmt.Errorf("rejecting configuration update: subscribers specified using environment variables should be specified using '%sSUBSCRIBERS=<LIST>' with one or more subscribers separated by a semicolon (the singular form '%sSUBSCRIBER' is not allowed)", cm.envVarPrefix, cm.envVarPrefix)
-			} else {
-				if err := v.BindEnv(viperKey, strings.ToUpper(key)); err != nil {
-					return err
-				}
+			if err := v.BindEnv(viperKey, strings.ToUpper(key)); err != nil {
+				return err
 			}
 		}
 	}
 
-	// Important we do this last as a cfg-file could be set as a flag or
-	// environment variable. We also want to allow configuring BeeWatch entirely
-	// without a config file.
-	if v.GetString("cfg-file") != "" {
-		// First we read the config file into a separate Viper instance.
-		// We mainly do this so we can check subscribers are only being set in one place.
-		// Otherwise we'd have to define complicated precedence rules for merging subscribers.
-		vFile := viper.New()
-		vFile.SetConfigFile(v.GetString("cfg-file"))
-
-		if err := vFile.ReadInConfig(); err != nil {
+	// Important we do this last as a ConfigFileFlag could be set as a flag or environment variable. It is
+	// also possible to configure applications entirely without a config file.
+	if v.GetString(FlagConfigFile) != "" {
+		v.SetConfigFile(v.GetString(FlagConfigFile))
+		if err := v.ReadInConfig(); err != nil {
 			if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-				return fmt.Errorf("rejecting configuration update: configuration file at '%s' was not found (check it exists and permissions are set correctly)", v.GetString("cfg-file"))
+				return fmt.Errorf("rejecting configuration update: configuration file at '%s' was not found (check it exists and permissions are set correctly)", v.GetString(FlagConfigFile))
 			} else if _, ok := err.(viper.ConfigParseError); ok {
-				return fmt.Errorf("rejecting configuration update: error parsing configuration file at '%s': %w", v.GetString("cfg-file"), err)
+				return fmt.Errorf("rejecting configuration update: error parsing configuration file at '%s': %w", v.GetString(FlagConfigFile), err)
 			}
-			return fmt.Errorf("rejecting configuration update: an unknown error occurred reading config file '%s' (check permissions): %w", v.GetString("cfg-file"), err)
+			return fmt.Errorf("rejecting configuration update: an unknown error occurred reading config file '%s' (check permissions): %w", v.GetString(FlagConfigFile), err)
 		}
-		subscribersFromFile := vFile.GetStringSlice("subscriber")
-
-		if len(subscribersFromFile) > 0 && (len(subscribersFromFlags) > 0 || subscribersFromEnv) {
-			return fmt.Errorf("rejecting configuration update: subscribers cannot be set using a mix of flags, environment variables, and a configuration file (only one is allowed)")
-		}
-		// If all our checks pass we'll actually use the config file for the combined Viper instance.
-		v.SetConfigFile(v.GetString("cfg-file"))
 
 		// Merge the configuration set via flags and environment variables with the cfg-file.
 		if err := v.MergeInConfig(); err != nil {
@@ -345,7 +300,7 @@ func (cm *ConfigManager) updateConfiguration() error {
 		}
 	}
 
-	if v.GetBool("developer.dump-config") {
+	if v.GetBool(FlagDumpConfig) {
 		fmt.Printf("Dumping final merged configuration from Viper: \n\n%s\n\n", v.AllSettings())
 	}
 
@@ -385,20 +340,4 @@ func (cm *ConfigManager) updateConfiguration() error {
 	// appropriate.
 	cm.currentConfig = newConfig
 	return cm.UpdateListeners()
-}
-
-// parseTOMLSubscribersFromString accepts a string containing one or more
-// subscribers separated by a semicolon. Each subscriber can have one or more
-// key=value pairs defining its configuration. This list of subscriber(s) and
-// their configuration is then converted into TOML format and returned.
-// Generally it is used to easily unmarshal a list of subscribers where the
-// unmarshaller expects one or more TOML configuration sources.
-func parseTOMLSubscribersFromString(subscribers string) string {
-	var tomlSubscribers []string
-	for _, s := range strings.Split(subscribers, ";") {
-		subscriber := strings.ReplaceAll(s, ",", "\n")
-		tomlSubscribers = append(tomlSubscribers, "[[subscriber]]\n"+subscriber)
-	}
-
-	return strings.Join(tomlSubscribers, "\n")
 }
