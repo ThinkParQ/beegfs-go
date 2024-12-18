@@ -30,10 +30,11 @@ func newGenericCreateCmd() *cobra.Command {
 func newCreateCmd() *cobra.Command {
 	s := newGenericCreateCmd()
 	s.Use = "create"
-	s.Short = "Generates an index for the specified file system."
-	s.Long = `Generate an index by traversing the source directory.
+	s.Aliases = append(s.Aliases, "update")
+	s.Short = "Generates or updates the index for the specified file system."
+	s.Long = `Generate or updates the index by traversing the source directory.
 
-The index can be created within the source directory or in a separate index directory.
+The index can exist within the source directory or in a separate index directory.
 The program performs a breadth-first readdirplus traversal to list the contents, or it creates
 an output database and/or files listing directories and files it encounters. This program serves two main purposes:
 
@@ -41,7 +42,7 @@ an output database and/or files listing directories and files it encounters. Thi
 2. To create a comprehensive dump of directories, files, and links. You can choose to output in traversal order
    (each directory followed by its files) or to stride inodes across multiple files for merging with inode-strided attribute lists.
 
-Example: Create an index for the file system at /mnt/fs, limiting memory usage to 8GB:
+Example: Create or update the index for the file system at /mnt/fs, limiting memory usage to 8GB:
 $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 `
 	return s
