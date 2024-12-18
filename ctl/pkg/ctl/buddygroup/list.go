@@ -5,6 +5,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -50,21 +51,21 @@ func GetBuddyGroups(ctx context.Context) ([]GetBuddyGroups_Result, error) {
 		primary_cs := ""
 		switch t.PrimaryConsistencyState {
 		case pb.ConsistencyState_GOOD:
-			primary_cs = "Good"
+			primary_cs = target.ConsistencyGood
 		case pb.ConsistencyState_NEEDS_RESYNC:
-			primary_cs = "Needs resync"
+			primary_cs = target.ConsistencyNeedsResync
 		case pb.ConsistencyState_BAD:
-			primary_cs = "Bad"
+			primary_cs = target.ConsistencyBad
 		}
 
 		secondary_cs := ""
 		switch t.SecondaryConsistencyState {
 		case pb.ConsistencyState_GOOD:
-			secondary_cs = "Good"
+			secondary_cs = target.ConsistencyGood
 		case pb.ConsistencyState_NEEDS_RESYNC:
-			secondary_cs = "Needs resync"
+			secondary_cs = target.ConsistencyNeedsResync
 		case pb.ConsistencyState_BAD:
-			secondary_cs = "Bad"
+			secondary_cs = target.ConsistencyBad
 		}
 
 		res = append(res, GetBuddyGroups_Result{

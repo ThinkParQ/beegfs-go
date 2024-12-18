@@ -1,6 +1,7 @@
 package health
 
 import (
+	"context"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -20,7 +21,7 @@ func newDFCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printDF(targets, tgtFrontend.PrintConfig{Capacity: true})
+			printDF(cmd.Context(), targets, tgtFrontend.PrintConfig{Capacity: true})
 			return nil
 		},
 	}
@@ -29,7 +30,7 @@ func newDFCmd() *cobra.Command {
 
 // printDF() is a wrapper for PrintTargetList() that prints metadata and storage targets as separate
 // lists sorted by target ID.
-func printDF(targets []tgtBackend.GetTargets_Result, printConfig tgtFrontend.PrintConfig) {
+func printDF(ctx context.Context, targets []tgtBackend.GetTargets_Result, printConfig tgtFrontend.PrintConfig) {
 	metaTargets := []tgtBackend.GetTargets_Result{}
 	storageTargets := []tgtBackend.GetTargets_Result{}
 	for _, tgt := range targets {
@@ -47,8 +48,8 @@ func printDF(targets []tgtBackend.GetTargets_Result, printConfig tgtFrontend.Pri
 	})
 
 	printHeader("Metadata Targets", "-")
-	tgtFrontend.PrintTargetList(printConfig, metaTargets)
+	tgtFrontend.PrintTargetList(ctx, printConfig, metaTargets)
 
 	printHeader("Storage Targets", "-")
-	tgtFrontend.PrintTargetList(printConfig, storageTargets)
+	tgtFrontend.PrintTargetList(ctx, printConfig, storageTargets)
 }

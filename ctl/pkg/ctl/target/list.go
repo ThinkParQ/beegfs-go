@@ -27,11 +27,11 @@ type GetTargets_Result struct {
 // Defined as constants for reuse elsewhere, notably the health checks.
 const (
 	ReachabilityOnline          = "Online"
-	ReachabilityProbablyOffline = "Probably offline"
+	ReachabilityProbablyOffline = "Probably-offline"
 	ReachabilityOffline         = "Offline"
 
 	ConsistencyGood        = "Good"
-	ConsistencyNeedsResync = "Needs resync"
+	ConsistencyNeedsResync = "Needs-resync"
 	ConsistencyBad         = "Bad"
 
 	CapacityNormal    = "Normal"
