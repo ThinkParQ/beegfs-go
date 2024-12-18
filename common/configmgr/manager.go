@@ -20,8 +20,20 @@ import (
 )
 
 const (
+	// The path where ConfigMgr will look for a config file. This field is only used by ConfigMgr
+	// and does not need to correspond with an actual field in the provided Configurable. It will
+	// also not be set even if defined on the Configurable due to how ConfigMgr handles strict
+	// verification that all provided configuration was actually used.
 	FlagConfigFile = "cfg-file"
-	FlagVersion    = "version"
+	// The flag expected to be used to print the application's version. It does not need to
+	// correspond with an actual field in the provided Configurable. It will also not be set even if
+	// defined on the Configurable due to how ConfigMgr handles strict verification that all
+	// provided configuration was actually used. Instead it is expected that callers check and
+	// return the version prior to trying to initialize ConfigMgr if the version flag is set.
+	FlagVersion = "version"
+	// Callers can optionally set this configuration option to have ConfigMgr dump the final merged
+	// configuration for debugging. If set it will be included in the final Configurable allowing
+	// callers to also adjust their behavior if it is set (for example immediately exiting).
 	FlagDumpConfig = "developer.dump-config"
 )
 
@@ -251,7 +263,7 @@ func (cm *ConfigManager) updateConfiguration() error {
 	// We also get all of our defaults based on the flag setup.
 	err := v.BindPFlags(cm.initialFlags)
 	if err != nil {
-		return fmt.Errorf("rejecting configuration update: unable to parse command line flags: %s", err)
+		return fmt.Errorf("rejecting configuration update: unable to parse command line flags: %w", err)
 	}
 
 	// While Viper allows you to override values it reads from a config file
@@ -311,10 +323,21 @@ func (cm *ConfigManager) updateConfiguration() error {
 		decoderOpts = append(decoderOpts, viper.DecodeHook(hookFunc))
 	}
 
-	// Get everything out of our temporary Viper store and unmarshall it into a
-	// new empty instance of our configurable using decoderOpts if provided.
+	// The use of "UnmarshalExact" below enables strict decoding rules and will return an error on
+	// any keys in the configuration that don't map to fields in the application defined newConfig.
+	// However there are some keys that should be ignored. Since Viper does not support deleting
+	// configuration, as a workaround get the final merged configuration and delete anything we
+	// don't want to include in the application configuration before putting it back into a second
+	// Viper instance where it is unmarshalled from.
+	mergedConfig := v.AllSettings()
+	delete(mergedConfig, FlagConfigFile)
+	delete(mergedConfig, FlagVersion)
+	v2 := viper.New()
+	v2.MergeConfigMap(mergedConfig)
+	// Get everything out of the second Viper store and unmarshall it into a new empty instance of
+	// the configurable using decoderOpts if provided.
 	newConfig := cm.currentConfig.NewEmptyInstance()
-	if err := v.Unmarshal(newConfig, decoderOpts...); err != nil {
+	if err := v2.UnmarshalExact(newConfig, decoderOpts...); err != nil {
 		return fmt.Errorf("rejecting configuration update: unable to parse configuration (check if the configuration valid): %w", err)
 	}
 
