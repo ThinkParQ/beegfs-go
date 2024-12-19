@@ -194,7 +194,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		if unhealthyTargets {
 			failedCheck = true
 		}
-		printDF(targets, tgtFrontend.PrintConfig{Capacity: true, State: true})
+		printDF(ctx, targets, tgtFrontend.PrintConfig{Capacity: true, State: true})
 	}
 
 	fmt.Print(hint("HINT: This mode does not check file system consistency. To check for file system inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n"))

@@ -1,6 +1,7 @@
 package target
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/dsnet/golib/unitconv"
@@ -9,7 +10,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"go.uber.org/zap"
 )
 
 type PrintConfig struct {
@@ -32,7 +35,7 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			PrintTargetList(cfg, targets)
+			PrintTargetList(cmd.Context(), cfg, targets)
 			return nil
 		},
 	}
@@ -48,15 +51,17 @@ func newListCmd() *cobra.Command {
 
 // PrintTargetList prints out the provided list of targets based on the given list config. It is
 // exported for reuse in other packages like health that need to print the target list.
-func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
+func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetTargets_Result) {
 
-	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
+	logger, _ := config.GetLogger()
+
+	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "sync state", "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
 	defaultColumns := []string{"id", "alias", "on node", "pool"}
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
 	} else {
 		if cfg.State {
-			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency")
+			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency", "sync state")
 		}
 		if cfg.Capacity {
 			defaultColumns = append(defaultColumns, "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
@@ -168,6 +173,32 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			}
 		}
 
+		// Include the actual resync state if the consistency state is not good. Otherwise the
+		// consistency may be needs-resync while a resync is already underway which would be
+		// confusing. Note we get the resync state from the frontend instead of the backend because
+		// (a) it would currently cause a cyclical import if the backend target package tries to
+		// call functionality in the backend resync package and (b) we don't need this information
+		// in most circumstances but it be confusing/bug prone to add resync state as a field on
+		// GetTargets_Result without always populating it. Better instead the frontend determine if
+		// surfacing this detail to the user is important and get it only when necessary.
+		syncState := "Healthy"
+		if t.ConsistencyState != target.ConsistencyGood {
+			syncState = "Unknown"
+			if t.NodeType == beegfs.Meta {
+				if resp, err := resync.GetMetaResyncStats(ctx, t.Target); err != nil {
+					logger.Debug("error getting resync job state", zap.Error(err))
+				} else {
+					syncState = resp.State.String()
+				}
+			} else if t.NodeType == beegfs.Storage {
+				if resp, err := resync.GetStorageResyncStats(ctx, t.Target); err != nil {
+					logger.Debug("error getting resync job state", zap.Error(err))
+				} else {
+					syncState = resp.State.String()
+				}
+			}
+		}
+
 		tbl.Row(
 			t.Target.Uid,
 			t.Target.LegacyId,
@@ -177,6 +208,7 @@ func PrintTargetList(cfg PrintConfig, targets []target.GetTargets_Result) {
 			t.ReachabilityState,
 			lastContact,
 			t.ConsistencyState,
+			syncState,
 			t.CapacityPool,
 			spaceTotal,
 			spaceUsed,

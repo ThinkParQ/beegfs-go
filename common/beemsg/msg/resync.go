@@ -136,7 +136,7 @@ const (
 func (n BuddyResyncJobState) String() string {
 	switch n {
 	case NotStarted:
-		return "Not_Started"
+		return "Not-started"
 	case Running:
 		return "Running"
 	case Success:
