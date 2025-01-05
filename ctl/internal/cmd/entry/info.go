@@ -78,7 +78,7 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 		return err
 	}
 	defaultColumns := []string{"path", "entry id", "type", "meta node", "meta mirror", "storage pool", "stripe pattern", "storage targets", "buddy groups", "remote targets", "cool down"}
-	allColumns := append(defaultColumns, "client sessions")
+	allColumns := append(defaultColumns, "client sessions", "Stub status")
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {
@@ -231,6 +231,16 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		default:
 			fmt.Fprintf(entryToPrint, "Inlined inode: no\n")
 		}
+
+		if info.Entry.Type == beegfs.EntryRegularFile {
+			switch info.Entry.IsStub {
+			case true:
+				fmt.Fprintf(entryToPrint, "Stub file: yes\n")
+			default:
+				fmt.Fprintf(entryToPrint, "Stub file: no\n")
+			}
+		}
+
 		if info.Entry.EntryID != "root" && len(info.Entry.Verbose.DentryPath) != 0 {
 			fmt.Fprintf(entryToPrint, "Dentry info:\n")
 			fmt.Fprintf(entryToPrint, " + Path: %s\n", info.Entry.Verbose.DentryPath[1:])
@@ -316,9 +326,16 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	}
 
 	if info.Entry.Type == beegfs.EntryRegularFile {
-		row = append(row, fmt.Sprintf("Reading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite))
+		stubStatus := "no"
+		if info.Entry.IsStub {
+			stubStatus = "yes"
+		}
+
+		row = append(row,
+			fmt.Sprintf("Reading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite),
+			stubStatus)
 	} else {
-		row = append(row, "(directory)")
+		row = append(row, "(directory)", "(n/a)")
 	}
 
 	return row

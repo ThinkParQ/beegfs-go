@@ -251,6 +251,7 @@ type GetEntryInfoResponse struct {
 	MirrorNodeID     uint16
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
+	IsStub           bool
 }
 
 func (m *GetEntryInfoResponse) MsgId() uint16 {
@@ -265,6 +266,7 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.MirrorNodeID)
 	beeserde.DeserializeInt(d, &m.NumSessionsRead)
 	beeserde.DeserializeInt(d, &m.NumSessionsWrite)
+	beeserde.DeserializeInt(d, &m.IsStub)
 }
 
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
