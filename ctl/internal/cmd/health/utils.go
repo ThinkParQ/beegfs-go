@@ -51,7 +51,7 @@ func getFilteredClientList(ctx context.Context, noFilterByMgmtd bool, filterByMo
 		mounts[path.Clean(arg)] = struct{}{}
 	}
 
-	clients, err := procfs.GetBeeGFSClients(ctx, backendCfg)
+	clients, err := procfs.GetBeeGFSClients(ctx, backendCfg, logger)
 	if err != nil {
 		return nil, err
 	}

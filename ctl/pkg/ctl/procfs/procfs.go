@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"go.uber.org/zap"
 )
 
@@ -61,9 +61,8 @@ type MountPoint struct {
 	Opts map[string]string
 }
 
-func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig) ([]Client, error) {
+func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, logger *logger.Logger) ([]Client, error) {
 
-	logger, _ := config.GetLogger()
 	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(Client{}).PkgPath())))
 
 	mounts, err := getBeeGFSMounts()
