@@ -146,7 +146,11 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		return hint
 	}
 
-	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s", viper.GetString(config.ManagementAddrKey)), "#")
+	mgmtd, err := config.ManagementClient()
+	if err != nil {
+		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+	}
+	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s", mgmtd.GetAddress()), "#")
 	printHeader(">>>>> Checking for Busy Nodes <<<<<", "#")
 	log.Debug("collecting meta stats")
 	metaNodes, err := stats.MultiServerNodes(ctx, beegfs.Meta)

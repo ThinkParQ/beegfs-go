@@ -58,6 +58,11 @@ func newListCmd() *cobra.Command {
 func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	reachabilityError bool) error {
 
+	mgmtd, err := config.ManagementClient()
+	if err != nil {
+		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+	}
+
 	// Execute the actual command work
 	nodes, err := backend.GetNodes(cmd.Context(), cfg)
 	if err != nil {
@@ -93,7 +98,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 
 	// This shouldn't happen since a valid management address in the format <ip>:<port> is required.
 	grpcPort := "invalid"
-	if grpcAddr := strings.Split(viper.GetString(config.ManagementAddrKey), ":"); len(grpcAddr) == 2 {
+	if grpcAddr := strings.Split(mgmtd.GetAddress(), ":"); len(grpcAddr) == 2 {
 		grpcPort = grpcAddr[1]
 	}
 
