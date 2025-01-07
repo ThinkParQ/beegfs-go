@@ -135,8 +135,9 @@ func checkCommand(cmd *cobra.Command) error {
 // isCommandAuthorized enforces "opt-out" user authorization requiring commands to explicitly
 // declare using an annotation they can be run by users that do not have root privileges.
 func isCommandAuthorized(cmd *cobra.Command) error {
+	euid := syscall.Geteuid()
 	if _, ok := cmd.Annotations["authorization.AllowAllUsers"]; ok {
-		if mount := viper.GetString(config.BeeGFSMountPointKey); mount == config.BeeGFSMountPointNone {
+		if mount := viper.GetString(config.BeeGFSMountPointKey); mount == config.BeeGFSMountPointNone && euid != 0 {
 			// By forcing non-root users to interact with BeeGFS through a mount point Linux will
 			// handle verifying users have permissions for the entries they want to interact with.
 			// Otherwise users could guess file names and use CTL to see if those files exist.
@@ -144,7 +145,6 @@ func isCommandAuthorized(cmd *cobra.Command) error {
 		}
 		return nil
 	}
-	euid := syscall.Geteuid()
 	if euid != 0 {
 		return fmt.Errorf("only root can use this command")
 	}
