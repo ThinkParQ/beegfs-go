@@ -59,15 +59,18 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool(config.LogDeveloperKey, false, "Enable logging at DebugLevel and above and print stack traces at WarnLevel and above.")
 	cmd.PersistentFlags().MarkHidden(config.LogDeveloperKey)
 
-	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, `The table columns to print. Specify 'all' to print all available columns.
-	Does currently NOT automatically set potential flags required to actually fetch the data for the extra columns.`)
-	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, `The number of table rows before the header is repeated and the output is flushed to stdout.
-	If set to 0, prints no header and immediately flushes every row.`)
-
+	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, `When printing structured data, the columns/fields to include (use 'all' to include everything).
+	Currently does not automatically set potential flags required to actually fetch the data for some non-default fields.
+	Refer to the help for each command to see what additional flags may be needed.`)
+	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, `The number of rows/elements to print before output is flushed to stdout.
+	When printing using a table, the header will be repeated after printing this many rows (no headers are printed when set to 0).
+	If set to 0, rows are written immediately and table columns may not be aligned.`)
 	cmd.PersistentFlags().Bool(config.PrintJsonKey, false, fmt.Sprintf(`Print output normally rendered using a table as JSON instead (experimental). 
-	If the number of entries returned is greater than %s multiple JSON lists be returned (increase %s if needed).`, config.PageSizeKey, config.PageSizeKey))
-	cmd.PersistentFlags().Bool(config.PrintJsonPrettyKey, false, fmt.Sprintf(`Print output normally rendered using a table as JSON instead (experimental). 
-	If the number of entries returned is greater than %s multiple JSON lists will be returned (increase %s if needed).`, config.PageSizeKey, config.PageSizeKey))
+	If the number of elements to print is greater than %s multiple JSON lists separated by newlines will be printed (increase %s if needed).
+	Alternatively to stream an unknown or large number of elements, set %s to "0" to print using Newline-Delimited JSON (NDJSON).`, config.PageSizeKey, config.PageSizeKey, config.PageSizeKey))
+	cmd.PersistentFlags().Bool(config.PrintJsonPrettyKey, false, fmt.Sprintf(`Print output normally rendered using a table as pretty JSON instead (experimental). 
+	If the number of elements to print is greater than %s multiple JSON lists separated by newlines will be printed (increase %s if needed).
+	Alternatively to stream an unknown or large number of elements, set %s to "0" to print using Newline-Delimited JSON (NDJSON).`, config.PageSizeKey, config.PageSizeKey, config.PageSizeKey))
 
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")

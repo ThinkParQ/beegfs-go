@@ -83,7 +83,7 @@ func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOp
 func (p *Printomatic) replacePrinter() {
 
 	if viper.IsSet(config.PrintJsonKey) || viper.GetBool(config.PrintJsonPrettyKey) {
-		p.printer = newJSONPrinter(viper.GetBool(config.PrintJsonPrettyKey))
+		p.printer = newJSONPrinter(viper.GetBool(config.PrintJsonPrettyKey), viper.GetInt(config.PageSizeKey))
 	} else {
 		// Otherwise print using a stylized table. Use a very simple style with only spaces as
 		// separators to make parsing easier.
