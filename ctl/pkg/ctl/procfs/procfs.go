@@ -33,6 +33,7 @@ type GetBeeGFSClientsConfig struct {
 }
 
 type Client struct {
+	FsUUID       string
 	ID           string
 	ProcDir      string
 	Mount        MountPoint
@@ -107,7 +108,6 @@ func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, logger *l
 func parseClient(path string, mounts map[string]MountPoint) (Client, error) {
 	client := Client{ProcDir: path}
 	var err error
-
 	// Parse config file:
 	configFile, err := os.Open(filepath.Join(path, "config"))
 	if err != nil {
@@ -123,15 +123,15 @@ func parseClient(path string, mounts map[string]MountPoint) (Client, error) {
 	// Parse node files:
 	client.MgmtdNodes, err = parseClientNodesFile(filepath.Join(path, "mgmt_nodes"))
 	if err != nil {
-		return Client{}, err
+		return client, err
 	}
 	client.MetaNodes, err = parseClientNodesFile(filepath.Join(path, "meta_nodes"))
 	if err != nil {
-		return Client{}, err
+		return client, err
 	}
 	client.StorageNodes, err = parseClientNodesFile(filepath.Join(path, "storage_nodes"))
 	if err != nil {
-		return Client{}, err
+		return client, err
 	}
 
 	// Parse the client ID:
@@ -143,7 +143,28 @@ func parseClient(path string, mounts map[string]MountPoint) (Client, error) {
 			client.Mount = m
 		}
 	}
+
+	// Parse the UUID:
+	if client.FsUUID, err = parseClientFsUUIDFile(filepath.Join(path, "fs_uuid")); err != nil {
+		return client, err
+	}
+
 	return client, nil
+}
+
+func parseClientFsUUIDFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	var uuid string
+	scanner := bufio.NewScanner(file)
+	if scanner.Scan() {
+		// The UUID file contains a single line.
+		uuid = strings.TrimSpace(scanner.Text())
+	}
+	return uuid, scanner.Err()
 }
 
 func parseClientConfigFile(input io.Reader) (map[string]string, error) {
@@ -169,7 +190,7 @@ func parseClientConfigFile(input io.Reader) (map[string]string, error) {
 func parseClientNodesFile(path string) ([]Node, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("error opening %s: %w", path, err)
+		return nil, err
 	}
 	defer file.Close()
 	return parseNodes(file)
@@ -244,7 +265,7 @@ func parseNodes(input io.Reader) ([]Node, error) {
 func getBeeGFSMounts() (map[string]MountPoint, error) {
 	file, err := os.Open(mountProcDir)
 	if err != nil {
-		return nil, fmt.Errorf("error opening %s: %w", mountProcDir, err)
+		return nil, err
 	}
 	defer file.Close()
 	return parseMounts(file)
