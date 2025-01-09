@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -14,15 +16,18 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	pm "github.com/thinkparq/protobuf/go/management"
+	"go.uber.org/zap"
 )
 
 // Viper keys for the global config. Should be used when accessing it instead of raw strings.
 // Currently these are also used by the frontend for command line flag and env variable names.
 const (
-	// Managements gRPC listening address
+	// The gRPC listening address of the management. Note this defaults to auto, to reliably
+	// determine the address call GetAddress() on the Mgmtd client returned by ManagementClient().
 	ManagementAddrKey = "mgmtd-addr"
 	// BeeRemotes gRPC listening address
 	BeeRemoteAddrKey = "remote-addr"
@@ -69,6 +74,13 @@ const (
 // Viper values for certain configuration values.
 const (
 	BeeGFSMountPointNone = "none"
+	BeeGFSMgmtdAddrAuto  = "auto"
+)
+
+// BeeGFS procfs configuration keys.
+const (
+	procfsMgmtdHost = "sysMgmtdHost"
+	procfsMgmtdGrpc = "connMgmtdGrpcPort"
 )
 
 // The global config singleton
@@ -76,11 +88,18 @@ var globalMount filesystem.Provider
 
 var mgmtClient *beegrpc.Mgmtd
 
+// This package doesn't need to declare any types, but we need a type declared in this package so we
+// can use reflection to determine the package name so it can be injected into the logger.
+type dummy struct{}
+
 // Try to establish a connection to the managements gRPC service
 func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtClient != nil {
 		return mgmtClient, nil
 	}
+
+	logger, _ := GetLogger()
+	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(dummy{}).PkgPath())))
 
 	var cert []byte
 	var err error
@@ -99,8 +118,52 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 		}
 	}
 
+	mgmtdAddr := viper.GetString(ManagementAddrKey)
+	if mgmtdAddr == BeeGFSMgmtdAddrAuto {
+		ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration(ConnTimeoutKey))
+		defer cancel()
+		clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{}, logger)
+		if err != nil {
+			return nil, err
+		}
+		if len(clients) == 0 {
+			return nil, fmt.Errorf("unable to auto-configure the management address: BeeGFS does not appear to be mounted, manually specify --%s for the file system to manage", ManagementAddrKey)
+		}
+		for _, c := range clients {
+			sysMgmtdHost, ok := c.Config[procfsMgmtdHost]
+			if !ok {
+				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s, manually specify --%s for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdHost, ManagementAddrKey)
+			}
+			connMgmtdGrpcPort, ok := c.Config[procfsMgmtdGrpc]
+			if !ok {
+				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
+			}
+			foundMgmtdAddr := fmt.Sprintf("%s:%s", sysMgmtdHost, connMgmtdGrpcPort)
+			log.Debug("found client mount point", zap.String("mgmtdAddr", foundMgmtdAddr), zap.String("mountPoint", c.Mount.Path), zap.String("procfsDir", c.ProcDir))
+			if mgmtdAddr == BeeGFSMgmtdAddrAuto {
+				mgmtdAddr = foundMgmtdAddr
+			} else if len(clients) > 1 {
+				// Generally CTL shouldn't care if the same BeeGFS is mounted multiple times. The
+				// only time it might matter is if someone tries to run a command against multiple
+				// paths in different BeeGFS mount points. But that needs to be handled elsewhere
+				// anyway since users can always manually configure the mgmtd and do the same thing.
+				if mgmtdAddr != foundMgmtdAddr {
+					// Note the mgmtd address extracted from procfs should always be an IP address
+					// because when the client is mounted it handles resolving any hostnames first.
+					// However if the mgmtd service was available to this machine from multiple IPs
+					// this would not work. We could use the UUID here instead, but then we'd need
+					// to decide which hostname/port to use. Better for now to just ask the user.
+					return nil, fmt.Errorf("unable to auto-configure the management address: multiple client mount points with different %s:%s configurations were found, manually specify --%s for the file system to manage", procfsMgmtdHost, procfsMgmtdGrpc, ManagementAddrKey)
+				}
+			}
+		}
+		log.Debug("attempting to use auto configured management address", zap.String("mgmtdAddr", mgmtdAddr))
+	} else {
+		log.Debug("attempting to use user defined management address", zap.String("mgmtdAddr", mgmtdAddr))
+	}
+
 	mgmtClient, err = beegrpc.NewMgmtd(
-		viper.GetString(ManagementAddrKey),
+		mgmtdAddr,
 		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
 		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
 		beegrpc.WithTLSCaCert(cert),

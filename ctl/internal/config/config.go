@@ -22,7 +22,8 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Bool(config.RawKey, false, "Print raw values without SI or IEC prefixes (except durations).")
 
-	cmd.PersistentFlags().String(config.ManagementAddrKey, "127.0.0.1:8010", "The gRPC network address and port of the management node.")
+	cmd.PersistentFlags().String(config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, `The network address and gRPC port of the management node.
+	By default determined automatically when BeeGFS is mounted and all mount points are for the same file system.`)
 
 	cmd.PersistentFlags().String(config.BeeRemoteAddrKey, "127.0.0.1:9010", "The gRPC network address and port of the BeeRemote node.")
 
@@ -50,7 +51,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", `The file containing the authentication secret. 
 	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.`)
 
-	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time for each BeeMsg TCP connection attempt")
+	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time to attempt establishing non-gRPC connections.")
 
 	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, fmt.Sprintf(`By default all logging is disabled example for fatal errors. 
 	Optionally additional logging to stderr can be enabled to assist with debugging (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).

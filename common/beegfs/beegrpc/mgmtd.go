@@ -16,7 +16,8 @@ import (
 // non-GRPC specific functionality such as verifying feature licensing.
 type Mgmtd struct {
 	pm.ManagementClient
-	conn *grpc.ClientConn
+	conn    *grpc.ClientConn
+	address string
 }
 
 func NewMgmtd(address string, connOpts ...connOpt) (*Mgmtd, error) {
@@ -27,6 +28,7 @@ func NewMgmtd(address string, connOpts ...connOpt) (*Mgmtd, error) {
 	return &Mgmtd{
 		ManagementClient: pm.NewManagementClient(c),
 		conn:             c,
+		address:          address,
 	}, nil
 
 }
@@ -73,6 +75,11 @@ func (m *Mgmtd) VerifyLicense(ctx context.Context, requestedFeature string) ([]z
 		return licenseDetail, fmt.Errorf("the provided license does not include %s (licensed features: %+v)", requestedFeature, license.Data.DnsNames)
 	}
 	return licenseDetail, nil
+}
+
+// Returns the address:port of the configured management gRPC client.
+func (m *Mgmtd) GetAddress() string {
+	return m.address
 }
 
 func (m *Mgmtd) Cleanup() {
