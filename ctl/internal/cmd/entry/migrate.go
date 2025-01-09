@@ -126,7 +126,7 @@ run:
 	if printVerbosely {
 		tbl.PrintRemaining()
 	}
-	fmt.Printf("Migration statistics: %+v\n", *migrateStats)
+	cmdfmt.Printf("Summary: %+v\n", *migrateStats)
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
 		return &multiErr

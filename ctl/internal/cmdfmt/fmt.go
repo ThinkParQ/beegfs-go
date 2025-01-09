@@ -2,6 +2,7 @@ package cmdfmt
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -9,6 +10,12 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
+
+// Printf is like fmt.Printf except it prints to stderr instead of stdout. It is intended to be used
+// from commands that print structured output using a table or JSON that may be parsed by scripts.
+func Printf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format, a...)
+}
 
 // Printer is a condensed version of table.Writer that allows implementing alternative ways besides
 // tables to write out structured data.

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -199,6 +200,6 @@ writeResponses:
 
 	autoPrintRemaining = false
 	tbl.PrintRemaining()
-	fmt.Printf("Total Paths Found: %d\n", totalPaths)
+	cmdfmt.Printf("Success: total paths found: %d\n", totalPaths)
 	return nil
 }

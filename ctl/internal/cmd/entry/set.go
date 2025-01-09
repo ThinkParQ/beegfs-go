@@ -139,10 +139,8 @@ run:
 
 	if frontendCfg.verbose {
 		tbl.PrintRemaining()
-		fmt.Printf("Processed %d entries.\n", count-1)
-	} else {
-		fmt.Printf("Processed %d entries.\nConfiguration Updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg))
 	}
+	cmdfmt.Printf("Summary: processed %d entries | configuration updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg))
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
 		return &multiErr
@@ -164,7 +162,7 @@ func sprintfNewEntryConfig(newConfig entry.SetEntryCfg) string {
 		field := val.Field(i)
 		fieldType := typ.Field(i)
 		// Only include if the field is a pointer and not nil
-		if field.Kind() == reflect.Ptr && !field.IsNil() && fieldType.Name != "ActorEUID" {
+		if field.Kind() == reflect.Ptr && !field.IsNil() && fieldType.Name != "actorEUID" {
 			line = append(line, fmt.Sprintf("%s (%v)", fieldType.Name, field.Elem()))
 		}
 		// Only include non-empty slices:

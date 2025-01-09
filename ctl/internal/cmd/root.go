@@ -151,7 +151,7 @@ func isCommandAuthorized(cmd *cobra.Command) error {
 	return nil
 }
 
-var helpTemplate = `{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}{{end}}
+var helpTemplate = fmt.Sprintf(`{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}{{end}}
 
 Usage:{{if .Runnable}}
   {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
@@ -184,7 +184,13 @@ Global flags also apply to all sub-commands and can be set persistently using en
   export BEEGFS_MGMTD_ADDR=hostname
 
 To persist configuration across sessions/reboots set it in your .bashrc file or similar.
+
+Exit Codes:
+
+  %d - %s
+  %d - %s
+  %d - %s
 {{ else }}
 See "beegfs help" for a list of global flags that also apply to this command.
 {{end}}
-`
+`, util.Success, util.Success, util.GeneralError, util.GeneralError, util.PartialSuccess, util.PartialSuccess)

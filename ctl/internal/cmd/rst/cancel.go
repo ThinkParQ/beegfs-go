@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -55,25 +57,23 @@ func runCancelCmd(cmd *cobra.Command, cfg rst.UpdateJobCfg) error {
 		return err
 	}
 
-	if !response.Ok {
-		fmt.Printf("Unable to cancel one or more jobs: %s\n\n", response.Message)
-	} else {
-		if !cfg.Force {
-			fmt.Printf("Cancelled all jobs except ones that were already completed:\n\n")
-		} else {
-			fmt.Printf("Cancelled all jobs:\n\n")
-		}
-	}
-
 	tbl := newJobsTable(withDefaultColumns([]string{"ok", "path", "target", "last update", "job id", "request type"}))
-	defer tbl.PrintRemaining()
-
 	sort.Slice(response.Results, func(i, j int) bool {
 		return response.Results[i].Job.Status.Updated.AsTime().After(response.Results[j].Job.Status.Updated.AsTime())
 	})
 
 	for _, job := range response.Results {
 		tbl.Row(job)
+	}
+	tbl.PrintRemaining()
+
+	if !response.Ok {
+		return util.NewCtlError(fmt.Errorf("unable to cancel one or more jobs: %s", response.Message), util.PartialSuccess)
+	}
+	if !cfg.Force {
+		cmdfmt.Printf("Success: cancelled all jobs except ones that were already completed\n")
+	} else {
+		cmdfmt.Printf("Success: cancelled all jobs\n")
 	}
 	return nil
 }

@@ -80,7 +80,7 @@ run:
 	}
 
 	tbl.PrintRemaining()
-	fmt.Printf("Disposed Files: %d | Total Files: %d\n", statsDisposedFiles, statsTotalFiles)
+	cmdfmt.Printf("Summary: disposed files: %d | total files: %d\n", statsDisposedFiles, statsTotalFiles)
 	if len(multiErr.Errors) != 0 {
 		return multiErr
 	}
