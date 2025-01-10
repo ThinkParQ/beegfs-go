@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
@@ -63,15 +64,17 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	Currently does not automatically set potential flags required to actually fetch the data for some non-default fields.
 	Refer to the help for each command to see what additional flags may be needed.`)
 	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, `The number of rows/elements to print before output is flushed to stdout.
-	When printing using a table, the header will be repeated after printing this many rows (no headers are printed when set to 0).
-	If set to 0, rows are written immediately and table columns may not be aligned.`)
-	cmd.PersistentFlags().Bool(config.PrintJsonKey, false, fmt.Sprintf(`Print output normally rendered using a table as JSON instead (experimental). 
-	If the number of elements to print is greater than %s multiple JSON lists separated by newlines will be printed (increase %s if needed).
-	Alternatively to stream an unknown or large number of elements, set %s to "0" to print using Newline-Delimited JSON (NDJSON).`, config.PageSizeKey, config.PageSizeKey, config.PageSizeKey))
-	cmd.PersistentFlags().Bool(config.PrintJsonPrettyKey, false, fmt.Sprintf(`Print output normally rendered using a table as pretty JSON instead (experimental). 
-	If the number of elements to print is greater than %s multiple JSON lists separated by newlines will be printed (increase %s if needed).
-	Alternatively to stream an unknown or large number of elements, set %s to "0" to print using Newline-Delimited JSON (NDJSON).`, config.PageSizeKey, config.PageSizeKey, config.PageSizeKey))
-
+	When set to 0, output is flushed immediately: When printing tables columns may not be aligned. When printing JSON the output switches to NDJSON.`)
+	// TODO (https://github.com/ThinkParQ/beegfs-go/issues/30): Unmark experimental. This is mainly
+	// considered experimental because not all modes return structured output yet. While the output
+	// for modes that already return structured output is unlikely to change, there is always the
+	// possibility we need to make slight adjustments to the output based on user feedback. Thus it
+	// is better to consider this experimental until it is completely finalized.
+	cmd.PersistentFlags().Var(util.ValidatedStringFlag(config.OutputOptions, config.OutputTable), "output",
+		fmt.Sprintf(`Controls how structured output is printed to stdout. Valid options: %v (experimental).
+	When printing using a table, the header will be repeated after printing %s rows (set to 0 to omit printing table headers).
+	When printing JSON or pretty JSON, if the number of elements to print is greater than %s, prints multiple JSON lists separated by newlines.
+	When printing an unknown or large number of elements it is recommended to use NDJSON (Newline-Delimited JSON).`, config.OutputOptions, config.PageSizeKey, config.PageSizeKey))
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")
 	// Environment variables cannot use "-", replace with "_"

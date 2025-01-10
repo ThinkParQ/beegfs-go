@@ -77,10 +77,10 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 	if license.Result == pl.VerifyResult_VERIFY_ERROR {
 		return errors.New(license.Message)
 	}
-	if viper.GetBool(config.PrintJsonPrettyKey) {
+	if viper.GetString(config.OutputKey) == config.OutputJSONPretty.String() {
 		pretty, _ := json.MarshalIndent(license, "", "  ")
 		fmt.Printf("%s\n", pretty)
-	} else if viper.GetBool(config.PrintJsonKey) {
+	} else if viper.GetString(config.OutputKey) == config.OutputJSON.String() {
 		json, _ := json.Marshal(license)
 		fmt.Printf("%s\n", json)
 	} else {

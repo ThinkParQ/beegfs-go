@@ -27,12 +27,13 @@ type Printer interface {
 
 // Printomatic provides a standard way for printing structured data.
 type Printomatic struct {
-	printer   Printer
-	columns   []string
-	printCols []string
-	pageSize  uint
-	rowCount  uint
-	config    PrinterOptions
+	printer    Printer
+	columns    []string
+	printCols  []string
+	pageSize   uint
+	outputType config.OutputType
+	rowCount   uint
+	config     PrinterOptions
 }
 
 type PrinterOptions struct {
@@ -73,11 +74,24 @@ func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOp
 		printCols = viper.GetStringSlice(config.ColumnsKey)
 	}
 
+	// Determine the page size and output type:
+	pageSize := viper.GetUint(config.PageSizeKey)
+	outputType := config.OutputType(viper.GetString(config.OutputKey))
+
+	if outputType == config.OutputNDJSON {
+		// If NDJSON is requested automatically set the pageSize to zero.
+		pageSize = 0
+	} else if outputType == config.OutputJSON && pageSize == 0 {
+		// If the output type is JSON and the pageSize is zero, automatically use NDJSON.
+		outputType = config.OutputNDJSON
+	}
+
 	p := Printomatic{
-		columns:   columns,
-		printCols: printCols,
-		pageSize:  viper.GetUint(config.PageSizeKey),
-		config:    cfg,
+		columns:    columns,
+		printCols:  printCols,
+		pageSize:   pageSize,
+		outputType: outputType,
+		config:     cfg,
 	}
 
 	p.replacePrinter()
@@ -89,8 +103,10 @@ func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOp
 // used both to initialize the Printomatic and whenever pageSize is exceeded.
 func (p *Printomatic) replacePrinter() {
 
-	if viper.IsSet(config.PrintJsonKey) || viper.GetBool(config.PrintJsonPrettyKey) {
-		p.printer = newJSONPrinter(viper.GetBool(config.PrintJsonPrettyKey), viper.GetInt(config.PageSizeKey))
+	if p.outputType == config.OutputJSON ||
+		p.outputType == config.OutputJSONPretty ||
+		p.outputType == config.OutputNDJSON {
+		p.printer = newJSONPrinter(p.outputType == config.OutputJSONPretty, p.pageSize)
 	} else {
 		// Otherwise print using a stylized table. Use a very simple style with only spaces as
 		// separators to make parsing easier.

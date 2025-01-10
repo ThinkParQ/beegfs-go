@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/spf13/pflag"
 )
@@ -73,4 +74,39 @@ func (f *i64BytesFlag) Set(value string) error {
 	finalSize := int64(sizeInBytes)
 	*f.p = finalSize
 	return nil
+}
+
+// ValidatedStringFlag defines a flag that only accepts one of the allowed strings. Intended to be
+// used with typed constants that satisfy the stringer interface. Allowed strings should by all
+// lowercase and the user provided string will be converted to lowercase before checking it is one
+// of the allowed strings.
+func ValidatedStringFlag(allowed []fmt.Stringer, defaultValue fmt.Stringer) *validatedStringFlag {
+	return &validatedStringFlag{
+		value:   defaultValue,
+		allowed: allowed,
+	}
+}
+
+type validatedStringFlag struct {
+	value   fmt.Stringer
+	allowed []fmt.Stringer
+}
+
+func (f *validatedStringFlag) String() string {
+	return f.value.String()
+}
+
+func (f *validatedStringFlag) Set(val string) error {
+	val = strings.ToLower(val)
+	for _, allowed := range f.allowed {
+		if val == allowed.String() {
+			f.value = allowed
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid value: %q (allowed: %v)", val, f.allowed)
+}
+
+func (v *validatedStringFlag) Type() string {
+	return "string"
 }

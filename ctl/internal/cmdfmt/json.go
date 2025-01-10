@@ -12,12 +12,12 @@ type jsonPrinter struct {
 	columns  []table.ColumnConfig
 	rows     []map[string]any
 	pretty   bool
-	pageSize int
+	pageSize uint
 }
 
 // newJSONPrinter returns a ready to use printer. Set pretty to pretty print JSON and set pageSize
 // to 0 to print NDJSON.
-func newJSONPrinter(pretty bool, pageSize int) *jsonPrinter {
+func newJSONPrinter(pretty bool, pageSize uint) *jsonPrinter {
 	return &jsonPrinter{
 		// There should always be at least one element to render. This is a slight optimization when
 		// rendering NDJSON.
