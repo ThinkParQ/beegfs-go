@@ -41,8 +41,8 @@ const (
 	TlsDisableKey = "tls-disable"
 	// Disable TLS server verification for gRPC communication.
 	TlsDisableVerificationKey = "tls-disable-verification"
-	// Use a custom ca certificate for TLS server verification in addition to the system ones.
-	TlsCaCertKey = "tls-ca-cert"
+	// Use a custom certificate for TLS server verification in addition to the system ones.
+	TlsCertFile = "tls-cert-file"
 	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
 	// excluded.
 	RawKey = "raw"
@@ -96,8 +96,8 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 
 	var cert []byte
 	var err error
-	if viper.GetString(TlsCaCertKey) != "" {
-		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
@@ -175,8 +175,8 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 
 	var cert []byte
 	var err error
-	if viper.GetString(TlsCaCertKey) != "" {
-		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
