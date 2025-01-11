@@ -65,8 +65,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 
 func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg, backendCfg entry.GetEntriesCfg) error {
 
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "runEntryInfoCmd"))
+	log, _ := config.GetLogger()
 
 	// Setup the method for sending paths to the backend:
 	method, err := entry.DetermineInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)

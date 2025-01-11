@@ -73,8 +73,7 @@ type SetEntryResult struct {
 }
 
 func SetEntries(ctx context.Context, pm InputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, <-chan error, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "setEntries"))
+	log, _ := config.GetLogger()
 
 	// Validate new configuration once:
 	if err := cfg.setAndValidateEUID(); err != nil {

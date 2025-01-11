@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -62,9 +61,7 @@ type MountPoint struct {
 	Opts map[string]string
 }
 
-func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, logger *logger.Logger) ([]Client, error) {
-
-	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(Client{}).PkgPath())))
+func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logger.Logger) ([]Client, error) {
 
 	mounts, err := getBeeGFSMounts()
 	if err != nil {

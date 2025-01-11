@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"reflect"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -43,8 +42,7 @@ func printClientHeader(client procfs.Client, char string) {
 //     Set noFilterByMgmtd to return all clients.
 //   - If filterByMounts is specified, only the client(s) for those mount point(s) are returned.
 func getFilteredClientList(ctx context.Context, noFilterByMgmtd bool, filterByMounts []string, backendCfg procfs.GetBeeGFSClientsConfig) ([]procfs.Client, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(checkCfg{}).PkgPath())))
+	log, _ := config.GetLogger()
 
 	mgmtdClient, err := config.ManagementClient()
 	if err != nil {
@@ -76,7 +74,7 @@ func getFilteredClientList(ctx context.Context, noFilterByMgmtd bool, filterByMo
 		mounts[path.Clean(arg)] = struct{}{}
 	}
 
-	clients, err := procfs.GetBeeGFSClients(ctx, backendCfg, logger)
+	clients, err := procfs.GetBeeGFSClients(ctx, backendCfg, log)
 	if err != nil {
 		return nil, err
 	}

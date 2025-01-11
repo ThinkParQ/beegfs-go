@@ -7,6 +7,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -43,15 +44,14 @@ type disposalCleaner struct {
 	cfg         DisposalCfg
 	resultsChan chan<- DisposalResult
 	errChan     chan<- error
-	log         *zap.Logger
+	log         *logger.Logger
 }
 
 // CleanupDisposals() returns two channels where the results or errors running the disposal cleaner
 // will be sent. It immediately returns an error if any initialization fails. The DisposalResult
 // channel will be closed once all results have been returned, or if a fatal error occurs.
 func CleanupDisposals(ctx context.Context, cfg DisposalCfg) (<-chan DisposalResult, <-chan error, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "disposalCleaner"))
+	log, _ := config.GetLogger()
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
