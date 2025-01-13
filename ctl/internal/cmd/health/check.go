@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
-	"reflect"
 	"sort"
 	"time"
 
@@ -18,7 +16,6 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
-	"go.uber.org/zap"
 )
 
 type Status int
@@ -132,8 +129,7 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 
 func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg checkCfg, backendCfg procfs.GetBeeGFSClientsConfig) error {
 
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(checkCfg{}).PkgPath())))
+	log, _ := config.GetLogger()
 
 	// Should be set to true if any check falls and the command should return with a non-zero exit
 	// code after all checks are run and results printed (provided checks aren't ignored).

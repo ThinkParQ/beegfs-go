@@ -57,8 +57,7 @@ type StorageBenchResult struct {
 // nodes. It takes action based on the provided benchConfig.
 func ExecuteStorageBenchAction(ctx context.Context, benchConfig *StorageBenchConfig) ([]StorageBenchResult, error) {
 
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "storageBench"))
+	log, _ := config.GetLogger()
 	log.Debug("initializing storage bench mode", zap.Any("benchConfig", benchConfig))
 
 	store, err := config.NodeStore(ctx)

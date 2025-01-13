@@ -186,8 +186,7 @@ func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 // This approach allows callers to decide when there is an error if they should immediately
 // terminate, or continue writing out the remaining entries before handling the error.
 func GetEntries(ctx context.Context, pm InputMethod, cfg GetEntriesCfg) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "getEntries"))
+	log, _ := config.GetLogger()
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {

@@ -197,8 +197,7 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 }
 
 func copyRunner(bflagSet *bflag.FlagSet, paths []string, dest string) error {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "copyRunner"))
+	log, _ := config.GetLogger()
 
 	wrappedArgs := bflagSet.WrappedArgs()
 	log.Debug("starting copy runner", zap.Any("wrappedArgs", wrappedArgs), zap.Any("paths", paths), zap.Any("destination", dest))
@@ -220,8 +219,7 @@ func copyRunner(bflagSet *bflag.FlagSet, paths []string, dest string) error {
 }
 
 func copyUsingStdin(ctx context.Context, frontendCfg frontendCfg, bflagSet *bflag.FlagSet, destination string) error {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "copyUsingStdin"))
+	log, _ := config.GetLogger()
 
 	pathsChan := make(chan string, frontendCfg.batchSize)
 	stdinErrChan := make(chan error, 1)

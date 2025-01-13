@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"reflect"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -43,8 +41,8 @@ const (
 	TlsDisableKey = "tls-disable"
 	// Disable TLS server verification for gRPC communication.
 	TlsDisableVerificationKey = "tls-disable-verification"
-	// Use a custom ca certificate for TLS server verification in addition to the system ones.
-	TlsCaCertKey = "tls-ca-cert"
+	// Use a custom certificate for TLS server verification in addition to the system ones.
+	TlsCertFile = "tls-cert-file"
 	// Prints values in their raw, base form, without adding units and SI/IEC prefixes. Durations
 	// excluded.
 	RawKey = "raw"
@@ -118,23 +116,18 @@ var globalMount filesystem.Provider
 
 var mgmtClient *beegrpc.Mgmtd
 
-// This package doesn't need to declare any types, but we need a type declared in this package so we
-// can use reflection to determine the package name so it can be injected into the logger.
-type dummy struct{}
-
 // Try to establish a connection to the managements gRPC service
 func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtClient != nil {
 		return mgmtClient, nil
 	}
 
-	logger, _ := GetLogger()
-	log := logger.With(zap.String("component", path.Base(reflect.TypeOf(dummy{}).PkgPath())))
+	log, _ := GetLogger()
 
 	var cert []byte
 	var err error
-	if viper.GetString(TlsCaCertKey) != "" {
-		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
@@ -152,7 +145,7 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtdAddr == BeeGFSMgmtdAddrAuto {
 		ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration(ConnTimeoutKey))
 		defer cancel()
-		clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{}, logger)
+		clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{}, log)
 		if err != nil {
 			return nil, err
 		}
@@ -212,8 +205,8 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 
 	var cert []byte
 	var err error
-	if viper.GetString(TlsCaCertKey) != "" {
-		cert, err = os.ReadFile(viper.GetString(TlsCaCertKey))
+	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
+		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
@@ -419,13 +412,6 @@ var globalLogger *logger.Logger
 // For example you might log an connection attempt to a node. If the attempt fails an error is
 // returned, and if it is unclear what layer the error is coming from, debug logging could be
 // enabled to troubleshoot.
-//
-// Generally when using the logger you should create a child logger that adds additional context:
-//
-//	globalLogger, _ := config.GetLogger() // Check error as needed.
-//	log := globalLogger.With(zap.String("context", "SomeFunction"))
-//	log.Debug("logging enabled")
-//	// Result: 2024-08-01T20:20:18.979Z  debug  logging enabled {"context": "SomeFunction"}
 //
 // Note when getting the logger unless there is a bug in the logging implementation errors are
 // unlikely and can usually be ignored for interactive tools where a panic due to the logger being

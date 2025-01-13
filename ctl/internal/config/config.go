@@ -40,15 +40,14 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Int(config.NumWorkersKey, runtime.GOMAXPROCS(0), "The maximum number of workers to use when a command can complete work in parallel (default: number of CPUs).")
 
-	cmd.PersistentFlags().Bool(config.TlsDisableKey, false, "Disable TLS for gRPC communication")
+	cmd.PersistentFlags().Bool(config.TlsDisableKey, false, fmt.Sprintf("Disable TLS for gRPC communication (ignores %s).", config.TlsCertFile))
 
-	cmd.PersistentFlags().String(config.TlsCaCertKey, "/etc/beegfs/cert.pem", `Use a CA certificate (signed or self-signed) for server verification.
-	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.
-	Leave empty to use the system's default certificate pool to verify the server.`)
+	cmd.PersistentFlags().String(config.TlsCertFile, "/etc/beegfs/cert.pem", `Use the specified certificate to verify and encrypt gRPC traffic. Leave empty to use the system's default certificate pool.
+	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.`)
 
 	cmd.PersistentFlags().Bool(config.TlsDisableVerificationKey, false, "Disable TLS server verification")
 
-	cmd.PersistentFlags().Bool(config.AuthDisableKey, false, "Disable authentication")
+	cmd.PersistentFlags().Bool(config.AuthDisableKey, false, fmt.Sprintf("Disable authentication (ignores %s).", config.AuthFileKey))
 	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", `The file containing the authentication secret. 
 	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.`)
 

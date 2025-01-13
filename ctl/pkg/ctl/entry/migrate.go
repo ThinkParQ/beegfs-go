@@ -120,8 +120,7 @@ type migration struct {
 }
 
 func MigrateEntries(ctx context.Context, pm InputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "migrateEntries"))
+	log, _ := config.GetLogger()
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {

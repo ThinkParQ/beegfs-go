@@ -171,8 +171,7 @@ This will ensure the file is treated as a local path and avoids errors like "gzi
 // command are also ignored.
 func getGlobalConfig() []string {
 	var globalArgs []string
-	logger, _ := config.GetLogger()
-	log := logger.With(zap.String("component", "getGlobalConfig"))
+	log, _ := config.GetLogger()
 
 	for k, v := range viper.AllSettings() {
 		var value string
