@@ -81,16 +81,16 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	defaultColumns := []string{"path", "entry id", "type", "meta node", "meta mirror", "storage pool", "stripe pattern", "storage targets", "buddy groups", "remote targets", "cool down"}
 	allColumns := append(defaultColumns, "client sessions")
 	numColumns := len(allColumns)
-	var tbl cmdfmt.TableWrapper
+	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {
 		// For simplicity still use the table wrapper to handle printing the retro output. Just put
 		// all the output into one unlabeled column.
-		tbl = cmdfmt.NewTableWrapper([]string{}, []string{})
+		tbl = cmdfmt.NewPrintomatic([]string{}, []string{})
 	} else {
 		if frontendCfg.verbose {
 			defaultColumns = allColumns
 		}
-		tbl = cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+		tbl = cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 	}
 	defer tbl.PrintRemaining()
 
@@ -108,14 +108,14 @@ run:
 				log.Warn("unable to generate all output needed to print verbose details, some information may be missing (ignoring)", zap.Error(err))
 			}
 			if frontendCfg.retro {
-				tbl.Row(assembleRetroEntry(info, frontendCfg))
+				tbl.AddItem(assembleRetroEntry(info, frontendCfg))
 			} else {
 				row := assembleTableRow(info, numColumns)
 				if len(row) != numColumns {
 					// Sanity check in case new columns are added and assembleTableRow() is not updated.
 					log.Warn("number of columns in the row does not equal the expected number of columns, this is likely a bug and table output will probably not be formatted correctly (ignoring)", zap.Any("expected", numColumns), zap.Any("actual", len(row)))
 				}
-				tbl.Row(row...)
+				tbl.AddItem(row...)
 			}
 		case err, ok := <-errChan:
 			if ok {

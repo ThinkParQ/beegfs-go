@@ -46,7 +46,7 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		defaultColumns = append(defaultColumns, "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit")
 	}
 
-	tbl := cmdfmt.NewTableWrapper(
+	tbl := cmdfmt.NewPrintomatic(
 		[]string{"uid", "alias", "id", "members", "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit"},
 		defaultColumns,
 	)
@@ -122,7 +122,7 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 
 		members = strings.Trim(members, "\n")
 
-		tbl.Row(p.Pool.Uid, p.Pool.Alias, p.Pool.LegacyId, members, userSpaceLimit, userInodeLimit, groupSpaceLimit, groupInodeLimit)
+		tbl.AddItem(p.Pool.Uid, p.Pool.Alias, p.Pool.LegacyId, members, userSpaceLimit, userInodeLimit, groupSpaceLimit, groupInodeLimit)
 	}
 
 	tbl.PrintRemaining()

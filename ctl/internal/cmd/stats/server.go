@@ -91,7 +91,7 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 	defaultWithNode := []string{"node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
 	allColumns := []string{"time", "uid", "node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
 
-	var collectStatsFunc func(context.Context, *serverStats_Config, *cmdfmt.TableWrapper) error
+	var collectStatsFunc func(context.Context, *serverStats_Config, *cmdfmt.Printomatic) error
 	if _, ok := cfg.Node.(beegfs.InvalidEntityId); ok {
 		if cfg.Sum {
 			collectStatsFunc = multiNodeAggregated
@@ -107,7 +107,7 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 		defaultColumns = allColumns
 	}
 
-	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 
 	// incase if the interval is given we loop here until the user presses ctrl + c
 	for {
@@ -126,7 +126,7 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 }
 
 // Queries and prints the stats for one node
-func singleNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
+func singleNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.Printomatic) error {
 	node, stats, err := stats.SingleServerNode(ctx, cfg.Node)
 	if err != nil {
 		return err
@@ -146,7 +146,7 @@ func singleNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWra
 }
 
 // Queries and prints latest stat entry for multiple nodes separately
-func multiNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
+func multiNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.Printomatic) error {
 	perServerstatsResult, err := stats.MultiServerNodes(ctx, cfg.NodeType)
 	if err != nil {
 		return err
@@ -167,7 +167,7 @@ func multiNode(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrap
 }
 
 // Queries, sums up and prints the summarized stats for multiple nodes
-func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.TableWrapper) error {
+func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *cmdfmt.Printomatic) error {
 	totalStats, numberOfNodes, err := stats.MultiServerNodesAggregated(ctx, cfg.NodeType)
 	if err != nil {
 		return err
@@ -189,7 +189,7 @@ func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *cmdfmt
 }
 
 // Prints one line of stat entry
-func printData(w *cmdfmt.TableWrapper, node *beegfs.Node, stat stats.Stats) {
+func printData(w *cmdfmt.Printomatic, node *beegfs.Node, stat stats.Stats) {
 
 	uid := "n/a"
 	id := "n/a"
@@ -205,7 +205,7 @@ func printData(w *cmdfmt.TableWrapper, node *beegfs.Node, stat stats.Stats) {
 	busyWorkers := fmt.Sprintf("%d", stat.BusyWorkers)
 
 	if viper.GetBool(config.RawKey) {
-		w.Row(
+		w.AddItem(
 			stat.StatsTime,
 			uid,
 			id,
@@ -226,7 +226,7 @@ func printData(w *cmdfmt.TableWrapper, node *beegfs.Node, stat stats.Stats) {
 		} else {
 			statsTime = time.Unix(int64(stat.StatsTime), 0).Format(time.RFC3339)
 		}
-		w.Row(
+		w.AddItem(
 			statsTime,
 			uid,
 			id,

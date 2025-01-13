@@ -34,7 +34,7 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 
 	defaultColumns := []string{"id", "name", "policies", "type", "configuration"}
 
-	tbl := cmdfmt.NewTableWrapper(defaultColumns, defaultColumns)
+	tbl := cmdfmt.NewPrintomatic(defaultColumns, defaultColumns)
 	defer tbl.PrintRemaining()
 	sort.Slice(response.Rsts, func(i, j int) bool {
 		return response.Rsts[i].Id < response.Rsts[j].Id
@@ -69,7 +69,7 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 			}
 		}
 
-		tbl.Row(
+		tbl.AddItem(
 			rst.GetId(),
 			rst.GetName(),
 			rst.GetPolicies().String(),

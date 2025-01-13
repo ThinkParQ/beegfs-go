@@ -6,6 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 )
@@ -24,7 +26,10 @@ func newPushCmd() *cobra.Command {
 		Long: `Upload a file or directory in BeeGFS to a Remote Storage Target.
 By default the Remote Storage Target where entries are pushed is determined by the RST ID(s) set on each entry.
 Optionally an RST ID can be provided to perform a one-time push to that RST.
-When uploading multiple entries, any entries that do not have RSTs configured are ignored.
+
+When uploading multiple entries, any entries that do not have RSTs configured are silently ignored.
+If there is an error uploading any of the entries the return code will be 2.
+If a fatal error occurs and the command exits early before trying to upload all entries, the return code will be 1.
 
 WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.`,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -93,7 +98,6 @@ func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg rs
 	totalErrors := 0
 
 	tbl := newJobsTable(withJobDetails(frontendCfg.detail), withColumnWidth(frontendCfg.width))
-	defer tbl.PrintRemaining()
 
 writeResponses:
 	for {
@@ -106,6 +110,8 @@ writeResponses:
 			}
 			if resp.Err != nil {
 				if resp.FatalErr {
+					// If we return early ensure to print any buffered entries.
+					tbl.PrintRemaining()
 					return resp.Err
 				}
 				if errors.Is(resp.Err, rst.ErrFileHasNoRSTs) {
@@ -126,6 +132,12 @@ writeResponses:
 			}
 		}
 	}
-	fmt.Printf("\nTotal Jobs Scheduled: %d | Paths Skipped Due to Errors: %d | Ignored Paths: %d\n", totalJobs, totalErrors, totalIgnored)
+
+	tbl.PrintRemaining()
+	result := fmt.Sprintf("total jobs scheduled: %d | paths skipped due to errors: %d | ignored paths: %d\n", totalJobs, totalErrors, totalIgnored)
+	if totalErrors != 0 {
+		return util.NewCtlError(errors.New(result), util.PartialSuccess)
+	}
+	cmdfmt.Printf("Success: %s", result)
 	return nil
 }

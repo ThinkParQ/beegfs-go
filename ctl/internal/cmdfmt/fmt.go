@@ -2,6 +2,7 @@ package cmdfmt
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -10,36 +11,57 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-type TableWrapper struct {
-	tableWriter table.Writer
-	columns     []string
-	printCols   []string
-	pageSize    uint
-	rowCount    uint
-	config      TableWrapperOptions
+// Printf is like fmt.Printf except it prints to stderr instead of stdout. It is intended to be used
+// from commands that print structured output using a table or JSON that may be parsed by scripts.
+func Printf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format, a...)
 }
 
-type TableWrapperOptions struct {
+// Printer is a condensed version of table.Writer that allows implementing alternative ways besides
+// tables to write out structured data.
+type Printer interface {
+	AppendRow(row table.Row, configs ...table.RowConfig)
+	Render() string
+	SetColumnConfigs(configs []table.ColumnConfig)
+}
+
+// Printomatic provides a standard way for printing structured data.
+type Printomatic struct {
+	printer    Printer
+	columns    []string
+	printCols  []string
+	pageSize   uint
+	outputType config.OutputType
+	rowCount   uint
+	config     PrinterOptions
+}
+
+type PrinterOptions struct {
 	WithEmptyColumns bool
 }
 
-type TableWrapperOption func(*TableWrapperOptions)
+type PrinterOption func(*PrinterOptions)
 
-func WithEmptyColumns(withEmpty bool) TableWrapperOption {
-	return func(args *TableWrapperOptions) {
+func WithEmptyColumns(withEmpty bool) PrinterOption {
+	return func(args *PrinterOptions) {
 		args.WithEmptyColumns = withEmpty
 	}
 }
 
-// Creates a new table.Writer, applying some default settings. Reads certain viper config keys to
-// configure the table: PageSizeKey to configure the page size, ColumnsKey to define the columns to
-// be printed and SortBy key to sort the results by a column. The columns of the table must be
-// provided using the columns parameter (the header is generated from them). When adding rows,
-// call table.AppendRow() providing as many columns as set for the header. defaultColumns defines
-// which columns to print by default. A user can do --columns=all to print all columns instead.
-// Column names should be lowercase.
-func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWrapperOption) TableWrapper {
-	cfg := TableWrapperOptions{
+// Creates a new Printer for printing structured data either in a tabular or JSON format. Reads
+// certain Viper configuration keys to control how output is printed:
+//
+//   - PageSizeKey: Configure how many entries are buffered then printed at once.
+//   - ColumnsKey: Define what columns/keys are printed.
+//   - SortBy: Sort results by a specific column.
+//
+// The available columns (or keys for JSON) must be provided using the columns parameter, and will
+// be used to generate the table header. When adding rows call Printomatic.AppendRow() providing as
+// many columns as were initially provided. Use defaultColumns to define which columns are printed
+// by default. Column names should always be lowercase. As a special case, if a user specifies
+// "ColumnsKey=all" or --debug then all columns are printed.
+func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOption) Printomatic {
+	cfg := PrinterOptions{
 		WithEmptyColumns: true,
 	}
 	for _, opt := range opts {
@@ -52,66 +74,89 @@ func NewTableWrapper(columns []string, defaultColumns []string, opts ...TableWra
 		printCols = viper.GetStringSlice(config.ColumnsKey)
 	}
 
-	w := TableWrapper{
-		columns:   columns,
-		printCols: printCols,
-		pageSize:  viper.GetUint(config.PageSizeKey),
-		config:    cfg,
+	// Determine the page size and output type:
+	pageSize := viper.GetUint(config.PageSizeKey)
+	outputType := config.OutputType(viper.GetString(config.OutputKey))
+
+	if outputType == config.OutputNDJSON {
+		// If NDJSON is requested automatically set the pageSize to zero.
+		pageSize = 0
+	} else if outputType == config.OutputJSON && pageSize == 0 {
+		// If the output type is JSON and the pageSize is zero, automatically use NDJSON.
+		outputType = config.OutputNDJSON
 	}
 
-	w.replaceTableWriter()
+	p := Printomatic{
+		columns:    columns,
+		printCols:  printCols,
+		pageSize:   pageSize,
+		outputType: outputType,
+		config:     cfg,
+	}
 
-	return w
+	p.replacePrinter()
+
+	return p
 }
 
-// Creates a new internal TableWriter to prepare printing a new page
-func (w *TableWrapper) replaceTableWriter() {
+// replacePrinter() refreshes the internal Printer to prepare printing a new page of output. It is
+// used both to initialize the Printomatic and whenever pageSize is exceeded.
+func (p *Printomatic) replacePrinter() {
 
-	// Set the style. We use a very simple style with only spaces as separators to make parsing
-	// easier.
-	tbl := table.NewWriter()
-	tbl.SetStyle(table.Style{
-		Box: table.BoxStyle{
-			PaddingRight:  "  ",
-			PageSeparator: "\n",
-		},
-		Format: table.FormatOptions{
-			// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
-			// initForRenderSuppressColumns() does not ignore control characters. This was fixed
-			// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
-			// a new go-pretty release is tagged. But it also results in hidden characters being
-			// added to columns which are included if a user copies text, which can lead to weird
-			// behavior (for example copying a unix timestamp to a timestamp converter website).
-			// We should leave this disabled unless it becomes necessary.
-			//
-			// Direction: text.LeftToRight,
-			Footer: text.FormatUpper,
-			Header: text.FormatUpper,
-		},
-	})
+	if p.outputType == config.OutputJSON ||
+		p.outputType == config.OutputJSONPretty ||
+		p.outputType == config.OutputNDJSON {
+		p.printer = newJSONPrinter(p.outputType == config.OutputJSONPretty, p.pageSize)
+	} else {
+		// Otherwise print using a stylized table. Use a very simple style with only spaces as
+		// separators to make parsing easier.
+		tbl := table.NewWriter()
+		tbl.SetStyle(table.Style{
+			Box: table.BoxStyle{
+				PaddingRight:  "  ",
+				PageSeparator: "\n",
+			},
+			Format: table.FormatOptions{
+				// Direction breaks SuppressEmptyColumns() due to a bug in go-pretty where
+				// initForRenderSuppressColumns() does not ignore control characters. This was fixed
+				// with https://github.com/jedib0t/go-pretty/pull/327. Direction could be reenabled once
+				// a new go-pretty release is tagged. But it also results in hidden characters being
+				// added to columns which are included if a user copies text, which can lead to weird
+				// behavior (for example copying a unix timestamp to a timestamp converter website).
+				// We should leave this disabled unless it becomes necessary.
+				//
+				// Direction: text.LeftToRight,
+				Footer: text.FormatUpper,
+				Header: text.FormatUpper,
+			},
+		})
 
-	if !w.config.WithEmptyColumns {
-		tbl.SuppressEmptyColumns()
-	}
-
-	// Don't print a header if the page size is zero:
-	if w.pageSize > 0 {
-		// Build the header
-		row := table.Row{}
-		for _, h := range w.columns {
-			row = append(row, strings.ToLower(h))
+		if !p.config.WithEmptyColumns {
+			tbl.SuppressEmptyColumns()
 		}
-		tbl.AppendHeader(row)
+
+		// Don't print a header if the page size is zero:
+		if p.pageSize > 0 {
+			// Build the header
+			row := table.Row{}
+			for _, h := range p.columns {
+				row = append(row, strings.ToLower(h))
+			}
+			tbl.AppendHeader(row)
+		}
+		p.printer = tbl
 	}
 
+	// Regardless the printer type, users can control the columns:
 	colCfg := []table.ColumnConfig{}
 
 	// Hide all columns not to be printed
-	for i, name := range w.columns {
+	for i, name := range p.columns {
 		// The column number is used here because Name does not work if there is no header (as is
 		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
-		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true})
-		for _, cName := range w.printCols {
+		// The name is still included here because it is required when printing JSON.
+		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true, Name: name})
+		for _, cName := range p.printCols {
 			if cName == name || cName == "all" {
 				colCfg[len(colCfg)-1].Hidden = false
 				break
@@ -119,33 +164,32 @@ func (w *TableWrapper) replaceTableWriter() {
 		}
 	}
 
-	tbl.SetColumnConfigs(colCfg)
-
-	w.tableWriter = tbl
+	p.printer.SetColumnConfigs(colCfg)
 }
 
-// Appends a Row to the TableWriter if used, prints row to stdout otherwise. Auto prints the table
-// if pageSize rows have been added. If the pageSize is zero the row is immediately printed.
-func (w *TableWrapper) Row(fields ...any) {
-	w.tableWriter.AppendRow(fields)
-	w.rowCount += 1
-	if w.pageSize == 0 {
-		fmt.Println(w.tableWriter.Render())
+// Add an item to the Printomatic. Auto prints output when pageSize rows have been added. If the
+// pageSize is zero the output is always immediately printed.
+func (p *Printomatic) AddItem(fields ...any) {
+	p.printer.AppendRow(fields)
+	p.rowCount += 1
+	if p.pageSize == 0 {
+		fmt.Println(p.printer.Render())
 		// Intentionally don't print a blank line between rows when the page size is zero.
-		w.replaceTableWriter()
-	} else if w.rowCount%w.pageSize == 0 {
-		fmt.Println(w.tableWriter.Render())
+		p.replacePrinter()
+	} else if p.rowCount%p.pageSize == 0 {
+		fmt.Println(p.printer.Render())
 		fmt.Println()
-		w.replaceTableWriter()
+		p.replacePrinter()
 	}
 }
 
-// Prints the remaining rows of the table if tableWriter is used.
-func (w *TableWrapper) PrintRemaining() {
+// Print all remaining items in the Printomatic even if pageSize has not yet been reached. This
+// should always be called after adding all items to ensure everything is printed.
+func (w *Printomatic) PrintRemaining() {
 	// If the page size is zero rows are printed as they were added so there are no remaining rows.
 	if w.pageSize != 0 && w.rowCount%w.pageSize != 0 {
-		fmt.Println(w.tableWriter.Render())
+		fmt.Println(w.printer.Render())
 		fmt.Println()
-		w.replaceTableWriter()
+		w.replacePrinter()
 	}
 }

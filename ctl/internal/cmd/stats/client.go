@@ -122,7 +122,7 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 	old := []stats.ClientOps{}
 	t := 0
 
-	var tbl cmdfmt.TableWrapper
+	var tbl cmdfmt.Printomatic
 	if !cfg.retro {
 		var firstColumnName string
 		if cfg.perUser {
@@ -136,7 +136,7 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 		} else {
 			allColumns = append([]string{firstColumnName}, stats.StorageOpNamesLower...)
 		}
-		tbl = cmdfmt.NewTableWrapper(allColumns, allColumns, cmdfmt.WithEmptyColumns(cfg.withEmpty))
+		tbl = cmdfmt.NewPrintomatic(allColumns, allColumns, cmdfmt.WithEmptyColumns(cfg.withEmpty))
 	}
 
 	for {
@@ -178,7 +178,7 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 	return nil
 }
 
-func printOps(tbl *cmdfmt.TableWrapper, cs []stats.ClientOps, cfg *clientStats_Config, sum []uint64) {
+func printOps(tbl *cmdfmt.Printomatic, cs []stats.ClientOps, cfg *clientStats_Config, sum []uint64) {
 	limit := len(cs)
 	if cfg.limit > 0 {
 		limit = min(int(cfg.limit), limit)
@@ -253,7 +253,7 @@ func clientIPToString(ip uint64, name bool) string {
 }
 
 // Prints one client Ip/username, number of operations and operation name
-func printOpsRow(tbl *cmdfmt.TableWrapper, name string, ops []uint64, nt beegfs.NodeType, raw bool) {
+func printOpsRow(tbl *cmdfmt.Printomatic, name string, ops []uint64, nt beegfs.NodeType, raw bool) {
 	var opNames []string
 	if nt == beegfs.Meta {
 		opNames = stats.MetaOpNamesLower
@@ -274,7 +274,7 @@ func printOpsRow(tbl *cmdfmt.TableWrapper, name string, ops []uint64, nt beegfs.
 		}
 	}
 
-	tbl.Row(
+	tbl.AddItem(
 		rowColumns...,
 	)
 }

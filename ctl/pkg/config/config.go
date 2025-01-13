@@ -69,6 +69,7 @@ const (
 	// should not print a header at all and flush each row automatically (this requires NOT using
 	// the go-pretty table printer and just print columns separated by spaces).
 	PageSizeKey = "page-size"
+	OutputKey   = "output"
 )
 
 // Viper values for certain configuration values.
@@ -82,6 +83,35 @@ const (
 	procfsMgmtdHost = "sysMgmtdHost"
 	procfsMgmtdGrpc = "connMgmtdGrpcPort"
 )
+
+// OutputType is used to control what type of structured output should be printed.
+type OutputType string
+
+const (
+	OutputTable      OutputType = "table"
+	OutputJSON       OutputType = "json"
+	OutputJSONPretty OutputType = "json-pretty"
+	OutputNDJSON     OutputType = "ndjson"
+)
+
+var (
+	OutputOptions = []fmt.Stringer{OutputTable, OutputJSON, OutputJSONPretty, OutputNDJSON}
+)
+
+func (t OutputType) String() string {
+	switch t {
+	case OutputTable:
+		return "table"
+	case OutputJSON:
+		return "json"
+	case OutputJSONPretty:
+		return "json-pretty"
+	case OutputNDJSON:
+		return "ndjson"
+	default:
+		return "unknown"
+	}
+}
 
 // The global config singleton
 var globalMount filesystem.Provider

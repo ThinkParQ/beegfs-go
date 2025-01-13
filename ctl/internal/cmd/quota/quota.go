@@ -256,7 +256,7 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		return err
 	}
 
-	tbl := cmdfmt.NewTableWrapper(
+	tbl := cmdfmt.NewPrintomatic(
 		[]string{"id", "type", "pool", "space", "inode"},
 		[]string{"id", "type", "pool", "space", "inode"},
 	)
@@ -304,15 +304,14 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		}
 
 		if viper.GetBool(config.DebugKey) {
-			tbl.Row(*limits.QuotaId, idTypeStr, pool.String(), space, inode)
+			tbl.AddItem(*limits.QuotaId, idTypeStr, pool.String(), space, inode)
 		} else {
-			tbl.Row(*limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
+			tbl.AddItem(*limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
 
 	}
 
 	tbl.PrintRemaining()
-	fmt.Println()
 
 	return nil
 }
@@ -390,7 +389,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	// If no quotas were returned, this will never be set.
 	refreshPeriod := "?"
 
-	tbl := cmdfmt.NewTableWrapper(
+	tbl := cmdfmt.NewPrintomatic(
 		[]string{"id", "type", "pool", "space", "inode"},
 		[]string{"id", "type", "pool", "space", "inode"},
 	)
@@ -479,15 +478,14 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 		}
 
 		if viper.GetBool(config.DebugKey) {
-			tbl.Row(*entry.QuotaId, idTypeStr, pool.String(), space, inode)
+			tbl.AddItem(*entry.QuotaId, idTypeStr, pool.String(), space, inode)
 		} else {
-			tbl.Row(*entry.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
+			tbl.AddItem(*entry.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
 	}
 
 	tbl.PrintRemaining()
-	fmt.Println()
-	fmt.Printf("Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
+	cmdfmt.Printf("Warning: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
 
 	return nil
 }

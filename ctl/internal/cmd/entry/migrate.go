@@ -96,7 +96,7 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 	}
 
 	allColumns := []string{"path", "status", "original ids", "errors"}
-	tbl := cmdfmt.NewTableWrapper(allColumns, allColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	var migrateStats = &entry.MigrateStats{}
 
@@ -110,9 +110,9 @@ run:
 			}
 			if printVerbosely {
 				if result.Err != nil {
-					tbl.Row(result.Path, result.Status, result.StartingIDs, result.Err)
+					tbl.AddItem(result.Path, result.Status, result.StartingIDs, result.Err)
 				} else {
-					tbl.Row(result.Path, result.Status, result.StartingIDs, "none")
+					tbl.AddItem(result.Path, result.Status, result.StartingIDs, "none")
 				}
 			}
 			migrateStats.Update(result.Status)
@@ -126,7 +126,7 @@ run:
 	if printVerbosely {
 		tbl.PrintRemaining()
 	}
-	fmt.Printf("Migration statistics: %+v\n", *migrateStats)
+	cmdfmt.Printf("Summary: %+v\n", *migrateStats)
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
 		return &multiErr

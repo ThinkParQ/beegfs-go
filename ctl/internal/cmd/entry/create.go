@@ -117,15 +117,15 @@ WARNING: Directories created using this mode do not trigger file system modifica
 func PrintCreateEntryResult(entries []entry.CreateEntryResult) error {
 
 	columns := []string{"name", "status", "entry id", "type"}
-	tbl := cmdfmt.NewTableWrapper(columns, columns)
+	tbl := cmdfmt.NewPrintomatic(columns, columns)
 	anyErrors := false
 
 	for _, r := range entries {
 		if r.Status == beegfs.OpsErr_SUCCESS {
-			tbl.Row(r.Path, r.Status, string(r.RawEntryInfo.EntryID), r.RawEntryInfo.EntryType)
+			tbl.AddItem(r.Path, r.Status, string(r.RawEntryInfo.EntryID), r.RawEntryInfo.EntryType)
 		} else {
 			anyErrors = true
-			tbl.Row(r.Path, r.Status, "n/a", "n/a")
+			tbl.AddItem(r.Path, r.Status, "n/a", "n/a")
 		}
 	}
 	tbl.PrintRemaining()

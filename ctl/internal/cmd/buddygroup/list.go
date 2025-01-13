@@ -48,7 +48,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
 	}
-	tbl := cmdfmt.NewTableWrapper(allColumns, defaultColumns)
+	tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 	defer tbl.PrintRemaining()
 
 	for _, t := range groups {
@@ -64,7 +64,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			primaryTarget = fmt.Sprintf("%s (%s)", t.PrimaryTarget.Alias, t.PrimaryConsistencyState)
 			secondaryTarget = fmt.Sprintf("%s (%s)", t.SecondaryTarget.Alias, t.SecondaryConsistencyState)
 		}
-		tbl.Row(
+		tbl.AddItem(
 			beegfs.Uid(t.BuddyGroup.Uid),
 			t.BuddyGroup.Alias,
 			t.BuddyGroup.LegacyId,
