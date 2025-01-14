@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"os/user"
+	"strconv"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
@@ -200,58 +203,47 @@ func runSetLimitsCmd(cmd *cobra.Command, args []string, cfg setLimitsCmdConfig) 
 }
 
 type listLimitsConfig struct {
-	ids  string
-	typ  string
-	pool beegfs.EntityId
+	userIds  []string
+	groupIds []string
+	pool     beegfs.EntityId
 }
 
 func newListLimitsCmd() *cobra.Command {
 	cfg := listLimitsConfig{pool: beegfs.InvalidEntityId{}}
 
 	cmd := &cobra.Command{
-		Use:   "list-limits",
-		Short: "List the explicitly set quota limits for users and groups",
+		Use:         "list-limits",
+		Short:       "List the explicitly set quota limits for users and groups",
+		Long:        "List the explicitly set quota limits for users and groups. Lists only the entries belonging to the current user by default.",
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListLimitsCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.ids, "ids", "", "Quota ids to query. Can be either a single id or a range in the form `<min>-<max>`.")
-	cmd.Flags().StringVar(&cfg.typ, "type", "", "Quota type to query ('user' or 'group')")
+	cmd.Flags().StringSliceVar(&cfg.userIds, "user-ids", []string{"current"}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.groupIds, "group-ids", []string{"current"}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 
 	return cmd
 }
 
 func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
-	req := pm.GetQuotaLimitsRequest{}
+	req := pm.GetQuotaLimitsRequest_builder{}.Build()
 
-	if cfg.ids != "" {
-		min, max, err := util.ParseUint64RangeFromStr(cfg.ids, 0, uint64(^uint32(0)))
-		if err != nil {
-			return err
-		}
-
-		req.QuotaIdMin = new(uint32)
-		*req.QuotaIdMin = uint32(min)
-		req.QuotaIdMax = new(uint32)
-		*req.QuotaIdMax = uint32(max)
+	err := parseUserIdsInto(cfg.userIds, req.SetUserIdMin, req.SetUserIdMax, req.SetUserIdList)
+	if err != nil {
+		return err
 	}
 
-	if cfg.typ != "" {
-		switch cfg.typ {
-		case "user":
-			req.IdType = pb.QuotaIdType_QUOTA_ID_TYPE_USER
-		case "group":
-			req.IdType = pb.QuotaIdType_QUOTA_ID_TYPE_GROUP
-		default:
-			return fmt.Errorf("invalid id type: must be 'user' or 'group'")
-		}
+	err = parseGroupIdsInto(cfg.groupIds, req.SetGroupIdMin, req.SetGroupIdMax, req.SetGroupIdList)
+	if err != nil {
+		return err
 	}
 
-	req.Pool = cfg.pool.ToProto()
+	req.SetPool(cfg.pool.ToProto())
 
-	stream, err := quota.GetLimits(cmd.Context(), &req)
+	stream, err := quota.GetLimits(cmd.Context(), req)
 	if err != nil {
 		return err
 	}
@@ -321,8 +313,8 @@ const (
 )
 
 type listUsageConfig struct {
-	ids      string
-	typ      string
+	userIds  []string
+	groupIds []string
 	pool     beegfs.EntityId
 	exceeded bool
 }
@@ -333,55 +325,41 @@ func newListUsageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:         "list-usage",
 		Short:       "List quota usage per user or group together with their effective limit",
+		Long:        "List quota usage per user or group together with their effective limit. Lists only the entries belonging to the current user by default.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListUsageCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.ids, "ids", "", "Quota ids to query. Can be either a single id or a range in the form `<min>-<max>`.")
-	cmd.Flags().StringVar(&cfg.typ, "type", "", "Quota type to query ('user' or 'group')")
-	var pool beegfs.EntityId = beegfs.InvalidEntityId{}
-	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&pool, 16, beegfs.Storage), "pool", "Storage pool to query")
+	cmd.Flags().StringSliceVar(&cfg.userIds, "user-ids", []string{"current"}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.groupIds, "group-ids", []string{"current"}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit")
 
 	return cmd
 }
 
 func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
-	req := pm.GetQuotaUsageRequest{}
+	req := pm.GetQuotaUsageRequest_builder{}.Build()
 
-	if cfg.ids != "" {
-		min, max, err := util.ParseUint64RangeFromStr(cfg.ids, 0, uint64(^uint32(0)))
-		if err != nil {
-			return err
-		}
-
-		req.QuotaIdMin = new(uint32)
-		*req.QuotaIdMin = uint32(min)
-		req.QuotaIdMax = new(uint32)
-		*req.QuotaIdMax = uint32(max)
+	err := parseUserIdsInto(cfg.userIds, req.SetUserIdMin, req.SetUserIdMax, req.SetUserIdList)
+	if err != nil {
+		return err
 	}
 
-	if cfg.typ != "" {
-		switch cfg.typ {
-		case "user":
-			req.IdType = pb.QuotaIdType_QUOTA_ID_TYPE_USER
-		case "group":
-			req.IdType = pb.QuotaIdType_QUOTA_ID_TYPE_GROUP
-		default:
-			return fmt.Errorf("invalid id type: must be 'user' or 'group'")
-		}
+	err = parseGroupIdsInto(cfg.groupIds, req.SetGroupIdMin, req.SetGroupIdMax, req.SetGroupIdList)
+	if err != nil {
+		return err
 	}
 
-	req.Pool = cfg.pool.ToProto()
+	req.SetPool(cfg.pool.ToProto())
 
 	if cmd.Flags().Changed(listUsageExceededKey) {
-		req.Exceeded = new(bool)
-		*req.Exceeded = cfg.exceeded
+		req.SetExceeded(cfg.exceeded)
 	}
 
-	stream, err := quota.GetUsage(cmd.Context(), &req)
+	stream, err := quota.GetUsage(cmd.Context(), req)
 	if err != nil {
 		return err
 	}
@@ -511,4 +489,117 @@ func parseLimit(s string) (*int64, error) {
 	}
 
 	return res, nil
+}
+
+// parses a user id string slice, extracts the ids or fetches them from os and calls the appropriate
+// provided set functions
+func parseUserIdsInto(
+	idStr []string,
+	setMin func(uint32),
+	setMax func(uint32),
+	setList func([]uint32),
+) error {
+	if len(idStr) == 1 && idStr[0] == "current" {
+		uid := uint32(os.Getuid())
+		setMin(uid)
+		setMax(uid)
+	} else if len(idStr) > 0 {
+		if os.Geteuid() != 0 {
+			return fmt.Errorf("only root can query arbitrary user ids")
+		}
+
+		if len(idStr) > 1 {
+			ids := []uint32{}
+			for _, idStr := range idStr {
+				id, err := strconv.ParseUint(idStr, 10, 32)
+				if err != nil {
+					return fmt.Errorf("invalid user id in list: %w", err)
+				}
+				ids = append(ids, uint32(id))
+			}
+			setList(ids)
+		} else {
+			if idStr[0] == "all" {
+				setMin(0)
+			} else {
+				min, max, err := util.ParseUint64RangeFromStr(idStr[0], 0, uint64(^uint32(0)))
+				if err != nil {
+					return err
+				}
+				setMin(uint32(min))
+				setMax(uint32(max))
+			}
+		}
+	}
+
+	return nil
+}
+
+// parses a group id string slice, extracts the ids or fetches them from os and calls the appropriate
+// provided set functions
+func parseGroupIdsInto(
+	idStr []string,
+	setMin func(uint32),
+	setMax func(uint32),
+	setList func([]uint32),
+) error {
+	if len(idStr) == 1 && idStr[0] == "current" {
+		gids, err := getCurrentGroupIds()
+		if err != nil {
+			return err
+		}
+		setList(gids)
+	} else if len(idStr) > 0 {
+		if os.Geteuid() != 0 {
+			return fmt.Errorf("only root can query arbitrary group ids")
+		}
+
+		if len(idStr) > 1 {
+			ids := []uint32{}
+			for _, idStr := range idStr {
+				id, err := strconv.ParseUint(idStr, 10, 32)
+				if err != nil {
+					return fmt.Errorf("invalid group id in list: %w", err)
+				}
+				ids = append(ids, uint32(id))
+			}
+			setList(ids)
+		} else {
+			if idStr[0] == "all" {
+				setMin(0)
+			} else {
+				min, max, err := util.ParseUint64RangeFromStr(idStr[0], 0, uint64(^uint32(0)))
+				if err != nil {
+					return err
+				}
+				setMin(uint32(min))
+				setMax(uint32(max))
+			}
+		}
+	}
+
+	return nil
+}
+
+func getCurrentGroupIds() ([]uint32, error) {
+	user, err := user.Current()
+	if err != nil {
+		return nil, err
+	}
+
+	gidStrs, err := user.GroupIds()
+	if err != nil {
+		return nil, err
+	}
+
+	gids := []uint32{}
+	for _, gid := range gidStrs {
+		gid, err := strconv.ParseUint(gid, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		gids = append(gids, uint32(gid))
+	}
+
+	return gids, nil
 }
