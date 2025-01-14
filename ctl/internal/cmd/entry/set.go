@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
@@ -47,6 +48,33 @@ This enables normal users to change the default number of targets and chunksize 
 			}
 			return nil
 		},
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			// Early return if set-stub is not specified
+			if backendCfg.StubStatus == nil {
+				return nil
+			}
+
+			// Determine ALL flags that cannot be used simultaneously with set-stub
+			mutuallyExclusiveFlags := []string{}
+
+			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+				if flag.Name == "set-stub" {
+					return
+				}
+
+				// Only add flags that have been explicitly changed
+				if flag.Changed {
+					mutuallyExclusiveFlags = append(mutuallyExclusiveFlags, flag.Name)
+				}
+			})
+
+			// Check if any other flags were used with set-stub
+			if len(mutuallyExclusiveFlags) > 0 {
+				return fmt.Errorf("--set-stub can't be used with the following flag(s): %s", strings.Join(mutuallyExclusiveFlags, ", "))
+			}
+
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			return runEntrySetCmd(cmd.Context(), args, frontendCfg, backendCfg)
@@ -80,6 +108,8 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().MarkHidden("remote-cooldown")
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
+	cmd.Flags().Var(newStubStatusFlag(&backendCfg.StubStatus), "set-stub", "Set or clear the stub flag for regular files. If not specified, the stub status remains unchanged.")
+	cmd.Flags().MarkHidden("set-stub")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd

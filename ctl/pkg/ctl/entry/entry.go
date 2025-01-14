@@ -108,7 +108,7 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 		},
 		NumSessionsRead:  entryInfo.NumSessionsRead,
 		NumSessionsWrite: entryInfo.NumSessionsWrite,
-		IsStub:           entryInfo.IsStub,
+		IsStub:           entryInfo.Path.IsStub(),
 	}
 	if entry.FeatureFlags.IsBuddyMirrored() {
 		e.MetaBuddyGroup = int(entry.OwnerID)

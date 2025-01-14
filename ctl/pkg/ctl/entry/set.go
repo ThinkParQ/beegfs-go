@@ -31,6 +31,7 @@ type SetEntryCfg struct {
 	StripePattern      *beegfs.StripePatternType
 	RemoteTargets      []uint32
 	RemoteCooldownSecs *uint16
+	StubStatus         *bool
 }
 
 // Validates the effective UID has permissions to make the requested updates.
@@ -61,6 +62,9 @@ func (config *SetEntryCfg) setAndValidateEUID() error {
 		}
 		if config.RemoteCooldownSecs != nil {
 			return fmt.Errorf("only root can configure the remote cooldown")
+		}
+		if config.StubStatus != nil {
+			return fmt.Errorf("only root can configure stub status")
 		}
 	}
 	return nil
@@ -200,6 +204,11 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 
 // Handles regular files and all non-directory types (e.g., symlinks).
 func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
+	// Handle stub status updates separately
+	if cfg.StubStatus != nil {
+		return handleStubStatusUpdate(ctx, store, entry, cfg, searchPath)
+	}
+
 	// Start with the current settings for this entry
 	request := &msg.SetFilePatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
@@ -248,6 +257,32 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 			// Only return configuration that is allowed to be updated in the results:
 			RemoteTargets:      cfg.RemoteTargets,
 			RemoteCooldownSecs: cfg.RemoteCooldownSecs,
+		},
+	}, nil
+}
+
+func handleStubStatusUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
+	request := &msg.SetFileStubStatusRequest{
+		EntryInfo: *entry.Entry.origEntryInfoMsg,
+		Stub:      *cfg.StubStatus,
+	}
+
+	// send the request and handle the response
+	var resp = &msg.SetFileStubStatusResponse{}
+	err := store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+	if err != nil {
+		return SetEntryResult{}, err
+	}
+
+	if resp.Result != beegfs.OpsErr_SUCCESS {
+		return SetEntryResult{}, fmt.Errorf("server returned an error performing the requested updates on path %s: %w", searchPath, resp.Result)
+	}
+
+	return SetEntryResult{
+		Path:   searchPath,
+		Status: resp.Result,
+		Updates: SetEntryCfg{
+			StubStatus: cfg.StubStatus,
 		},
 	}, nil
 }

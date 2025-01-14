@@ -251,7 +251,6 @@ type GetEntryInfoResponse struct {
 	MirrorNodeID     uint16
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
-	IsStub           bool
 }
 
 func (m *GetEntryInfoResponse) MsgId() uint16 {
@@ -266,7 +265,6 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.MirrorNodeID)
 	beeserde.DeserializeInt(d, &m.NumSessionsRead)
 	beeserde.DeserializeInt(d, &m.NumSessionsWrite)
-	beeserde.DeserializeInt(d, &m.IsStub)
 }
 
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
@@ -369,6 +367,10 @@ type PathInfo struct {
 const (
 	// Equivalent of PATHINFO_FEATURE_ORIG in C++.
 	pathInfoFeatureOriginal = 1
+	// Equivalent of PATHINFO_FEATURE_ORIG_UNKNOWN in C++ (unused at present).
+	// pathInfoFeatureOrigUnknown = 2
+	// Equivalent of PATHINFO_FEATURE_STUB in C++.
+	pathInfoFeatureIsStub = 4
 )
 
 func (m *PathInfo) Deserialize(d *beeserde.Deserializer) {
@@ -377,6 +379,10 @@ func (m *PathInfo) Deserialize(d *beeserde.Deserializer) {
 		beeserde.DeserializeInt(d, &m.OrigParentUID)
 		beeserde.DeserializeCStr(d, &m.OrigParentEntryID, 4)
 	}
+}
+
+func (m *PathInfo) IsStub() bool {
+	return (m.Flags & pathInfoFeatureIsStub) == pathInfoFeatureIsStub
 }
 
 type RemoteStorageTarget struct {
@@ -542,5 +548,31 @@ func (m *SetFilePatternResponse) MsgId() uint16 {
 }
 
 func (m *SetFilePatternResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Result)
+}
+
+type SetFileStubStatusRequest struct {
+	EntryInfo EntryInfo
+	Stub      bool
+}
+
+func (m *SetFileStubStatusRequest) MsgId() uint16 {
+	return 2131
+}
+
+func (m *SetFileStubStatusRequest) Serialize(s *beeserde.Serializer) {
+	m.EntryInfo.Serialize(s)
+	beeserde.SerializeInt(s, m.Stub)
+}
+
+type SetFileStubStatusResponse struct {
+	Result beegfs.OpsErr
+}
+
+func (m *SetFileStubStatusResponse) MsgId() uint16 {
+	return 2132
+}
+
+func (m *SetFileStubStatusResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
