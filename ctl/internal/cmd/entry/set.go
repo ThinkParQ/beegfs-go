@@ -91,7 +91,7 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print what configuration was updated for each entry.")
 
 	// Entry options
-	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
+	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
 	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory. 
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
 	NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
