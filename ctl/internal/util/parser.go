@@ -100,7 +100,7 @@ func ParseIntFromStr(input string) (uint64, error) {
 		return 0, fmt.Errorf("unable to parse a valid number from the provided input (%s): %w", input, err)
 	}
 	b := num * multiplier
-	if b > math.MaxUint64 {
+	if num != 0.0 && multiplier >= math.MaxUint64/num {
 		return 0, fmt.Errorf("value parsed from the provided input (%f) is larger than the maximum allowed (%d)", b, uint64(math.MaxUint64))
 	}
 	return uint64(b), nil
