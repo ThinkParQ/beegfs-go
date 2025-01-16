@@ -12,8 +12,13 @@ import (
 
 // Constants used for arguments to various BeeGFS ioctls.
 const (
-	cfgMaxPath    = 4096
-	entryIDMaxLen = 26
+	cfgMaxPath         = 4096
+	entryIDMaxLen      = 26
+	nodeTypeBufLen     = 16
+	pingMaxCount       = 10
+	pingMaxInterval    = 2000
+	pingNodeBufLen     = 64
+	pingSockTypeBufLen = 8
 )
 
 // beegfsIOCTypeID is the type identifier for BeeGFS ioctl operations. In ioctl
@@ -76,6 +81,7 @@ var (
 	iocCreateFileV3      = _iow(beegfsIOCTypeID, ioctlNumCreateFileV3, uintptr(unsafe.Sizeof(mkFileV3Arg{})))
 	iocMkFileStripeHints = _iow(beegfsIOCTypeID, ioctlNumMkFileStripeHints, uintptr(unsafe.Sizeof(makeFileStripeHintsArg{})))
 	iocGetEntryInfo      = _ior(beegfsIOCTypeID, ioctlNumGetEntryInfo, uintptr(unsafe.Sizeof(getEntryInfoArg{})))
+	iocPingNode          = _ior(beegfsIOCTypeID, ioctlNumPingNode, uintptr(unsafe.Sizeof(pingNodeArg{})))
 )
 
 // Argument structures used for interacting with the BeeGFS file system via each
@@ -149,4 +155,25 @@ type getEntryInfoArg struct {
 	EntryID       [entryIDMaxLen + 1]byte
 	EntryType     int32
 	FeatureFlags  int32
+}
+
+type pingNodeArgParams struct {
+	NodeID   uint32
+	NodeType [nodeTypeBufLen]byte
+	Count    uint32
+	Interval uint32
+}
+
+type pingNodeArgResults struct {
+	OutNode      [pingNodeBufLen]byte
+	OutSuccess   uint32
+	OutErrors    uint32
+	OutTotalTime uint32
+	OutPingTime  [pingMaxCount]uint32
+	OutPingType  [pingMaxCount][pingSockTypeBufLen]byte
+}
+
+type pingNodeArg struct {
+	Params  pingNodeArgParams
+	Results pingNodeArgResults
 }
