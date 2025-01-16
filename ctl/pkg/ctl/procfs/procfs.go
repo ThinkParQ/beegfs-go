@@ -29,6 +29,8 @@ const (
 type GetBeeGFSClientsConfig struct {
 	// Call df to force the client module to establish storage server connections.
 	ForceConnections bool
+	FilterByUUID     string
+	FilterByMounts   []string
 }
 
 type Client struct {
@@ -61,6 +63,12 @@ type MountPoint struct {
 	Opts map[string]string
 }
 
+// GetBeeGFSClients() gets the list of local BeeGFS client instances. It optionally applies the
+// following filters before returning the list:
+//
+//   - Filters out mounts for BeeGFS instances other than the management service configured for CTL.
+//     Set cfg.FilterByUUID to an empty string to return all clients.
+//   - If cfg.FilterByMounts is specified, only the client(s) for those mount point(s) are returned.
 func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logger.Logger) ([]Client, error) {
 
 	mounts, err := getBeeGFSMounts()
@@ -93,12 +101,47 @@ func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logg
 		}
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}
 
-	return clients, nil
+	if cfg.FilterByUUID == "" && len(cfg.FilterByMounts) == 0 {
+		// No filtering requested, return list as is
+		return clients, nil
+	}
+
+	log.Debug("Applying client filters", zap.Any("UUID", cfg.FilterByUUID), zap.Any("Mount points", cfg.FilterByMounts))
+
+	filteredClients := []Client{}
+
+	mountsFilter := make(map[string]struct{})
+	for _, arg := range cfg.FilterByMounts {
+		mountsFilter[path.Clean(arg)] = struct{}{}
+	}
+
+	for _, c := range clients {
+		// filter by the configured UUID first
+		if cfg.FilterByUUID != "" {
+			log.Debug("filtering client mounts for the filesystem with the requested UUID", zap.Any("UUID", cfg.FilterByUUID))
+			if c.FsUUID != cfg.FilterByUUID {
+				log.Debug("ignoring client mount because it is for a BeeGFS instance other than the one with the requested UUID", zap.Any("mountProcDir", c.ProcDir), zap.String("mountFsUUID", c.FsUUID), zap.Any("mountPath", c.Mount.Path))
+				continue
+			}
+		} else {
+			log.Debug("not filtering by file system UUID: user requested all client mounts be included")
+		}
+
+		// otherwise, filter by configured mounts
+		if len(mountsFilter) > 0 {
+			if _, ok := mountsFilter[c.Mount.Path]; !ok {
+				log.Debug("ignoring client mount because it was not one of the user specified mount paths", zap.Any("procDir", c.ProcDir), zap.Any("mountPath", c.Mount.Path))
+				continue
+			}
+		}
+		log.Debug("including client mount", zap.Any("mountProcDir", c.ProcDir), zap.String("mountFsUUID", c.FsUUID), zap.Any("mountPath", c.Mount.Path))
+		filteredClients = append(filteredClients, c)
+	}
+	return filteredClients, nil
 }
 
 // Parses a client from its procfs directory and associated it with its MountPoint (if available).

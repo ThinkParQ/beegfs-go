@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 )
 
@@ -49,8 +50,21 @@ This can cause the command to block if any storage nodes are unreachable (use --
 }
 
 func runNetCmd(cmd *cobra.Command, filterByMounts []string, frontendCfg netCfg, backendCfg procfs.GetBeeGFSClientsConfig) error {
+	backendCfg.FilterByUUID = ""
+	if !frontendCfg.noFilterByMgmtd {
+		mgmtd, err := config.ManagementClient()
+		if err != nil {
+			return fmt.Errorf("unable to connect to management node: %w", err)
+		}
+		backendCfg.FilterByUUID, err = mgmtd.GetFsUUID(cmd.Context())
+		if err != nil {
+			return err
+		}
+	}
+	backendCfg.FilterByMounts = filterByMounts
+	log, _ := config.GetLogger()
 	procCtx, procCtxCancel := context.WithTimeout(cmd.Context(), frontendCfg.connectionTimeout)
-	clients, err := getFilteredClientList(procCtx, frontendCfg.noFilterByMgmtd, filterByMounts, backendCfg)
+	clients, err := procfs.GetBeeGFSClients(procCtx, backendCfg, log)
 	procCtxCancel()
 	if err != nil {
 		return err
