@@ -214,15 +214,15 @@ func newListLimitsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:         "list-limits",
 		Short:       "List the explicitly set quota limits for users and groups",
-		Long:        "List the explicitly set quota limits for users and groups. Lists only the entries belonging to the current user by default.",
+		Long:        "List the explicitly set quota limits for users and groups. By default only entries for the current user and their groups are listed. Only the root user can query limits for other user and group IDs.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListLimitsCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&cfg.userIds, "user-ids", []string{"current"}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
-	cmd.Flags().StringSliceVar(&cfg.groupIds, "group-ids", []string{"current"}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 
 	return cmd
@@ -230,6 +230,11 @@ func newListLimitsCmd() *cobra.Command {
 
 func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 	req := pm.GetQuotaLimitsRequest_builder{}.Build()
+
+	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
+		cfg.userIds = append(cfg.userIds, "current")
+		cfg.groupIds = append(cfg.groupIds, "current")
+	}
 
 	err := parseUserIdsInto(cfg.userIds, req.SetUserIdMin, req.SetUserIdMax, req.SetUserIdList)
 	if err != nil {
@@ -325,15 +330,15 @@ func newListUsageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:         "list-usage",
 		Short:       "List quota usage per user or group together with their effective limit",
-		Long:        "List quota usage per user or group together with their effective limit. Lists only the entries belonging to the current user by default.",
+		Long:        "List the quota usage info for users and groups. By default only entries for the current user and their groups are listed. Only the root user can query limits for other user and group IDs.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListUsageCmd(cmd, cfg)
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&cfg.userIds, "user-ids", []string{"current"}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
-	cmd.Flags().StringSliceVar(&cfg.groupIds, "group-ids", []string{"current"}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
+	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit")
 
@@ -342,6 +347,11 @@ func newListUsageCmd() *cobra.Command {
 
 func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	req := pm.GetQuotaUsageRequest_builder{}.Build()
+
+	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
+		cfg.userIds = append(cfg.userIds, "current")
+		cfg.groupIds = append(cfg.groupIds, "current")
+	}
 
 	err := parseUserIdsInto(cfg.userIds, req.SetUserIdMin, req.SetUserIdMax, req.SetUserIdList)
 	if err != nil {
