@@ -42,22 +42,22 @@ func RefreshEntriesInfo(ctx context.Context, paths InputMethod) (<-chan *Refresh
 }
 
 func refreshEntryInfo(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) (*RefreshEntryResult, error) {
-	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, path)
+	entryInfo, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
 	if err != nil {
 		return &RefreshEntryResult{}, err
 	}
 
 	var resp = &msg.RefreshEntryInfoResponse{}
 	request := &msg.RefreshEntryInfoRequest{
-		EntryInfo: entry,
+		EntryInfo: entryInfo,
 	}
 	err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
 	if err != nil {
 		return &RefreshEntryResult{}, fmt.Errorf("error refreshing entry information from node: %w", err)
 	}
 	if resp.Result != beegfs.OpsErr_SUCCESS {
-		return &RefreshEntryResult{Path: path, EntryID: string(entry.EntryID), Status: resp.Result}, resp.Result
+		return &RefreshEntryResult{Path: path, EntryID: string(entryInfo.EntryID), Status: resp.Result}, resp.Result
 	}
 
-	return &RefreshEntryResult{Path: path, EntryID: string(entry.EntryID), Status: resp.Result}, nil
+	return &RefreshEntryResult{Path: path, EntryID: string(entryInfo.EntryID), Status: resp.Result}, nil
 }

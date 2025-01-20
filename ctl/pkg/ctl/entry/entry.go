@@ -208,11 +208,7 @@ func GetEntries(ctx context.Context, pm InputMethod, cfg GetEntriesCfg) (<-chan 
 }
 
 func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {
-	// TODO: https://github.com/thinkparq/ctl/issues/54
-	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
-	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
-	// always retrieved using the RPC.
-	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, path)
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +244,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 			// We have to make another RPC to get the parent details needed for verbose output. We can't
 			// just cache them the first time around because some of the path components may be skipped
 			// if we were able to take any shortcuts during the search.
-			parentEntry, parentOwner, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, parentSearchPath)
+			parentEntry, parentOwner, err := GetEntryAndOwnerFromPath(ctx, mappings, parentSearchPath)
 			if err != nil {
 				entryWithParent.Entry.Verbose = Verbose{
 					Err: types.MultiError{Errors: []error{err}},
@@ -269,10 +265,21 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	return &entryWithParent, nil
 }
 
+func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path string) (msg.EntryInfo, beegfs.Node, error) {
+	// TODO: https://github.com/thinkparq/ctl/issues/54
+	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
+	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
+	// always retrieved using the RPC.
+	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, path)
+	if err != nil {
+		return msg.EntryInfo{}, beegfs.Node{}, err
+	}
+	return entry, ownerNode, nil
+}
+
 // getEntryAndOwnerFromPathViaRPC() is the Go equivalent of the use unmounted code path from the C++
 // getEntryAndOwnerFromPath().
 func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings, searchPath string) (msg.EntryInfo, beegfs.Node, error) {
-
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return msg.EntryInfo{}, beegfs.Node{}, err
