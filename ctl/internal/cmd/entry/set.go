@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,23 +55,22 @@ This enables normal users to change the default number of targets and chunksize 
 				return nil
 			}
 
-			// Determine ALL flags that cannot be used simultaneously with set-stub
-			mutuallyExclusiveFlags := []string{}
+			// Flags that are allowed to be used with set-stub.
+			allowedFlags := []string{"set-stub", "verbose", "yes", "recurse"}
+
+			// Initialize a list to track any disallowed flags.
+			disallowedFlags := []string{}
 
 			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-				if flag.Name == "set-stub" {
-					return
-				}
-
-				// Only add flags that have been explicitly changed
-				if flag.Changed {
-					mutuallyExclusiveFlags = append(mutuallyExclusiveFlags, flag.Name)
+				// Only add flags that have been explicitly changed and are not allowed with set-stub flag.
+				if flag.Changed && !slices.Contains(allowedFlags, flag.Name) {
+					disallowedFlags = append(disallowedFlags, flag.Name)
 				}
 			})
 
-			// Check if any other flags were used with set-stub
-			if len(mutuallyExclusiveFlags) > 0 {
-				return fmt.Errorf("--set-stub can't be used with the following flag(s): %s", strings.Join(mutuallyExclusiveFlags, ", "))
+			// Return an error if any disallowed flags are used with set-stub.
+			if len(disallowedFlags) > 0 {
+				return fmt.Errorf("--set-stub can't be used with the following flag(s): %s", strings.Join(disallowedFlags, ", "))
 			}
 
 			return nil

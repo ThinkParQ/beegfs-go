@@ -117,6 +117,19 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 		return SetEntryResult{}, err
 	}
 
+	// Handle stub status separately from other updates.
+	if cfg.StubStatus != nil {
+		// Return error if the entry is NOT a regular file.
+		if entry.Entry.Type != beegfs.EntryRegularFile {
+			return SetEntryResult{
+				Path:    path,
+				Status:  beegfs.OpsErr_NOTSUPP,
+				Updates: SetEntryCfg{},
+			}, nil
+		}
+		return handleStubStatusUpdate(ctx, store, entry, cfg, path)
+	}
+
 	if entry.Entry.Type == beegfs.EntryDirectory {
 		return handleDirectory(ctx, mappings, store, entry, cfg, path)
 	}
@@ -204,10 +217,6 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 
 // Handles regular files and all non-directory types (e.g., symlinks).
 func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
-	// Handle stub status updates separately
-	if cfg.StubStatus != nil {
-		return handleStubStatusUpdate(ctx, store, entry, cfg, searchPath)
-	}
 
 	// Start with the current settings for this entry
 	request := &msg.SetFilePatternRequest{
