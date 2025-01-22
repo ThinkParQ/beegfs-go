@@ -57,6 +57,8 @@ type Entry struct {
 	// that have this file open for writing at least once. If the same file has the a file opened
 	// multiple times, it is still treated as a single session for that client.
 	NumSessionsWrite uint32
+	// IsStub is only applicable for regular files. It indicates whether this file is a stub file.
+	IsStub bool
 	// Only populated if GetEntryConfig.Verbose.
 	Verbose Verbose
 	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
@@ -106,6 +108,7 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 		},
 		NumSessionsRead:  entryInfo.NumSessionsRead,
 		NumSessionsWrite: entryInfo.NumSessionsWrite,
+		IsStub:           entryInfo.Path.IsStub(),
 	}
 	if entry.FeatureFlags.IsBuddyMirrored() {
 		e.MetaBuddyGroup = int(entry.OwnerID)

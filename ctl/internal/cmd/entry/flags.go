@@ -246,6 +246,34 @@ func (f *rstCooldownFlag) Set(value string) error {
 	return nil
 }
 
+type stubStatusFlag struct {
+	p **bool
+}
+
+func newStubStatusFlag(p **bool) *stubStatusFlag {
+	return &stubStatusFlag{p: p}
+}
+
+func (f *stubStatusFlag) String() string {
+	if *f.p == nil {
+		return "unchanged"
+	}
+	return fmt.Sprintf("%t", **f.p)
+}
+
+func (f *stubStatusFlag) Type() string {
+	return "<true|false>"
+}
+
+func (f *stubStatusFlag) Set(value string) error {
+	parsedValue, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("stub status must be true or false, got %q: %w", value, err)
+	}
+	*f.p = &parsedValue
+	return nil
+}
+
 type permissionsFlag struct {
 	p **int32
 }
