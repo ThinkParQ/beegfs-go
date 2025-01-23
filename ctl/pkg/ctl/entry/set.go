@@ -144,7 +144,7 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, path string) (SetEntryResult, error) {
 	// Start with the current settings for this entry:
 	request := &msg.SetDirPatternRequest{
-		EntryInfo: *entry.Entry.origEntryInfoMsg,
+		EntryInfo: *entry.Entry.OrigEntryInfoMsg,
 		Pattern:   entry.Entry.Pattern.StripePattern,
 		RST:       entry.Entry.Remote.RemoteStorageTarget,
 	}
@@ -226,7 +226,7 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 
 	// Start with the current settings for this entry
 	request := &msg.SetFilePatternRequest{
-		EntryInfo: *entry.Entry.origEntryInfoMsg,
+		EntryInfo: *entry.Entry.OrigEntryInfoMsg,
 		RST:       entry.Entry.Remote.RemoteStorageTarget,
 	}
 
@@ -304,7 +304,7 @@ func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *
 	// Create new file state by combining the access flags and data state
 	newFileState := beegfs.NewFileState(newAccessFlags, newDataState)
 	request := &msg.SetFileStateRequest{
-		EntryInfo: *entry.Entry.origEntryInfoMsg,
+		EntryInfo: *entry.Entry.OrigEntryInfoMsg,
 		FileState: newFileState,
 	}
 

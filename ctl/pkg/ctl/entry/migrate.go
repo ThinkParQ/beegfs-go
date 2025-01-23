@@ -406,7 +406,7 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 		// if a mask was set (after the ownership was reset on the new file). But in general this is
 		// the safest approach.
 		Umask:       0000,
-		ParentInfo:  *entry.Parent.origEntryInfoMsg,
+		ParentInfo:  *entry.Parent.OrigEntryInfoMsg,
 		NewFileName: []byte(tempFileBase),
 		Pattern:     newPattern,
 		RST:         entry.Entry.Remote.RemoteStorageTarget,
