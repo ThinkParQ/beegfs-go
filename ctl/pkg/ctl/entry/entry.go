@@ -67,7 +67,7 @@ type Entry struct {
 	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
 	// modes like set pattern that need to include the EntryInfo message so they don't need to recreate
 	// the message from scratch.
-	origEntryInfoMsg *msg.EntryInfo
+	OrigEntryInfoMsg *msg.EntryInfo
 }
 
 // patternConfig embeds the BeeMsg defined stripe pattern alongside fields that map various
@@ -236,7 +236,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	}
 	entryWithParent.Entry = newEntry(mappings, entry, ownerNode, *resp)
 	if cfg.IncludeOrigMsg {
-		entryWithParent.Entry.origEntryInfoMsg = &entry
+		entryWithParent.Entry.OrigEntryInfoMsg = &entry
 	}
 
 	if cfg.Verbose {
@@ -256,7 +256,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 				entryWithParent.Parent = newEntry(mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
 				entryWithParent.Entry.Verbose = newVerbose(resp.Path, entryWithParent.Entry, entryWithParent.Parent)
 				if cfg.IncludeOrigMsg {
-					entryWithParent.Parent.origEntryInfoMsg = &parentEntry
+					entryWithParent.Parent.OrigEntryInfoMsg = &parentEntry
 				}
 			}
 		} else {
