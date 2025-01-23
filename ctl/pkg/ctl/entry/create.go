@@ -89,7 +89,7 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 		// get a vague internal error).
 		Mode:       (*userCfg.Permissions & 07777) | syscall.S_IFREG,
 		Umask:      0000,
-		ParentInfo: *parent.Entry.origEntryInfoMsg,
+		ParentInfo: *parent.Entry.OrigEntryInfoMsg,
 		// Start with the parent pattern and RST config.
 		Pattern: parent.Entry.Pattern.StripePattern,
 		RST:     parent.Entry.Remote.RemoteStorageTarget,
@@ -271,7 +271,7 @@ func generateAndVerifyMkDirRequest(userCfg *CreateEntryCfg, parent *GetEntryComb
 		// get a vague internal error).
 		Mode:           (*userCfg.Permissions & 07777) | syscall.S_IFDIR,
 		Umask:          0000,
-		ParentInfo:     *parent.Entry.origEntryInfoMsg,
+		ParentInfo:     *parent.Entry.OrigEntryInfoMsg,
 		NoMirror:       userCfg.DirCfg.NoMirror,
 		PreferredNodes: make([]uint16, 0, len(userCfg.DirCfg.Nodes)),
 	}
