@@ -576,3 +576,27 @@ func (m *SetFileStubStatusResponse) MsgId() uint16 {
 func (m *SetFileStubStatusResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
+
+type RefreshEntryInfoRequest struct {
+	EntryInfo EntryInfo
+}
+
+func (r *RefreshEntryInfoRequest) MsgId() uint16 {
+	return 2055
+}
+
+func (r *RefreshEntryInfoRequest) Serialize(s *beeserde.Serializer) {
+	r.EntryInfo.Serialize(s)
+}
+
+type RefreshEntryInfoResponse struct {
+	Result beegfs.OpsErr
+}
+
+func (r *RefreshEntryInfoResponse) MsgId() uint16 {
+	return 2056
+}
+
+func (r *RefreshEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &r.Result)
+}
