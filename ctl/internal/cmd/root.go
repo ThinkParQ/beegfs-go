@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/benchmark"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/buddygroup"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/chunkbalance"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/copy"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/debug"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/entry"
@@ -105,6 +106,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(index.NewCmd())
 	cmd.AddCommand(copy.NewCopyCmd())
 	cmd.AddCommand(debug.NewCmd())
+	cmd.AddCommand(chunkbalance.NewCmd())
 
 	// This must run AFTER all commands are added.
 	wrapAllCommands(cmd)
