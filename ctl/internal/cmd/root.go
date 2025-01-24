@@ -181,7 +181,7 @@ Flags:
 {{if (eq .Name "beegfs")}}
 Global flags also apply to all sub-commands and can be set persistently using environment variables:
 
-  export BEEGFS_MGMTD_ADDR=hostname
+  export BEEGFS_MGMTD_ADDR=hostname:port
 
 To persist configuration across sessions/reboots set it in your .bashrc file or similar.
 
