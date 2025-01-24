@@ -928,7 +928,7 @@ func (gc *badgerGarbageCollection) runGarbageCollection() bool {
 	for {
 		if err := gc.RunValueLogGC(0.5); err != nil {
 			if errors.Is(err, badger.ErrNoRewrite) {
-				gc.logger.Debugf("database garbage collection complete (total time: %s)", time.Since(start).String())
+				gc.logger.Infof("database garbage collection complete (total time: %s)", time.Since(start).String())
 				return true
 			}
 			gc.logger.Warningf("database garbage collection failed to complete: %v.", err)

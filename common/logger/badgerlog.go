@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -20,24 +21,24 @@ type BadgerLoggerBridge struct {
 // It returns a Logger compatible with the badger.Logger interface and sets up
 // Zap so each message logged will include the provided sub component name.
 func NewBadgerLoggerBridge(subComponent string, logger *zap.Logger) *BadgerLoggerBridge {
-	logger = logger.With(zap.String("subComponent", subComponent))
+	logger = logger.With(zap.String("database", subComponent))
 	return &BadgerLoggerBridge{
 		logger: logger,
 	}
 }
 
 func (z *BadgerLoggerBridge) Errorf(format string, args ...interface{}) {
-	z.logger.Error(fmt.Sprintf(format, args...))
+	z.logger.Error(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
 func (z *BadgerLoggerBridge) Warningf(format string, args ...interface{}) {
-	z.logger.Warn(fmt.Sprintf(format, args...))
+	z.logger.Warn(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
 func (z *BadgerLoggerBridge) Infof(format string, args ...interface{}) {
-	z.logger.Info(fmt.Sprintf(format, args...))
+	z.logger.Info(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
 func (z *BadgerLoggerBridge) Debugf(format string, args ...interface{}) {
-	z.logger.Debug(fmt.Sprintf(format, args...))
+	z.logger.Debug(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
