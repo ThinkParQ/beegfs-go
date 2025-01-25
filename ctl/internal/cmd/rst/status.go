@@ -18,7 +18,7 @@ import (
 type statusConfig struct {
 	history int
 	retro   bool
-	detail  bool
+	verbose bool
 	width   int
 }
 
@@ -45,7 +45,7 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().StringVar(&backendCfg.JobID, "job-id", "", "If a file path is specified, only return results for this specific job.")
 	cmd.Flags().IntVar(&frontendCfg.history, "history", 1, "Limit the number of jobs returned for each path+RST combination (defaults to only the most recently created job).")
 	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Don't print output in a table and return all possible fields grouping jobs for each path by RST and sorting by when they were created.")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 30, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
@@ -62,7 +62,7 @@ func runGetStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rs
 	}
 
 	withDebug := viper.GetBool(config.DebugKey)
-	tbl := newJobsTable(withJobDetails(frontendCfg.detail), withColumnWidth(frontendCfg.width))
+	tbl := newJobsTable(withJobDetails(frontendCfg.verbose), withColumnWidth(frontendCfg.width))
 
 	// Set to false to control when the remaining table entries are printed instead of having them
 	// print automatically when the function returns (i.e., if an error happens).

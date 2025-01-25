@@ -13,8 +13,8 @@ import (
 )
 
 type pushPullCfg struct {
-	detail bool
-	width  int
+	verbose bool
+	width   int
 }
 
 func newPushCmd() *cobra.Command {
@@ -46,7 +46,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().Uint32VarP(&backendCfg.RSTID, "remote-target", "t", 0, "Perform a one time push to the specified Remote Storage Target ID.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
@@ -80,7 +80,7 @@ func newPullCmd() *cobra.Command {
 	cmd.MarkFlagRequired("remote-path")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
@@ -97,7 +97,7 @@ func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg rs
 	totalIgnored := 0
 	totalErrors := 0
 
-	tbl := newJobsTable(withJobDetails(frontendCfg.detail), withColumnWidth(frontendCfg.width))
+	tbl := newJobsTable(withJobDetails(frontendCfg.verbose), withColumnWidth(frontendCfg.width))
 
 writeResponses:
 	for {
@@ -116,7 +116,7 @@ writeResponses:
 				}
 				if errors.Is(resp.Err, rst.ErrFileHasNoRSTs) {
 					totalIgnored++
-					if viper.GetBool(config.DebugKey) || frontendCfg.detail {
+					if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
 						tbl.MinimalRow(resp.Path, fmt.Errorf("%s (ignoring file)", resp.Err))
 
 					}
@@ -127,7 +127,7 @@ writeResponses:
 				continue
 			}
 			totalJobs++
-			if viper.GetBool(config.DebugKey) || frontendCfg.detail {
+			if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
 				tbl.Row(resp.Result)
 			}
 		}
