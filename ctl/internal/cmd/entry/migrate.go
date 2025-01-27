@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 )
 
 type migrateCfg struct {
@@ -85,7 +86,7 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 			return fmt.Errorf("the recurse mode migrates the specified entry and ALL child entries, if you're sure this is what you want add the --yes flag")
 		}
 	}
-	method, err := entry.DetermineInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	method, err := util.DeterminePathInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
 	if err != nil {
 		return err
 	}

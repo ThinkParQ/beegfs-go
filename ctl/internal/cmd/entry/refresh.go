@@ -8,6 +8,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 )
 
 type frontendCfg struct {
@@ -50,7 +51,7 @@ func runRefreshEntryInfoCmd(cmd *cobra.Command, paths []string, cfg frontendCfg)
 		}
 	}
 
-	method, err := entry.DetermineInputMethod(paths, cfg.recurse, cfg.stdinDelimiter)
+	method, err := util.DeterminePathInputMethod(paths, cfg.recurse, cfg.stdinDelimiter)
 	if err != nil {
 		return err
 	}

@@ -188,7 +188,7 @@ func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 // an error. The error channel returns any errors walking the directory or getting the entry info.
 // This approach allows callers to decide when there is an error if they should immediately
 // terminate, or continue writing out the remaining entries before handling the error.
-func GetEntries(ctx context.Context, pm InputMethod, cfg GetEntriesCfg) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
+func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg) (<-chan *GetEntryCombinedInfo, <-chan error, error) {
 	log, _ := config.GetLogger()
 
 	mappings, err := util.GetMappings(ctx)
@@ -204,7 +204,7 @@ func GetEntries(ctx context.Context, pm InputMethod, cfg GetEntriesCfg) (<-chan 
 		return GetEntry(ctx, mappings, cfg, path)
 	}
 
-	return processEntries(ctx, pm, true, processEntry)
+	return util.ProcessPaths(ctx, pm, true, processEntry)
 }
 
 func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {

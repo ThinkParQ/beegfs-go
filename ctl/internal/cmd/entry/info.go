@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -68,7 +69,7 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	log, _ := config.GetLogger()
 
 	// Setup the method for sending paths to the backend:
-	method, err := entry.DetermineInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	method, err := util.DeterminePathInputMethod(args, frontendCfg.recurse, frontendCfg.stdinDelimiter)
 	if err != nil {
 		return err
 	}
