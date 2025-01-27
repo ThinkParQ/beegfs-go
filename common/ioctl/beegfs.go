@@ -7,6 +7,7 @@ package ioctl
 // external callers.
 
 import (
+	"structs"
 	"unsafe"
 )
 
@@ -100,6 +101,7 @@ var (
 // returned as "/beegfs/beegfs-client.conf".
 
 type getCfgFileArg struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
 	// Where the resulting path will be stored (out value).
 	Path [cfgMaxPath]byte
 	// Length of the path buffer. This is unused because its after a fixed-size
@@ -108,8 +110,9 @@ type getCfgFileArg struct {
 }
 
 type mkFileV3Arg struct {
-	OwnerNodeID            uint32  // Owner node of the parent directory.
-	ParentParentEntryID    uintptr // Entry ID of the parent of the parent (i.e., the grandparent's ID).
+	_                      structs.HostLayout // Mark the struct as using the host memory layout.
+	OwnerNodeID            uint32             // Owner node of the parent directory.
+	ParentParentEntryID    uintptr            // Entry ID of the parent of the parent (i.e., the grandparent's ID).
 	ParentParentEntryIDLen int32
 	ParentEntryID          uintptr // Entry ID of the parent.
 	ParentEntryIDLen       int32
@@ -143,13 +146,15 @@ type mkFileV3Arg struct {
 }
 
 type makeFileStripeHintsArg struct {
-	Filename   uintptr // file name we want to create
-	Mode       uint32  // mode (access permission) of the new file
-	NumTargets uint32  // number of desired targets, 0 for directory default
-	ChunkSize  uint32  // in bytes, must be 2^n >= 64Ki, 0 for directory default
+	_          structs.HostLayout // Mark the struct as using the host memory layout.
+	Filename   uintptr            // file name we want to create
+	Mode       uint32             // mode (access permission) of the new file
+	NumTargets uint32             // number of desired targets, 0 for directory default
+	ChunkSize  uint32             // in bytes, must be 2^n >= 64Ki, 0 for directory default
 }
 
 type getEntryInfoArg struct {
+	_             structs.HostLayout // Mark the struct as using the host memory layout.
 	OwnerID       uint32
 	ParentEntryID [entryIDMaxLen + 1]byte
 	EntryID       [entryIDMaxLen + 1]byte
@@ -158,6 +163,7 @@ type getEntryInfoArg struct {
 }
 
 type pingNodeArgParams struct {
+	_        structs.HostLayout // Mark the struct as using the host memory layout.
 	NodeID   uint32
 	NodeType [nodeTypeBufLen]byte
 	Count    uint32
@@ -165,6 +171,7 @@ type pingNodeArgParams struct {
 }
 
 type pingNodeArgResults struct {
+	_            structs.HostLayout // Mark the struct as using the host memory layout.
 	OutNode      [pingNodeBufLen]byte
 	OutSuccess   uint32
 	OutErrors    uint32
@@ -174,6 +181,7 @@ type pingNodeArgResults struct {
 }
 
 type pingNodeArg struct {
+	_       structs.HostLayout // Mark the struct as using the host memory layout.
 	Params  pingNodeArgParams
 	Results pingNodeArgResults
 }
