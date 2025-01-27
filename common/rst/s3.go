@@ -17,6 +17,7 @@ import (
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type S3Client struct {
@@ -89,6 +90,7 @@ func (rst *S3Client) GenerateWorkRequests(ctx context.Context, job *beeremote.Jo
 		if err != nil {
 			return nil, false, err
 		}
+		job.SetStartMtime(timestamppb.New(stat.ModTime()))
 		fileSize = stat.Size()
 		segCount, partsPerSegment = rst.recommendedSegments(fileSize)
 		if segCount > 1 {
@@ -148,6 +150,14 @@ func (rst *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 }
 
 func (rst *S3Client) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+
+	// For all job types and operations get the current modification time of the local file as it
+	// existed when the job was completed.
+	stat, err := rst.mountPoint.Stat(job.GetRequest().GetPath())
+	if err != nil {
+		return fmt.Errorf("unable to local file mtime as part of complete work requests: %w", err)
+	}
+	job.SetStopMtime(timestamppb.New(stat.ModTime()))
 
 	if job.Request.GetSync() == nil {
 		return ErrReqAndRSTTypeMismatch

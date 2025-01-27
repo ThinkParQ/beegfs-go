@@ -161,8 +161,8 @@ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsT
 github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
 github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8=
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
-github.com/thinkparq/protobuf v0.0.0-beta.4.0.20250124154812-3dd9c71631dd h1:3A7Ko8DBIMg+8f9gj5R8Xctgf/2cz9KbbG8iLKeSbGo=
-github.com/thinkparq/protobuf v0.0.0-beta.4.0.20250124154812-3dd9c71631dd/go.mod h1:nJ+QdkynNoo4gi1tuayVWeklted1Q+M7IBQ/WgIQ7yQ=
+github.com/thinkparq/protobuf v0.0.0-beta.4.0.20250130213241-db633fc9d66b h1:IdQGMxrlIrJFTUZ+C1wGdftOz1geaomSzxy2LjIC0Uo=
+github.com/thinkparq/protobuf v0.0.0-beta.4.0.20250130213241-db633fc9d66b/go.mod h1:nJ+QdkynNoo4gi1tuayVWeklted1Q+M7IBQ/WgIQ7yQ=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.2.1/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 go.opencensus.io v0.24.0 h1:y73uSU6J157QMP2kn2r30vwW1A2W2WFwSCGnAVxeaD0=

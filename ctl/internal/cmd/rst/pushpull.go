@@ -117,12 +117,12 @@ writeResponses:
 				if errors.Is(resp.Err, rst.ErrFileHasNoRSTs) {
 					totalIgnored++
 					if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
-						tbl.MinimalRow(resp.Path, fmt.Errorf("%s (ignoring file)", resp.Err))
+						tbl.MinimalRow(resp.Path, fmt.Sprintf("%s (ignoring file)", resp.Err.Error()))
 
 					}
 				} else {
 					totalErrors++
-					tbl.MinimalRow(resp.Path, fmt.Errorf("%s (skipping file)", resp.Err))
+					tbl.MinimalRow(resp.Path, fmt.Sprintf("%s (skipping file)", resp.Err.Error()))
 				}
 				continue
 			}

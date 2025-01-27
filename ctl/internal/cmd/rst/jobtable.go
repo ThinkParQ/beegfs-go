@@ -58,7 +58,7 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 		// types of errors are not put in the status column because (a) that is technically
 		// inaccurate and (b) it would require always displaying the status message column, which
 		// often has overflow and means table rows will span multiple lines more often than needed.
-		defaultJobColumns: []string{"ok", "path", "target", "last update", "request type", ""},
+		defaultJobColumns: []string{"ok", "path", "target", "job updated", "request type", ""},
 		columnWidth:       35,
 		jobDetails:        false,
 	}
@@ -70,10 +70,10 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 	// anywhere that has overridden the default columns with withDefaultColumns.
 	//
 	// The full set of fields related to a particular job, not including work requests and results.
-	allJobColumns := []string{"ok", "path", "target", "created", "last update", "job id", "request type", "state", "status message", ""}
+	allJobColumns := []string{"ok", "path", "target", "job created", "job updated", "start mtime", "end mtime", "job id", "request type", "state", "status message", ""}
 	// All fields for this job and its work requests and results. Information for a particular job
 	// will generally need to be printed using multiple rows.
-	allJobAndWorkColumns := []string{"ok", "path", "target", "created", "last update", "job id", "request type", "state", "status message", "work requests", "work results", ""}
+	allJobAndWorkColumns := []string{"ok", "path", "target", "job created", "job updated", "start mtime", "end mtime", "job id", "request type", "state", "status message", "work requests", "work results", ""}
 
 	if viper.GetBool(config.DebugKey) {
 		cfg.defaultJobColumns = allJobAndWorkColumns
@@ -108,6 +108,8 @@ func (t *jobsTable) Row(job *beeremote.JobResult) {
 		job.Job.GetRequest().GetRemoteStorageTarget(),
 		job.Job.GetCreated().AsTime().Format(time.RFC3339),
 		job.Job.GetStatus().GetUpdated().AsTime().Format(time.RFC3339),
+		job.Job.GetStartMtime().AsTime().Format(time.RFC3339),
+		job.Job.GetStopMtime().AsTime().Format(time.RFC3339),
 		job.Job.GetId(),
 		operation,
 		job.Job.GetStatus().GetState(),
@@ -122,7 +124,7 @@ func (t *jobsTable) Row(job *beeremote.JobResult) {
 // MinimalRow() adds a row for a job that could not be created for some reason. This is helpful when
 // listing jobs that may or may not have been actually created. It only populates the path and
 // status message field based on the error, putting a question mark/unknown in the ok field.
-func (t *jobsTable) MinimalRow(path string, err error) {
+func (t *jobsTable) MinimalRow(path string, explanation string) {
 	t.tbl.AddItem(
 		convertJobStateToEmoji(beeremote.Job_UNKNOWN),
 		path,
@@ -135,7 +137,9 @@ func (t *jobsTable) MinimalRow(path string, err error) {
 		"-",
 		"-",
 		"-",
-		fmt.Sprintf("WARNING: %s", err.Error()),
+		"-",
+		"-",
+		explanation,
 	)
 }
 
@@ -247,10 +251,19 @@ var jobStateMap = map[beeremote.Job_State]jobStateEmoji{
 	beeremote.Job_UNASSIGNED: {"⏳", beeremote.Job_UNASSIGNED.String()},
 	beeremote.Job_SCHEDULED:  {"⏳", beeremote.Job_SCHEDULED.String()},
 	beeremote.Job_RUNNING:    {"⏳", beeremote.Job_RUNNING.String()},
-	beeremote.Job_ERROR:      {"\u26A0\ufe0f ", beeremote.Job_ERROR.String()},
-	beeremote.Job_FAILED:     {"❌", beeremote.Job_FAILED.String()},
-	beeremote.Job_CANCELLED:  {"🚫", beeremote.Job_CANCELLED.String()},
-	beeremote.Job_COMPLETED:  {"✅", beeremote.Job_COMPLETED.String()},
+	// The warning sign (⚠) emoji can cause alignment issues in go-pretty tables
+	// because it is normally followed by a variation selector (`\ufe0f`), making
+	// it behave inconsistently in monospaced environments.
+	//
+	// To fix this, we insert a Zero-Width Non-Joiner (`\u200C`), which is an
+	// invisible character that prevents character merging but does NOT act as a space.
+	//
+	// This ensures the emoji is treated as a standalone character, preventing
+	// overlapping with table padding and maintaining proper column alignment.
+	beeremote.Job_ERROR:     {"\u26A0\ufe0f\u200C", beeremote.Job_ERROR.String()},
+	beeremote.Job_FAILED:    {"❌", beeremote.Job_FAILED.String()},
+	beeremote.Job_CANCELLED: {"🚫", beeremote.Job_CANCELLED.String()},
+	beeremote.Job_COMPLETED: {"✅", beeremote.Job_COMPLETED.String()},
 }
 
 func convertWorkStateToEmoji(state flex.Work_State) string {
@@ -274,7 +287,7 @@ var workStateMap = map[flex.Work_State]workStateEmoji{
 	flex.Work_CREATED:   {"⏳", flex.Work_CREATED.String()},
 	flex.Work_SCHEDULED: {"⏳", flex.Work_SCHEDULED.String()},
 	flex.Work_RUNNING:   {"⏳", flex.Work_RUNNING.String()},
-	flex.Work_ERROR:     {"\u26A0\ufe0f ", flex.Work_ERROR.String()},
+	flex.Work_ERROR:     {"\u26A0\ufe0f\u200C", flex.Work_ERROR.String()},
 	flex.Work_FAILED:    {"❌", flex.Work_FAILED.String()},
 	flex.Work_CANCELLED: {"🚫", flex.Work_CANCELLED.String()},
 	flex.Work_COMPLETED: {"✅", flex.Work_COMPLETED.String()},
