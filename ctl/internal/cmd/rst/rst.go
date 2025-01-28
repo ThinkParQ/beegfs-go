@@ -9,16 +9,7 @@ func NewRSTCmd() *cobra.Command {
 		Short:   "Interact with Remote Storage Targets",
 	}
 
-	cmd.AddCommand(newStatusCmd(), newPushCmd(), newPullCmd(), newJobCmd(), newListCmd())
+	cmd.AddCommand(newPushCmd(), newPullCmd(), newJobCmd(), newListCmd())
 
-	return cmd
-}
-
-func newJobCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "job",
-		Short: "Update the state of job(s) running for a file in BeeGFS",
-	}
-	cmd.AddCommand(newCancelCmd(), newCleanupCmd())
 	return cmd
 }
