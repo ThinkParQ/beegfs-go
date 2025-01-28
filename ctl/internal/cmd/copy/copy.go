@@ -120,6 +120,7 @@ As such it does not validate after the copy completes that the source was not mo
 For performance it also does not perform any checksum verification when comparing the source/destination.
 If used as part of a backup or other workload where strict consistency guarantees are required, users
 should take measures to perform additional verification the source and destination match bit-for-bit.`,
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, err := os.Stat(beegfsCopyPath)
 			if err != nil {
