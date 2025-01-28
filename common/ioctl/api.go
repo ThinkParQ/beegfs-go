@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -130,4 +132,48 @@ func CreateFileWithStripeHints(path string, permissions uint32, numTargets uint3
 	}
 
 	return nil
+}
+
+func PingNode(mountpoint string, nodeID beegfs.LegacyId, count uint32, interval time.Duration) (*pingNodeArgResults, error) {
+	mp, err := os.Open(mountpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer mp.Close()
+
+	if count > pingMaxCount {
+		return nil, fmt.Errorf("count exceeds the maximum allowed ping count (%d)", pingMaxCount)
+	}
+
+	if interval > pingMaxInterval*time.Millisecond {
+		return nil, fmt.Errorf("interval exceeds the maximum allowed ping count (%dms)", pingMaxInterval)
+	}
+	intervalMS := uint32(interval.Milliseconds())
+
+	arg := pingNodeArg{
+		Params: pingNodeArgParams{
+			NodeID:   uint32(nodeID.NumId),
+			Count:    count,
+			Interval: intervalMS,
+		},
+		Results: pingNodeArgResults{
+			OutNode:     [pingNodeBufLen]byte{},
+			OutPingTime: [pingMaxCount]uint32{},
+			OutPingType: [pingMaxCount][pingSockTypeBufLen]byte{},
+		},
+	}
+	copy(arg.Params.NodeType[:], strings.ToLower(nodeID.NodeType.String())+"\x00")
+
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(mp.Fd()),
+		uintptr(iocPingNode),
+		uintptr(unsafe.Pointer(&arg)))
+
+	if errno != 0 {
+		err := syscall.Errno(errno)
+		return nil, fmt.Errorf("error pinging node: %w (errno: %d)", err, errno)
+	}
+
+	return &arg.Results, nil
 }

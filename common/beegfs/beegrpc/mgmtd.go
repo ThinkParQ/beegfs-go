@@ -87,3 +87,17 @@ func (m *Mgmtd) Cleanup() {
 		m.conn.Close()
 	}
 }
+
+func (m *Mgmtd) GetFsUUID(ctx context.Context) (string, error) {
+	resp, err := m.GetNodes(ctx, &pm.GetNodesRequest{})
+	if err != nil {
+		return "", fmt.Errorf("unable to get file system UUID from the management node: %w", err)
+	}
+	if resp.FsUuid == nil {
+		return "", fmt.Errorf("file system UUID received from the management node is unexpectedly nil (this is likely a bug elsewhere)")
+	}
+	if *resp.FsUuid == "" {
+		return "", fmt.Errorf("file system UUID received from the management node is unexpectedly empty (this is likely a bug elsewhere)")
+	}
+	return *resp.FsUuid, nil
+}

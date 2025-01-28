@@ -7,13 +7,19 @@ package ioctl
 // external callers.
 
 import (
+	"structs"
 	"unsafe"
 )
 
 // Constants used for arguments to various BeeGFS ioctls.
 const (
-	cfgMaxPath    = 4096
-	entryIDMaxLen = 26
+	cfgMaxPath         = 4096
+	entryIDMaxLen      = 26
+	nodeTypeBufLen     = 16
+	pingMaxCount       = 10
+	pingMaxInterval    = 2000
+	pingNodeBufLen     = 64
+	pingSockTypeBufLen = 8
 )
 
 // beegfsIOCTypeID is the type identifier for BeeGFS ioctl operations. In ioctl
@@ -76,6 +82,7 @@ var (
 	iocCreateFileV3      = _iow(beegfsIOCTypeID, ioctlNumCreateFileV3, uintptr(unsafe.Sizeof(mkFileV3Arg{})))
 	iocMkFileStripeHints = _iow(beegfsIOCTypeID, ioctlNumMkFileStripeHints, uintptr(unsafe.Sizeof(makeFileStripeHintsArg{})))
 	iocGetEntryInfo      = _ior(beegfsIOCTypeID, ioctlNumGetEntryInfo, uintptr(unsafe.Sizeof(getEntryInfoArg{})))
+	iocPingNode          = _ior(beegfsIOCTypeID, ioctlNumPingNode, uintptr(unsafe.Sizeof(pingNodeArg{})))
 )
 
 // Argument structures used for interacting with the BeeGFS file system via each
@@ -94,6 +101,7 @@ var (
 // returned as "/beegfs/beegfs-client.conf".
 
 type getCfgFileArg struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
 	// Where the resulting path will be stored (out value).
 	Path [cfgMaxPath]byte
 	// Length of the path buffer. This is unused because its after a fixed-size
@@ -102,8 +110,9 @@ type getCfgFileArg struct {
 }
 
 type mkFileV3Arg struct {
-	OwnerNodeID            uint32  // Owner node of the parent directory.
-	ParentParentEntryID    uintptr // Entry ID of the parent of the parent (i.e., the grandparent's ID).
+	_                      structs.HostLayout // Mark the struct as using the host memory layout.
+	OwnerNodeID            uint32             // Owner node of the parent directory.
+	ParentParentEntryID    uintptr            // Entry ID of the parent of the parent (i.e., the grandparent's ID).
 	ParentParentEntryIDLen int32
 	ParentEntryID          uintptr // Entry ID of the parent.
 	ParentEntryIDLen       int32
@@ -137,16 +146,42 @@ type mkFileV3Arg struct {
 }
 
 type makeFileStripeHintsArg struct {
-	Filename   uintptr // file name we want to create
-	Mode       uint32  // mode (access permission) of the new file
-	NumTargets uint32  // number of desired targets, 0 for directory default
-	ChunkSize  uint32  // in bytes, must be 2^n >= 64Ki, 0 for directory default
+	_          structs.HostLayout // Mark the struct as using the host memory layout.
+	Filename   uintptr            // file name we want to create
+	Mode       uint32             // mode (access permission) of the new file
+	NumTargets uint32             // number of desired targets, 0 for directory default
+	ChunkSize  uint32             // in bytes, must be 2^n >= 64Ki, 0 for directory default
 }
 
 type getEntryInfoArg struct {
+	_             structs.HostLayout // Mark the struct as using the host memory layout.
 	OwnerID       uint32
 	ParentEntryID [entryIDMaxLen + 1]byte
 	EntryID       [entryIDMaxLen + 1]byte
 	EntryType     int32
 	FeatureFlags  int32
+}
+
+type pingNodeArgParams struct {
+	_        structs.HostLayout // Mark the struct as using the host memory layout.
+	NodeID   uint32
+	NodeType [nodeTypeBufLen]byte
+	Count    uint32
+	Interval uint32
+}
+
+type pingNodeArgResults struct {
+	_            structs.HostLayout // Mark the struct as using the host memory layout.
+	OutNode      [pingNodeBufLen]byte
+	OutSuccess   uint32
+	OutErrors    uint32
+	OutTotalTime uint32
+	OutPingTime  [pingMaxCount]uint32
+	OutPingType  [pingMaxCount][pingSockTypeBufLen]byte
+}
+
+type pingNodeArg struct {
+	_       structs.HostLayout // Mark the struct as using the host memory layout.
+	Params  pingNodeArgParams
+	Results pingNodeArgResults
 }

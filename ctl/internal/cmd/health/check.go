@@ -203,8 +203,13 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 
 	printHeader(">>>>> Checking Connections to Server Nodes <<<<<", "#")
 	log.Debug("getting filtered client list")
+	backendCfg.FilterByUUID, err = mgmtd.GetFsUUID(ctx)
+	if err != nil {
+		return err
+	}
+	backendCfg.FilterByMounts = filterByMounts
 	procCtx, procCtxCancel := context.WithTimeout(ctx, frontendCfg.connectionTimeout)
-	clients, err := getFilteredClientList(procCtx, false, filterByMounts, backendCfg)
+	clients, err := procfs.GetBeeGFSClients(procCtx, backendCfg, log)
 	procCtxCancel()
 	if err != nil {
 		if !errors.Is(err, procfs.ErrEstablishingConnections) {
