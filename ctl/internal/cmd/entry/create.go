@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 )
 
@@ -65,7 +66,7 @@ WARNING: Files created using this mode do not trigger file system modification e
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.FileCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 	When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
 	NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
-	cmd.Flags().VarP(newRstsFlag(&backendCfg.FileCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
+	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.FileCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
 	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.FileCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/18
 	// Unmark this as hidden once automatic uploads are supported.
