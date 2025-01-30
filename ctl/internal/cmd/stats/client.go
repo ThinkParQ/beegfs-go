@@ -171,8 +171,13 @@ func runClientStatsCmd(cmd *cobra.Command, cfg *clientStats_Config) error {
 			break
 		}
 
-		time.Sleep(cfg.interval)
-		t += int(cfg.interval.Abs().Seconds())
+		select {
+		case <-time.After(cfg.interval):
+			t += int(cfg.interval.Abs().Seconds())
+			continue
+		case <-cmd.Context().Done():
+			return nil
+		}
 	}
 
 	return nil
