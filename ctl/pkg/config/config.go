@@ -59,6 +59,8 @@ const (
 	// DebugLevel and above, and uses a console encoder. Logs are written to standard error.
 	// Stacktraces are included on logs of WarnLevel and above. DPanicLevel logs will panic.
 	LogDeveloperKey = "log-developer"
+	// Start the pprof HTTP server at this address:port for performance debugging.
+	PprofAddress = "pprof"
 	// Print only the given columns of a table. Applied automatically when cmdfmt.NewTable() is used.
 	// "all" prints all available columns, not only the default ones.
 	ColumnsKey = "columns"

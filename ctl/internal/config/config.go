@@ -60,6 +60,9 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool(config.LogDeveloperKey, false, "Enable logging at DebugLevel and above and print stack traces at WarnLevel and above.")
 	cmd.PersistentFlags().MarkHidden(config.LogDeveloperKey)
 
+	cmd.PersistentFlags().String(config.PprofAddress, "", "Start the pprof HTTP server at this address:port for performance debugging (e.g., localhost:6060 or :9999).")
+	cmd.PersistentFlags().MarkHidden(config.PprofAddress)
+
 	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, `When printing structured data, the columns/fields to include (use 'all' to include everything).
 	Currently does not automatically set potential flags required to actually fetch the data for some non-default fields.
 	Refer to the help for each command to see what additional flags may be needed.`)
