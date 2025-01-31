@@ -120,7 +120,12 @@ func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 			break
 		}
 
-		time.Sleep(cfg.Interval)
+		select {
+		case <-time.After(cfg.Interval):
+			continue
+		case <-cmd.Context().Done():
+			return nil
+		}
 	}
 	return nil
 }

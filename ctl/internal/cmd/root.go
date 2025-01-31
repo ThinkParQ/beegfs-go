@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 
@@ -90,8 +92,15 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	// persistent (global) flags so they are only printed for the root "beegfs" command.
 	cmd.SetHelpTemplate(helpTemplate)
 
+	// By default there is no explicit signal handler and the Go runtime will immediately terminate
+	// on a interrupt signal (Ctrl+C). To allow for more graceful handling/cleanup including the
+	// opportunity for additional logging and errors to be returned, setup the context passed to all
+	// commands to be cancelled by an interrupt and automatically cancel when the program exits.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
 	// Parse the given parameters and execute the selected command
-	err := cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(ctx)
 	if err != nil {
 		// If the command returned a util.CtlError with an included exit code, use this to exit the
 		// program
