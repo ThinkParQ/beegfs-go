@@ -12,6 +12,28 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
+type PathInputType int
+
+const (
+	PathInputInvalid PathInputType = iota
+	PathInputStdin
+	PathInputRecursion
+	PathInputList
+)
+
+func (t PathInputType) String() string {
+	switch t {
+	case PathInputStdin:
+		return "stdin"
+	case PathInputRecursion:
+		return "recursion"
+	case PathInputList:
+		return "list"
+	default:
+		return "unknown"
+	}
+}
+
 // PathInputMethod is used to configure how paths are provided to ProcessPaths(). It must be
 // initialized using DeterminePathInputMethod() before first use.
 type PathInputMethod struct {
@@ -25,6 +47,11 @@ type PathInputMethod struct {
 	pathsViaRecursion string
 	// Specify one or more paths.
 	pathsViaList []string
+	inputType    PathInputType
+}
+
+func (m PathInputMethod) Get() PathInputType {
+	return m.inputType
 }
 
 // DeterminePathInputMethod() processes user configuration to determine how paths are provided to
@@ -40,20 +67,24 @@ func DeterminePathInputMethod(paths []string, recurse bool, stdinDelimiter strin
 		if paths[0] == "-" {
 			var err error
 			pm.pathsViaStdin = true
+			pm.inputType = PathInputStdin
 			pm.stdinDelimiter, err = GetStdinDelimiterFromString(stdinDelimiter)
 			if err != nil {
 				return pm, err
 			}
 		} else if recurse {
 			pm.pathsViaRecursion = paths[0]
+			pm.inputType = PathInputRecursion
 		} else {
 			pm.pathsViaList = paths
+			pm.inputType = PathInputList
 		}
 	} else {
 		if recurse {
 			return pm, fmt.Errorf("only one path can be specified with the recurse option")
 		}
 		pm.pathsViaList = paths
+		pm.inputType = PathInputList
 	}
 	return pm, nil
 }

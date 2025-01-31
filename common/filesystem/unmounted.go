@@ -32,6 +32,10 @@ func (fs UnmountedFS) Stat(path string) (os.FileInfo, error) {
 	return nil, ErrUnmounted
 }
 
+func (fs UnmountedFS) Lstat(path string) (os.FileInfo, error) {
+	return nil, ErrUnmounted
+}
+
 func (fs UnmountedFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {
 	return ErrUnmounted
 }

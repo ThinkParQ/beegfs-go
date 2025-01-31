@@ -32,6 +32,11 @@ func (fs MockFS) Stat(path string) (os.FileInfo, error) {
 	return fs.Fs.Stat(path)
 }
 
+func (fs MockFS) Lstat(path string) (os.FileInfo, error) {
+	// afereo does not have an equivalent for lstat.
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {
 	file, err := fs.Fs.Create(path)
 	if err != nil {

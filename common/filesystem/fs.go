@@ -34,8 +34,10 @@ type Provider interface {
 	// presumed to already be a relative path inside the mount point and returned as is (possibly
 	// with '/' added).
 	GetRelativePathWithinMount(path string) (string, error)
-	// Returns the equivalent of an stat(2).
+	// Returns the equivalent of an stat(2). Caution: Follows symbolic links (use lstat if needed).
 	Stat(name string) (os.FileInfo, error)
+	// Returns the equivalent of lstat(2). Does not follow symbolic links.
+	Lstat(name string) (os.FileInfo, error)
 	// Creates a file at the specified path returning an error if the file already exists, unless
 	// overwrite is true, then the file will be zeroed and overwritten. If created and supported by
 	// the underlying file system, the new file will be extended to the specified size to reduce
@@ -154,6 +156,10 @@ func (fs BeeGFS) GetRelativePathWithinMount(path string) (string, error) {
 
 func (fs BeeGFS) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(filepath.Join(fs.MountPoint, name))
+}
+
+func (fs BeeGFS) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(filepath.Join(fs.MountPoint, name))
 }
 
 // BeeGFS does not support fallocate(), this uses truncate() instead. As a result this doesn't

@@ -9,7 +9,7 @@ func NewRSTCmd() *cobra.Command {
 		Short:   "Interact with Remote Storage Targets",
 	}
 
-	cmd.AddCommand(newPushCmd(), newPullCmd(), newJobCmd(), newListCmd())
+	cmd.AddCommand(newPushCmd(), newPullCmd(), newJobCmd(), newListCmd(), newStatusCmd())
 
 	return cmd
 }
