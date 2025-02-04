@@ -52,7 +52,7 @@ func TestGenerateRequests(t *testing.T) {
 	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Also test flex.SyncJob_DOWNLOAD once we have an s3MockProvider.
 	for i, op := range []flex.SyncJob_Operation{flex.SyncJob_UPLOAD} {
-		requests, retry, err := testS3Client.GenerateWorkRequests(context.Background(), testJobs[i], 1)
+		requests, retry, err := testS3Client.GenerateWorkRequests(context.Background(), nil, testJobs[i], 1)
 		assert.NoError(t, err)
 		assert.True(t, retry)
 		require.Len(t, requests, 1)
@@ -63,20 +63,20 @@ func TestGenerateRequests(t *testing.T) {
 	// If an invalid job type is specified for this RST return the correct error:
 	jobMock := proto.Clone(jobWithNoExternalID).(*beeremote.Job)
 	jobMock.Request.Type = &beeremote.JobRequest_Mock{Mock: &flex.MockJob{}}
-	_, retry, err := testS3Client.GenerateWorkRequests(context.Background(), jobMock, 1)
+	_, retry, err := testS3Client.GenerateWorkRequests(context.Background(), nil, jobMock, 1)
 	assert.ErrorIs(t, err, ErrReqAndRSTTypeMismatch)
 	assert.False(t, retry)
 
 	// If the the job type is correct but the operation is not specified/supported, return the correct error:
 	jobSyncInvalid := proto.Clone(jobWithNoExternalID).(*beeremote.Job)
 	jobSyncInvalid.Request.Type = &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}}
-	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), jobSyncInvalid, 1)
+	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobSyncInvalid, 1)
 	assert.ErrorIs(t, err, ErrUnsupportedOpForRST)
 	assert.False(t, retry)
 
 	// If the job already as an external ID it should not be allowed to generate new requests.
 	jobWithExternalID := proto.Clone(baseTestJob).(*beeremote.Job)
-	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), jobWithExternalID, 1)
+	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobWithExternalID, 1)
 	assert.ErrorIs(t, err, ErrJobAlreadyHasExternalID)
 	assert.False(t, retry)
 }

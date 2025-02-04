@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	s3Config "github.com/aws/aws-sdk-go-v2/config"
@@ -60,11 +61,29 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	return rst, nil
 }
 
+// doesJobAlreadyExist is intended to be used with GenerateWorkRequests to determine if the lastJob
+// has already completed the work that would be done by thisJob.
+func (rst *S3Client) doesJobAlreadyExist(lastJob *beeremote.Job, thisJob *beeremote.Job) bool {
+	if lastJob == nil {
+		return false
+	}
+	if lastJob.Request.GetSync().GetOperation() != thisJob.Request.GetSync().GetOperation() {
+		return false
+	}
+	if lastJob.GetStatus().GetState() != beeremote.Job_COMPLETED {
+		return false
+	}
+	if !lastJob.GetStopMtime().AsTime().Equal(thisJob.GetStartMtime().AsTime()) {
+		return false
+	}
+	return true
+}
+
 func (rst *S3Client) GetConfig() *flex.RemoteStorageTarget {
 	return proto.Clone(rst.config).(*flex.RemoteStorageTarget)
 }
 
-func (rst *S3Client) GenerateWorkRequests(ctx context.Context, job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, bool, error) {
+func (rst *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, bool, error) {
 
 	if job.ExternalId != "" {
 		return nil, false, ErrJobAlreadyHasExternalID
@@ -91,6 +110,9 @@ func (rst *S3Client) GenerateWorkRequests(ctx context.Context, job *beeremote.Jo
 			return nil, false, err
 		}
 		job.SetStartMtime(timestamppb.New(stat.ModTime()))
+		if rst.doesJobAlreadyExist(lastJob, job) {
+			return nil, false, fmt.Errorf("%s: %w", job.GetRequest().GetPath(), ErrJobAlreadyExists)
+		}
 		fileSize = stat.Size()
 		segCount, partsPerSegment = rst.recommendedSegments(fileSize)
 		if segCount > 1 {
@@ -154,8 +176,9 @@ func (rst *S3Client) CompleteWorkRequests(ctx context.Context, job *beeremote.Jo
 	// For all job types and operations get the current modification time of the local file as it
 	// existed when the job was completed.
 	stat, err := rst.mountPoint.Stat(job.GetRequest().GetPath())
-	if err != nil {
-		return fmt.Errorf("unable to local file mtime as part of complete work requests: %w", err)
+	if !abort && err != nil {
+		// Ignore errors when aborting.
+		return fmt.Errorf("unable to set local file mtime as part of completing work requests: %w", err)
 	}
 	job.SetStopMtime(timestamppb.New(stat.ModTime()))
 
@@ -166,20 +189,35 @@ func (rst *S3Client) CompleteWorkRequests(ctx context.Context, job *beeremote.Jo
 	case flex.SyncJob_UPLOAD:
 		if job.ExternalId != "" {
 			if abort {
+				// When aborting there is no reason to check the mtime below and it may not have
+				// been set correctly anyway given the error check is skipped above.
 				return rst.AbortUpload(ctx, job.ExternalId, job.Request.Path)
+			} else {
+				// TODO: https://github.com/thinkparq/gobee/issues/29
+				// There could be lots of parts. Look for ways to optimize this. Like if we could
+				// determine the total number of parts and make an appropriately sized slice up front.
+				// Or if we could just pass the RST method the unmodified map since it potentially has
+				// to iterate over the slice to convert it to the type it expects anyway. The drawback
+				// with the latter approach is the RST package would import a BeeRemote package and the
+				// goal has been to break this out into a standalone package to reuse for BeeSync.
+				partsToFinish := make([]*flex.Work_Part, 0)
+				for _, r := range workResults {
+					partsToFinish = append(partsToFinish, r.Parts...)
+				}
+				// If there was an error finishing the upload we should return that and not worry
+				// about checking if the file was modified.
+				if err := rst.FinishUpload(ctx, job.ExternalId, job.Request.Path, partsToFinish); err != nil {
+					return err
+				}
 			}
-			// TODO: https://github.com/thinkparq/gobee/issues/29
-			// There could be lots of parts. Look for ways to optimize this. Like if we could
-			// determine the total number of parts and make an appropriately sized slice up front.
-			// Or if we could just pass the RST method the unmodified map since it potentially has
-			// to iterate over the slice to convert it to the type it expects anyway. The drawback
-			// with the latter approach is the RST package would import a BeeRemote package and the
-			// goal has been to break this out into a standalone package to reuse for BeeSync.
-			partsToFinish := make([]*flex.Work_Part, 0)
-			for _, r := range workResults {
-				partsToFinish = append(partsToFinish, r.Parts...)
+		}
+		// Skip checking the file was modified if we were told to abort since the mtime may not have
+		// been set correctly anyway given the error check is skipped above.
+		if !abort {
+			if !job.GetStartMtime().AsTime().Equal(job.GetStopMtime().AsTime()) {
+				return fmt.Errorf("successfully completed all work requests but the file appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
+					job.GetStartMtime().AsTime().Format(time.RFC3339), job.GetStopMtime().AsTime().Format(time.RFC3339))
 			}
-			return rst.FinishUpload(ctx, job.ExternalId, job.Request.Path, partsToFinish)
 		}
 		return nil
 	case flex.SyncJob_DOWNLOAD:
