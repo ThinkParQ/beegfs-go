@@ -116,7 +116,7 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 
 	return util.ProcessPaths(ctx, pm, true, func(path string) (*GetStatusResult, error) {
 		return matchPathAndGetStatus(ctx, cfg, path, mappings, dbChan, &dbPath, dbOk, pm.Get())
-	})
+	}, util.RecurseLexicographically(true))
 }
 
 // matchPathAndGetStatus expects to be called one or more times by util.ProcessPaths(). It adjusts

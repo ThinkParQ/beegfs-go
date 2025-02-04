@@ -89,6 +89,20 @@ func DeterminePathInputMethod(paths []string, recurse bool, stdinDelimiter strin
 	return pm, nil
 }
 
+// The PathInputMethod is usually determined by the frontend then the backend calls ProcessPaths.
+// ProcessPathOpts contains any settings that should always be determined by the backend.
+type ProcessPathOpts struct {
+	RecurseLexicographically bool
+}
+
+type ProcessPathOpt func(*ProcessPathOpts)
+
+func RecurseLexicographically(l bool) ProcessPathOpt {
+	return func(args *ProcessPathOpts) {
+		args.RecurseLexicographically = l
+	}
+}
+
 // ProcessPaths() processes one or more entries based on the PathInputMethod and executes the
 // specified request for each entry by invoking the provided processEntry() function.
 //
@@ -110,7 +124,13 @@ func ProcessPaths[ResultT any](
 	method PathInputMethod,
 	singleWorker bool,
 	processEntry func(path string) (ResultT, error),
+	opts ...ProcessPathOpt,
 ) (<-chan ResultT, <-chan error, error) {
+
+	args := &ProcessPathOpts{}
+	for _, opt := range opts {
+		opt(args)
+	}
 
 	var resultsChan <-chan ResultT
 	// Largely arbitrary channel size selection. There are multiple writers to this channel, but the
@@ -122,7 +142,7 @@ func ProcessPaths[ResultT any](
 		go ReadFromStdin(ctx, method.stdinDelimiter, pathsChan, errChan)
 		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry, true)
 	} else if method.pathsViaRecursion != "" {
-		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errChan)
+		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errChan, args.RecurseLexicographically)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -237,7 +257,7 @@ func startProcessing[ResultT any](
 
 // Asynchronously walks a directory from startingPath, immediately returning a channel where the
 // paths will be sent, or an error if anything goes wrong setting up.
-func walkDir(ctx context.Context, startingPath string, errChan chan<- error) (<-chan string, error) {
+func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lexicographically bool) (<-chan string, error) {
 
 	beegfsClient, err := config.BeeGFSClient(startingPath)
 	if err != nil {
@@ -264,7 +284,7 @@ func walkDir(ctx context.Context, startingPath string, errChan chan<- error) (<-
 			return nil
 		}
 
-		err := beegfsClient.WalkDir(startInMount, walkDirFunc)
+		err := beegfsClient.WalkDir(startInMount, walkDirFunc, filesystem.Lexicographically(lexicographically))
 		if err != nil {
 			errChan <- err
 			close(pathChan)
