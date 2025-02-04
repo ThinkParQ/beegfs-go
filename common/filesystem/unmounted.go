@@ -61,7 +61,7 @@ func (fs UnmountedFS) WriteFilePart(path string, offsetStart int64, offsetStop i
 	return nil, ErrUnmounted
 }
 
-func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {
 	return ErrUnmounted
 }
 

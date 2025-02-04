@@ -70,9 +70,10 @@ type Provider interface {
 	// Write (such as a download) if there is no valid file to write the results to.
 	WriteFilePart(path string, offsetStart int64, offsetStop int64) (io.WriteCloser, error)
 	// A wrapper around filepath.WalkDir allowing it to be used with relative paths inside a
-	// Filesystem. Note WalkDir may return an absolute path, thus the paths it returns should be
-	// sanitized with GetRelativePathWithinMount() if needed.
-	WalkDir(path string, fn fs.WalkDirFunc) error
+	// Filesystem and apply different options for walking the path, for example walking in
+	// lexicographical order. Note WalkDir may return an absolute path, thus the paths it returns
+	// should be sanitized with GetRelativePathWithinMount() if needed.
+	WalkDir(path string, fn fs.WalkDirFunc, walkOpts ...WalkOption) error
 	// CopyXAttrsToFile copies the xattrs from srcPath to dstPath. If there are no xattrs or if the BeeGFS
 	// instance does not have user xattrs enabled, no error is returned.
 	CopyXAttrsToFile(srcPath, dstPath string) error
@@ -218,8 +219,15 @@ func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 	return newLimitedFileWriter(file, offsetStart, offsetStop), nil
 }
 
-func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {
 	root := fs.MountPoint + path
+	args := &WalkOptions{}
+	for _, opt := range opts {
+		opt(args)
+	}
+	if args.Lexicographically {
+		return WalkDirLexicographically(root, fn)
+	}
 	return filepath.WalkDir(root, fn)
 }
 

@@ -93,7 +93,7 @@ func (fs MockFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 
 }
 
-func (fs MockFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (fs MockFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {
 	return fmt.Errorf("not implemented")
 }
 
