@@ -33,6 +33,7 @@ type SyncJobRequestCfg struct {
 type SyncJobResponse struct {
 	Path     string
 	Result   *beeremote.JobResult
+	Status   beeremote.SubmitJobResponse_ResponseStatus
 	Err      error
 	FatalErr bool
 }
@@ -75,7 +76,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 
 	var operation flex.SyncJob_Operation
 	var isDir bool
-	pathStat, err := beegfs.Stat(pathInMount)
+	pathStat, err := beegfs.Lstat(pathInMount)
 	switch {
 	case cfg.Download:
 		operation = flex.SyncJob_DOWNLOAD
@@ -104,6 +105,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 	}
 
 	baseRequest := &beeremote.JobRequest{
+		Force:               cfg.Force,
 		Path:                "",
 		RemoteStorageTarget: cfg.RSTID,
 		Type: &beeremote.JobRequest_Sync{
@@ -138,6 +140,12 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 			// This could happen for uploads, or downloads if the user asked to overwrite an
 			// existing file.
 			if pathStat != nil {
+				// TODO: https://github.com/ThinkParQ/bee-remote/issues/25 Support symbolic links.
+				if !pathStat.Mode().IsRegular() {
+					resp.Err = ErrFileTypeUnsupported
+					respChan <- resp
+					return
+				}
 				rstIDs, err = checkEntryAndDetermineRSTs(ctx, mappings, baseRequest.RemoteStorageTarget, baseRequest.Path, ignoreReaders, ignoreWriters)
 				if err != nil {
 					resp.Err = err
@@ -159,6 +167,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 					respChan <- resp
 				} else {
 					resp.Result = r.Result
+					resp.Status = r.GetStatus()
 					respChan <- resp
 				}
 			}
@@ -239,6 +248,7 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 						respChan <- resp
 					} else {
 						resp.Result = r.Result
+						resp.Status = r.GetStatus()
 						respChan <- resp
 					}
 				}
@@ -269,9 +279,21 @@ func SubmitSyncJobRequests(ctx context.Context, cfg SyncJobRequestCfg) (<-chan *
 				if d.Type()&fs.ModeSymlink != 0 {
 					// TODO: https://github.com/ThinkParQ/bee-remote/issues/25
 					// Support symbolic links.
+					relPath, err := beegfs.GetRelativePathWithinMount(path)
+					if err != nil {
+						// An error at this point is unlikely given previous steps also get relative
+						// paths. To be safe note this in the error that is returned and just return
+						// the absolute path instead. This shouldn't be a security issue since the
+						// user should have access to this path if they were able to start a job
+						// request for it.
+						relPath = path
+						err = fmt.Errorf("%w: unable to determine relative path", ErrFileTypeUnsupported)
+					} else {
+						err = ErrFileTypeUnsupported
+					}
 					respChan <- &SyncJobResponse{
-						Path: path,
-						Err:  fmt.Errorf("skipping symbolic link: %s", path),
+						Path: relPath,
+						Err:  err,
 					}
 				} else if !d.IsDir() {
 					// Only send file paths to the channel.

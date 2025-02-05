@@ -70,10 +70,10 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 	// anywhere that has overridden the default columns with withDefaultColumns.
 	//
 	// The full set of fields related to a particular job, not including work requests and results.
-	allJobColumns := []string{"ok", "path", "target", "job created", "job updated", "start mtime", "end mtime", "job id", "request type", "state", "status message", ""}
+	allJobColumns := []string{"ok", "path", "target", "job created", "job updated", "start file mtime", "end file mtime", "job id", "request type", "state", "status message", ""}
 	// All fields for this job and its work requests and results. Information for a particular job
 	// will generally need to be printed using multiple rows.
-	allJobAndWorkColumns := []string{"ok", "path", "target", "job created", "job updated", "start mtime", "end mtime", "job id", "request type", "state", "status message", "work requests", "work results", ""}
+	allJobAndWorkColumns := []string{"ok", "path", "target", "job created", "job updated", "start file mtime", "end file mtime", "job id", "request type", "state", "status message", "work requests", "work results", ""}
 
 	if viper.GetBool(config.DebugKey) {
 		cfg.defaultJobColumns = allJobAndWorkColumns
@@ -250,7 +250,7 @@ var jobStateMap = map[beeremote.Job_State]jobStateEmoji{
 	beeremote.Job_UNKNOWN:    {"❓", beeremote.Job_UNKNOWN.String()},
 	beeremote.Job_UNASSIGNED: {"⏳", beeremote.Job_UNASSIGNED.String()},
 	beeremote.Job_SCHEDULED:  {"⏳", beeremote.Job_SCHEDULED.String()},
-	beeremote.Job_RUNNING:    {"⏳", beeremote.Job_RUNNING.String()},
+	beeremote.Job_RUNNING:    {"🔄", beeremote.Job_RUNNING.String()},
 	// The warning sign (⚠) emoji can cause alignment issues in go-pretty tables
 	// because it is normally followed by a variation selector (`\ufe0f`), making
 	// it behave inconsistently in monospaced environments.
@@ -286,7 +286,7 @@ var workStateMap = map[flex.Work_State]workStateEmoji{
 	flex.Work_UNKNOWN:   {"❓", flex.Work_UNKNOWN.String()},
 	flex.Work_CREATED:   {"⏳", flex.Work_CREATED.String()},
 	flex.Work_SCHEDULED: {"⏳", flex.Work_SCHEDULED.String()},
-	flex.Work_RUNNING:   {"⏳", flex.Work_RUNNING.String()},
+	flex.Work_RUNNING:   {"🔄", flex.Work_RUNNING.String()},
 	flex.Work_ERROR:     {"\u26A0\ufe0f\u200C", flex.Work_ERROR.String()},
 	flex.Work_FAILED:    {"❌", flex.Work_FAILED.String()},
 	flex.Work_CANCELLED: {"🚫", flex.Work_CANCELLED.String()},
