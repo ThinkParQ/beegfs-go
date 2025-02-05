@@ -9,6 +9,8 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // GetJobsConfig contains all user facing flags needed to generate a
@@ -18,6 +20,14 @@ type GetJobsConfig struct {
 	Path             string
 	WithWorkRequests bool
 	WithWorkResults  bool
+	// Currently exactPath is not exported to only allow this mode to be used from within the rst
+	// package, notably for GetStatus. This is because it might be confusing when a user had a
+	// directory containing files that were uploaded, but then later deleted or renamed the
+	// directory and replaced it with an identically named file, making it impossible to display
+	// jobs for the previously uploaded files under the now deleted directory. This is not a problem
+	// for GetStatus because it is only used when we want to get the jobs for at most a single path,
+	// and will be comparing mtime to determine if the dbPath matches the current fsPath.
+	exactPath bool
 }
 
 type GetJobsResponse struct {
@@ -57,15 +67,9 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 				Path:  pathInMount,
 			},
 		}
+	case cfg.exactPath:
+		request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: cfg.Path}
 	default:
-		// Currently we don't support querying by exact path:
-		//
-		//   request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: pathInMount}
-		//
-		// This is to avoid corner cases where a user had a directory containing files that were
-		// uploaded, but then later deleted or renamed the directory and replaced it with an
-		// identically named file, making it impossible to display jobs for the previously uploaded
-		// files under the now deleted directory.
 		request.Query = &beeremote.GetJobsRequest_ByPathPrefix{ByPathPrefix: pathInMount}
 	}
 
@@ -86,6 +90,11 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 			if err == io.EOF {
 				return
 			} else if err != nil {
+				if rpcStatus, ok := status.FromError(err); ok {
+					if rpcStatus.Code() == codes.NotFound {
+						err = ErrEntryNotFound
+					}
+				}
 				respChan <- &GetJobsResponse{
 					Err: err,
 				}

@@ -40,16 +40,28 @@ var SupportedRSTTypes = map[string]func() (any, any){
 }
 
 type Provider interface {
-	// GenerateWorkRequests is used to split a job into one or more work requests that each work on some
-	// segment of a file comprised of one or more parts. It requires a pointer to a job, the file
-	// size, and the number of available workers. It determines if an external ID is needed and
-	// generates one and sets it directly on the job. It generates and returns a slice of work
-	// requests based on the request type, operation, file size, and available workers (specify 0 if
-	// the number of workers is unknown). If anything goes wrong it returns a boolean indicating if
-	// a retry is possible, and an error. Errors can be retried if the error was likely transient,
-	// such as a network issue, otherwise retry is be false if generating requests is not possible,
-	// such as the request type is invalid for this RST.
-	GenerateWorkRequests(ctx context.Context, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error)
+	// GenerateWorkRequests performs any one-time operations that must happen at the start of a job.
+	// To optimize performance it should perform all tasks required to interact with BeeGFS or the
+	// remote Provider at the start of a job.
+	//
+	// For providers that support idempotent operations, it optionally accepts a lastJob that should
+	// be compared with the current state of the file the request is for, and determines if the new
+	// job is required. If the current job is not needed it should return ErrOperationNotNeeded. Not
+	// all possible operations for a particular Provider need to be idempotent.
+	//
+	// It determines if the job can be split into one or more work requests that each work on some
+	// segment of the file (which is in turn comprised of one or more parts). This determination
+	// should be made based on the file size, availableWorkers, and best practices for the Provider.
+	//
+	// It determines if an external ID is needed and generates one and sets it directly on the job.
+	// If applicable to the operation it also sets the StartMtime on the job based on a stat of the
+	// local file in BeeGFS. It generates and returns a slice of work requests based on the request
+	// type, operation, file size, and available workers (specify 0 if the number of workers is
+	// unknown). If anything goes wrong it returns a boolean indicating if a retry is possible, and
+	// an error. Errors can be retried if the error was likely transient, such as a network issue,
+	// otherwise retry is be false if generating requests is not possible, such as the request type
+	// is invalid for this RST.
+	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -57,9 +69,17 @@ type Provider interface {
 	// does not return an error, but rather updates any fields in the part that make sense to allow
 	// the request to be resumed later (if supported), but will not mark the part as completed.
 	ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error
-	// CompleteWorkRequests is used to perform any tasks needed to complete or abort the specified job
-	// on the RST. If the job is to be completed it requires the slice of work results that
-	// resulted from executing the previously generated WorkRequests.
+	// CompleteWorkRequests is used to perform any tasks needed to complete or abort the specified
+	// job on the RST.  To optimize performance it should perform all tasks required to interact
+	// with BeeGFS or the remote Provider at the end of a job.
+	//
+	// If the job is to be completed it requires the slice of work results that resulted from
+	// executing the previously generated WorkRequests. If applicable to the operation it should set
+	// the StopMtime directly on the job based on a stat of the local file in BeeGFS.
+	//
+	// It is also responsible for verifying the operation completed successfully, for example
+	// checking data integrity by verifying checksums and modification timestamps to ensure a stable
+	// version of the file exists in BeeGFS and/or the remote Provider.
 	CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error
 	// Returns a deep copy of the Remote Storage Target's config.
 	GetConfig() *flex.RemoteStorageTarget

@@ -34,8 +34,10 @@ type Provider interface {
 	// presumed to already be a relative path inside the mount point and returned as is (possibly
 	// with '/' added).
 	GetRelativePathWithinMount(path string) (string, error)
-	// Returns the equivalent of an stat(2).
+	// Returns the equivalent of an stat(2). Caution: Follows symbolic links (use lstat if needed).
 	Stat(name string) (os.FileInfo, error)
+	// Returns the equivalent of lstat(2). Does not follow symbolic links.
+	Lstat(name string) (os.FileInfo, error)
 	// Creates a file at the specified path returning an error if the file already exists, unless
 	// overwrite is true, then the file will be zeroed and overwritten. If created and supported by
 	// the underlying file system, the new file will be extended to the specified size to reduce
@@ -68,9 +70,10 @@ type Provider interface {
 	// Write (such as a download) if there is no valid file to write the results to.
 	WriteFilePart(path string, offsetStart int64, offsetStop int64) (io.WriteCloser, error)
 	// A wrapper around filepath.WalkDir allowing it to be used with relative paths inside a
-	// Filesystem. Note WalkDir may return an absolute path, thus the paths it returns should be
-	// sanitized with GetRelativePathWithinMount() if needed.
-	WalkDir(path string, fn fs.WalkDirFunc) error
+	// Filesystem and apply different options for walking the path, for example walking in
+	// lexicographical order. Note WalkDir may return an absolute path, thus the paths it returns
+	// should be sanitized with GetRelativePathWithinMount() if needed.
+	WalkDir(path string, fn fs.WalkDirFunc, walkOpts ...WalkOption) error
 	// CopyXAttrsToFile copies the xattrs from srcPath to dstPath. If there are no xattrs or if the BeeGFS
 	// instance does not have user xattrs enabled, no error is returned.
 	CopyXAttrsToFile(srcPath, dstPath string) error
@@ -156,6 +159,10 @@ func (fs BeeGFS) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(filepath.Join(fs.MountPoint, name))
 }
 
+func (fs BeeGFS) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(filepath.Join(fs.MountPoint, name))
+}
+
 // BeeGFS does not support fallocate(), this uses truncate() instead. As a result this doesn't
 // actually preallocate the chunkfiles, instead they are effectively sparse files (i.e., ls will
 // show the specified size, but du will show 0). Thus it is less likely the file will occupy
@@ -212,8 +219,15 @@ func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 	return newLimitedFileWriter(file, offsetStart, offsetStop), nil
 }
 
-func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {
 	root := fs.MountPoint + path
+	args := &WalkOptions{}
+	for _, opt := range opts {
+		opt(args)
+	}
+	if args.Lexicographically {
+		return WalkDirLexicographically(root, fn)
+	}
 	return filepath.WalkDir(root, fn)
 }
 

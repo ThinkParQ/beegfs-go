@@ -3,66 +3,83 @@ package rst
 import (
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
-	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
+	"go.uber.org/zap"
 )
 
 type statusConfig struct {
-	history int
-	retro   bool
-	detail  bool
-	width   int
+	stdinDelimiter string
+	recurse        bool
+	verbose        bool
+	summarize      bool
 }
 
 func newStatusCmd() *cobra.Command {
 
 	frontendCfg := statusConfig{}
-	backendCfg := rst.GetJobsConfig{}
+	backendCfg := rst.GetStatusCfg{}
 	cmd := &cobra.Command{
 		Use:   "status <path>",
-		Short: "Get the status of jobs for a file or directory path",
-		Long:  "Get the status of jobs for a file or directory path.\nJobs for each path are grouped together and sorted by remote target then by when they were created.",
+		Short: "Check if files in BeeGFS are synchronized with their remote targets",
+		Long: `Check if files in BeeGFS are synchronized with their remote targets.
+This mode checks if files in BeeGFS have been modified since the most recently created job for each remote target.
+Use "job list" for additional details and a complete list of jobs including paths that no longer exist, or do not exist yet.
+
+By default only files that are not currently in sync with their configured or the manually specified remote targets are listed.
+Use the verbose flag to print all entries including ones that are synchronized or do not have remote targets configured.
+Use the debug flag to print additional details such as the last job ID and modification timestamp from the file and last job.
+
+Specifying Paths:
+* A single file can be specified, or a directory can be specified with the --recurse flag to check all files in that directory are synchronized.
+* When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
+* Multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry info -').`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
+			if len(args) < 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backendCfg.Path = args[0]
-			return runGetStatusCmd(cmd, frontendCfg, backendCfg)
+			frontendCfg.verbose = frontendCfg.verbose || viper.GetBool(config.DebugKey)
+			backendCfg.Debug = viper.GetBool(config.DebugKey)
+			return runStatusCmd(cmd, frontendCfg, backendCfg)
 		},
 	}
 
-	cmd.Flags().StringVar(&backendCfg.JobID, "job-id", "", "If a file path is specified, only return results for this specific job.")
-	cmd.Flags().IntVar(&frontendCfg.history, "history", 1, "Limit the number of jobs returned for each path+RST combination (defaults to only the most recently created job).")
-	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Don't print output in a table and return all possible fields grouping jobs for each path by RST and sorting by when they were created.")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
-	cmd.Flags().IntVar(&frontendCfg.width, "width", 30, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Ignore the remote targets configured on each entry and only check files are synchronized with this comma-separated list of target IDs.`)
+	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\n", "Change the string delimiter used to determine individual paths when read from stdin (e.g., --stdin-delimiter=\"\\x00\" for NULL).")
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (WARNING: this may return large amounts of output, for example if the BeeGFS root is the provided path).")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
+	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
+	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }
 
-func runGetStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.GetJobsConfig) error {
+func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.GetStatusCfg) error {
 
-	responses := make(chan *rst.GetJobsResponse, 1024)
-	err := rst.GetJobs(cmd.Context(), backendCfg, responses)
+	log, _ := config.GetLogger()
+
+	// Setup the method for sending paths to the backend:
+	method, err := util.DeterminePathInputMethod(cmd.Flags().Args(), frontendCfg.recurse, frontendCfg.stdinDelimiter)
 	if err != nil {
-		if errors.Is(err, filesystem.ErrInitFSClient) {
-			return fmt.Errorf("%w (hint: use the --%s=none flag to interact with files that no longer exist or if BeeGFS is not mounted)", err, config.BeeGFSMountPointKey)
-		}
 		return err
 	}
 
-	withDebug := viper.GetBool(config.DebugKey)
-	tbl := newJobsTable(withJobDetails(frontendCfg.detail), withColumnWidth(frontendCfg.width))
+	resultChan, errChan, err := rst.GetStatus(cmd.Context(), method, backendCfg)
+	if err != nil {
+		return err
+	}
+
+	// Setup the table to print results
+	tbl := cmdfmt.NewPrintomatic([]string{"ok", "path", "explanation"}, []string{"ok", "path", "explanation"})
 
 	// Set to false to control when the remaining table entries are printed instead of having them
 	// print automatically when the function returns (i.e., if an error happens).
@@ -73,133 +90,86 @@ func runGetStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rs
 		}
 	}()
 
-	totalPaths := 0
+	totalEntries := 0
+	unsyncedFiles := 0
+	syncedFiles := 0
+	notAttemptedFiles := 0
+	noTargetFiles := 0
+	notSupportedFiles := 0
+	directories := 0
+	printRowByDefault := false
+	var multiErr types.MultiError
 
-writeResponses:
+run:
 	for {
 		select {
 		case <-cmd.Context().Done():
-			break writeResponses
-		case resp, ok := <-responses:
+			break run
+		case path, ok := <-resultChan:
 			if !ok {
-				break writeResponses
+				break run
 			}
-
-			if resp.Err != nil {
-				return err
-			}
-
-			// Sort jobs by when they were created so the most recently created job always determines
-			// the path's status for that RST when printing horizontally:
-			sort.Slice(resp.Results, func(i, j int) bool {
-				return resp.Results[i].Job.Created.GetSeconds() > resp.Results[j].Job.Created.GetSeconds()
-			})
-
-			// Print jobs by RST ID:
-			rstsForPath := []uint32{}
-			jobsPerRST := map[uint32][]*beeremote.JobResult{}
-			for _, job := range resp.Results {
-				if jobsPerRST[job.Job.Request.RemoteStorageTarget] == nil {
-					jobsPerRST[job.Job.Request.RemoteStorageTarget] = make([]*beeremote.JobResult, 0, 1)
-					rstsForPath = append(rstsForPath, job.Job.Request.RemoteStorageTarget)
-				}
-				jobsPerRST[job.Job.Request.RemoteStorageTarget] = append(jobsPerRST[job.Job.Request.RemoteStorageTarget], job)
-			}
-			// Sort by RST ID:
-			sort.Slice(rstsForPath, func(i, j int) bool {
-				return rstsForPath[i] < rstsForPath[j]
-			})
-
-			totalPaths++
-
-			// Print output using a table:
-			if !frontendCfg.retro {
-				for _, rst := range rstsForPath {
-					for i, job := range jobsPerRST[rst] {
-						if i >= frontendCfg.history {
-							break
-						}
-						tbl.Row(job)
-					}
-				}
+			totalEntries++
+			switch path.SyncStatus {
+			case rst.Synchronized:
+				syncedFiles++
+				printRowByDefault = false
+			case rst.Unsynchronized:
+				unsyncedFiles++
+				printRowByDefault = true
+			case rst.NotAttempted:
+				notAttemptedFiles++
+				printRowByDefault = true
+			case rst.NoTargets:
+				noTargetFiles++
+				printRowByDefault = false
+			case rst.NotSupported:
+				notSupportedFiles++
+				printRowByDefault = false
+			case rst.Directory:
+				directories++
+				log.Debug("ignoring directory", zap.Any("path", path), zap.Any("reason", path.SyncReason))
 				continue
+			default:
+				return fmt.Errorf("unknown sync status %d for path %s", path.SyncStatus, path.Path)
 			}
 
-			// Otherwise print in a more information dense horizontal format:
-			strBuilder := strings.Builder{}
-			if len(resp.Results) == 0 {
-				fmt.Fprintf(&strBuilder, "Path: %s - No jobs found for path.\n", resp.Path)
-				continue
-			} else {
-				fmt.Fprintf(&strBuilder, "Path: %s\n", resp.Path)
+			if !frontendCfg.summarize && (frontendCfg.verbose || printRowByDefault) {
+				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
 
-			for _, id := range rstsForPath {
-				fmt.Fprintf(&strBuilder, "%s Remote Storage Target: %d\n", convertJobStateToEmoji(jobsPerRST[id][0].Job.Status.State), id)
-				for i, job := range jobsPerRST[id] {
-					if i >= frontendCfg.history {
-						break
-					}
-					fmt.Fprintf(&strBuilder, "  %s Job:", convertJobStateToEmoji(job.Job.Status.State))
-					fmt.Fprintf(&strBuilder, " id: %s, state: %s, ", job.Job.Id, job.Job.Status.State)
-					// Optimize printing jobs we know about (for example no need to print path again):
-					switch job.Job.Request.Type.(type) {
-					case *beeremote.JobRequest_Sync:
-						fmt.Fprintf(&strBuilder, "request: {remote_storage_target: %d, type: sync, %s}", job.Job.Request.RemoteStorageTarget, job.Job.Request.GetSync())
-					default:
-						fmt.Fprintf(&strBuilder, "request: {%s}", job.Job.GetRequest())
-					}
-
-					if withDebug {
-						fmt.Fprintf(&strBuilder, ", message: %s", job.Job.Status.Message)
-						if job.Job.ExternalId != "" {
-							fmt.Fprintf(&strBuilder, ", external_id: %s", job.Job.ExternalId)
-						} else {
-							fmt.Fprintf(&strBuilder, ", external_id: none")
-						}
-					}
-
-					fmt.Fprintf(&strBuilder, "\n")
-
-					if withDebug {
-						if len(job.WorkRequests) == len(job.WorkResults) {
-							sort.Slice(job.WorkRequests, func(i, j int) bool {
-								return job.WorkRequests[i].RequestId <= job.WorkRequests[j].RequestId
-							})
-							sort.Slice(job.WorkResults, func(i, j int) bool {
-								return job.WorkResults[i].Work.RequestId <= job.WorkResults[j].Work.RequestId
-							})
-							for i, wr := range job.GetWorkResults() {
-								fmt.Fprintf(&strBuilder, "    %s Work ID: %s\n", convertWorkStateToEmoji(wr.Work.Status.State), wr.Work.RequestId)
-								fmt.Fprintf(&strBuilder, "         Request: %s\n", job.WorkRequests[i])
-								fmt.Fprintf(&strBuilder, "         Result: %s\n", wr)
-								if job.WorkRequests[i].RequestId != wr.Work.RequestId {
-									fmt.Fprintf(&strBuilder, "WARNING: There are an equal number of requests/results but the request and result IDs don't all line up (likely this is a bug in BeeRemote).")
-								}
-							}
-						} else {
-							// This generally shouldn't happen unless there is a bug.
-							fmt.Fprintf(&strBuilder, "WARNING: The number of work requests and results does not match, printing individual results (likely this is a bug)).")
-							fmt.Fprintf(&strBuilder, "      Work Requests:\n")
-							for _, wr := range job.GetWorkRequests() {
-								fmt.Fprintf(&strBuilder, "           %s\n", wr)
-							}
-							fmt.Fprintf(&strBuilder, "      Work Results:\n")
-							for _, wr := range job.GetWorkResults() {
-								fmt.Fprintf(&strBuilder, "        %s %s\n", convertWorkStateToEmoji(wr.Work.Status.State), wr)
-							}
-						}
-					}
-					fmt.Fprintf(&strBuilder, "     (created: %s | last updated: %s)\n", job.Job.Created.AsTime(), job.Job.Status.Updated.AsTime())
-					fmt.Fprintf(&strBuilder, "\n")
-				}
+		case err, ok := <-errChan:
+			if ok {
+				// Once an error happens the entriesChan will be closed, however this is a buffered
+				// channel so there may still be valid entries we should finish printing before
+				// returning the error.
+				multiErr.Errors = append(multiErr.Errors, err)
 			}
-			fmt.Print(strBuilder.String())
 		}
 	}
 
 	autoPrintRemaining = false
 	tbl.PrintRemaining()
-	cmdfmt.Printf("Success: total paths found: %d\n", totalPaths)
+
+	if viper.GetBool(config.DisableEmojisKey) {
+		cmdfmt.Printf("Summary: found %d entries | %d synchronized | %d unsynchronized | %d not attempted | %d without remote targets | %d not supported | %d directories\n",
+			totalEntries, syncedFiles, unsyncedFiles, notAttemptedFiles, noTargetFiles, notSupportedFiles, directories)
+	} else {
+		cmdfmt.Printf("Summary: found %d entries | %s %d synchronized | %s %d unsynchronized | %s %d not attempted | %s %d without remote targets | %s %d not supported | %s %d directories\n",
+			totalEntries, rst.Synchronized, syncedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
+	}
+	if noTargetFiles != 0 {
+		cmdfmt.Printf("Warning: not all files have remote targets configured\n")
+	}
+
+	if totalEntries != (syncedFiles + unsyncedFiles + notAttemptedFiles + noTargetFiles + notSupportedFiles + directories) {
+		return fmt.Errorf("the total number of entries does not match the number of entries in various states (this is probably a bug)")
+	}
+
+	if len(multiErr.Errors) != 0 {
+		return &multiErr
+	} else if unsyncedFiles != 0 {
+		return iUtil.NewCtlError(errors.New("not all files are synchronized"), iUtil.PartialSuccess)
+	}
 	return nil
 }

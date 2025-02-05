@@ -52,7 +52,7 @@ func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
+func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {

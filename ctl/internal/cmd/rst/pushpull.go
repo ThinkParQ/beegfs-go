@@ -10,11 +10,12 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
+	"github.com/thinkparq/protobuf/go/beeremote"
 )
 
 type pushPullCfg struct {
-	detail bool
-	width  int
+	verbose bool
+	width   int
 }
 
 func newPushCmd() *cobra.Command {
@@ -44,9 +45,9 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 		},
 	}
 	cmd.Flags().Uint32VarP(&backendCfg.RSTID, "remote-target", "t", 0, "Perform a one time push to the specified Remote Storage Target ID.")
-	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
+	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
@@ -78,9 +79,9 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
 	cmd.Flags().StringVarP(&backendCfg.RemotePath, "remote-path", "p", "", "The name/path of the object/file in the remote target you wish to download.")
 	cmd.MarkFlagRequired("remote-path")
-	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
+	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.detail, "detail", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
@@ -93,11 +94,16 @@ func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg rs
 	if err != nil {
 		return err
 	}
-	totalJobs := 0
-	totalIgnored := 0
-	totalErrors := 0
 
-	tbl := newJobsTable(withJobDetails(frontendCfg.detail), withColumnWidth(frontendCfg.width))
+	noRSTSpecified := 0
+	fileNotSupported := 0
+	errStartingSync := 0
+	syncStarted := 0
+	syncCompleted := 0
+	syncInProgress := 0
+	syncNotAllowed := 0
+
+	tbl := newJobsTable(withJobDetails(frontendCfg.verbose), withColumnWidth(frontendCfg.width))
 
 writeResponses:
 	for {
@@ -115,27 +121,61 @@ writeResponses:
 					return resp.Err
 				}
 				if errors.Is(resp.Err, rst.ErrFileHasNoRSTs) {
-					totalIgnored++
-					if viper.GetBool(config.DebugKey) || frontendCfg.detail {
-						tbl.MinimalRow(resp.Path, fmt.Errorf("%s (ignoring file)", resp.Err))
-
+					noRSTSpecified++
+					if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
+						tbl.MinimalRow(resp.Path, fmt.Sprintf("%s (ignored)", resp.Err.Error()))
+					}
+				} else if errors.Is(resp.Err, rst.ErrFileTypeUnsupported) {
+					fileNotSupported++
+					if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
+						tbl.MinimalRow(resp.Path, fmt.Sprintf("%s (ignored)", resp.Err.Error()))
 					}
 				} else {
-					totalErrors++
-					tbl.MinimalRow(resp.Path, fmt.Errorf("%s (skipping file)", resp.Err))
+					errStartingSync++
+					tbl.MinimalRow(resp.Path, resp.Err.Error())
 				}
 				continue
 			}
-			totalJobs++
-			if viper.GetBool(config.DebugKey) || frontendCfg.detail {
+
+			switch resp.Status {
+			case beeremote.SubmitJobResponse_CREATED:
+				syncStarted++
+			case beeremote.SubmitJobResponse_EXISTING:
+				if resp.Result.Job.GetStatus().GetState() == beeremote.Job_COMPLETED {
+					syncCompleted++
+				} else {
+					syncInProgress++
+				}
+			case beeremote.SubmitJobResponse_NOT_ALLOWED:
+				// This indicates the last job failed and requires manual intervention. Always print
+				// these jobs as the user will likely want to see them anyway.
+				syncNotAllowed++
+				tbl.Row(resp.Result)
+				continue
+			default:
+				tbl.PrintRemaining()
+				tbl.Row(resp.Result)
+				return fmt.Errorf("unknown response status: %s (are the versions of CTL and Remote compatible?)", resp.Status.String())
+			}
+
+			if viper.GetBool(config.DebugKey) || frontendCfg.verbose {
 				tbl.Row(resp.Result)
 			}
 		}
 	}
 
 	tbl.PrintRemaining()
-	result := fmt.Sprintf("total jobs scheduled: %d | paths skipped due to errors: %d | ignored paths: %d\n", totalJobs, totalErrors, totalIgnored)
-	if totalErrors != 0 {
+
+	var result string
+	if viper.GetBool(config.DisableEmojisKey) {
+		result = fmt.Sprintf("%d already synced | %d already syncing | %d scheduled sync | %d previous sync failure | %d error starting sync | %d no remote target (ignored) | %d not supported (ignored)\n",
+			syncCompleted, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
+	} else {
+		result = fmt.Sprintf("✅ %d already synced | 🔄 %d already syncing | ⏳ %d scheduled for sync | ❌ %d previous sync failure | \u26A0\ufe0f\u200C %d error starting sync | ⛔ %d no remote target (ignored) | 🚫 %d not supported (ignored)\n",
+			syncCompleted, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
+	}
+
+	if errStartingSync != 0 || syncNotAllowed != 0 {
 		return util.NewCtlError(errors.New(result), util.PartialSuccess)
 	}
 	cmdfmt.Printf("Success: %s", result)

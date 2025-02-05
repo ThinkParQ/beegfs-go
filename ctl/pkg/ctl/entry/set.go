@@ -76,7 +76,7 @@ type SetEntryResult struct {
 	Updates SetEntryCfg
 }
 
-func SetEntries(ctx context.Context, pm InputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, <-chan error, error) {
+func SetEntries(ctx context.Context, pm util.PathInputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, <-chan error, error) {
 	log, _ := config.GetLogger()
 
 	// Validate new configuration once:
@@ -97,7 +97,7 @@ func SetEntries(ctx context.Context, pm InputMethod, cfg SetEntryCfg) (<-chan Se
 		return setEntry(ctx, mappings, cfg, path)
 	}
 
-	return processEntries(ctx, pm, false, processEntry)
+	return util.ProcessPaths(ctx, pm, false, processEntry)
 }
 
 // setEntry applies the SetEntryRequest to the specified searchPath. WARNING: This function is meant

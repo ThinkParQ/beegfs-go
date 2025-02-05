@@ -19,7 +19,7 @@ type RefreshEntryResult struct {
 	EntryID string
 }
 
-func RefreshEntriesInfo(ctx context.Context, paths InputMethod) (<-chan *RefreshEntryResult, <-chan error, error) {
+func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan *RefreshEntryResult, <-chan error, error) {
 	log, _ := config.GetLogger()
 	store, err := config.NodeStore(ctx)
 	if err != nil {
@@ -38,7 +38,7 @@ func RefreshEntriesInfo(ctx context.Context, paths InputMethod) (<-chan *Refresh
 	processEntry := func(path string) (*RefreshEntryResult, error) {
 		return refreshEntryInfo(ctx, mappings, store, path)
 	}
-	return processEntries(ctx, paths, false, processEntry)
+	return util.ProcessPaths(ctx, paths, false, processEntry)
 }
 
 func refreshEntryInfo(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) (*RefreshEntryResult, error) {

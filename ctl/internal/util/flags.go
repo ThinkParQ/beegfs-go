@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -109,4 +110,56 @@ func (f *validatedStringFlag) Set(val string) error {
 
 func (v *validatedStringFlag) Type() string {
 	return "string"
+}
+
+type rstsFlag struct {
+	p *[]uint32
+}
+
+func NewRemoteTargetsFlag(p *[]uint32) *rstsFlag {
+	return &rstsFlag{p: p}
+}
+
+func (f *rstsFlag) String() string {
+	if f.p == nil {
+		return "unchanged"
+	}
+	if len(*f.p) == 0 {
+		return "unchanged"
+	}
+	rsts := make([]string, 0, len(*f.p))
+	for _, v := range *f.p {
+		rsts = append(rsts, strconv.FormatUint(uint64(v), 10))
+	}
+	return strings.Join(rsts, ", ")
+}
+
+func (f *rstsFlag) Type() string {
+	return "<id>[,<id>]..."
+}
+
+func (f *rstsFlag) Set(value string) error {
+	if strings.ToLower(value) == "none" {
+		*f.p = make([]uint32, 0)
+		return nil
+	}
+	rstStrings := strings.Split(value, ",")
+	rstUint32s := make([]uint32, 0, len(rstStrings))
+	rstMap := make(map[uint64]struct{})
+	for _, str := range rstStrings {
+		parsedRST, err := strconv.ParseUint(str, 10, 32)
+		if err != nil {
+			return fmt.Errorf("error parsing RST ID %s: %w", str, err)
+		}
+		if parsedRST == 0 {
+			return fmt.Errorf("using '0' as an RST ID is not allowed")
+		}
+		if _, ok := rstMap[parsedRST]; ok {
+			return fmt.Errorf("RST ID %d was specified multiple times", parsedRST)
+		}
+		rstMap[parsedRST] = struct{}{}
+		rstUint32s = append(rstUint32s, uint32(parsedRST))
+	}
+	*f.p = rstUint32s
+	return nil
 }

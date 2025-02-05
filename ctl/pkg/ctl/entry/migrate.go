@@ -119,7 +119,7 @@ type migration struct {
 	egid uint32
 }
 
-func MigrateEntries(ctx context.Context, pm InputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
+func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
 	log, _ := config.GetLogger()
 
 	mappings, err := util.GetMappings(ctx)
@@ -225,7 +225,7 @@ func MigrateEntries(ctx context.Context, pm InputMethod, cfg MigrateCfg) (<-chan
 		return migrateEntry(ctx, mappings, migration, path)
 	}
 
-	return processEntries(ctx, pm, false, processEntry)
+	return util.ProcessPaths(ctx, pm, false, processEntry)
 }
 
 // migrateEntry determines if an entry has any chunks on targets or mirror groups that need to be

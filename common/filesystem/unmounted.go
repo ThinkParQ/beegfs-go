@@ -32,6 +32,10 @@ func (fs UnmountedFS) Stat(path string) (os.FileInfo, error) {
 	return nil, ErrUnmounted
 }
 
+func (fs UnmountedFS) Lstat(path string) (os.FileInfo, error) {
+	return nil, ErrUnmounted
+}
+
 func (fs UnmountedFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {
 	return ErrUnmounted
 }
@@ -57,7 +61,7 @@ func (fs UnmountedFS) WriteFilePart(path string, offsetStart int64, offsetStop i
 	return nil, ErrUnmounted
 }
 
-func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc) error {
+func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {
 	return ErrUnmounted
 }
 

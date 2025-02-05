@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -62,10 +63,13 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		return pflag.NormalizedName(lowercaseFlagName)
 	})
 
-	// Initialize global config
-	// Can be accessed at config.Config and passed to the ctl API
+	// Initialize global config that can be later accessed through Viper.
 	cmdConfig.InitGlobalFlags(cmd)
 	defer cmdConfig.Cleanup()
+	// WARNING: Configuration in Viper is not set at this point based on user provided flags. This
+	// does not happen until after a command is executed and all configuration is merged together.
+	// To add functionality that should run before all commands that depends on global configuration
+	// this must be added elsewhere, typically globalPersistentPreRunE().
 
 	// Add subcommands
 	cmd.AddCommand(versionCmd)
@@ -122,7 +126,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 func attachPersistentPreRunE(cmd *cobra.Command) {
 	original := cmd.PersistentPreRunE
 	cmd.PersistentPreRunE = func(c *cobra.Command, args []string) error {
-		if err := checkCommand(c); err != nil {
+		if err := globalPersistentPreRunE(c); err != nil {
 			return err
 		}
 		if original != nil {
@@ -132,9 +136,19 @@ func attachPersistentPreRunE(cmd *cobra.Command) {
 	}
 }
 
-// checkCommand() implements any checks that should run for all commands after all configuration is
-// known and the only thing remaining is to execute the command.
-func checkCommand(cmd *cobra.Command) error {
+// globalPersistentPreRunE() implements any functionality that should run before all commands after
+// all configuration is known and the only thing remaining is to execute the command.
+func globalPersistentPreRunE(cmd *cobra.Command) error {
+	// Enable performance profiling via pprof if requested:
+	if viper.GetString(config.PprofAddress) != "" {
+		go func() {
+			err := http.ListenAndServe(viper.GetString(config.PprofAddress), nil)
+			if err != nil {
+				panic("unable to setup pprof HTTP server: " + err.Error())
+			}
+		}()
+	}
+	// Global configuration checks:
 	if viper.GetInt(config.NumWorkersKey) < 1 {
 		return fmt.Errorf("the number of workers must be at least 1")
 	}
