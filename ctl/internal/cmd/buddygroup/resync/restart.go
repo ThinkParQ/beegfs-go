@@ -30,7 +30,7 @@ This mode is not supported with metadata targets because metadata targets must a
 	cmd.Flags().Int64Var(&cfg.timestampSec, "timestamp", -1,
 		"Override last buddy communication timestamp with a specific Unix timestamp (storage targets only).")
 	cmd.Flags().DurationVar(&cfg.timespan, "timespan", -1*time.Second,
-		"Resync entries modified in the given timespan, for example 1d for the last day or 1h for the last hour (storage targets only).")
+		"Resync entries modified in the given timespan, for example 24h for the last day or 1h for the last hour (storage targets only).")
 
 	cmd.MarkFlagsMutuallyExclusive("timestamp", "timespan")
 	cmd.MarkFlagsOneRequired("timestamp", "timespan")

@@ -65,7 +65,7 @@ func printMetaResults(result msg.GetMetaResyncStatsResp) {
 	fmt.Println("\nDiscovery Results")
 	fmt.Println("-----------------")
 	fmt.Printf("Directories Discovered: %d\n", result.DiscoveredDirs)
-	fmt.Printf("Files Discovered: %d\n", result.GatherErrors)
+	fmt.Printf("Discovery Errors: %d\n", result.GatherErrors)
 
 	fmt.Println("\nSync Results")
 	fmt.Println("------------")
