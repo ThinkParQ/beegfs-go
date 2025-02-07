@@ -33,6 +33,7 @@ type Mappings struct {
 	StoragePoolToConfig         Mapper[pool.GetStoragePools_Result]
 	MetaBuddyGroupToPrimaryNode Mapper[beegfs.EntityIdSet]
 	StorageTargetsToBuddyGroup  Mapper[beegfs.EntityIdSet]
+	MirroredTargetToPrimary     Mapper[beegfs.EntityIdSet]
 	RstIdToConfig               map[uint32]*flex.RemoteStorageTarget
 }
 
@@ -78,6 +79,8 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 	if err != nil {
 		return mappings, err
 	}
+
+	mappings.MirroredTargetToPrimary = MapMirroredTargetToPrimary(buddyMirrors)
 
 	// RST Mappings. Initialized last so if there is an error the caller can choose to ignore it and
 	// still use the other mappings.
@@ -325,6 +328,28 @@ func MapStorageTargetsToBuddyGroup(buddyMirrors []buddygroup.GetBuddyGroups_Resu
 		buddyMapper.byLegacyID[m.SecondaryTarget.LegacyId] = m.BuddyGroup
 	}
 	return buddyMapper, nil
+}
+
+func MapMirroredTargetToPrimary(buddyMirrors []buddygroup.GetBuddyGroups_Result) Mapper[beegfs.EntityIdSet] {
+	var buddyMapper = Mapper[beegfs.EntityIdSet]{}
+	buddyMapper.byUID = make(map[beegfs.Uid]beegfs.EntityIdSet)
+	buddyMapper.byAlias = make(map[beegfs.Alias]beegfs.EntityIdSet)
+	buddyMapper.byLegacyID = make(map[beegfs.LegacyId]beegfs.EntityIdSet)
+
+	for _, m := range buddyMirrors {
+		primary := beegfs.EntityIdSet{
+			Uid:      m.PrimaryTarget.Uid,
+			LegacyId: m.PrimaryTarget.LegacyId,
+			Alias:    m.PrimaryTarget.Alias,
+		}
+		buddyMapper.byUID[m.PrimaryTarget.Uid] = primary
+		buddyMapper.byAlias[m.PrimaryTarget.Alias] = primary
+		buddyMapper.byLegacyID[m.PrimaryTarget.LegacyId] = primary
+		buddyMapper.byUID[m.SecondaryTarget.Uid] = primary
+		buddyMapper.byAlias[m.SecondaryTarget.Alias] = primary
+		buddyMapper.byLegacyID[m.SecondaryTarget.LegacyId] = primary
+	}
+	return buddyMapper
 }
 
 // Map RST IDs to the full configuration details of that RST. We don't use a Mapper here and just

@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -184,17 +185,45 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 		syncState := "Healthy"
 		if t.ConsistencyState != target.ConsistencyGood {
 			syncState = "Unknown"
-			if t.NodeType == beegfs.Meta {
-				if resp, err := resync.GetMetaResyncStats(ctx, t.Target); err != nil {
-					logger.Debug("error getting resync job state", zap.Error(err))
+			mappings, err := util.GetMappings(ctx)
+			if err != nil {
+				logger.Debug("unable to determine resync job state because there was an error getting entity mappings", zap.Error(err))
+			} else {
+				// Resync stats should be determined from the node that owns the primary target.
+				primary, err := mappings.MirroredTargetToPrimary.Get(t.Target.Uid)
+				if err != nil {
+					logger.Debug("unable to map secondary target to primary target", zap.Any("target", t.Target), zap.Error(err))
 				} else {
-					syncState = resp.State.String()
-				}
-			} else if t.NodeType == beegfs.Storage {
-				if resp, err := resync.GetStorageResyncStats(ctx, t.Target); err != nil {
-					logger.Debug("error getting resync job state", zap.Error(err))
-				} else {
-					syncState = resp.State.String()
+					if t.NodeType == beegfs.Meta {
+						if resp, err := resync.GetMetaResyncStats(ctx, primary); err != nil {
+							logger.Debug("error getting resync job state", zap.Error(err))
+						} else {
+							// Ensure the resync stats are from an active/current resync, not
+							// leftover from some historical resync. The end time will be zero if a
+							// resync is active. Note if someone were to be actively watching this
+							// command there may be a brief period where either (1) the consistency
+							// is needs-resync but the sync state is success (observed), or (2)
+							// where the sync state is unknown even though the resync was successful
+							// (in theory). But in all cases we should always only display the sync
+							// state for the current sync.
+							if resp.EndTime == 0 {
+								syncState = resp.State.String()
+							} else {
+								syncState = "Not-started"
+							}
+						}
+					} else if t.NodeType == beegfs.Storage {
+						if resp, err := resync.GetStorageResyncStats(ctx, primary); err != nil {
+							logger.Debug("error getting resync job state", zap.Error(err))
+						} else {
+							if resp.EndTime == 0 {
+								syncState = resp.State.String()
+							} else {
+								syncState = "Not-started"
+							}
+						}
+					}
+
 				}
 			}
 		}

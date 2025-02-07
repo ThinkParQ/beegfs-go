@@ -60,7 +60,9 @@ func printMetaResults(result msg.GetMetaResyncStatsResp) {
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
 	fmt.Printf("Start Time: %s\n", time.Unix(int64(result.StartTime), 0).Format(time.RFC3339))
-	fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	if result.EndTime != 0 {
+		fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	}
 
 	fmt.Println("\nDiscovery Results")
 	fmt.Println("-----------------")
@@ -94,7 +96,9 @@ func printStorageResults(result msg.GetStorageResyncStatsResp) {
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
 	fmt.Printf("Start Time: %s\n", time.Unix(int64(result.StartTime), 0).Format(time.RFC3339))
-	fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	if result.EndTime != 0 {
+		fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	}
 
 	fmt.Println("\nDiscovery Results")
 	fmt.Println("-----------------")

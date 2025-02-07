@@ -37,6 +37,7 @@ nfpms:
     formats:
       - rpm
       - deb
+    epoch: "20"
     scripts:
       preinstall: ./build/preinstall.sh
       postinstall: ./build/postinstall.sh

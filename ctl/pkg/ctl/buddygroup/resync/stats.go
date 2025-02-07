@@ -12,7 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 )
 
-// Retrieves resync statistics for metadata targets.
+// Retrieves resync statistics for metadata targets. Should be used with the primary target.
 func GetMetaResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (msg.GetMetaResyncStatsResp, error) {
 	node, target, err := getNode(ctx, pTarget)
 	if err != nil {
@@ -33,7 +33,7 @@ func GetMetaResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (msg.Ge
 	return resp, err
 }
 
-// Retrieves resync statistics for storage targets.
+// Retrieves resync statistics for storage targets. Should be used with the primary target.
 func GetStorageResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (msg.GetStorageResyncStatsResp, error) {
 	node, target, err := getNode(ctx, pTarget)
 	if err != nil {
