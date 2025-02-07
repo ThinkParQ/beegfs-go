@@ -6,7 +6,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     container:
-      image: golang:1.23.5
+      image: golang:1.23.6
       options: --user 1001
     steps:
       - name: Checkout
