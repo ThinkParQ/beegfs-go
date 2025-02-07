@@ -254,8 +254,8 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 	}
 
 	tbl := cmdfmt.NewPrintomatic(
-		[]string{"id", "type", "pool", "space", "inode"},
-		[]string{"id", "type", "pool", "space", "inode"},
+		[]string{"name", "id", "type", "pool", "space", "inode"},
+		[]string{"name", "id", "type", "pool", "space", "inode"},
 	)
 
 	for {
@@ -300,10 +300,15 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			return err
 		}
 
+		name, err := idToName(*limits.QuotaId, idTypeStr)
+		if err != nil {
+			return err
+		}
+
 		if viper.GetBool(config.DebugKey) {
-			tbl.AddItem(*limits.QuotaId, idTypeStr, pool.String(), space, inode)
+			tbl.AddItem(name, *limits.QuotaId, idTypeStr, pool.String(), space, inode)
 		} else {
-			tbl.AddItem(*limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
+			tbl.AddItem(name, *limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
 
 	}
@@ -378,8 +383,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	refreshPeriod := "?"
 
 	tbl := cmdfmt.NewPrintomatic(
-		[]string{"id", "type", "pool", "space", "inode"},
-		[]string{"id", "type", "pool", "space", "inode"},
+		[]string{"name", "id", "type", "pool", "space", "inode"},
+		[]string{"name", "id", "type", "pool", "space", "inode"},
 	)
 
 	for {
@@ -465,10 +470,15 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 			return err
 		}
 
+		name, err := idToName(*entry.QuotaId, idTypeStr)
+		if err != nil {
+			return err
+		}
+
 		if viper.GetBool(config.DebugKey) {
-			tbl.AddItem(*entry.QuotaId, idTypeStr, pool.String(), space, inode)
+			tbl.AddItem(name, *entry.QuotaId, idTypeStr, pool.String(), space, inode)
 		} else {
-			tbl.AddItem(*entry.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
+			tbl.AddItem(name, *entry.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
 	}
 
@@ -612,4 +622,25 @@ func getCurrentGroupIds() ([]uint32, error) {
 	}
 
 	return gids, nil
+}
+
+// converts a user or group ID to its corresponding username or groupname
+// Fetched from the operating system's user and group database. If not found returns the ID as string.
+func idToName(id uint32, idType string) (string, error) {
+	switch idType {
+	case "user":
+		userName, err := user.LookupId(strconv.Itoa(int(id)))
+		if err == nil {
+			return userName.Username, nil
+		}
+	case "group":
+		groupName, err := user.LookupGroupId(strconv.Itoa(int(id)))
+		if err == nil {
+			return groupName.Name, nil
+		}
+	default:
+		return "", fmt.Errorf("invalid idType: %s", idType)
+	}
+
+	return fmt.Sprintf("%d", id), nil
 }
