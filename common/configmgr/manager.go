@@ -318,10 +318,14 @@ func (cm *ConfigManager) updateConfiguration() error {
 
 	// Optionally handle decoding custom formats.
 	// Adapted from: https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/.
-	var decoderOpts []viper.DecoderConfigOption
-	for _, hookFunc := range cm.decodeHookFuncs {
-		decoderOpts = append(decoderOpts, viper.DecodeHook(hookFunc))
+	decodeHooks := []mapstructure.DecodeHookFunc{
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
 	}
+	for _, hookFunc := range cm.decodeHookFuncs {
+		decodeHooks = append(decodeHooks, hookFunc)
+	}
+	decodeOpts := viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(decodeHooks...))
 
 	// The use of "UnmarshalExact" below enables strict decoding rules and will return an error on
 	// any keys in the configuration that don't map to fields in the application defined newConfig.
@@ -337,7 +341,7 @@ func (cm *ConfigManager) updateConfiguration() error {
 	// Get everything out of the second Viper store and unmarshall it into a new empty instance of
 	// the configurable using decoderOpts if provided.
 	newConfig := cm.currentConfig.NewEmptyInstance()
-	if err := v2.UnmarshalExact(newConfig, decoderOpts...); err != nil {
+	if err := v2.UnmarshalExact(newConfig, decodeOpts); err != nil {
 		return fmt.Errorf("rejecting configuration update: unable to parse configuration (check if the configuration valid): %w", err)
 	}
 
