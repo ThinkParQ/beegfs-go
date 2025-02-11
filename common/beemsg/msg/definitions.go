@@ -20,15 +20,34 @@ func (m *AuthenticateChannel) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.AuthSecret)
 }
 
-type HeartbeatRequest struct {
-}
+type HeartbeatRequest struct{}
 
 func (m *HeartbeatRequest) MsgId() uint16 {
 	return 1019
 }
 
-func (m *HeartbeatRequest) Serialize(s *beeserde.Serializer) {
+func (m *HeartbeatRequest) Serialize(s *beeserde.Serializer) {}
+
+func (m *HeartbeatRequest) Deserialize(d *beeserde.Deserializer) {}
+
+type GenericDebug struct {
+	Command []byte
 }
 
-func (m *HeartbeatRequest) Deserialize(d *beeserde.Deserializer) {
+func (m *GenericDebug) MsgId() uint16 {
+	return 1029
+}
+func (m *GenericDebug) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeCStr(s, m.Command, 1)
+}
+
+type GenericDebugResp struct {
+	Response []byte
+}
+
+func (m *GenericDebugResp) MsgId() uint16 {
+	return 1030
+}
+func (m *GenericDebugResp) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeCStr(d, &m.Response, 1)
 }

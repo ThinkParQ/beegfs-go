@@ -15,6 +15,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/benchmark"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/copy"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/debug"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/entry"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/health"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/index"
@@ -86,6 +87,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(benchmark.NewBenchmarkCmd())
 	cmd.AddCommand(index.NewCmd())
 	cmd.AddCommand(copy.NewCopyCmd())
+	cmd.AddCommand(debug.NewCmd())
 
 	// This must run AFTER all commands are added.
 	for _, child := range cmd.Commands() {
