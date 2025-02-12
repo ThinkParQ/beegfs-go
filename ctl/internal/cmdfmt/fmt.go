@@ -86,6 +86,13 @@ func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOp
 		outputType = config.OutputNDJSON
 	}
 
+	for i := range columns {
+		columns[i] = strings.ReplaceAll(columns[i], " ", "_")
+	}
+	for i := range printCols {
+		printCols[i] = strings.ReplaceAll(printCols[i], " ", "_")
+	}
+
 	p := Printomatic{
 		columns:    columns,
 		printCols:  printCols,
