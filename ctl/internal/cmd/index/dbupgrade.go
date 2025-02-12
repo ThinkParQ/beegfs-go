@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const dbUpgradeCmd = "db-upgrade"
+const dbUpgradeCmd = "db"
 
 func newGenericUpgradeCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -27,41 +27,36 @@ func newGenericUpgradeCmd() *cobra.Command {
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("index-path", "I",
-			"Index directory path [default: IndexEnv.conf]", "-I", ""),
-		bflag.Flag("db-version", "T",
-			"Upgrade/Downgrade database schema to the target Hive Index database version", "-T", 0),
-		bflag.Flag("backup", "b",
-			"Backup database files while upgrading/downgrading database schema", "-b", false),
-		bflag.Flag("delete", "d",
-			"Delete backup database files recursively from index directory path", "-d", false),
-		bflag.Flag("restore", "r",
-			"Restore backup database files recursively from index directory path", "-r", false),
+		bflag.Flag("index-path", "I", "BeeGFS Index directory path", "-I", ""),
+		bflag.Flag("db-version", "T", "BeeGFS Hive index database upgrade to version", "-T", ""),
+		bflag.Flag("upgrade", "U", "BeeGFS Hive Index database upgrade", "-U", false),
+		bflag.Flag("downgrade", "D", "BeeGFS Hive Index database downgrade", "-D", false),
+		bflag.Flag("backup", "b", "Backup Hive index database files before upgrading, allowing restoration if needed.", "-b", false),
+		bflag.Flag("delete", "d", "Delete previously backed up database files from index directory tree", "-d", false),
+		bflag.Flag("restore", "r", "Restore Backup database files from index directory tree", "-r", false),
+		bflag.Flag("version", "v", "Prints BeeGFS Hive Index database version", "-v", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
-	err := cmd.MarkFlagRequired("db-version")
-	if err != nil {
-		fmt.Println(err)
-		return nil
-	}
 
 	return cmd
 }
 
 func newUpgradeCmd() *cobra.Command {
 	s := newGenericUpgradeCmd()
-	s.Use = "db-upgrade"
+	s.Use = "db"
 	s.Short = "Upgrades or downgrades the BeeGFS Hive index database schema."
 
 	s.Long = `Upgrade or downgrade the BeeGFS Hive Index database schema to a specified version.
 
-This utility allows for updating the BeeGFS Hive Index database schema to a particular version, 
-using SQL scripts. Only root users can perform schema upgrades. By default, SQL script configurations 
-are located in "/opt/beegfs/db." If multiple SQL scripts are found in the script directory, the utility 
-sorts them in ascending order and executes each in sequence on the database files.
-
-Example: Upgrade the database to version "2" with a backup prior to the update:
-# beegfs index db-upgrade --db-version "2" --index-path /mnt/index --backup
+The BeeGFS Hive Index database upgrade utility updates the database schema while
+preserving existing data, ensuring compatibility with the latest index database version.
+Example:
+Get current BeeGFS Hive Index database version:
+# beegfs index db -v
+Upgrade to latest BeeGFS Hive Index database version:
+# beegfs index db -U -b
+Upgrade to BeeGFS Hive Index specific database version 3:
+# beegfs index db -U -b -T 3
 `
 	return s
 }
