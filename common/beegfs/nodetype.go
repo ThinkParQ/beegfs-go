@@ -28,19 +28,18 @@ func NodeTypeFromString(input string) NodeType {
 		return InvalidNodeType
 	}
 
+	// To avoid ambiguity with metadata, specifying management requires at least 2 characters.
+	if len(input) >= 2 &&
+		(strings.HasPrefix("management", input) || strings.HasPrefix("mgmtd", input)) {
+		return Management
+	}
+
 	if strings.HasPrefix("client", input) {
 		return Client
 	} else if strings.HasPrefix("storage", input) {
 		return Storage
-	}
-
-	// To avoid ambiguity, for common first characters, we require minimum length of 2 here
-	if len(input) >= 2 {
-		if strings.HasPrefix("meta", input) {
-			return Meta
-		} else if strings.HasPrefix("management", input) || strings.HasPrefix("mgmtd", input) {
-			return Management
-		}
+	} else if strings.HasPrefix("metadata", input) {
+		return Meta
 	}
 
 	return InvalidNodeType
