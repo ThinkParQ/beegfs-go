@@ -139,7 +139,7 @@ func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg,
 	// The table is only used for printing verbose output and tbl.PrintRemaining() is only called at
 	// the end when running in verbose mode (to avoid the headers printing out). If this is ever
 	// used to print other output adjust how/where tbl.PrintRemaining() is called as needed.
-	allColumns := []string{"path", "status", "configuration updates"}
+	allColumns := []string{"path", "status", "configuration_updates"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	count := 0

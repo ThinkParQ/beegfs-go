@@ -78,8 +78,8 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	if err != nil {
 		return err
 	}
-	defaultColumns := []string{"path", "entry id", "type", "meta node", "meta mirror", "storage pool", "stripe pattern", "storage targets", "buddy groups", "remote targets", "cool down"}
-	allColumns := append(defaultColumns, "client sessions", "data_state")
+	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "buddy_groups", "remote_targets", "cool_down"}
+	allColumns := append(defaultColumns, "client_sessions", "data_state")
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {

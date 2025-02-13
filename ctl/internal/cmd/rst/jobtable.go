@@ -70,10 +70,10 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 	// anywhere that has overridden the default columns with withDefaultColumns.
 	//
 	// The full set of fields related to a particular job, not including work requests and results.
-	allJobColumns := []string{"ok", "path", "target", "job created", "job updated", "start file mtime", "end file mtime", "job id", "request type", "state", "status message", ""}
+	allJobColumns := []string{"ok", "path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", ""}
 	// All fields for this job and its work requests and results. Information for a particular job
 	// will generally need to be printed using multiple rows.
-	allJobAndWorkColumns := []string{"ok", "path", "target", "job created", "job updated", "start file mtime", "end file mtime", "job id", "request type", "state", "status message", "work requests", "work results", ""}
+	allJobAndWorkColumns := []string{"ok", "path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", "work_requests", "work_results", ""}
 
 	if viper.GetBool(config.DebugKey) {
 		cfg.defaultJobColumns = allJobAndWorkColumns

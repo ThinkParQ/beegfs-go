@@ -117,7 +117,7 @@ WARNING: Directories created using this mode do not trigger file system modifica
 
 func PrintCreateEntryResult(entries []entry.CreateEntryResult) error {
 
-	columns := []string{"name", "status", "entry id", "type"}
+	columns := []string{"name", "status", "entry_id", "type"}
 	tbl := cmdfmt.NewPrintomatic(columns, columns)
 	anyErrors := false
 

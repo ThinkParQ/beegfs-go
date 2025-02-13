@@ -40,7 +40,7 @@ func runEntryDisposalCmd(cmd *cobra.Command, frontendCfg entryDisposalCfg, backe
 		return err
 	}
 
-	allColumns := []string{"metadata node", "entry", "disposal result"}
+	allColumns := []string{"metadata_node", "entry", "disposal_result"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	statsDisposedFiles := 0
 	statsTotalFiles := 0

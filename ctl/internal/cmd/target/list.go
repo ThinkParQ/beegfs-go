@@ -56,16 +56,16 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 
 	logger, _ := config.GetLogger()
 
-	allColumns := []string{"uid", "id", "alias", "on node", "pool", "reachability", "last contact", "consistency", "sync state", "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
-	defaultColumns := []string{"id", "alias", "on node", "pool"}
+	allColumns := []string{"uid", "id", "alias", "on_node", "pool", "reachability", "last_contact", "consistency", "sync_state", "cap_pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
+	defaultColumns := []string{"id", "alias", "on_node", "pool"}
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
 	} else {
 		if cfg.State {
-			defaultColumns = append(defaultColumns, "reachability", "last contact", "consistency", "sync state")
+			defaultColumns = append(defaultColumns, "reachability", "last_contact", "consistency", "sync_state")
 		}
 		if cfg.Capacity {
-			defaultColumns = append(defaultColumns, "cap pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
+			defaultColumns = append(defaultColumns, "cap_pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
 		}
 	}
 
