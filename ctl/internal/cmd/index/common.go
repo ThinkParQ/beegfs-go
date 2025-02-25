@@ -37,7 +37,7 @@ var commonIndexFlags = []bflag.FlagWrapper{
 
 func checkBeeGFSConfig() error {
 	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		return fmt.Errorf("to use this mode first install the beegfs-hive-index package")
+		return fmt.Errorf("BeeGFS Hive Index mode requires the 'beegfs-hive-index' package to be installed")
 	}
 
 	requiredConfigs := []string{indexConfig, indexEnv}
