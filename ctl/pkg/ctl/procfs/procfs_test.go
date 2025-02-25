@@ -113,19 +113,19 @@ mds3 [ID: 1]
 }
 
 func TestParseMounts(t *testing.T) {
-
 	tests := []struct {
-		input    string
-		expected map[string]MountPoint
+		input      string
+		expected   map[string]MountPoint
+		expFsPaths []string
 	}{
 		{
 			input: `
-binfmt_misc /proc/sys/fs/binfmt_misc binfmt_misc rw,nosuid,nodev,noexec,relatime 0 0
-tmpfs /run/snapd/ns tmpfs rw,nosuid,nodev,noexec,relatime,size=1016744k,mode=755,inode64 0 0
-beegfs_nodev /mnt/beegfs beegfs rw,relatime,cfgFile=/etc/beegfs/beegfs-client.conf 0 0
-nsfs /run/snapd/ns/lxd.mnt nsfs rw 0 0
-tmpfs /run/user/1000 tmpfs rw,nosuid,nodev,relatime,size=1016740k,nr_inodes=254185,mode=700,uid=1000,gid=1000,inode64 0 0		
-beegfs_nodev /mnt/2beegfs beegfs ro,cfgFile=/etc/beegfs/2beegfs-client.conf 0 0
+	binfmt_misc /proc/sys/fs/binfmt_misc binfmt_misc rw,nosuid,nodev,noexec,relatime 0 0
+	tmpfs /run/snapd/ns tmpfs rw,nosuid,nodev,noexec,relatime,size=1016744k,mode=755,inode64 0 0
+	beegfs_nodev /mnt/beegfs beegfs rw,relatime,cfgFile=/etc/beegfs/beegfs-client.conf 0 0
+	nsfs /run/snapd/ns/lxd.mnt nsfs rw 0 0
+	tmpfs /run/user/1000 tmpfs rw,nosuid,nodev,relatime,size=1016740k,nr_inodes=254185,mode=700,uid=1000,gid=1000,inode64 0 0		
+	beegfs_nodev /mnt/2beegfs beegfs ro,cfgFile=/etc/beegfs/2beegfs-client.conf 0 0
 			`,
 			expected: map[string]MountPoint{
 				"/etc/beegfs/beegfs-client.conf": {
@@ -144,12 +144,14 @@ beegfs_nodev /mnt/2beegfs beegfs ro,cfgFile=/etc/beegfs/2beegfs-client.conf 0 0
 					},
 				},
 			},
+			expFsPaths: []string{"beegfs"},
 		},
 	}
 
 	for _, test := range tests {
-		nodes, err := parseMounts(strings.NewReader(test.input))
+		nodes, fsPaths, err := parseMounts(strings.NewReader(test.input))
 		assert.NoError(t, err)
 		assert.Equal(t, test.expected, nodes)
+		assert.ElementsMatch(t, test.expFsPaths, fsPaths)
 	}
 }
