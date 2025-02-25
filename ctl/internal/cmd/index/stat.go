@@ -75,7 +75,12 @@ func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
 	allArgs = append(allArgs, statCmd)
 	allArgs = append(allArgs, wrappedArgs...)
 	allArgs = append(allArgs, path)
-	log.Debug("running index stat", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index stat command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("statCmd", statCmd),
+		zap.String("path", path),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

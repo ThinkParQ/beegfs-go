@@ -89,11 +89,17 @@ $ beegfs index ls /mnt/index
 func runPythonLsIndex(bflagSet *bflag.FlagSet, path string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+1)
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, lsCmd, path)
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("running index ls", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index ls command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("lsCmd", lsCmd),
+		zap.String("path", path),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
+
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()

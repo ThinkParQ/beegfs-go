@@ -57,7 +57,11 @@ func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
 	allArgs = append(allArgs, createCmd)
 	allArgs = append(allArgs, wrappedArgs...)
 	allArgs = append(allArgs, "-k")
-	log.Debug("running index create", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index create command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("createCmd", createCmd),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

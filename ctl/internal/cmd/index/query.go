@@ -57,7 +57,11 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	allArgs := make([]string, 0, len(wrappedArgs)+1)
 	allArgs = append(allArgs, queryCmd)
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("running index query", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index query command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("queryCmd", queryCmd),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

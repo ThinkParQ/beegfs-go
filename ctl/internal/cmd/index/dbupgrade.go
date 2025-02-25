@@ -69,10 +69,15 @@ Example: Upgrade the database to version "2" with a backup prior to the update:
 func runPythonUpgradeIndex(bflagSet *bflag.FlagSet) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
+	allArgs := make([]string, 0, len(wrappedArgs)+3)
 	allArgs = append(allArgs, dbUpgradeCmd, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("running index db", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index db command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("dbUpgradeCmd", dbUpgradeCmd),
+		zap.Int("numWorkers", viper.GetInt(config.NumWorkersKey)),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

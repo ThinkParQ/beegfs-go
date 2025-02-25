@@ -109,7 +109,12 @@ func runPythonFindIndex(bflagSet *bflag.FlagSet, path string) error {
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, findCmd, path)
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("running index find", zap.Any("args", allArgs))
+	log.Debug("Running BeeGFS Hive Index find command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("findCmd", findCmd),
+		zap.String("path", path),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

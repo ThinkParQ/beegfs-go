@@ -12,7 +12,6 @@ const (
 	beeBinary   = "/usr/bin/bee"
 	indexConfig = "/etc/beegfs/index/config"
 	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
-	updateEnv   = "/etc/beegfs/index/updateEnv.conf"
 )
 
 var path string
@@ -41,7 +40,7 @@ func checkBeeGFSConfig() error {
 		return fmt.Errorf("to use this mode first install the beegfs-hive-index package")
 	}
 
-	requiredConfigs := []string{indexConfig, indexEnv, updateEnv}
+	requiredConfigs := []string{indexConfig, indexEnv}
 	for _, file := range requiredConfigs {
 		if _, err := os.Stat(file); os.IsNotExist(err) {
 			return fmt.Errorf("error: required configuration file %s is"+
