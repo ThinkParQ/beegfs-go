@@ -59,7 +59,7 @@ Known storage node commands:
   - "usedquota <target or pool ID> <"uid"/"gid"> [<forEachTarget>] range <fromID> <toID>": Print information about user (uid) or group (gid) quota utilization on target <targetID> for user/group IDs in range <fromID>-<toID>
   - "setrejectionrate <rate>": Set the node's RDMA connection rejection rate to <rate>. Only for RDMA debugging!
 
-These lists arte not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.`,
+These lists are not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			node, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
