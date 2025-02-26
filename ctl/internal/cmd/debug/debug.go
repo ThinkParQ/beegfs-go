@@ -32,7 +32,6 @@ Known commands for both meta and storage nodes:
   - "net": Print the node's network connections
   - "quotaexceeded <target or pool id> <"uid"/"gid"> <"size"/"inode">": Print users (uid) or groups (gid) that exceeded their size or inode quotas on the given target or pool
   - "liststoragestates": List the node's last known state of all storage nodes
-  - "setrejectionrate <rate>": Set the node's RDMA connection rejection rate to <rate>. Only for RDMA debugging!
 
 Known meta node commands:
   - "listfileappendlocks <parentEntryID> <entryID> [<isBuddyMirrored>]": List all held append locks for entry <entryID> in directory <parentEntryID>
@@ -58,6 +57,7 @@ Known storage node commands:
   - "chunklockstoresize <targetID>": Print the size of target <targetID>'s chunk lock store
   - "chunklockstore <targetID> [<maxEntries>]": Print information about (at most <maxEntries>) entries in target <targetID>'s chunk lock store
   - "usedquota <target or pool ID> <"uid"/"gid"> [<forEachTarget>] range <fromID> <toID>": Print information about user (uid) or group (gid) quota utilization on target <targetID> for user/group IDs in range <fromID>-<toID>
+  - "setrejectionrate <rate>": Set the node's RDMA connection rejection rate to <rate>. Only for RDMA debugging!
 
 These lists arte not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.`,
 		Args: cobra.MinimumNArgs(2),
