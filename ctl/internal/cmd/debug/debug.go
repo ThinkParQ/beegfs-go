@@ -16,6 +16,8 @@ func NewCmd() *cobra.Command {
 		Short:  "Send various debug commands to meta or storage nodes",
 		Long: `Send various debug commands to meta or storage nodes.
 
+THIS MODE IS MEANT FOR DEBUGGING PURPOSES ONLY! IMPROPER USE CAN HAVE UNINTENDED EFFECTS AND EVEN CAUSE DAMAGE TO THE FILE SYSTEM. USE AT YOUR OWN RISK!
+
 Known commands for both meta and storage nodes:
   - "version": Print the node's service release version
   - "msgqueuestats": Print statistics about the node's message queues
@@ -57,8 +59,7 @@ Known storage node commands:
   - "chunklockstore <targetID> [<maxEntries>]": Print information about (at most <maxEntries>) entries in target <targetID>'s chunk lock store
   - "usedquota <target or pool ID> <"uid"/"gid"> [<forEachTarget>] range <fromID> <toID>": Print information about user (uid) or group (gid) quota utilization on target <targetID> for user/group IDs in range <fromID>-<toID>
 
-These lists arte not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.
-Remember this is a debug tool and NOT meant for normal use. Using it might have unintended effects or even damage your file system.`,
+These lists arte not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			node, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
