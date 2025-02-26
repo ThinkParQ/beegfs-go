@@ -16,8 +16,9 @@ func NewCmd() *cobra.Command {
 		Short:  "Send various debug commands to meta or storage nodes",
 		Long: `Send various debug commands to meta or storage nodes.
 
-Known meta node commands: listfileappendlocks, listfileentrylocks, listfilerangelocks, listopenfiles, refstats, cachestats, version, msgqueuestats, listpools, dumpdentry, dumpinode, dumpinlinedinode, writedirdentry, writedirinode, writefileinode
-Known storage node commands: listopenfiles, version, msgqueuestats, resyncqueuelen, chunklockstoresize, chunklockstore, setrejectionrate
+Known commands for both meta and storage nodes: varlogmessages, varlogkernlog, beegfslog, loadavg, dropcaches, getcfg, getloglevel, setloglevel, net, quotaexceeded, liststoragestates
+Known meta node commands: listfileappendlocks, listfileentrylocks, listfilerangelocks, listopenfiles, refstats, cachestats, version, msgqueuestats, listpools, dumpdentry, dumpinode, dumpinlinedinode, writedirdentry, writedirinode, writefileinode, listmetastates, liststoragepools
+Known storage node commands: listopenfiles, version, msgqueuestats, resyncqueuelen, chunklockstoresize, chunklockstore, setrejectionrate, usedquota
 
 These lists might be incomplete or outdated. Some commands might not be available under all circumstances. Some commands require arguments which will usually be pointed to when using the command.
 Remember this is a debug tool and NOT meant for normal use. Using it might have unintended effects or even damage your file system.`,
