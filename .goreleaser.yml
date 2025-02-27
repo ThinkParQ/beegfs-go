@@ -31,8 +31,6 @@ nfpms:
     homepage: https://www.beegfs.io
     maintainer: BeeGFS Maintainers <packages@beegfs.com>
     description: A collection of tools for managing BeeGFS.
-    provides:
-      - beegfs
     license: BeeGFS EULA
     formats:
       - rpm
