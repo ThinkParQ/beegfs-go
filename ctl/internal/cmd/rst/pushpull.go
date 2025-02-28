@@ -48,7 +48,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
-	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
 
@@ -82,7 +82,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
-	cmd.Flags().IntVar(&frontendCfg.width, "width", 35, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
 
