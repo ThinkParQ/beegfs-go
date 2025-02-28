@@ -22,8 +22,7 @@ var (
 )
 
 const (
-	mountProcDir  = "/proc/mounts"
-	beeGFSProcDir = "/proc/fs/beegfs"
+	mountProcDir = "/proc/mounts"
 )
 
 type GetBeeGFSClientsConfig struct {
@@ -70,8 +69,7 @@ type MountPoint struct {
 //     Set cfg.FilterByUUID to an empty string to return all clients.
 //   - If cfg.FilterByMounts is specified, only the client(s) for those mount point(s) are returned.
 func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logger.Logger) ([]Client, error) {
-
-	mounts, err := getBeeGFSMounts()
+	mounts, fsTypes, err := getBeeGFSMounts()
 	if err != nil {
 		log.Warn("unexpected error getting mounted file systems (ignoring)", zap.Error(err))
 	}
@@ -84,25 +82,28 @@ func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logg
 	}
 
 	clients := make([]Client, 0)
-	err = filepath.Walk(beeGFSProcDir, func(path string, info os.FileInfo, err error) error {
-		log := log.With(zap.String("procfsDir", path))
-		if err != nil {
-			log.Warn("unexpected error walking procfs directory (ignoring)", zap.Error(err))
-			return nil
-		}
-		if info.IsDir() && path != beeGFSProcDir {
-			log.Debug("collecting mount info from procfs")
-			mount, err := parseClient(path, mounts)
+	for _, fsType := range fsTypes {
+		procDir := path.Join("/proc/fs", fsType)
+		err = filepath.Walk(procDir, func(path string, info os.FileInfo, err error) error {
+			log := log.With(zap.String("procfsDir", path))
 			if err != nil {
-				log.Warn("unexpected error parsing mount (ignoring)", zap.Error(err))
+				log.Warn("unexpected error walking procfs directory (ignoring)", zap.Error(err))
 				return nil
 			}
-			clients = append(clients, mount)
+			if info.IsDir() && path != procDir {
+				log.Debug("collecting mount info from procfs")
+				mount, err := parseClient(path, mounts)
+				if err != nil {
+					log.Warn("unexpected error parsing mount (ignoring)", zap.Error(err))
+					return nil
+				}
+				clients = append(clients, mount)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	if cfg.FilterByUUID == "" && len(cfg.FilterByMounts) == 0 {
@@ -113,7 +114,6 @@ func GetBeeGFSClients(ctx context.Context, cfg GetBeeGFSClientsConfig, log *logg
 	log.Debug("Applying client filters", zap.Any("UUID", cfg.FilterByUUID), zap.Any("Mount points", cfg.FilterByMounts))
 
 	filteredClients := []Client{}
-
 	mountsFilter := make(map[string]struct{})
 	for _, arg := range cfg.FilterByMounts {
 		mountsFilter[path.Clean(arg)] = struct{}{}
@@ -302,18 +302,18 @@ func parseNodes(input io.Reader) ([]Node, error) {
 	return nodes, nil
 }
 
-func getBeeGFSMounts() (map[string]MountPoint, error) {
+func getBeeGFSMounts() (map[string]MountPoint, []string, error) {
 	file, err := os.Open(mountProcDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	return parseMounts(file)
 }
 
-func parseMounts(input io.Reader) (map[string]MountPoint, error) {
-
+func parseMounts(input io.Reader) (map[string]MountPoint, []string, error) {
 	mounts := map[string]MountPoint{}
+	fsTypesMap := make(map[string]struct{})
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -328,7 +328,8 @@ func parseMounts(input io.Reader) (map[string]MountPoint, error) {
 			continue
 		}
 
-		if fields[2] == "beegfs" {
+		fsType := fields[2]
+		if strings.HasPrefix(fsType, "beegfs") {
 			cfgFile := ""
 			opts := make(map[string]string)
 			for _, config := range strings.Split(fields[3], ",") {
@@ -347,14 +348,22 @@ func parseMounts(input io.Reader) (map[string]MountPoint, error) {
 					Path: path.Clean(fields[1]),
 					Opts: opts,
 				}
+				// Record this BeeGFS type
+				fsTypesMap[fsType] = struct{}{}
 			} else {
-				return nil, fmt.Errorf("invalid BeeGFS mount in %s (no config file): %s", mountProcDir, line)
+				return nil, nil, fmt.Errorf("invalid BeeGFS mount in %s (no config file): %s", mountProcDir, line)
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return mounts, fmt.Errorf("unexpected error while scanning mounts: %w", err)
+		return mounts, nil, fmt.Errorf("unexpected error while scanning mounts: %w", err)
 	}
-	return mounts, nil
+
+	fsTypes := make([]string, 0, len(fsTypesMap))
+	for t := range fsTypesMap {
+		fsTypes = append(fsTypes, t)
+	}
+
+	return mounts, fsTypes, nil
 }
