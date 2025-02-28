@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"go.uber.org/zap"
 )
 
 const statCmd = "stat"
@@ -68,11 +69,18 @@ $ beegfs index stat --beegfs README
 }
 
 func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
+	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, statCmd)
 	allArgs = append(allArgs, wrappedArgs...)
 	allArgs = append(allArgs, path)
+	log.Debug("Running BeeGFS Hive Index stat command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("statCmd", statCmd),
+		zap.String("path", path),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

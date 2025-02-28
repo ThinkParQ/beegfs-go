@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"go.uber.org/zap"
 )
 
 const queryCmd = "query-index"
@@ -50,10 +52,16 @@ beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 }
 
 func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
+	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+1)
 	allArgs = append(allArgs, queryCmd)
 	allArgs = append(allArgs, wrappedArgs...)
+	log.Debug("Running BeeGFS Hive Index query command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("queryCmd", queryCmd),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

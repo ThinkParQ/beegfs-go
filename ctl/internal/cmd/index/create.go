@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"go.uber.org/zap"
 )
 
 const createCmd = "index"
@@ -49,11 +51,17 @@ $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 }
 
 func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
+	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, createCmd)
 	allArgs = append(allArgs, wrappedArgs...)
 	allArgs = append(allArgs, "-k")
+	log.Debug("Running BeeGFS Hive Index create command",
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("createCmd", createCmd),
+		zap.Any("allArgs", allArgs),
+	)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

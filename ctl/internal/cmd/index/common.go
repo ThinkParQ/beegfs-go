@@ -12,7 +12,6 @@ const (
 	beeBinary   = "/usr/bin/bee"
 	indexConfig = "/etc/beegfs/index/config"
 	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
-	updateEnv   = "/etc/beegfs/index/updateEnv.conf"
 )
 
 var path string
@@ -38,23 +37,15 @@ var commonIndexFlags = []bflag.FlagWrapper{
 
 func checkBeeGFSConfig() error {
 	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		//nolint:golint // we want to capitalize BeeGFS in the error string
-		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexConfig)
+		return fmt.Errorf("BeeGFS Hive Index mode requires the 'beegfs-hive-index' package to be installed")
 	}
 
-	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
-		//nolint:golint // we want to capitalize BeeGFS in the error string
-		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexConfig)
-	}
-
-	if _, err := os.Stat(indexEnv); os.IsNotExist(err) {
-		//nolint:golint // we want to capitalize BeeGFS in the error string
-		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", indexEnv)
-	}
-
-	if _, err := os.Stat(updateEnv); os.IsNotExist(err) {
-		//nolint:golint // we want to capitalize BeeGFS in the error string
-		return fmt.Errorf("BeeGFS Hive Index is not configured: %s not found", updateEnv)
+	requiredConfigs := []string{indexConfig, indexEnv}
+	for _, file := range requiredConfigs {
+		if _, err := os.Stat(file); os.IsNotExist(err) {
+			return fmt.Errorf("error: required configuration file %s is"+
+				" missing. Verify that beegfs-hive-index is properly installed and configured", file)
+		}
 	}
 
 	return nil
