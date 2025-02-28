@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 
+	"github.com/mitchellh/go-wordwrap"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -29,6 +31,17 @@ import (
 	cmdConfig "github.com/thinkparq/beegfs-go/ctl/internal/config"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"golang.org/x/term"
+)
+
+const (
+	helpMinTermWidth = 80
+	helpMaxTermWidth = 150
+)
+
+var (
+	helpBulletRegex = regexp.MustCompile(`^\s*([-*•]\s+|\d+\.\s+)`)
+	paragraphRegex  = regexp.MustCompile("\n\n+")
 )
 
 // Main entry point of the tool
@@ -41,7 +54,7 @@ func Execute() int {
 	cmd := &cobra.Command{
 		Use:   BinaryName,
 		Short: "The BeeGFS command line control tool",
-		Long: fmt.Sprintf(`%s
+		Long: fmt.Sprintf(`%s\
 %s
 This tool allows you to inspect, configure, and monitor BeeGFS.
 
@@ -93,7 +106,10 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	wrapAllCommands(cmd)
 
 	// Override the help template to allow the output to be customized including skipping printing
-	// persistent (global) flags so they are only printed for the root "beegfs" command.
+	// persistent (global) flags so they are only printed for the root "beegfs" command and wrapping
+	// long help text and arguments automatically.
+	cobra.AddTemplateFunc("wrapFlagUsages", wrapFlagUsages)
+	cobra.AddTemplateFunc("wrapHelpText", wrapHelpText)
 	cmd.SetHelpTemplate(helpTemplate)
 
 	// By default there is no explicit signal handler and the Go runtime will immediately terminate
@@ -201,7 +217,12 @@ func isCommandAuthorized(cmd *cobra.Command) error {
 	return nil
 }
 
-var helpTemplate = fmt.Sprintf(`{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}{{end}}
+// Cobra does not directly support automatically wrapping flags with long descriptions but instead
+// recommends this approach: https://github.com/spf13/cobra/issues/1805#issuecomment-1246192724
+// https://github.com/vmware-tanzu/community-edition/blob/138acbf49d492815d7f72055db0186c43888ae15/cli/cmd/plugin/unmanaged-cluster/cmd/utils.go#L74-L113
+// We follow a similar approach defining our own custom template functions so we can control the
+// width of flags and other text in the help output of each command.
+var helpTemplate = fmt.Sprintf(`{{with (or .Long .Short)}}{{wrapHelpText . | trimTrailingWhitespaces}}{{end}}
 
 Usage:{{if .Runnable}}
   {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
@@ -227,13 +248,13 @@ Global Flags:
 {{ else }}
 Flags:
 {{end}}
-{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
+{{wrapFlagUsages .LocalFlags | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
 {{if (eq .Name "beegfs")}}
-Global flags also apply to all sub-commands and can be set persistently using environment variables:
+Global flags apply to all commands and can be persisted using the environment:
 
   export BEEGFS_MGMTD_ADDR=hostname:port
 
-To persist configuration across sessions/reboots set it in your .bashrc file or similar.
+To persist across sessions/reboots set it in your .bashrc file or similar.
 
 Exit Codes:
 
@@ -244,3 +265,157 @@ Exit Codes:
 See "beegfs help" for a list of global flags that also apply to this command.
 {{end}}
 `, util.Success, util.Success, util.GeneralError, util.GeneralError, util.PartialSuccess, util.PartialSuccess)
+
+// getTermWidthForHelp attempts to determine the width of the terminal, falling back to
+// helpMinTermWidth if there is an error (i.e., stdout is not a terminal). It also enforces a
+// helpMaxTermWidth and helpMinTermWidth to ensure readability.
+func getTermWidthForHelp() int {
+	termWidth, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return helpMinTermWidth
+	}
+	if termWidth > helpMaxTermWidth {
+		return helpMaxTermWidth
+	} else if termWidth < helpMinTermWidth {
+		return helpMinTermWidth
+	}
+	return termWidth
+}
+
+// getParagraphsForHelp() allows help text to be defined using markdown like formatting where line
+// breaks can be inserted anywhere to help code readability that are ignored when rendering. It
+// preserve line breaks when typically desired, for example when items are specified as a list, or
+// for indented example that should be rendered exactly as specified. See below for details.
+func getParagraphsForHelp(input string) []string {
+	paragraphs := paragraphRegex.Split(input, -1)
+	for i, paragraph := range paragraphs {
+
+		lines := strings.Split(paragraph, "\n")
+		for i := range lines {
+			// We don't want to trim leading spaces as they are needed to preserve indentation.
+			// However trailing spaces should not need to be preserved and make the result ugly.
+			lines[i] = strings.TrimRight(lines[i], " ")
+		}
+
+		if helpBulletRegex.MatchString(strings.TrimSpace(lines[0])) {
+			// Handle bullet blocks:
+			paragraphs[i] = mergeBulletsForHelp(lines)
+		} else if strings.HasSuffix(lines[0], ":") {
+			// Handle header blocks.
+			var adjustedLines []string
+			// Keep the header:
+			adjustedLines = append(adjustedLines, lines[0])
+			if len(lines) > 1 {
+				if helpBulletRegex.MatchString(strings.TrimSpace(lines[1])) {
+					// If its a bullet block merge each bullet maintaining newlines between bullets.
+					// Handle if this is a bullet block:
+					bulletParagraph := mergeBulletsForHelp(lines[1:])
+					adjustedLines = append(adjustedLines, bulletParagraph)
+				} else {
+					// Handle if its a normal paragraph block, placing it right after the header:
+					adjustedLines = append(adjustedLines, strings.Join(lines[1:], " "))
+				}
+			}
+			paragraphs[i] = strings.Join(adjustedLines, "\n")
+		} else if strings.HasPrefix(lines[0], " ") {
+			// Handle code/example blocks indicated by indentation:
+			paragraphs[i] = strings.Join(lines, "\n")
+		} else if strings.HasSuffix(lines[0], "\\") {
+			// Handle preserving line breaks when lines end in a backslash:
+			lines[0] = strings.TrimSuffix(lines[0], "\\")
+			paragraphs[i] = strings.Join(lines, "\n")
+		} else {
+			// Otherwise collapse the block into a single line with spaces:
+			paragraphs[i] = strings.Join(lines, " ")
+		}
+	}
+	return paragraphs
+}
+
+// mergeBulletsForHelp allows bullets to be specified using line breaks for readability that are
+// merged while maintaining new line between each bullet.
+func mergeBulletsForHelp(lines []string) string {
+	var bulletLines []string
+	var currentBullet string
+
+	for _, line := range lines {
+		if helpBulletRegex.MatchString(strings.TrimSpace(line)) {
+			// If we were collecting a previous bullet, add it to the list
+			if currentBullet != "" {
+				bulletLines = append(bulletLines, currentBullet)
+			}
+			// Start a new bullet, keeping its original indentation
+			currentBullet = line
+		} else {
+			// If this line is NOT a new bullet, append it to the current bullet
+			currentBullet += " " + strings.TrimSpace(line)
+		}
+	}
+	// Add the last bullet to the list (if one exists)
+	if currentBullet != "" {
+		bulletLines = append(bulletLines, currentBullet)
+	}
+	// Join bullets together maintaining newlines between bullets.
+	return strings.Join(bulletLines, "\n")
+}
+
+// wrapFlagUsages allows flag usage to be defined using markdown like formatting where line breaks
+// and tabs can be inserted anywhere to help code readability that are then ignored when rendering.
+// Ignoring tabs is helpful so help text can be defined without having to unindent the second line
+// to the left column to avoid insertion of a tab:
+//
+//	cmd.Flags().BoolVar(&someFlag, "some-flag", false, `Some very long help text
+//	that should wrap on another line for readability.`)
+//
+// The resulting text will gracefully wrap at the terminal width, or at the defined min/max widths.
+func wrapFlagUsages(cmd *pflag.FlagSet) string {
+	cmd.VisitAll(func(flag *pflag.Flag) {
+		usage := strings.Join(getParagraphsForHelp(flag.Usage), "\n\n")
+		usage = strings.Replace(usage, "\t", "", -1)
+		flag.Usage = usage
+	})
+	return cmd.FlagUsagesWrapped(getTermWidthForHelp() - 1)
+}
+
+// wrapFlagUsages allows flag usage to be defined using markdown like formatting where line breaks
+// and tabs can be inserted anywhere to help code readability that are ignored when rendering.
+//
+// The resulting text will gracefully wrap at the terminal width, or at the defined min/max widths.
+func wrapHelpText(input string) string {
+	paragraphs := getParagraphsForHelp(input)
+	width := getTermWidthForHelp()
+	lines := strings.Split(strings.Join(paragraphs, "\n\n"), "\n")
+	var wrappedLines []string
+	for _, line := range lines {
+		// Get leading spaces for indentation
+		trimmed := strings.TrimLeft(line, " ")
+		// Calculate indentation length.
+		indent := len(line) - len(trimmed)
+		// Wrap the line at the prescribed width, accounting for indentation. Subtract 1 from the
+		// available width to prevent edge-case wrapping issues where text might exceed the terminal
+		// width by one character. This helps avoid quirks in terminal rendering and ensures more
+		// consistent wrapping behavior. This is a fancy way of saying ¯\_(ツ)_/¯ but FWIW I also
+		// see this done in other implementations that auto-wrap text based on the terminal width.
+		wrapped := wordwrap.WrapString(trimmed, uint(width-indent-1))
+
+		// Re-add indentation to wrapped lines
+		for i, wrappedLine := range strings.Split(wrapped, "\n") {
+			// If the line is a bullet then account for the bullet when indenting wrapped lines.
+			if i > 0 && helpBulletRegex.MatchString(line) {
+				// This approach allows for variable width bullets but will indent like this:
+				//
+				// 1. long
+				//    line
+				// 12. long
+				//     line
+				//
+				// It seems unlikely we'll have lists this large anyway, but if needed we could
+				// align these lists differently but this was the most straightforward approach.
+				wrappedLines = append(wrappedLines, strings.Repeat(" ", len(helpBulletRegex.FindString(line)))+wrappedLine)
+			} else {
+				wrappedLines = append(wrappedLines, strings.Repeat(" ", indent)+wrappedLine)
+			}
+		}
+	}
+	return strings.Join(wrappedLines, "\n")
+}
