@@ -17,7 +17,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newStatCmd())
 	cmd.AddCommand(newStatsCmd())
 	cmd.AddCommand(newQueryCmd())
-	cmd.AddCommand(newUpgradeCmd())
+	//cmd.AddCommand(newUpgradeCmd()) Shall not be included in V8 Release
 
 	return cmd
 }
