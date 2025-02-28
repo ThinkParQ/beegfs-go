@@ -201,6 +201,13 @@ func globalPersistentPreRunE(cmd *cobra.Command) error {
 // isCommandAuthorized enforces "opt-out" user authorization requiring commands to explicitly
 // declare using an annotation they can be run by users that do not have root privileges.
 func isCommandAuthorized(cmd *cobra.Command) error {
+	// The completion commands are auto generated so we cannot easily add an annotation, but they
+	// should be runnable by all users. However in case we add a command called completion this need
+	// to only apply to the top-level completion command.
+	if cmd.Parent().Name() == "completion" && cmd.Parent().Parent().Name() == BinaryName {
+		return nil
+	}
+
 	euid := syscall.Geteuid()
 	if _, ok := cmd.Annotations["authorization.AllowAllUsers"]; ok {
 		if mount := viper.GetString(config.BeeGFSMountPointKey); mount == config.BeeGFSMountPointNone && euid != 0 {
