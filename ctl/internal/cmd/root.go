@@ -90,9 +90,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(debug.NewCmd())
 
 	// This must run AFTER all commands are added.
-	for _, child := range cmd.Commands() {
-		attachPersistentPreRunE(child)
-	}
+	wrapAllCommands(cmd)
 
 	// Override the help template to allow the output to be customized including skipping printing
 	// persistent (global) flags so they are only printed for the root "beegfs" command.
@@ -119,6 +117,33 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	}
 
 	return 0
+}
+
+// wrapAllCommands applies any customizations that should be made to all commands. Notably
+// customizing error handling around positional arguments and executing any extra functionality that
+// should run before all commands.
+func wrapAllCommands(cmd *cobra.Command) {
+	if cmd.Args != nil {
+		origArgs := cmd.Args
+		cmd.Args = attachCustomArgsErr(origArgs)
+	}
+	attachPersistentPreRunE(cmd)
+	for _, subCmd := range cmd.Commands() {
+		wrapAllCommands(subCmd) // Recursively wrap subcommands
+	}
+}
+
+// attachCustomArgsErr prints the usage text along with the error when the positional arguments are
+// specified incorrectly. For example if required positional arguments are omitted Cobra prints a
+// generic error "requires at least N arg(s), only received N" which does not make it obvious what
+// went wrong and how to fix the issue.
+func attachCustomArgsErr(argsFn cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := argsFn(cmd, args); err != nil {
+			return fmt.Errorf("%w\nUsage: %s", err, cmd.Use)
+		}
+		return nil
+	}
 }
 
 // attachPersistentPreRunE ensures checkCommand() is executed before running all commands. It is not
