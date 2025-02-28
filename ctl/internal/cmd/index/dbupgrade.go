@@ -86,3 +86,8 @@ func runPythonUpgradeIndex(bflagSet *bflag.FlagSet) error {
 	}
 	return nil
 }
+
+// Can be removed once db Flag is enabled
+var _ = newGenericUpgradeCmd
+var _ = newUpgradeCmd
+var _ = runPythonUpgradeIndex
