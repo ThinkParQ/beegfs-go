@@ -32,7 +32,6 @@ func newGenericCreateCmd() *cobra.Command {
 func newCreateCmd() *cobra.Command {
 	s := newGenericCreateCmd()
 	s.Use = "create"
-	s.Aliases = append(s.Aliases, "update")
 	s.Short = "Generates or updates the index for the specified file system."
 	s.Long = `Generate or updates the index by traversing the source directory.
 

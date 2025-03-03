@@ -18,9 +18,11 @@ var path string
 
 var commonIndexFlags = []bflag.FlagWrapper{
 	bflag.Flag("fs-path", "F",
-		"File system path for which index will be created [default: IndexEnv/UpdateEnv.conf]", "-F", ""),
+		"File system path for which index will be created [default: indexEnv."+
+			"conf]", "-F", ""),
 	bflag.Flag("index-path", "I",
-		"File system path for which index will be created [default: IndexEnv/UpdateEnv.conf]", "-I", ""),
+		"File system path at which the index will be stored [default: indexEnv."+
+			"conf]", "-I", ""),
 	bflag.GlobalFlag(config.BeeGFSMountPointKey, "-M"),
 	bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
 	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
