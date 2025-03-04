@@ -17,6 +17,7 @@ func newGenericQueryCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err

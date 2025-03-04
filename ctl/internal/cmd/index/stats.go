@@ -19,7 +19,8 @@ func newGenericStatsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
-		Args: cobra.MinimumNArgs(1),
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
