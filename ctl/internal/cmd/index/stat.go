@@ -17,6 +17,7 @@ func newGenericStatCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
+		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				path = args[0]
