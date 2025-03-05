@@ -96,7 +96,7 @@ func runCreatePoolCmd(cmd *cobra.Command, cfg createPool_Config) error {
 	}
 
 	if len(targets) == 0 && len(groups) == 0 {
-		fmt.Printf("\nWARNING: No targets or buddy groups were initially assigned to this pool.\nCreating files in directories assigned to this pool will fail until targets/mirrors are assigned with 'beegfs pool assign'.\n")
+		fmt.Printf("\nNo targets or buddy groups were initially assigned to this pool.\nCreating files in directories assigned to this pool will fail until targets/mirrors are assigned with 'beegfs pool assign'.\n")
 	}
 
 	return nil

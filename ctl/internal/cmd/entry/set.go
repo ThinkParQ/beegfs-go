@@ -39,7 +39,8 @@ which can be updated for existing files at any time. Enable the --verbose flag t
 Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to update multiple directories at once.
 Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
-WARNING: When updating multiple entries, non-directory entries will be silently ignored.
+
+NOTE: When updating multiple entries, non-directory entries will be silently ignored.
 
 Required Permissions:
 This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config. 

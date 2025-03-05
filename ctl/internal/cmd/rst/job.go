@@ -174,7 +174,7 @@ writeResponses:
 	}
 
 	if processedPaths == 0 {
-		cmdfmt.Printf("Warning: no jobs were found for the specified path\n")
+		cmdfmt.Printf("no jobs were found for the specified path\n")
 	} else if !cfg.Force {
 		cmdfmt.Printf("Success: updated all jobs except ones that were already completed for %d paths\n", processedPaths)
 	} else {

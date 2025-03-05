@@ -483,7 +483,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	}
 
 	tbl.PrintRemaining()
-	cmdfmt.Printf("Warning: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
+	cmdfmt.Printf("INFO: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
 
 	return nil
 }

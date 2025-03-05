@@ -230,7 +230,7 @@ func collectSupportFiles(tmpBundlePath string, globalFlags []string) error {
 			cmd.Stderr = os.Stderr
 			err := cmd.Run()
 			if err != nil {
-				fmt.Fprintf(f, "\nWARNING: Error capturing section: %s (ignoring)\n", err)
+				fmt.Fprintf(f, "\nError capturing section: %s (ignoring)\n", err)
 			}
 		}
 		f.Close()

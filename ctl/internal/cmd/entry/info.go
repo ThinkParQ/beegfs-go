@@ -51,7 +51,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 		},
 	}
 
-	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (WARNING: this may return large amounts of output, for example if the BeeGFS root is the provided path).")
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	// TODO: https://github.com/thinkparq/ctl/issues/56
 	// Update help text when verbose no longer just applies to the retro mode.
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "In the \"retro\" mode, print more information about each entry, such as chunk and dentry paths on the servers.")

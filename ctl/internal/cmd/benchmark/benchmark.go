@@ -341,10 +341,10 @@ func printResultsSummary(t table.Writer, results []benchmark.StorageBenchResult)
 	if len(benchType) == 1 {
 		testType = strings.ToUpper(benchType[0].String())
 	} else if len(benchType) > 1 {
-		fmt.Println("WARNING: Unable to summarize results - found results for both read and write benchmarks.")
+		fmt.Println("Unable to summarize results - found results for both read and write benchmarks.")
 		return
 	} else {
-		fmt.Println("WARNING: Unable to summarize results - no results found.")
+		fmt.Println("Unable to summarize results - no results found.")
 		return
 	}
 
