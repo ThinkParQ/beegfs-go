@@ -78,8 +78,8 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 		}
 	})
 
-	allColumns := []string{"uid", "id", "alias", "nics", "reachable"}
-	defaultColumns := []string{"id", "alias"}
+	allColumns := []string{"uid", "id", "type", "alias", "nics", "reachable"}
+	defaultColumns := []string{"id", "type", "alias"}
 
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
@@ -140,6 +140,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 		tbl.AddItem(
 			node.Node.Uid,
 			node.Node.Id,
+			node.Node.Id.NodeType,
 			node.Node.Alias,
 			nics,
 			reachableNics,

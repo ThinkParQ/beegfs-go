@@ -42,7 +42,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 		return fmt.Errorf("no mirrors configured")
 	}
 
-	defaultColumns := []string{"alias", "id", "primary", "secondary"}
+	defaultColumns := []string{"alias", "id", "type", "primary_target", "primary_consistency", "secondary_target", "secondary_consistency"}
 	allColumns := append([]string{"uid"}, defaultColumns...)
 
 	if viper.GetBool(config.DebugKey) {
@@ -58,18 +58,21 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 		primaryTarget := ""
 		secondaryTarget := ""
 		if viper.GetBool(config.DebugKey) {
-			primaryTarget = fmt.Sprintf("%v (%s)", t.PrimaryTarget, t.PrimaryConsistencyState)
-			secondaryTarget = fmt.Sprintf("%v (%s)", t.SecondaryTarget, t.SecondaryConsistencyState)
+			primaryTarget = fmt.Sprintf("%v", t.PrimaryTarget)
+			secondaryTarget = fmt.Sprintf("%v", t.SecondaryTarget)
 		} else {
-			primaryTarget = fmt.Sprintf("%s (%s)", t.PrimaryTarget.Alias, t.PrimaryConsistencyState)
-			secondaryTarget = fmt.Sprintf("%s (%s)", t.SecondaryTarget.Alias, t.SecondaryConsistencyState)
+			primaryTarget = t.PrimaryTarget.LegacyId.String()
+			secondaryTarget = t.SecondaryTarget.LegacyId.String()
 		}
 		tbl.AddItem(
 			beegfs.Uid(t.BuddyGroup.Uid),
 			t.BuddyGroup.Alias,
 			t.BuddyGroup.LegacyId,
+			t.BuddyGroup.LegacyId.NodeType,
 			primaryTarget,
+			t.PrimaryConsistencyState,
 			secondaryTarget,
+			t.SecondaryConsistencyState,
 		)
 	}
 	return nil

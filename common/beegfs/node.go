@@ -18,7 +18,7 @@ type Node struct {
 }
 
 func (node Node) String() string {
-	return fmt.Sprintf("%s[%s, %s]", node.Alias.String(), node.Id.String(), node.Uid.String())
+	return node.Id.StringLong()
 }
 
 func (node Node) Addrs() []string {

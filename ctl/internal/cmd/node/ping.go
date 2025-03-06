@@ -120,7 +120,7 @@ fetch_results:
 			fmt.Printf("Is the node online and reachable by the client?\n\n")
 			continue fetch_results
 		}
-		fmt.Printf("Pinged node %v. Successful: %d, failed: %d.\n", res.Node, res.OutSuccess, res.OutErrors)
+		fmt.Printf("Pinged node %v. Successful: %d, failed: %d.\n", res.Node.Id.StringLong(), res.OutSuccess, res.OutErrors)
 		fmt.Printf("================================================================================\n")
 		min := math.MaxFloat32
 		max := 0.0

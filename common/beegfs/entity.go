@@ -58,6 +58,16 @@ type LegacyId struct {
 
 // User friendly output of LegacyId
 func (n LegacyId) String() string {
+	nt := n.NodeType.String()[:1]
+	if n.NodeType == Management {
+		nt = "mg"
+	}
+
+	return fmt.Sprintf("%s:%d", nt, n.NumId)
+}
+
+// User friendly long output of LegacyId
+func (n LegacyId) StringLong() string {
 	return fmt.Sprintf("%s:%d", n.NodeType.String(), n.NumId)
 }
 

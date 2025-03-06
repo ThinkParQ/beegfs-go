@@ -78,7 +78,7 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	if err != nil {
 		return err
 	}
-	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "buddy_groups", "remote_targets", "cool_down"}
+	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets", "cool_down"}
 	allColumns := append(defaultColumns, "client_sessions", "data_state")
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
@@ -264,11 +264,15 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 		info.Path,
 		info.Entry.EntryID,
 		info.Entry.Type,
-		fmt.Sprintf("%s (%d)", info.Entry.MetaOwnerNode.Alias, info.Entry.MetaOwnerNode.Id.NumId),
+		info.Entry.MetaOwnerNode.Id.String(),
 	)
 
 	if info.Entry.FeatureFlags.IsBuddyMirrored() {
-		row = append(row, info.Entry.MetaBuddyGroup)
+		id := beegfs.LegacyId{
+			NumId:    beegfs.NumId(info.Entry.MetaBuddyGroup),
+			NodeType: beegfs.Meta,
+		}
+		row = append(row, id)
 	} else {
 		row = append(row, "(unmirrored)")
 	}
@@ -284,10 +288,14 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	fmtTgtIDsFunc := func(targetIDs []uint16) string {
 		var targetsBuilder strings.Builder
 		for i, tgt := range targetIDs {
+			id := beegfs.LegacyId{
+				NumId:    beegfs.NumId(tgt),
+				NodeType: beegfs.Storage,
+			}
 			if i > 0 {
 				targetsBuilder.WriteString(",")
 			}
-			targetsBuilder.WriteString(fmt.Sprintf("%d", tgt))
+			targetsBuilder.WriteString(id.String())
 		}
 		return targetsBuilder.String()
 	}

@@ -56,8 +56,8 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 
 	logger, _ := config.GetLogger()
 
-	allColumns := []string{"uid", "id", "alias", "on_node", "pool", "reachability", "last_contact", "consistency", "sync_state", "cap_pool", "space", "sused", "sfree", "inodes", "iused", "ifree"}
-	defaultColumns := []string{"id", "alias", "on_node", "pool"}
+	allColumns := []string{"uid", "id", "type", "alias", "node", "storage_pool", "reachability", "last_contact", "consistency", "sync_state", "cap_pool", "space", "space_used", "space_free", "inodes", "inodes_used", "inodes_free"}
+	defaultColumns := []string{"id", "type", "alias", "node", "storage_pool"}
 	if viper.GetBool(config.DebugKey) {
 		defaultColumns = allColumns
 	} else {
@@ -65,7 +65,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 			defaultColumns = append(defaultColumns, "reachability", "last_contact", "consistency", "sync_state")
 		}
 		if cfg.Capacity {
-			defaultColumns = append(defaultColumns, "cap_pool", "space", "sused", "sfree", "inodes", "iused", "ifree")
+			defaultColumns = append(defaultColumns, "cap_pool", "space", "space_used", "space_free", "inodes", "inodes_used", "inodes_free")
 		}
 	}
 
@@ -104,17 +104,17 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 			}
 		} // Otherwise nil (aka don't filter by pool).
 
-		node := t.Node.Alias.String()
+		node := t.Node.LegacyId.String()
 		if viper.GetBool(config.DebugKey) {
 			node = t.Node.String()
-
 		}
-		pool := "n/a"
+
+		pool := "(n/a)"
 		if t.StoragePool != nil {
 			if viper.GetBool(config.DebugKey) {
 				pool = t.StoragePool.String()
 			} else {
-				pool = t.StoragePool.Alias.String()
+				pool = t.StoragePool.LegacyId.String()
 			}
 		}
 		lastContact := "unknown"
@@ -231,6 +231,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 		tbl.AddItem(
 			t.Target.Uid,
 			t.Target.LegacyId,
+			t.Target.LegacyId.NodeType,
 			t.Target.Alias,
 			node,
 			pool,
