@@ -52,8 +52,8 @@ func IdFromString(input string, bitSize int) (NumId, error) {
 // Contains a NodeType and NumId - the "legacy" way to identify a BeeGFS entity. It is NOT unique
 // over all entity types (nodes, targets, ...).
 type LegacyId struct {
-	NumId    NumId
-	NodeType NodeType
+	NumId    NumId    `json:"num_id"`
+	NodeType NodeType `json:"node_type"`
 }
 
 // User friendly output of LegacyId
@@ -156,9 +156,9 @@ func (n InvalidEntityId) ToProto() *pb.EntityIdSet {
 }
 
 type EntityIdSet struct {
-	Uid      Uid
-	Alias    Alias
-	LegacyId LegacyId
+	Uid      Uid      `json:"uid"`
+	Alias    Alias    `json:"alias"`
+	LegacyId LegacyId `json:"id"`
 }
 
 func EntityIdSetFromProto(input *pb.EntityIdSet) (EntityIdSet, error) {
