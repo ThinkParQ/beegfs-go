@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/node"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -54,20 +55,20 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteNode_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Node)
 	if cfg.execute {
 		if err != nil {
-			fmt.Printf("Node deleted, but received no id info from the server. Please verify the deletion using the `node list` command.\n")
+			cmdfmt.Printf("Node deleted, but received no id info from the server. Please verify the deletion using the `node list` command.\n")
 		} else {
-			fmt.Printf("Node deleted: %s\n", res)
+			cmdfmt.Printf("Node deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
 			return fmt.Errorf("received no id info from the server")
 		} else {
-			fmt.Printf("Node can be deleted: %s\n", res)
+			cmdfmt.Printf("Node can be deleted: %s\n", res)
 			if res.LegacyId.NodeType == beegfs.Meta {
-				fmt.Print("Deleting a meta node might cause adverse effects to your file system and should only be done if no files using it or its internal target are left. If you really want to delete the node, please add the --yes flag to the command. ")
+				cmdfmt.Printf("Deleting a meta node might cause adverse effects to your file system and should only be done if no files using it or its internal target are left. If you really want to delete the node, please add the --yes flag to the command. ")
 			} else {
-				fmt.Print("Deleting a node should be safe if no targets are left assigned to it. If you really want to delete the node, please add the --yes flag to the command. ")
+				cmdfmt.Printf("Deleting a node should be safe if no targets are left assigned to it. If you really want to delete the node, please add the --yes flag to the command. ")
 			}
 		}
 	}

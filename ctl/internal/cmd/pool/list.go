@@ -128,6 +128,5 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 	}
 
 	tbl.PrintRemaining()
-	fmt.Println()
 	return nil
 }

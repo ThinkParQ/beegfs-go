@@ -1,9 +1,8 @@
 package buddygroup
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
 )
 
@@ -37,7 +36,7 @@ Mirroring for files can be enabled by moving them from an unmirrored directory t
 func runMirrorRootInode(cmd *cobra.Command, execute bool) error {
 
 	if !execute {
-		fmt.Printf(`Initialize mirroring for the root directory cannot be undone. 
+		cmdfmt.Printf(`Initialize mirroring for the root directory cannot be undone. 
 If you really want to initialize mirroring for the root directory, please add the --yes flag to the command.
 `)
 		return nil
@@ -48,7 +47,7 @@ If you really want to initialize mirroring for the root directory, please add th
 		return err
 	}
 
-	fmt.Printf(`Successfully initialized mirroring for the root directory.
+	cmdfmt.Printf(`Successfully initialized mirroring for the root directory.
 NOTE: To complete activating mirroring, please remount any clients and restart all metadata services now.
 `)
 

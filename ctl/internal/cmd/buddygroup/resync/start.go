@@ -1,11 +1,11 @@
 package resync
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
 )
 
@@ -53,6 +53,6 @@ func runStartResyncCmd(cmd *cobra.Command, cfg *startResync_config) error {
 		return err
 	}
 
-	fmt.Println("Successfully sent resync request. Progress can be monitored with 'beegfs mirror resync stats'.")
+	cmdfmt.Printf("Successfully sent resync request. Progress can be monitored with 'beegfs mirror resync stats'.\n")
 	return nil
 }

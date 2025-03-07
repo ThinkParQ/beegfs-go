@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -54,16 +55,16 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteTarget_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Target)
 	if cfg.execute {
 		if err != nil {
-			fmt.Printf("Target deleted, but received no id info from the server. Please verify the deletion using the `target list` command.\n")
+			cmdfmt.Printf("Target deleted, but received no id info from the server. Please verify the deletion using the `target list` command.\n")
 		} else {
-			fmt.Printf("Target deleted: %s\n", res)
+			cmdfmt.Printf("Target deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
 			return fmt.Errorf("received no id info from the server")
 		} else {
-			fmt.Printf(`Target can be deleted: %s
+			cmdfmt.Printf(`Target can be deleted: %s
 Deleting a target might cause adverse effects to your file system and should only be done if no files using it are left. If you really want to delete the target, please add the --yes flag to the command.
 `, res)
 		}

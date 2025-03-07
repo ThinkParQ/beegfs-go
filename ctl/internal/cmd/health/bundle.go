@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
@@ -145,8 +146,8 @@ For example with tar when extracting a bundle from the same directory you must p
 			if err != nil {
 				return fmt.Errorf("error bundling data into a tarball at %s: %w", tmpBundlePath, err)
 			}
-			fmt.Printf("Successfully created support bundle at: %s%s\n", tmpBundlePath, bundleExtension)
-			fmt.Printf(`
+			cmdfmt.Printf("Successfully created support bundle at: %s%s\n", tmpBundlePath, bundleExtension)
+			cmdfmt.Printf(`
 Note the bundle filename contains the current timestamp in RFC3339 format which contains colons (:).
 When specifying the path relative to the current working directory, it may be required to prefix the filename with './':
  
