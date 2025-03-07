@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	beeBinary   = "/usr/bin/bee"
+	beeBinary   = "/opt/beegfs/python/index/bee"
 	indexConfig = "/etc/beegfs/index/config"
 	indexEnv    = "/etc/beegfs/index/indexEnv.conf"
 )
