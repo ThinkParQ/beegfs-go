@@ -52,13 +52,13 @@ This enables normal users to change the default number of targets and chunksize 
 			return nil
 		},
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			// Early return if set-stub is not specified
-			if backendCfg.StubStatus == nil {
+			// Early return if --file-data-state is not specified.
+			if backendCfg.FileDataState == nil {
 				return nil
 			}
 
-			// Flags that are allowed to be used with set-stub.
-			allowedFlags := []string{"set-stub", "verbose", "yes", "recurse"}
+			// Flags that are allowed to be used with file-data-state.
+			allowedFlags := []string{"file-data-state", "verbose", "yes", "recurse"}
 
 			// Initialize a list to track any disallowed flags.
 			disallowedFlags := []string{}
@@ -72,7 +72,7 @@ This enables normal users to change the default number of targets and chunksize 
 
 			// Return an error if any disallowed flags are used with set-stub.
 			if len(disallowedFlags) > 0 {
-				return fmt.Errorf("--set-stub can't be used with the following flag(s): %s", strings.Join(disallowedFlags, ", "))
+				return fmt.Errorf("--file-data-state can't be used with the following flag(s): %s", strings.Join(disallowedFlags, ", "))
 			}
 
 			return nil
@@ -110,8 +110,9 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().MarkHidden("remote-cooldown")
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
-	cmd.Flags().Var(newStubStatusFlag(&backendCfg.StubStatus), "set-stub", "Set or clear the stub flag for regular files. If not specified, the stub status remains unchanged.")
-	cmd.Flags().MarkHidden("set-stub")
+	cmd.Flags().Var(newFileDataStateFlag(&backendCfg.FileDataState), "file-data-state",
+		"Set the data state for files. Valid values: local, offloaded. Specify 'none' to unset the data state.")
+	cmd.Flags().MarkHidden("file-data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd

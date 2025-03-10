@@ -194,31 +194,48 @@ func (f *rstCooldownFlag) Set(value string) error {
 	return nil
 }
 
-type stubStatusFlag struct {
-	p **bool
+type fileDataStateFlag struct {
+	p **beegfs.FileDataState
 }
 
-func newStubStatusFlag(p **bool) *stubStatusFlag {
-	return &stubStatusFlag{p: p}
+func newFileDataStateFlag(p **beegfs.FileDataState) *fileDataStateFlag {
+	return &fileDataStateFlag{p: p}
 }
 
-func (f *stubStatusFlag) String() string {
+func (f *fileDataStateFlag) String() string {
 	if *f.p == nil {
 		return "unchanged"
 	}
-	return fmt.Sprintf("%t", **f.p)
-}
 
-func (f *stubStatusFlag) Type() string {
-	return "<true|false>"
-}
-
-func (f *stubStatusFlag) Set(value string) error {
-	parsedValue, err := strconv.ParseBool(value)
-	if err != nil {
-		return fmt.Errorf("stub status must be true or false, got %q: %w", value, err)
+	if **f.p == beegfs.FileDataStateUnset {
+		return "none"
 	}
-	*f.p = &parsedValue
+
+	return beegfs.FileDataStateToString(**f.p)
+}
+
+func (f *fileDataStateFlag) Type() string {
+	return "<local|offloaded|none>"
+}
+
+func (f *fileDataStateFlag) Set(value string) error {
+	// Allocate the state if it doesn't exist.
+	if *f.p == nil {
+		*f.p = new(beegfs.FileDataState)
+	}
+
+	// Special case for "none" to indicate unset data state.
+	if strings.ToLower(value) == "none" {
+		**f.p = beegfs.FileDataStateUnset
+		return nil
+	}
+
+	state, err := beegfs.ParseFileDataState(value)
+	if err != nil {
+		return fmt.Errorf("invalid file data state: %w", err)
+	}
+
+	**f.p = state
 	return nil
 }
 

@@ -251,6 +251,7 @@ type GetEntryInfoResponse struct {
 	MirrorNodeID     uint16
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
+	FileDataState    beegfs.FileDataState
 }
 
 func (m *GetEntryInfoResponse) MsgId() uint16 {
@@ -265,6 +266,7 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.MirrorNodeID)
 	beeserde.DeserializeInt(d, &m.NumSessionsRead)
 	beeserde.DeserializeInt(d, &m.NumSessionsWrite)
+	beeserde.DeserializeInt(d, &m.FileDataState)
 }
 
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
@@ -369,8 +371,6 @@ const (
 	pathInfoFeatureOriginal = 1
 	// Equivalent of PATHINFO_FEATURE_ORIG_UNKNOWN in C++ (unused at present).
 	// pathInfoFeatureOrigUnknown = 2
-	// Equivalent of PATHINFO_FEATURE_STUB in C++.
-	pathInfoFeatureIsStub = 4
 )
 
 func (m *PathInfo) Deserialize(d *beeserde.Deserializer) {
@@ -379,10 +379,6 @@ func (m *PathInfo) Deserialize(d *beeserde.Deserializer) {
 		beeserde.DeserializeInt(d, &m.OrigParentUID)
 		beeserde.DeserializeCStr(d, &m.OrigParentEntryID, 4)
 	}
-}
-
-func (m *PathInfo) IsStub() bool {
-	return (m.Flags & pathInfoFeatureIsStub) == pathInfoFeatureIsStub
 }
 
 type RemoteStorageTarget struct {
@@ -551,29 +547,29 @@ func (m *SetFilePatternResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
 
-type SetFileStubStatusRequest struct {
+type SetFileDataStateRequest struct {
 	EntryInfo EntryInfo
-	Stub      bool
+	DataState beegfs.FileDataState
 }
 
-func (m *SetFileStubStatusRequest) MsgId() uint16 {
+func (m *SetFileDataStateRequest) MsgId() uint16 {
 	return 2131
 }
 
-func (m *SetFileStubStatusRequest) Serialize(s *beeserde.Serializer) {
+func (m *SetFileDataStateRequest) Serialize(s *beeserde.Serializer) {
 	m.EntryInfo.Serialize(s)
-	beeserde.SerializeInt(s, m.Stub)
+	beeserde.SerializeInt(s, m.DataState)
 }
 
-type SetFileStubStatusResponse struct {
+type SetFileDataStateResponse struct {
 	Result beegfs.OpsErr
 }
 
-func (m *SetFileStubStatusResponse) MsgId() uint16 {
+func (m *SetFileDataStateResponse) MsgId() uint16 {
 	return 2132
 }
 
-func (m *SetFileStubStatusResponse) Deserialize(d *beeserde.Deserializer) {
+func (m *SetFileDataStateResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
 
