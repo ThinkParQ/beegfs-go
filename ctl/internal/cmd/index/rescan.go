@@ -20,7 +20,7 @@ func newGenericRescanCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&recurse, "recurse", false, "Rescan Directory with Recursion")
+	cmd.Flags().BoolVar(&recurse, "recurse", false, "Recursively rescan all directories beneath the specified path.")
 
 	return cmd
 }
