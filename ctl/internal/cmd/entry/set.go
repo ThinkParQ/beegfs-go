@@ -111,7 +111,7 @@ This enables normal users to change the default number of targets and chunksize 
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
 	cmd.Flags().Var(newFileDataStateFlag(&backendCfg.FileDataState), "file-data-state",
-		"Set the data state for files. Valid values: local, offloaded. Specify 'none' to unset the data state.")
+		"Set the data state for files. Valid values: local, locked, offloaded. Specify 'none' to unset the data state.")
 	cmd.Flags().MarkHidden("file-data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	// IMPORTANT: When adding new flags or updating flag names update the help function below.
