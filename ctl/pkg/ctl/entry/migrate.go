@@ -257,7 +257,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	// Only regular files are currently supported.
-	if entry.Entry.Type != beegfs.EntryRegularFile {
+	if entry.Entry.Type != beegfs.EntryRegularFile && entry.Entry.Type != beegfs.EntrySymlink {
 		// If this is a directory, check if the user wants to update the directory's pool:
 		if entry.Entry.Type == beegfs.EntryDirectory {
 			if migration.setDir != nil {
@@ -335,7 +335,7 @@ func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) er
 	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
 
 	// The originalStat will be used to set the original attributes on the migrated file.
-	originalStat, err := client.Stat(entry.Path)
+	originalStat, err := client.Lstat(entry.Path)
 	if err != nil {
 		return err
 	}
@@ -422,7 +422,7 @@ func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) er
 
 	// Just before the rename to keep the possible window for any races as short as possible, do a
 	// sanity check if the original file was modified while being migrated.
-	updatedStat, err := client.Stat(entry.Path)
+	updatedStat, err := client.Lstat(entry.Path)
 	if err != nil {
 		return err
 	}

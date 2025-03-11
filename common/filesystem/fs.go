@@ -116,7 +116,7 @@ func NewFromPath(path string) (Provider, error) {
 	}
 
 	for {
-		currentStat, err := os.Stat(absPath)
+		currentStat, err := os.Lstat(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
@@ -124,7 +124,7 @@ func NewFromPath(path string) (Provider, error) {
 		if parentPath == absPath {
 			return nil, fmt.Errorf("%w: %s", ErrInitFSClient, path)
 		}
-		parentStat, err := os.Stat(parentPath)
+		parentStat, err := os.Lstat(parentPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
@@ -238,7 +238,7 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 	// The VFS imposes a 255-byte limit on attribute names.
 	// Ref: https://man7.org/linux/man-pages/man7/xattr.7.html
 	buf := make([]byte, 255)
-	n, err := unix.Listxattr(srcPath, buf)
+	n, err := unix.Llistxattr(srcPath, buf)
 	if err != nil {
 		// Testing shows if the client and/or meta don't have xattr support enabled, no error is
 		// returned and the number of xattrs is simply zero. However some sources online suggest
@@ -274,7 +274,7 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 		xattr := string(xattrs[i:end])
 
 		// Query the required buffer size:
-		size, err := unix.Getxattr(srcPath, xattr, nil)
+		size, err := unix.Lgetxattr(srcPath, xattr, nil)
 		if err != nil {
 			return fmt.Errorf("error getting size of xattr %s: %w", xattr, err)
 		}
@@ -283,7 +283,7 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 			valBuf = make([]byte, size)
 		}
 		// Get the value of this attribute:
-		vlen, err := unix.Getxattr(srcPath, xattr, valBuf)
+		vlen, err := unix.Lgetxattr(srcPath, xattr, valBuf)
 		if err != nil {
 			return fmt.Errorf("error getting xattr %s: %w", xattr, err)
 		}
