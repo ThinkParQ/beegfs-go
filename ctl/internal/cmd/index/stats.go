@@ -36,11 +36,7 @@ func newGenericStatsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				beegfsClient, err := config.BeeGFSClient(cwd)
-				if err != nil {
-					return err
-				}
-				path = beegfsClient.GetMountPath()
+				path = cwd
 			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err

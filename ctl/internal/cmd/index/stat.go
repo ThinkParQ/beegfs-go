@@ -19,6 +19,9 @@ func newGenericStatCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkBeeGFSConfig(); err != nil {
+				return err
+			}
 			if len(args) > 0 {
 				path = args[0]
 			} else {
@@ -26,14 +29,7 @@ func newGenericStatCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				beegfsClient, err := config.BeeGFSClient(cwd)
-				if err != nil {
-					return err
-				}
-				path = beegfsClient.GetMountPath()
-			}
-			if err := checkBeeGFSConfig(); err != nil {
-				return err
+				path = cwd
 			}
 			return runPythonStatIndex(bflagSet, path)
 		},
