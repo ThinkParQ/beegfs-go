@@ -15,8 +15,14 @@ func newGenericRescanCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var recurse bool
 	var cmd = &cobra.Command{
-		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				cwd, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				args = append([]string{cwd}, args...)
+			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
