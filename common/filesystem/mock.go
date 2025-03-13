@@ -116,3 +116,7 @@ func (fs MockFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 func (fs MockFS) OverwriteFile(srcPath, dstPath string) error {
 	return fmt.Errorf("not implemented")
 }
+
+func (fs MockFS) Readlink(path string) (string, error) {
+	return "", fmt.Errorf("not implemented")
+}

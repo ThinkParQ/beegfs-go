@@ -43,7 +43,16 @@ Thus migration should not be done while applications are modifying files in the 
 If applications are only creating files you can first use the "entry set" mode to update the storage pool
 for all directories in the tree being migrated to one that does not contain the targets you wish to free,
 then run the migrate mode. Alternatively if applications are not creating files in the directory tree, you 
-can use the migrate mode to update the storage pool for all directories it encounters while migrating files.`,
+can use the migrate mode to update the storage pool for all directories it encounters while migrating files.
+
+Symlinks are supported with a few limitations:
+
+* The original number of targets is not preserved and instead inherited from the parent directory. This is not 
+  important as the contents of a symlink in BeeGFS are simply the path the link is pointing at, which will only 
+  ever be stored on a single target as the max file length is 4096 and the minimum chunk size in BeeGFS is 64KiB. 
+* Timestamps on the link itself may not be preserved correctly.
+* The link will be moved to targets or storage mirrors in the specified pool, but the link entry may appear
+  to be assigned to the same pool as the parent directory unless the directory's pool is also updated.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
