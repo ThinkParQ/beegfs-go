@@ -49,9 +49,9 @@ Symlinks are supported with a few limitations:
 
 * The original number of targets is not preserved and instead inherited from the parent directory. This is not 
   important as the contents of a symlink in BeeGFS are simply the path the link is pointing at, which will only 
-  ever be stored on a single target as the max file length is 4096 and the minimum chunk size in BeeGFS is 64KiB. 
+  ever be stored on a single target as the max path length is 4096 and the minimum chunk size in BeeGFS is 64KiB. 
 * Timestamps on the link itself may not be preserved correctly.
-* The link will be moved to targets or storage mirrors in the specified pool, but the link entry may appear
+* The link entry will be moved to targets or storage mirrors in the specified pool, but the link entry may appear
   to be assigned to the same pool as the parent directory unless the directory's pool is also updated.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {

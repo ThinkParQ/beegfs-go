@@ -268,7 +268,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		return result, err
 	}
 
-	// Only regular files are currently supported.
+	// Regular files and symbolic links are currently supported.
 	if entry.Entry.Type != beegfs.EntryRegularFile && entry.Entry.Type != beegfs.EntrySymlink {
 		// If this is a directory, check if the user wants to update the directory's pool:
 		if entry.Entry.Type == beegfs.EntryDirectory {
@@ -509,7 +509,7 @@ func migrateLink(entry *GetEntryCombinedInfo, req migration) error {
 		return fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
 	}
 
-	linkPath, err := client.Readlink(entry.Path)
+	linkTarget, err := client.Readlink(entry.Path)
 	if err != nil {
 		return err
 	}
@@ -519,7 +519,7 @@ func migrateLink(entry *GetEntryCombinedInfo, req migration) error {
 	// complicates matters if we need to update these after the link is created.
 	if err = ioctl.CreateFile(
 		client.GetMountPath()+tempFile,
-		ioctl.SetSymlinkTo(linkPath),
+		ioctl.SetSymlinkTo(linkTarget),
 		ioctl.SetType(ioctl.S_SYMBOLIC),
 		ioctl.SetPermissions(int32(originalStat.Mode().Perm())),
 		ioctl.SetUID(origLinuxStat.Uid),
@@ -529,11 +529,6 @@ func migrateLink(entry *GetEntryCombinedInfo, req migration) error {
 		ioctl.SetStoragePool(req.dstPool),
 	); err != nil {
 		return fmt.Errorf("unable to create symlink via ioctl: %w", err)
-	}
-
-	err = client.CopyXAttrsToFile(entry.Path, tempFile)
-	if err != nil {
-		return fmt.Errorf("symlink is migrated but original extended attributes could not be applied: %w", err)
 	}
 
 	if err = client.OverwriteFile(tempFile, entry.Path); err != nil {
