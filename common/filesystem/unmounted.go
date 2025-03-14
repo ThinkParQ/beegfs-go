@@ -84,3 +84,7 @@ func (fs UnmountedFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error
 func (fs UnmountedFS) OverwriteFile(srcPath, dstPath string) error {
 	return ErrUnmounted
 }
+
+func (fs UnmountedFS) Readlink(path string) (string, error) {
+	return "", ErrUnmounted
+}

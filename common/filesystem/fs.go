@@ -83,6 +83,7 @@ type Provider interface {
 	CopyTimestamps(fromStat fs.FileInfo, dstPath string) error
 	// Atomically renames srcPath to dstPath overwriting the dstPath with srcPath's contents.
 	OverwriteFile(srcPath, dstPath string) error
+	Readlink(path string) (string, error)
 }
 
 // NewFromMountPoint accepts an exact path where a file system is mounted. It detects the file
@@ -116,7 +117,7 @@ func NewFromPath(path string) (Provider, error) {
 	}
 
 	for {
-		currentStat, err := os.Stat(absPath)
+		currentStat, err := os.Lstat(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
@@ -124,7 +125,7 @@ func NewFromPath(path string) (Provider, error) {
 		if parentPath == absPath {
 			return nil, fmt.Errorf("%w: %s", ErrInitFSClient, path)
 		}
-		parentStat, err := os.Stat(parentPath)
+		parentStat, err := os.Lstat(parentPath)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
 		}
@@ -238,7 +239,7 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 	// The VFS imposes a 255-byte limit on attribute names.
 	// Ref: https://man7.org/linux/man-pages/man7/xattr.7.html
 	buf := make([]byte, 255)
-	n, err := unix.Listxattr(srcPath, buf)
+	n, err := unix.Llistxattr(srcPath, buf)
 	if err != nil {
 		// Testing shows if the client and/or meta don't have xattr support enabled, no error is
 		// returned and the number of xattrs is simply zero. However some sources online suggest
@@ -274,7 +275,7 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 		xattr := string(xattrs[i:end])
 
 		// Query the required buffer size:
-		size, err := unix.Getxattr(srcPath, xattr, nil)
+		size, err := unix.Lgetxattr(srcPath, xattr, nil)
 		if err != nil {
 			return fmt.Errorf("error getting size of xattr %s: %w", xattr, err)
 		}
@@ -283,12 +284,12 @@ func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 			valBuf = make([]byte, size)
 		}
 		// Get the value of this attribute:
-		vlen, err := unix.Getxattr(srcPath, xattr, valBuf)
+		vlen, err := unix.Lgetxattr(srcPath, xattr, valBuf)
 		if err != nil {
 			return fmt.Errorf("error getting xattr %s: %w", xattr, err)
 		}
 		// Set the xattr on the destination path:
-		err = unix.Setxattr(dstPath, xattr, valBuf[:vlen], 0)
+		err = unix.Lsetxattr(dstPath, xattr, valBuf[:vlen], 0)
 		if err != nil {
 			return fmt.Errorf("error setting xattr %s (value: %s): %w", xattr, valBuf[:vlen], err)
 		}
@@ -345,6 +346,9 @@ func (fs BeeGFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
 	return nil
 }
 
+// CopyTimestamps atime+mtime and the change time from `fromStat` to `dstPath` for regular files.
+// This also works for symlinks, but testing shows it only seems to copy the mtime correctly for
+// symlinks even though UtimesNanoAt does copy the atime for regular files.
 func (fs BeeGFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	dstPath = filepath.Join(fs.MountPoint, dstPath)
 
@@ -353,10 +357,24 @@ func (fs BeeGFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 		return fmt.Errorf("unable to cast FileInfo to syscall.Stat_t (is the underlying OS Linux?)")
 	}
 
-	atime := time.Unix(int64(linuxStat.Atim.Sec), int64(linuxStat.Atim.Nsec))
-	mtime := time.Unix(int64(linuxStat.Mtim.Sec), int64(linuxStat.Mtim.Nsec))
-	if err := os.Chtimes(dstPath, atime, mtime); err != nil {
-		return fmt.Errorf("error copying timestamps to destination path: %w", err)
+	atime := time.Unix(linuxStat.Atim.Sec, linuxStat.Atim.Nsec)
+	mtime := time.Unix(linuxStat.Mtim.Sec, linuxStat.Mtim.Nsec)
+
+	// os.Chtimes does not work for symlinks because it will update the timestamps on the file the
+	// link is pointing at. For symlinks use UtimesNanoAt(). That is not just also used for regular
+	// files because UtimesNanoAt() does not preserve the changed timestamp.
+	if linuxStat.Mode&syscall.DT_LNK != 0 {
+		times := [2]unix.Timespec{
+			unix.NsecToTimespec(atime.UnixNano()),
+			unix.NsecToTimespec(mtime.UnixNano()),
+		}
+		if err := unix.UtimesNanoAt(unix.AT_FDCWD, dstPath, times[:], unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("failed to update timestamps: %w", err)
+		}
+	} else {
+		if err := os.Chtimes(dstPath, atime, mtime); err != nil {
+			return fmt.Errorf("error copying timestamps to destination path: %w", err)
+		}
 	}
 
 	return nil
@@ -371,7 +389,11 @@ func (fs BeeGFS) OverwriteFile(srcPath, dstPath string) error {
 	// application automatically cleans up dstPath on failure.
 	err := unix.Renameat2(unix.AT_FDCWD, srcPath, unix.AT_FDCWD, dstPath, 0)
 	if err != nil {
-		return fmt.Errorf("failed to atomically rename: %w", err)
+		return fmt.Errorf("failed to atomically rename %s to %s: %w", srcPath, dstPath, err)
 	}
 	return nil
+}
+
+func (fs BeeGFS) Readlink(path string) (string, error) {
+	return os.Readlink(filepath.Join(fs.MountPoint, path))
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
@@ -119,8 +120,19 @@ type migration struct {
 	egid uint32
 }
 
+// MigrateEntries migrates the entries specified by the PathInputMethod based on the provided
+// MigrateCfg. It returns channels where results and errors are returned asynchronously.
+//
+// WARNING: For MigrateEntries to work correctly it sets the umask to zero because it needs to be
+// able to create files with any permissions. If needed, the caller should reset the umask once all
+// entries are migrated.
 func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
 	log, _ := config.GetLogger()
+
+	// Set the umask to 0 ensuring files can be created via ioctl with exact permissions. Without
+	// this the default system umask might impose restrictions that would prevent recreating files
+	// with their original permissions. This affects the entire process, not just this function.
+	syscall.Umask(0)
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
@@ -256,8 +268,8 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		return result, err
 	}
 
-	// Only regular files are currently supported.
-	if entry.Entry.Type != beegfs.EntryRegularFile {
+	// Regular files and symbolic links are currently supported.
+	if entry.Entry.Type != beegfs.EntryRegularFile && entry.Entry.Type != beegfs.EntrySymlink {
 		// If this is a directory, check if the user wants to update the directory's pool:
 		if entry.Entry.Type == beegfs.EntryDirectory {
 			if migration.setDir != nil {
@@ -298,7 +310,12 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		return result, nil
 	}
 
-	err = migrate(ctx, entry, migration)
+	if entry.Entry.Type == beegfs.EntryRegularFile {
+		err = migrate(ctx, entry, migration)
+	} else {
+		err = migrateLink(entry, migration)
+	}
+
 	if err != nil {
 		result.Status = MigrateError
 		result.Err = err
@@ -335,7 +352,7 @@ func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) er
 	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
 
 	// The originalStat will be used to set the original attributes on the migrated file.
-	originalStat, err := client.Stat(entry.Path)
+	originalStat, err := client.Lstat(entry.Path)
 	if err != nil {
 		return err
 	}
@@ -422,7 +439,7 @@ func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) er
 
 	// Just before the rename to keep the possible window for any races as short as possible, do a
 	// sanity check if the original file was modified while being migrated.
-	updatedStat, err := client.Stat(entry.Path)
+	updatedStat, err := client.Lstat(entry.Path)
 	if err != nil {
 		return err
 	}
@@ -470,6 +487,56 @@ func didFileChange(a, b *syscall.Stat_t) error {
 
 	if a.Nlink != b.Nlink {
 		return errors.New("hard link added during migration")
+	}
+
+	return nil
+}
+
+func migrateLink(entry *GetEntryCombinedInfo, req migration) error {
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(entry.Path)
+	// tempFileBase is just the name of the temp file.
+	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
+	// tempFile is the full absolute path to the temp file.
+	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
+	// The originalStat will be used to set the original attributes on the migrated link.
+	originalStat, err := client.Lstat(entry.Path)
+	if err != nil {
+		return err
+	}
+	origLinuxStat, ok := originalStat.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
+	}
+
+	linkTarget, err := client.Readlink(entry.Path)
+	if err != nil {
+		return err
+	}
+
+	// Create the symlink with the correct owner, permissions, etc. Because symlinks contain minimal
+	// data it doesn't matter if it briefly is double counted against the user/group quotas and it
+	// complicates matters if we need to update these after the link is created.
+	if err = ioctl.CreateFile(
+		client.GetMountPath()+tempFile,
+		ioctl.SetSymlinkTo(linkTarget),
+		ioctl.SetType(ioctl.S_SYMBOLIC),
+		ioctl.SetPermissions(int32(originalStat.Mode().Perm())),
+		ioctl.SetUID(origLinuxStat.Uid),
+		ioctl.SetGID(origLinuxStat.Gid),
+		// Testing shows when creating the symlink it will not actually be assigned to this storage
+		// pool but target/buddy group selection will take the specified pool into account.
+		ioctl.SetStoragePool(req.dstPool),
+	); err != nil {
+		return fmt.Errorf("unable to create symlink via ioctl: %w", err)
+	}
+
+	if err = client.OverwriteFile(tempFile, entry.Path); err != nil {
+		return fmt.Errorf("unable to swap symlink with temp symlink: %w", err)
+	}
+
+	if err = client.CopyTimestamps(originalStat, entry.Path); err != nil {
+		return fmt.Errorf("symlink is migrated but original timestamps could not be applied: %w", err)
 	}
 
 	return nil
