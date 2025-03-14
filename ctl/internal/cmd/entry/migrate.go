@@ -45,14 +45,17 @@ for all directories in the tree being migrated to one that does not contain the 
 then run the migrate mode. Alternatively if applications are not creating files in the directory tree, you 
 can use the migrate mode to update the storage pool for all directories it encounters while migrating files.
 
-Symlinks are supported with a few limitations:
+Symlinks are supported but the migrated links will look slightly different than regular files:
 
 * The original number of targets is not preserved and instead inherited from the parent directory. This is not 
   important as the contents of a symlink in BeeGFS are simply the path the link is pointing at, which will only 
   ever be stored on a single target as the max path length is 4096 and the minimum chunk size in BeeGFS is 64KiB. 
 * Timestamps on the link itself may not be preserved correctly.
-* The link entry will be moved to targets or storage mirrors in the specified pool, but the link entry may appear
-  to be assigned to the same pool as the parent directory unless the directory's pool is also updated.`,
+* The link will always be moved to targets or storage buddy mirrors in the specified destination pool, even though
+  the link will always inherit its storage pool assignment from its parent directory (which may differ).
+  
+These differences should never be problematic as typically the link itself is not important and most commands will
+actually redirect and return information from the linked file (i.e., stat, open, etc).`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
