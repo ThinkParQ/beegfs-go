@@ -76,6 +76,7 @@ count of files, directories, or links, as well as distribution per level, maximu
 and minimum file sizes, and other key metrics.
 
 Example: Get the total file count in a directory
+
 $ beegfs index stats total-filecount
 
 Positional arguments:

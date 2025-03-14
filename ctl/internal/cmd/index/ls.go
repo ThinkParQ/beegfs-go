@@ -78,6 +78,7 @@ This command works similarly to the standard "ls" command, supporting both absol
 You can use it from within the index directory or from a filesystem directory when specifying relative paths.
 
 Example: List the contents of the index directory at /mnt/index.
+
 $ beegfs index ls /mnt/index
 `
 	return s

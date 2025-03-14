@@ -96,6 +96,7 @@ This command provides similar options to GNU find, but Hive's find is significan
 than running traditional find commands on the filesystem.
 
 Example: List files in the index directory that are larger than 1GB.
+
 $ beegfs index find --size +1G
 `
 	return s
