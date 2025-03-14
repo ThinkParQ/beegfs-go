@@ -45,7 +45,7 @@ func newGenericRescanCmd() *cobra.Command {
 
 func newRescanCmd() *cobra.Command {
 	s := newGenericRescanCmd()
-	s.Use = "rescan"
+	s.Use = "rescan <directory-path>"
 	s.Short = "Updates the index for a specific subdirectory of a previously indexed filesystem."
 	s.Long = `The rescan command allows users to refresh the metadata for a subdirectory, ensuring that newly created files and directories are indexed, and stale entries (files or directories deleted from the filesystem but still present in the index) are removed.
 
