@@ -31,7 +31,7 @@ type SetEntryCfg struct {
 	StripePattern      *beegfs.StripePatternType
 	RemoteTargets      []uint32
 	RemoteCooldownSecs *uint16
-	StubStatus         *bool
+	FileDataState      *beegfs.FileDataState
 }
 
 // Validates the effective UID has permissions to make the requested updates.
@@ -63,8 +63,8 @@ func (config *SetEntryCfg) setAndValidateEUID() error {
 		if config.RemoteCooldownSecs != nil {
 			return fmt.Errorf("only root can configure the remote cooldown")
 		}
-		if config.StubStatus != nil {
-			return fmt.Errorf("only root can configure stub status")
+		if config.FileDataState != nil {
+			return fmt.Errorf("only root can configure file data state")
 		}
 	}
 	return nil
@@ -117,8 +117,8 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 		return SetEntryResult{}, err
 	}
 
-	// Handle stub status separately from other updates.
-	if cfg.StubStatus != nil {
+	// Handle file data state updates separately from other updates.
+	if cfg.FileDataState != nil {
 		// Return error if the entry is NOT a regular file.
 		if entry.Entry.Type != beegfs.EntryRegularFile {
 			return SetEntryResult{
@@ -127,7 +127,7 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 				Updates: SetEntryCfg{},
 			}, nil
 		}
-		return handleStubStatusUpdate(ctx, store, entry, cfg, path)
+		return handleFileDataStateUpdate(ctx, store, entry, cfg, path)
 	}
 
 	if entry.Entry.Type == beegfs.EntryDirectory {
@@ -270,14 +270,14 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 	}, nil
 }
 
-func handleStubStatusUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
-	request := &msg.SetFileStubStatusRequest{
+func handleFileDataStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
+	request := &msg.SetFileDataStateRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
-		Stub:      *cfg.StubStatus,
+		DataState: *cfg.FileDataState,
 	}
 
 	// send the request and handle the response
-	var resp = &msg.SetFileStubStatusResponse{}
+	var resp = &msg.SetFileDataStateResponse{}
 	err := store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
 		return SetEntryResult{}, err
@@ -291,7 +291,7 @@ func handleStubStatusUpdate(ctx context.Context, store *beemsg.NodeStore, entry 
 		Path:   searchPath,
 		Status: resp.Result,
 		Updates: SetEntryCfg{
-			StubStatus: cfg.StubStatus,
+			FileDataState: cfg.FileDataState,
 		},
 	}, nil
 }

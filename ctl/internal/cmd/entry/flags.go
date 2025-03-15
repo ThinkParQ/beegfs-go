@@ -194,31 +194,38 @@ func (f *rstCooldownFlag) Set(value string) error {
 	return nil
 }
 
-type stubStatusFlag struct {
-	p **bool
+type fileDataStateFlag struct {
+	p **beegfs.FileDataState
 }
 
-func newStubStatusFlag(p **bool) *stubStatusFlag {
-	return &stubStatusFlag{p: p}
+func newFileDataStateFlag(p **beegfs.FileDataState) *fileDataStateFlag {
+	return &fileDataStateFlag{p: p}
 }
 
-func (f *stubStatusFlag) String() string {
+func (f *fileDataStateFlag) String() string {
 	if *f.p == nil {
 		return "unchanged"
 	}
-	return fmt.Sprintf("%t", **f.p)
+
+	return (**f.p).String()
 }
 
-func (f *stubStatusFlag) Type() string {
-	return "<true|false>"
+func (f *fileDataStateFlag) Type() string {
+	return "<local|locked|offloaded|none>"
 }
 
-func (f *stubStatusFlag) Set(value string) error {
-	parsedValue, err := strconv.ParseBool(value)
-	if err != nil {
-		return fmt.Errorf("stub status must be true or false, got %q: %w", value, err)
+func (f *fileDataStateFlag) Set(value string) error {
+	// Allocate the state if it doesn't exist.
+	if *f.p == nil {
+		*f.p = new(beegfs.FileDataState)
 	}
-	*f.p = &parsedValue
+
+	state, err := beegfs.ParseFileDataState(value)
+	if err != nil {
+		return fmt.Errorf("invalid file data state: %w", err)
+	}
+
+	**f.p = state
 	return nil
 }
 
