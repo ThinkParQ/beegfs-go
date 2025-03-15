@@ -69,14 +69,33 @@ func NewCmd() *cobra.Command {
 
 func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 	license, err := licenseCmd.GetLicense(cmd.Context(), cfg.Reload)
+	// Store the error (or nil if there is no error) in ret, so we can return from this function if
+	// nothing else goes wrong along the way. This is important in case we reload a certificate that
+	// fails verification. It will still be loaded by the mgmtd and not printing it would suggest it
+	// wasn't loaded, but we also want to let the user know that there was an error.
+	ret := err
+	fmt.Println(license, ret)
 	if err != nil {
-		return err
+		if cfg.Reload {
+			// As noted above, we still want to print the certificate data in case of a failed
+			// reload, so fetch it again. If we encounter another error, we return that. Otherwise,
+			// we continue to the next check.
+			license, err = licenseCmd.GetLicense(cmd.Context(), false)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
-	// Even if there was no error, it is still possible that no license certificate data is available,
-	// because the certificate was not loaded. We have to handle that case.
+	// Even if there was no error in either of the two `GetLicense()` calls, it is still possible
+	// that no license certificate data is available, because the certificate was not loaded.
+	// We have to handle that case and return additional info about the original error in ret if
+	// available. `errors.Join()` will gracefully handle the case of `ret == nil` as well.
 	if license.Result == pl.VerifyResult_VERIFY_ERROR {
-		return errors.New(license.Message)
+		return errors.Join(ret, errors.New(license.Message))
 	}
+
 	if viper.GetString(config.OutputKey) == config.OutputJSONPretty.String() {
 		pretty, _ := json.MarshalIndent(license, "", "  ")
 		fmt.Printf("%s\n", pretty)
@@ -144,5 +163,5 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 			fmt.Println(f)
 		}
 	}
-	return nil
+	return ret
 }
