@@ -207,27 +207,17 @@ func (f *fileDataStateFlag) String() string {
 		return "unchanged"
 	}
 
-	if **f.p == beegfs.FileDataStateUnset {
-		return "none"
-	}
-
-	return beegfs.FileDataStateToString(**f.p)
+	return (**f.p).String()
 }
 
 func (f *fileDataStateFlag) Type() string {
-	return "<local|offloaded|none>"
+	return "<local|locked|offloaded|none>"
 }
 
 func (f *fileDataStateFlag) Set(value string) error {
 	// Allocate the state if it doesn't exist.
 	if *f.p == nil {
 		*f.p = new(beegfs.FileDataState)
-	}
-
-	// Special case for "none" to indicate unset data state.
-	if strings.ToLower(value) == "none" {
-		**f.p = beegfs.FileDataStateUnset
-		return nil
 	}
 
 	state, err := beegfs.ParseFileDataState(value)
