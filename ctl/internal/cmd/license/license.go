@@ -74,7 +74,6 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 	// fails verification. It will still be loaded by the mgmtd and not printing it would suggest it
 	// wasn't loaded, but we also want to let the user know that there was an error.
 	ret := err
-	fmt.Println(license, ret)
 	if err != nil {
 		if cfg.Reload {
 			// As noted above, we still want to print the certificate data in case of a failed
@@ -90,8 +89,12 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 	}
 	// Even if there was no error in either of the two `GetLicense()` calls, it is still possible
 	// that no license certificate data is available, because the certificate was not loaded.
-	// We have to handle that case and return additional info about the original error in ret if
-	// available. `errors.Join()` will gracefully handle the case of `ret == nil` as well.
+	// `license` could also be `nil` although that would be unexpected. We have to handle
+	// these cases and return additional info about the original error in ret if available.
+	// `errors.Join()` will gracefully handle the case of `ret == nil` as well.
+	if license == nil {
+		return errors.Join(ret, errors.New("license unexpectly nil (this is probably a bug)"))
+	}
 	if license.Result == pl.VerifyResult_VERIFY_ERROR {
 		return errors.Join(ret, errors.New(license.Message))
 	}
