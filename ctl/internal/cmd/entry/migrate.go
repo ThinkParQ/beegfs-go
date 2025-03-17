@@ -108,7 +108,7 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 		return err
 	}
 
-	allColumns := []string{"path", "status", "original ids", "errors"}
+	allColumns := []string{"path", "status", "original_ids", "errors"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	var migrateStats = &entry.MigrateStats{}

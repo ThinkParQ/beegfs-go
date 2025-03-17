@@ -1,10 +1,9 @@
 package pool
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
@@ -85,9 +84,9 @@ func runAssignPoolCmd(cmd *cobra.Command, cfg assignPool_Config) error {
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if err != nil {
-		fmt.Printf("Pool assigned, but received no id info from the server. Please verify the assignment using the `pool list` command.\n")
+		cmdfmt.Printf("Pool assigned, but received no id info from the server. Please verify the assignment using the `pool list` command.\n")
 	} else {
-		fmt.Printf("Pool assigned: %s\n", res)
+		cmdfmt.Printf("Pool assigned: %s\n", res)
 	}
 
 	return nil

@@ -87,9 +87,9 @@ Example: Print stats for a single metadata server:
 
 func runServerstatsCmd(cmd *cobra.Command, cfg *serverStats_Config) error {
 
-	defaultColumns := []string{"time", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
-	defaultWithNode := []string{"node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
-	allColumns := []string{"time", "uid", "node id", "alias", "queue length", "requests", "busy workers", "written", "read", "sent", "received"}
+	defaultColumns := []string{"time", "queue_length", "requests", "busy_workers", "written", "read", "sent", "received"}
+	defaultWithNode := []string{"node id", "alias", "queue_length", "requests", "busy_workers", "written", "read", "sent", "received"}
+	allColumns := []string{"time", "uid", "node_id", "alias", "queue_length", "requests", "busy_workers", "written", "read", "sent", "received"}
 
 	var collectStatsFunc func(context.Context, *serverStats_Config, *cmdfmt.Printomatic) error
 	if _, ok := cfg.Node.(beegfs.InvalidEntityId); ok {

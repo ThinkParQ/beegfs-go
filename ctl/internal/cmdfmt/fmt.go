@@ -86,6 +86,13 @@ func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOp
 		outputType = config.OutputNDJSON
 	}
 
+	for i := range columns {
+		columns[i] = strings.ReplaceAll(columns[i], " ", "_")
+	}
+	for i := range printCols {
+		printCols[i] = strings.ReplaceAll(printCols[i], " ", "_")
+	}
+
 	p := Printomatic{
 		columns:    columns,
 		printCols:  printCols,
@@ -155,7 +162,7 @@ func (p *Printomatic) replacePrinter() {
 		// The column number is used here because Name does not work if there is no header (as is
 		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
 		// The name is still included here because it is required when printing JSON.
-		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true, Name: name})
+		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true, Name: name, Align: text.AlignLeft, AlignHeader: text.AlignLeft})
 		for _, cName := range p.printCols {
 			if cName == name || cName == "all" {
 				colCfg[len(colCfg)-1].Hidden = false

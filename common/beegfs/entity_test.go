@@ -36,7 +36,7 @@ func TestEntityParser(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, LegacyId{NumId: 1, NodeType: Meta}, v)
 
-	v, err = f.Parse("me:1")
+	v, err = f.Parse("m:1")
 	assert.NoError(t, err)
 	assert.Equal(t, LegacyId{NumId: 1, NodeType: Meta}, v)
 
@@ -61,9 +61,6 @@ func TestEntityParser(t *testing.T) {
 	assert.Equal(t, LegacyId{NumId: 7, NodeType: Meta}, v)
 
 	_, err = f.Parse("management:1")
-	assert.Error(t, err)
-
-	_, err = f.Parse("m:1")
 	assert.Error(t, err)
 
 	_, err = f.Parse("metu:1")

@@ -32,7 +32,8 @@ func newCreateFileCmd() *cobra.Command {
 		Short: "Create a file in BeeGFS with specific configuration",
 		Long: `Create a file in BeeGFS with specific configuration.
 Unless specified, striping configuration is inherited from the parent directory.
-WARNING: Files created using this mode do not trigger file system modification events.`,
+
+NOTE: Files created using this mode do not trigger file system modification events.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -89,7 +90,8 @@ func newCreateDirCmd() *cobra.Command {
 		Long: `Create a directory in BeeGFS with specific configuration.
 By default if the parent directory is mirrored, the new directory will also be mirrored.
 Optionally the new directory can always be unmirrored or created on specific metadata node(s).
-WARNING: Directories created using this mode do not trigger file system modification events.`,
+
+NOTE: Directories created using this mode do not trigger file system modification events.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -117,7 +119,7 @@ WARNING: Directories created using this mode do not trigger file system modifica
 
 func PrintCreateEntryResult(entries []entry.CreateEntryResult) error {
 
-	columns := []string{"name", "status", "entry id", "type"}
+	columns := []string{"name", "status", "entry_id", "type"}
 	tbl := cmdfmt.NewPrintomatic(columns, columns)
 	anyErrors := false
 

@@ -1,10 +1,9 @@
 package target
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -58,7 +57,7 @@ Specify --yes for the command to actually take action.
 
 func runSetStateCmd(cmd *cobra.Command, cfg setState_Config) error {
 	if !cfg.execute {
-		fmt.Printf(`This command is very dangerous and can cause serious data loss. It should not be used under normal circumstances. 
+		cmdfmt.Printf(`This command is very dangerous and can cause serious data loss. It should not be used under normal circumstances. 
 It is absolutely recommended to contact support before proceeding and thus requires explicit confirmation. 
 Specify --yes for the command to actually take action.
 `)

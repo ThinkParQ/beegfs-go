@@ -39,7 +39,8 @@ which can be updated for existing files at any time. Enable the --verbose flag t
 Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to update multiple directories at once.
 Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
-WARNING: When updating multiple entries, non-directory entries will be silently ignored.
+
+NOTE: When updating multiple entries, non-directory entries will be silently ignored.
 
 Required Permissions:
 This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config. 
@@ -139,7 +140,7 @@ func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg,
 	// The table is only used for printing verbose output and tbl.PrintRemaining() is only called at
 	// the end when running in verbose mode (to avoid the headers printing out). If this is ever
 	// used to print other output adjust how/where tbl.PrintRemaining() is called as needed.
-	allColumns := []string{"path", "status", "configuration updates"}
+	allColumns := []string{"path", "status", "configuration_updates"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
 	var multiErr types.MultiError
 	count := 0

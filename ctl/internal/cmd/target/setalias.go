@@ -1,10 +1,9 @@
 package target
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 )
 
@@ -37,7 +36,7 @@ func runSetAliasCmd(cmd *cobra.Command, eid beegfs.EntityId, newAlias beegfs.Ali
 		return err
 	}
 
-	fmt.Printf("Alias set to %s\n", newAlias)
+	cmdfmt.Printf("Alias set to %s\n", newAlias)
 
 	return nil
 }

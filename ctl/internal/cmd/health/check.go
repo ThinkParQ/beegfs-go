@@ -215,12 +215,12 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		if !errors.Is(err, procfs.ErrEstablishingConnections) {
 			return err
 		}
-		fmt.Printf("WARNING: Error establishing new connections, further connection checks may be incomplete or skipped: %s (ignoring)\n", err)
+		fmt.Printf("Error establishing new connections, further connection checks may be incomplete or skipped: %s (ignoring)\n", err)
 		fmt.Print(hint(fmt.Sprintf("HINT: Try increasing the '--%s' flag or setting '--%s=false` to skip establishing new connections.\n\n", connectionTimeoutFlag, forceConnectionsFlag)))
 	}
 
 	if len(clients) == 0 {
-		fmt.Printf("WARNING: No client mounts found, skipping connection checks\n\n")
+		fmt.Printf("No client mounts found, skipping connection checks\n\n")
 	} else if len(clients) > 1 {
 		fmt.Print(hint("\nHINT: Multiple client mounts detected, connections will be checked from each mount point (specify <mount-path> if this is not what you want).\n\n"))
 	}

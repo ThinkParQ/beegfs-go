@@ -1,10 +1,9 @@
 package pool
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
@@ -90,13 +89,13 @@ func runCreatePoolCmd(cmd *cobra.Command, cfg createPool_Config) error {
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if err != nil {
-		fmt.Printf("Pool created, but received no id info from the server. Please verify the creation using the `pool list` command.\n")
+		cmdfmt.Printf("Pool created, but received no id info from the server. Please verify the creation using the `pool list` command.\n")
 	} else {
-		fmt.Printf("Pool created: %s\n", res)
+		cmdfmt.Printf("Pool created: %s\n", res)
 	}
 
 	if len(targets) == 0 && len(groups) == 0 {
-		fmt.Printf("\nWARNING: No targets or buddy groups were initially assigned to this pool.\nCreating files in directories assigned to this pool will fail until targets/mirrors are assigned with 'beegfs pool assign'.\n")
+		cmdfmt.Printf("\nNo targets or buddy groups were initially assigned to this pool.\nCreating files in directories assigned to this pool will fail until targets/mirrors are assigned with 'beegfs pool assign'.\n")
 	}
 
 	return nil

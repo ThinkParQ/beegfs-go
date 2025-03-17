@@ -56,7 +56,7 @@ Specifying Paths:
 
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Ignore the remote targets configured on each entry and only check files are synchronized with this comma-separated list of target IDs.`)
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\n", "Change the string delimiter used to determine individual paths when read from stdin (e.g., --stdin-delimiter=\"\\x00\" for NULL).")
-	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (WARNING: this may return large amounts of output, for example if the BeeGFS root is the provided path).")
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
@@ -159,7 +159,7 @@ run:
 			totalEntries, rst.Synchronized, syncedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
 	}
 	if noTargetFiles != 0 {
-		cmdfmt.Printf("Warning: not all files have remote targets configured\n")
+		cmdfmt.Printf("INFO: not all files have remote targets configured\n")
 	}
 
 	if totalEntries != (syncedFiles + unsyncedFiles + notAttemptedFiles + noTargetFiles + notSupportedFiles + directories) {

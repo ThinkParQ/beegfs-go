@@ -51,7 +51,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 		},
 	}
 
-	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (WARNING: this may return large amounts of output, for example if the BeeGFS root is the provided path).")
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	// TODO: https://github.com/thinkparq/ctl/issues/56
 	// Update help text when verbose no longer just applies to the retro mode.
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "In the \"retro\" mode, print more information about each entry, such as chunk and dentry paths on the servers.")
@@ -78,8 +78,8 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	if err != nil {
 		return err
 	}
-	defaultColumns := []string{"path", "entry id", "type", "meta node", "meta mirror", "storage pool", "stripe pattern", "storage targets", "buddy groups", "remote targets", "cool down"}
-	allColumns := append(defaultColumns, "client sessions", "data_state")
+	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets", "cool_down"}
+	allColumns := append(defaultColumns, "client_sessions", "data_state")
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {
@@ -264,11 +264,15 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 		info.Path,
 		info.Entry.EntryID,
 		info.Entry.Type,
-		fmt.Sprintf("%s (%d)", info.Entry.MetaOwnerNode.Alias, info.Entry.MetaOwnerNode.Id.NumId),
+		info.Entry.MetaOwnerNode.Id.String(),
 	)
 
 	if info.Entry.FeatureFlags.IsBuddyMirrored() {
-		row = append(row, info.Entry.MetaBuddyGroup)
+		id := beegfs.LegacyId{
+			NumId:    beegfs.NumId(info.Entry.MetaBuddyGroup),
+			NodeType: beegfs.Meta,
+		}
+		row = append(row, id)
 	} else {
 		row = append(row, "(unmirrored)")
 	}
@@ -284,10 +288,14 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	fmtTgtIDsFunc := func(targetIDs []uint16) string {
 		var targetsBuilder strings.Builder
 		for i, tgt := range targetIDs {
+			id := beegfs.LegacyId{
+				NumId:    beegfs.NumId(tgt),
+				NodeType: beegfs.Storage,
+			}
 			if i > 0 {
 				targetsBuilder.WriteString(",")
 			}
-			targetsBuilder.WriteString(fmt.Sprintf("%d", tgt))
+			targetsBuilder.WriteString(id.String())
 		}
 		return targetsBuilder.String()
 	}

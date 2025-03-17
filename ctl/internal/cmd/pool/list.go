@@ -41,13 +41,13 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 		return err
 	}
 
-	defaultColumns := []string{"alias", "id", "members"}
+	defaultColumns := []string{"id", "alias", "targets", "mirrors"}
 	if cfg.WithLimits {
 		defaultColumns = append(defaultColumns, "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit")
 	}
 
 	tbl := cmdfmt.NewPrintomatic(
-		[]string{"uid", "alias", "id", "members", "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit"},
+		[]string{"uid", "id", "alias", "targets", "mirrors", "user_space_limit", "user_inode_limit", "group_space_limit", "group_inode_limit"},
 		defaultColumns,
 	)
 
@@ -104,28 +104,29 @@ func RunListCmd(cmd *cobra.Command, cfg pool.GetStoragePools_Config) error {
 			}
 		}
 
-		members := ""
+		targets := ""
 		for _, t := range p.Targets {
 			if viper.GetBool(config.DebugKey) {
-				members += t.String() + "\n"
+				targets += t.String() + "\n"
 			} else {
-				members += t.Alias.String() + "\n"
+				targets += t.LegacyId.String() + ","
 			}
 		}
+		targets = strings.Trim(targets, ",")
+
+		buddy_groups := ""
 		for _, t := range p.BuddyGroups {
 			if viper.GetBool(config.DebugKey) {
-				members += t.String() + "\n"
+				buddy_groups += t.String() + "\n"
 			} else {
-				members += t.Alias.String() + "\n"
+				buddy_groups += t.LegacyId.String() + ","
 			}
 		}
+		buddy_groups = strings.Trim(buddy_groups, ",")
 
-		members = strings.Trim(members, "\n")
-
-		tbl.AddItem(p.Pool.Uid, p.Pool.Alias, p.Pool.LegacyId, members, userSpaceLimit, userInodeLimit, groupSpaceLimit, groupInodeLimit)
+		tbl.AddItem(p.Pool.Uid, p.Pool.LegacyId, p.Pool.Alias, targets, buddy_groups, userSpaceLimit, userInodeLimit, groupSpaceLimit, groupInodeLimit)
 	}
 
 	tbl.PrintRemaining()
-	fmt.Println()
 	return nil
 }

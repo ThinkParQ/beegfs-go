@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -60,16 +61,16 @@ func runDeleteBuddyGroupCmd(cmd *cobra.Command, cfg deleteBuddyGroup_Config) err
 	res, err := beegfs.EntityIdSetFromProto(resp.Group)
 	if cfg.execute {
 		if err != nil {
-			fmt.Printf("Buddy group deleted, but received no id info from the server. Please verify the deletion using the `mirror list` command.\n")
+			cmdfmt.Printf("Buddy group deleted, but received no id info from the server. Please verify the deletion using the `mirror list` command.\n")
 		} else {
-			fmt.Printf("Buddy group deleted: %s\n", res)
+			cmdfmt.Printf("Buddy group deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
 			return fmt.Errorf("received no id info from the server")
 		} else {
-			fmt.Printf(`Buddy group can be deleted: %s
+			cmdfmt.Printf(`Buddy group can be deleted: %s
 Deleting a buddy group might cause adverse effects to your file system and should only be done if no files using it are left. If you really want to delete the buddy group, please add the --yes flag to the command.
 `, res)
 		}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
 	pm "github.com/thinkparq/protobuf/go/management"
 )
@@ -54,16 +55,16 @@ func runDeletePoolCmd(cmd *cobra.Command, cfg deletePool_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if cfg.execute {
 		if err != nil {
-			fmt.Printf("Pool deleted, but received no id info from the server. Please verify the deletion using the `pool list` command.\n")
+			cmdfmt.Printf("Pool deleted, but received no id info from the server. Please verify the deletion using the `pool list` command.\n")
 		} else {
-			fmt.Printf("Pool deleted: %s\n", res)
+			cmdfmt.Printf("Pool deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
 			return fmt.Errorf("received no id info from the server")
 		} else {
-			fmt.Printf("Pool can be deleted: %s\nIf you really want to delete it, please add the --yes flag to the command.\n", res)
+			cmdfmt.Printf("Pool can be deleted: %s\nIf you really want to delete it, please add the --yes flag to the command.\n", res)
 		}
 	}
 

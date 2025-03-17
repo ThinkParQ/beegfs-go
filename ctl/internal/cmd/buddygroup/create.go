@@ -94,9 +94,9 @@ func runCreateBuddyGroupCmd(cmd *cobra.Command, cfg createBuddyGroup_Config) err
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Group)
 	if err != nil {
-		fmt.Printf("Buddy group created, but received no id info from the server. Please verify the creation using the `mirror list` command.\n")
+		cmdfmt.Printf("Buddy group created, but received no id info from the server. Please verify the creation using the `mirror list` command.\n")
 	} else {
-		fmt.Printf("Buddy group created: %s\n", res)
+		cmdfmt.Printf("Buddy group created: %s\n", res)
 	}
 
 	return nil
@@ -108,7 +108,7 @@ func runCreateBuddyGroupsAutomaticCmd(cmd *cobra.Command, cfg backend.AutoCreate
 		return err
 	}
 	for _, bg := range results {
-		fmt.Printf("Buddy group created: %s\n", bg)
+		cmdfmt.Printf("Buddy group created: %s\n", bg)
 	}
 	if len(warnings) > 0 {
 		for _, err := range warnings {
