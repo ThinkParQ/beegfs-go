@@ -19,23 +19,20 @@ func newGenericFindCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkBeeGFSConfig(); err != nil {
+				return err
+			}
+			var paths []string
 			if len(args) > 0 {
-				path = args[0]
+				paths = args
 			} else {
 				cwd, err := os.Getwd()
 				if err != nil {
 					return err
 				}
-				beegfsClient, err := config.BeeGFSClient(cwd)
-				if err != nil {
-					return err
-				}
-				path = beegfsClient.GetMountPath()
+				paths = []string{cwd}
 			}
-			if err := checkBeeGFSConfig(); err != nil {
-				return err
-			}
-			return runPythonFindIndex(bflagSet, path)
+			return runPythonFindIndex(bflagSet, paths)
 		},
 	}
 
@@ -104,16 +101,17 @@ $ beegfs index find --size +1G
 	return s
 }
 
-func runPythonFindIndex(bflagSet *bflag.FlagSet, path string) error {
+func runPythonFindIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, findCmd, path)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+1)
+	allArgs = append(allArgs, findCmd)
+	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
 	log.Debug("Running BeeGFS Hive Index find command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("findCmd", findCmd),
-		zap.String("path", path),
+		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
 	cmd := exec.Command(beeBinary, allArgs...)

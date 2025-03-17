@@ -19,23 +19,19 @@ func newGenericLsCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				path = args[0]
-			} else {
+			if err := checkBeeGFSConfig(); err != nil {
+				return err
+			}
+			paths := args
+			if len(paths) == 0 {
 				cwd, err := os.Getwd()
 				if err != nil {
 					return err
 				}
-				beegfsClient, err := config.BeeGFSClient(cwd)
-				if err != nil {
-					return err
-				}
-				path = beegfsClient.GetMountPath()
+				paths = []string{cwd}
 			}
-			if err := checkBeeGFSConfig(); err != nil {
-				return err
-			}
-			return runPythonLsIndex(bflagSet, path)
+
+			return runPythonLsIndex(bflagSet, paths)
 		},
 	}
 
@@ -87,16 +83,18 @@ $ beegfs index ls /mnt/index
 	return s
 }
 
-func runPythonLsIndex(bflagSet *bflag.FlagSet, path string) error {
+func runPythonLsIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, lsCmd, path)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+1)
+	allArgs = append(allArgs, lsCmd)
+	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
+
 	log.Debug("Running BeeGFS Hive Index ls command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("lsCmd", lsCmd),
-		zap.String("path", path),
+		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
 	cmd := exec.Command(beeBinary, allArgs...)
