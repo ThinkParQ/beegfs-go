@@ -44,6 +44,7 @@ an output database and/or files listing directories and files it encounters. Thi
    (each directory followed by its files) or to stride inodes across multiple files for merging with inode-strided attribute lists.
 
 Example: Create or update the index for the file system at /mnt/fs, limiting memory usage to 8GB:
+
 $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 `
 	return s
@@ -55,7 +56,6 @@ func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, createCmd)
 	allArgs = append(allArgs, wrappedArgs...)
-	allArgs = append(allArgs, "-k")
 	log.Debug("Running BeeGFS Hive Index create command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("createCmd", createCmd),

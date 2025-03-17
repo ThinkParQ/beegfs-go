@@ -57,9 +57,11 @@ including metadata attributes for files and directories. Additional options allo
 of BeeGFS-specific metadata if available.
 
 Example: Display the status of a file
+
 $ beegfs index stat README
 
 Example: Display BeeGFS-specific metadata for a file
+
 $ beegfs index stat --beegfs README
 `
 	return s

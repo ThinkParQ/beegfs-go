@@ -47,6 +47,7 @@ perform complex operations, such as attaching an input database to join data acr
 queries at various levels within a directory structure.
 
 Example:
+
 beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 `
 	return s
