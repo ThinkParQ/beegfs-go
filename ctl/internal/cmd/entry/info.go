@@ -105,7 +105,7 @@ run:
 			}
 			// Still try and print as much information as possible if verbose details are not available.
 			if len(info.Entry.Verbose.Err.Errors) != 0 {
-				log.Warn("unable to generate all output needed to print verbose details, some information may be missing (ignoring)", zap.Error(err))
+				log.Warn("unable to generate all output needed to print verbose details, some information may be missing (ignoring)", zap.Any("errors", info.Entry.Verbose.Err.Errors))
 			}
 			if frontendCfg.retro {
 				tbl.AddItem(assembleRetroEntry(info, frontendCfg))

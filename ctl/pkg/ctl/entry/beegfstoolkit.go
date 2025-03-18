@@ -29,7 +29,10 @@ const (
 func getFileChunkPath(originalParentUID uint32, originalParentEntryID string, entryID string) (string, error) {
 	uidStr := fmt.Sprintf("%X", originalParentUID)
 	timestamp, err := timestampFromEntryID(string(originalParentEntryID))
-	yearMonth, day := timestampToPath(timestamp)
+	if err != nil {
+		return "?", fmt.Errorf("unable to get file chunk path for entry ID %s with original parent UID %d because a timestamp could not be parsed from the original parent entry ID '%s': %w", entryID, originalParentUID, originalParentEntryID, err)
+	}
+	yearMonth, day, err := timestampToPath(timestamp)
 	chunkPath := "u" + uidStr + "/" +
 		yearMonth + "/" + // Level 1 - approx yymm
 		day + "/" + // Level 2 - approx dd
@@ -43,17 +46,20 @@ func getFileChunkPath(originalParentUID uint32, originalParentEntryID string, en
 func timestampFromEntryID(entryID string) (string, error) {
 	splitParentEntryID := strings.Split(entryID, "-")
 	if l := len(splitParentEntryID); l == 1 {
+		if entryID == "" {
+			return "?", fmt.Errorf("unable to parse timestamp from an empty entry ID")
+		}
 		// For special entries like 'root' and 'lost+found' just return as is.
 		return entryID, nil
 	} else if l != 3 {
 		// This shouldn't happen, just return the entry as is but the caller should log an error.
-		return entryID, fmt.Errorf("unable to parse timestamp from original parent entry ID %s", entryID)
+		return "?", fmt.Errorf("unable to parse timestamp from an entry ID that does not contain three parts separated by hyphens: %s", entryID)
 	}
 	return splitParentEntryID[1], nil
 }
 
 // timeStampToPath() from the BeeGFS StorageTK.
-func timestampToPath(timestamp string) (yearMonth string, day string) {
+func timestampToPath(timestamp string) (yearMonth string, day string, err error) {
 	tsLastPos := len(timestamp) - 1
 	tsDayPos := tsLastPos - timestampDayRPos
 
@@ -63,12 +69,16 @@ func timestampToPath(timestamp string) (yearMonth string, day string) {
 		day = timestamp[tsLastPos-timestampDayRPos : tsLastPos-timestampDayRPos+1]
 	}
 
-	if tsDayPos == 0 {
+	// This would happen if there is a dangling dentry for some reason. For example if entries are
+	// being deleted while querying those same entries with verbose details.
+	if tsDayPos < 0 {
+		return "?", "?", fmt.Errorf("the provided timestamp is invalid: %s", timestamp)
+	} else if tsDayPos == 0 {
 		yearMonth = "0"
 	} else {
 		yearMonth = timestamp[:tsDayPos]
 	}
-	return yearMonth, day
+	return yearMonth, day, nil
 }
 
 // getMetaDirEntryPath() from the BeeGFS MetaStorageTk.
