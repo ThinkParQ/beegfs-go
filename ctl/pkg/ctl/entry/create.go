@@ -199,7 +199,7 @@ func checkPoolForPattern(storagePool pool.GetStoragePools_Result, pattern beegfs
 // in the pool that will be assigned to the new entry. This also has the same effect of not allowing
 // files to be created using targets in different pools unless forced.
 func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.GetStoragePools_Result, pattern beegfs.StripePatternType, targetsOrBuddies []beegfs.EntityId) ([]uint16, error) {
-	ids := []uint16{}
+	ids := map[uint16]struct{}{}
 	if pattern == beegfs.StripePatternRaid0 {
 		targetMap := map[beegfs.EntityIdSet]struct{}{}
 		for _, t := range storagePool.Targets {
@@ -212,7 +212,10 @@ func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.Ge
 				if _, ok := targetMap[t]; !ok && !force {
 					return nil, fmt.Errorf("specified target %s is not in the pool %s assigned to the new entry (use force to override)", t, storagePool.Pool)
 				}
-				ids = append(ids, uint16(t.LegacyId.NumId))
+				if _, ok := ids[uint16(t.LegacyId.NumId)]; ok {
+					return nil, fmt.Errorf("the same target was specified multiple times: %d", t.LegacyId.NumId)
+				}
+				ids[uint16(t.LegacyId.NumId)] = struct{}{}
 			}
 		}
 	} else if pattern == beegfs.StripePatternBuddyMirror {
@@ -227,14 +230,21 @@ func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.Ge
 				if _, ok := buddyMap[b]; !ok && !force {
 					return nil, fmt.Errorf("specified buddy group %s is not in the pool %s assigned to the new entry (use force to override)", b, storagePool.Pool)
 				}
-				ids = append(ids, uint16(b.LegacyId.NumId))
+				if _, ok := ids[uint16(b.LegacyId.NumId)]; ok {
+					return nil, fmt.Errorf("the same buddy group was specified multiple times: %d", b.LegacyId.NumId)
+				}
+				ids[uint16(b.LegacyId.NumId)] = struct{}{}
 			}
 		}
 	} else {
 		return nil, fmt.Errorf("unknown stripe pattern: %s", pattern)
 	}
 
-	return ids, nil
+	finalIDs := make([]uint16, 0)
+	for id := range ids {
+		finalIDs = append(finalIDs, id)
+	}
+	return finalIDs, nil
 }
 
 func generateAndVerifyMkDirRequest(userCfg *CreateEntryCfg, parent *GetEntryCombinedInfo, nodeStore *beemsg.NodeStore, mappings *util.Mappings) (*msg.MkDirRequest, error) {
