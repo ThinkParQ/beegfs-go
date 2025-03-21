@@ -103,6 +103,13 @@ func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool)
 		}
 	}
 	treeArgs := []string{createCmd, "-S"}
+	requiredFlags := map[string]bool{"-X": true, "-n": true}
+	for i := 0; i < len(wrappedArgs); i++ {
+		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
+			treeArgs = append(treeArgs, wrappedArgs[i], wrappedArgs[i+1])
+			i++
+		}
+	}
 	log.Debug("Running BeeGFS Hive Index Tree-Summary command",
 		zap.Any("Args", treeArgs),
 	)
