@@ -9,6 +9,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	fUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -113,6 +114,7 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 	var multiErr types.MultiError
 	var migrateStats = &entry.MigrateStats{}
 
+	migrateErr := false
 	printVerbosely := frontendCfg.verbose || viper.GetBool(config.DebugKey)
 run:
 	for {
@@ -121,12 +123,11 @@ run:
 			if !ok {
 				break run
 			}
-			if printVerbosely {
-				if result.Err != nil {
-					tbl.AddItem(result.Path, result.Status, result.StartingIDs, result.Err)
-				} else {
-					tbl.AddItem(result.Path, result.Status, result.StartingIDs, "none")
-				}
+			if result.Err != nil {
+				migrateErr = true
+				tbl.AddItem(result.Path, result.Status, result.StartingIDs, result.Err)
+			} else if printVerbosely {
+				tbl.AddItem(result.Path, result.Status, result.StartingIDs, "none")
 			}
 			migrateStats.Update(result.Status)
 
@@ -136,13 +137,16 @@ run:
 			}
 		}
 	}
-	if printVerbosely {
+	if migrateErr || printVerbosely {
 		tbl.PrintRemaining()
 	}
 	cmdfmt.Printf("Summary: %+v\n", *migrateStats)
 	// We may have still processed some entries so wait to print an error until the end.
 	if len(multiErr.Errors) != 0 {
 		return &multiErr
+	}
+	if migrateErr {
+		return fUtil.NewCtlError(fmt.Errorf("some entries could not be migrated"), fUtil.PartialSuccess)
 	}
 
 	return nil

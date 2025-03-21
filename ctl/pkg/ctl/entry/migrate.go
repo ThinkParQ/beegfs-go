@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -11,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -27,11 +29,11 @@ const (
 	MigrateUnknown MigrateStatus = iota
 	MigrateError
 	MigrateNotSupported
-	MigrateSkipped
+	MigrateSkippedDir
 	MigrateNotNeeded
 	MigrateNeeded
 	MigratedFile
-	MigratedDirectory
+	MigrateUpdatedDir
 )
 
 func (s MigrateStatus) String() string {
@@ -40,15 +42,15 @@ func (s MigrateStatus) String() string {
 		return "error"
 	case MigrateNotSupported:
 		return "migration not supported"
-	case MigrateSkipped:
-		return "migration skipped"
+	case MigrateSkippedDir:
+		return "skipped updating directory"
 	case MigrateNotNeeded:
 		return "migration not needed"
 	case MigrateNeeded:
 		return "migration needed"
 	case MigratedFile:
 		return "migrated file"
-	case MigratedDirectory:
+	case MigrateUpdatedDir:
 		return "updated directory"
 	default:
 		return "unknown"
@@ -59,11 +61,11 @@ type MigrateStats struct {
 	MigrationStatusUnknown int
 	MigrationErrors        int
 	MigrationNotSupported  int
-	MigrationSkipped       int
+	MigrationSkippedDirs   int
 	MigrationNotNeeded     int
 	MigrationNeeded        int
 	MigratedFiles          int
-	MigratedDirectories    int
+	MigrationUpdatedDirs   int
 }
 
 func (s *MigrateStats) Update(status MigrateStatus) {
@@ -72,16 +74,16 @@ func (s *MigrateStats) Update(status MigrateStatus) {
 		s.MigrationErrors++
 	case MigrateNotSupported:
 		s.MigrationNotSupported++
-	case MigrateSkipped:
-		s.MigrationSkipped++
+	case MigrateSkippedDir:
+		s.MigrationSkippedDirs++
 	case MigrateNotNeeded:
 		s.MigrationNotNeeded++
 	case MigrateNeeded:
 		s.MigrationNeeded++
 	case MigratedFile:
 		s.MigratedFiles++
-	case MigratedDirectory:
-		s.MigratedDirectories++
+	case MigrateUpdatedDir:
+		s.MigrationUpdatedDirs++
 	default:
 		s.MigrationStatusUnknown++
 	}
@@ -287,10 +289,10 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 					err = setResult.Status
 					return result, nil
 				}
-				result.Status = MigratedDirectory
+				result.Status = MigrateUpdatedDir
 				return result, nil
 			}
-			result.Status = MigrateSkipped
+			result.Status = MigrateSkippedDir
 			return result, nil
 		}
 
@@ -299,6 +301,33 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	result.StartingIDs = entry.Entry.Pattern.TargetIDs
+
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(entry.Path)
+
+	// As much we can check up front before making any changes to determine if the migration is
+	// likely to succeed. This ensures the dry run mode is as accurate as possible.
+
+	// A stat of the entry is needed for some checks and to set the original attributes on the
+	// migrated entry.
+	stat, err := client.Lstat(entry.Path)
+	if err != nil {
+		result.Status = MigrateError
+		result.Err = err
+		return result, nil
+	}
+	linuxStat, ok := stat.Sys().(*syscall.Stat_t)
+	if !ok {
+		result.Status = MigrateError
+		result.Err = fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
+		return result, nil
+	}
+	err = migratePossible(linuxStat)
+	if err != nil {
+		result.Status = MigrateError
+		result.Err = err
+		return result, nil
+	}
 
 	if !needsMigration(entry, migration) {
 		result.Status = MigrateNotNeeded
@@ -311,9 +340,9 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	if entry.Entry.Type == beegfs.EntryRegularFile {
-		err = migrate(ctx, entry, migration)
+		err = migrate(ctx, client, stat, linuxStat, entry, migration)
 	} else {
-		err = migrateLink(entry, migration)
+		err = migrateLink(client, stat, linuxStat, entry, migration)
 	}
 
 	if err != nil {
@@ -324,6 +353,16 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 
 	result.Status = MigratedFile
 	return result, nil
+}
+
+func migratePossible(stat *syscall.Stat_t) error {
+	if stat.Mode&0o777 == 0 {
+		return fmt.Errorf("refusing to migrate entry with 000 permissions")
+	}
+	if stat.Nlink > 1 {
+		return fmt.Errorf("cannot migrate entries with hard links yet (number of links: %d)", stat.Nlink)
+	}
+	return nil
 }
 
 func needsMigration(entry *GetEntryCombinedInfo, req migration) bool {
@@ -342,28 +381,12 @@ func needsMigration(entry *GetEntryCombinedInfo, req migration) bool {
 	return false
 }
 
-func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) error {
+func migrate(ctx context.Context, client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
 
-	// No need to check for an error, the global client is initialized by process.go.
-	client, _ := config.BeeGFSClient(entry.Path)
 	// tempFileBase is just the name of the temp file.
 	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
 	// tempFile is the full absolute path to the temp file.
 	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
-
-	// The originalStat will be used to set the original attributes on the migrated file.
-	originalStat, err := client.Lstat(entry.Path)
-	if err != nil {
-		return err
-	}
-
-	origLinuxStat, ok := originalStat.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
-	}
-	if origLinuxStat.Nlink > 1 {
-		return fmt.Errorf("cannot migrate files with hard links yet (number of links: %d)", origLinuxStat.Nlink)
-	}
 
 	// Clear the target IDs from the original stripe pattern and update the storage pool ID to the
 	// one being migrated to. This will cause the metadata server to automatically handle picking
@@ -389,7 +412,7 @@ func migrate(ctx context.Context, entry *GetEntryCombinedInfo, req migration) er
 	}
 
 	var resp = &msg.MakeFileWithPatternResponse{}
-	err = req.store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+	err := req.store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
 		return err
 	}
@@ -492,22 +515,11 @@ func didFileChange(a, b *syscall.Stat_t) error {
 	return nil
 }
 
-func migrateLink(entry *GetEntryCombinedInfo, req migration) error {
-	// No need to check for an error, the global client is initialized by process.go.
-	client, _ := config.BeeGFSClient(entry.Path)
+func migrateLink(client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
 	// tempFileBase is just the name of the temp file.
 	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
 	// tempFile is the full absolute path to the temp file.
 	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
-	// The originalStat will be used to set the original attributes on the migrated link.
-	originalStat, err := client.Lstat(entry.Path)
-	if err != nil {
-		return err
-	}
-	origLinuxStat, ok := originalStat.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
-	}
 
 	linkTarget, err := client.Readlink(entry.Path)
 	if err != nil {
