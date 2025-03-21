@@ -152,16 +152,16 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 			return nil, err
 		}
 		if len(clients) == 0 {
-			return nil, fmt.Errorf("unable to auto-configure the management address: BeeGFS does not appear to be mounted, manually specify --%s for the file system to manage", ManagementAddrKey)
+			return nil, fmt.Errorf("unable to auto-configure the management address: BeeGFS does not appear to be mounted, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage", ManagementAddrKey)
 		}
 		for _, c := range clients {
 			sysMgmtdHost, ok := c.Config[procfsMgmtdHost]
 			if !ok {
-				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s, manually specify --%s for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdHost, ManagementAddrKey)
+				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdHost, ManagementAddrKey)
 			}
 			connMgmtdGrpcPort, ok := c.Config[procfsMgmtdGrpc]
 			if !ok {
-				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
+				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s <hostname|ip>:<grpc-port>for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
 			}
 			foundMgmtdAddr := fmt.Sprintf("%s:%s", sysMgmtdHost, connMgmtdGrpcPort)
 			log.Debug("found client mount point", zap.String("mgmtdAddr", foundMgmtdAddr), zap.String("mountPoint", c.Mount.Path), zap.String("procfsDir", c.ProcDir))
