@@ -2,25 +2,42 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/mock"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -72,6 +89,14 @@ func main() {
 	pflag.CommandLine.MarkHidden("developer.perf-profiling-port")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
 	pflag.CommandLine.MarkHidden("developer.dump-config")
+	pflag.Uint32("developer.benchmark-target", 0, "Specify a target to perform an upload sync operation (0 uses mock target)")
+	pflag.Int("developer.benchmark-count", 0, "Specify a target to perform an upload sync operation (0 disables performance benchmarking)")
+	pflag.Int32("developer.benchmark-mock-work-requests", 1, "Specify the number of mocked work requests per job")
+	pflag.Bool("developer.benchmark-mock-beegfs", false, "Whether BeeGFS should be mocked")
+	pflag.CommandLine.MarkHidden("developer.benchmark-target")
+	pflag.CommandLine.MarkHidden("developer.benchmark-count")
+	pflag.CommandLine.MarkHidden("developer.benchmark-work-requests")
+	pflag.CommandLine.MarkHidden("developer.benchmark-mock-beegfs")
 
 	pflag.CommandLine.SortFlags = false
 	pflag.Usage = func() {
@@ -99,6 +124,28 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	benchmarkTarget, _ := pflag.CommandLine.GetUint32("developer.benchmark-target")
+	benchmarkCount, _ := pflag.CommandLine.GetInt("developer.benchmark-count")
+	BenchmarkMockWorkRequests, _ := pflag.CommandLine.GetInt32("developer.benchmark-mock-work-requests")
+	BenchmarkMockBeeGFS, _ := pflag.CommandLine.GetBool("developer.benchmark-mock-beegfs")
+	if BenchmarkMockWorkRequests < 1 {
+		BenchmarkMockWorkRequests = 1
+	}
+	if benchmarkCount != 0 {
+		dbPath := "/var/lib/beegfs/remote/benchmark.badger"
+		defer os.RemoveAll(dbPath)
+
+		if err := pflag.CommandLine.Set("job.path-db", dbPath); err != nil {
+			fmt.Printf("unable to set temporary BadgerDB path for performance benchmarking: %s\n", err)
+			os.Exit(1)
+		}
+		pprofPort := "16060"
+		if err := pflag.CommandLine.Set("developer.perf-profiling-port", pprofPort); err != nil {
+			fmt.Printf("unable to set temporary BadgerDB path for performance benchmarking: %s\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
@@ -140,6 +187,14 @@ Using environment variables:
 	mountPoint, err := filesystem.NewFromMountPoint(initialCfg.MountPoint)
 	if err != nil {
 		logger.Fatal("unable to access BeeGFS mount point", zap.Error(err))
+	}
+
+	if benchmarkCount != 0 && benchmarkTarget == 0 {
+		mockedMountPoint := benchmarkMockTarget(initialCfg)
+		if BenchmarkMockBeeGFS {
+			fmt.Println("Mocking BeeGFS mount point")
+			mountPoint = mockedMountPoint
+		}
 	}
 
 	// Create a channel to receive OS signals to coordinate graceful shutdown:
@@ -232,6 +287,25 @@ Using environment variables:
 	errChan := make(chan error, 2)
 	jobServer.ListenAndServe(errChan)
 
+	if benchmarkCount != 0 {
+		var benchmarkTargetType *flex.RemoteStorageTarget
+		for _, rst := range initialCfg.RemoteStorageTargets {
+			if rst.Id == benchmarkTarget {
+				benchmarkTargetType = rst
+				break
+			}
+		}
+
+		address := strings.Split(initialCfg.Server.Address, ":")[0]
+		port := initialCfg.Developer.PerfProfilingPort
+		varsUrl := fmt.Sprintf("http://%s:%d/debug/vars", address, port)
+
+		time.Sleep(5 * time.Second) // Wait for job server to start
+		if err := runBenchmarks(ctx, cancel, jobManager, mountPoint.GetMountPath(), benchmarkTarget, benchmarkTargetType, BenchmarkMockWorkRequests, benchmarkCount, varsUrl); err != nil {
+			fmt.Printf("unable to complete performance benchmark: %v\n", err)
+		}
+	}
+
 	// Block and wait for a shutdown signal:
 	select {
 	case err := <-errChan:
@@ -244,4 +318,363 @@ Using environment variables:
 	workerManager.Stop()
 
 	logger.Info("shutdown all components, exiting")
+}
+
+func runBenchmarks(ctx context.Context, cancel context.CancelFunc, jobMgr *job.Manager, mountPath string, target uint32, targetType *flex.RemoteStorageTarget, workRequests int32, count int, varsUrl string) error {
+	if target == 0 {
+		// target type is mocked so cancel immediately after testing
+		defer cancel()
+	}
+
+	benchmarkCtx, benchmarkCancel := context.WithCancel(ctx)
+	defer benchmarkCancel()
+
+	inMountPath := "performance-testing.tmp"
+	path := filepath.Join(mountPath, inMountPath)
+	if err := os.Mkdir(path, 0755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("unable to create temporary file directory: %w", err)
+	}
+	if err := benchmarkCreateFiles(benchmarkCtx, path, count); err != nil {
+		return fmt.Errorf("failed to complete benchmark: %w", err)
+	}
+
+	logPath := fmt.Sprintf("benchmark-%v", time.Now().Unix())
+	if err := os.Mkdir(logPath, 0755); err != nil {
+		return fmt.Errorf("unable to create log directory: %w", err)
+	}
+	if err := collectPProfDebugVars(benchmarkCtx, varsUrl, logPath); err != nil {
+		return err
+	}
+	measurementChan, err := benchmarkMeasure(benchmarkCtx, logPath)
+	if err != nil {
+		return err
+	}
+
+	if err := benchmarkSubmit(benchmarkCtx, jobMgr, measurementChan, target, targetType, workRequests, inMountPath, count); err != nil {
+		return fmt.Errorf("failed to complete benchmark: %w", err)
+	}
+
+	return nil
+}
+
+func benchmarkCreateFiles(ctx context.Context, path string, count int) error {
+	fmt.Println("Create temporary files...")
+	workers := runtime.GOMAXPROCS(0)
+	fileChan := benchmarkGetFilepaths(path, count)
+
+	g, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < workers; i++ {
+		g.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case path, ok := <-fileChan:
+					if !ok {
+						return nil
+					}
+
+					if _, err := os.Stat(path); err != nil && os.IsNotExist(err) {
+						f, err := os.Create(path)
+						if err != nil {
+							return err
+						}
+						f.Close()
+					}
+				}
+			}
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("failed to create temporary files: %w", err)
+	}
+
+	fmt.Printf("Temporary files created. Path: %s\n", path)
+	return nil
+}
+
+type measurement struct {
+	count       int64
+	elapsedTime float64
+}
+
+func benchmarkMeasure(ctx context.Context, logPath string) (chan<- measurement, error) {
+	path := filepath.Join(logPath, "results.csv")
+	resultsHandle, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("unable to open file to write benchmark results: %w", err)
+	}
+
+	measurementChan := make(chan measurement, 128)
+	go func() {
+		defer resultsHandle.Close()
+		resultsHandle.WriteString("count,elapsed_time,throughput")
+
+		start := time.Now()
+		var count int64
+		throughputs := []float64{}
+	collect:
+		for {
+			select {
+			case <-ctx.Done():
+				break collect
+			case measurement, ok := <-measurementChan:
+				if !ok {
+					break collect
+				}
+				countMeasured := measurement.count - count
+				count += countMeasured
+				throughput := float64(countMeasured) / measurement.elapsedTime
+				throughputs = append(throughputs, throughput)
+				line := fmt.Sprintf("\n%d,%.2f,%.2f", count, measurement.elapsedTime, throughput)
+				resultsHandle.WriteString(line)
+			}
+		}
+
+		filteredThroughputs := filterOutliers(throughputs, 2.0)
+		var sum float64
+		var maximum float64
+		var minimum float64
+		for _, throughput := range filteredThroughputs {
+			sum += throughput
+			if throughput > maximum {
+				maximum = throughput
+			}
+			if minimum == 0.0 || minimum > throughput {
+				minimum = throughput
+			}
+		}
+		filteredAvg := sum / float64(len(filteredThroughputs))
+		totalSeconds := time.Since(start).Seconds()
+
+		path = filepath.Join(logPath, "summary.log")
+		summaryHandle, err := os.Create(path)
+		if err != nil {
+			return
+		}
+		summary := fmt.Sprintf("Files transferred: %d\nDuration: %.2f sec\nAverage: %.2f jobs/s\nAverage Without Outliers: %.2f jobs/s\nMaximum: %.2f jobs/s\nMinimum: %.2f jobs/s\n", count, totalSeconds, float64(count)/totalSeconds, filteredAvg, maximum, minimum)
+		summaryHandle.WriteString(summary)
+		fmt.Print("Benchmark Complete.\n\n")
+		fmt.Println(summary)
+	}()
+
+	return measurementChan, nil
+}
+
+func collectPProfDebugVars(ctx context.Context, varsUrl string, logPath string) error {
+	path := filepath.Join(logPath, "pprof-debug-vars.ndjson")
+	statsHandle, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("unable to collect performance profile variables: %w", err)
+	}
+
+	go func() {
+		defer statsHandle.Close()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				resp, err := http.Get(varsUrl)
+				if err != nil {
+					fmt.Printf("failed to fetch pprof debug variables: %v", err)
+					return
+				}
+				defer resp.Body.Close()
+
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Printf("failed to read pprof debug variables: %v", err)
+					return
+				}
+
+				loadavg, err := os.ReadFile("/proc/loadavg")
+				if err != nil {
+					fmt.Printf("failed to read /proc/loadavg: %v", err)
+					return
+				}
+				fields := strings.Fields(strings.Split(string(loadavg), "\n")[0])
+				var data map[string]interface{}
+				if err := json.Unmarshal(body, &data); err != nil {
+					fmt.Printf("failed to parse /proc/loadavg: %v", err)
+					return
+				}
+				data["load1"], _ = strconv.ParseFloat(fields[0], 64)
+				data["load5"], _ = strconv.ParseFloat(fields[1], 64)
+				data["load15"], _ = strconv.ParseFloat(fields[2], 64)
+				data["timestamp"] = time.Now().Format(time.RFC3339)
+				enc := json.NewEncoder(statsHandle)
+				enc.SetIndent("", "")
+				if err := enc.Encode(data); err != nil {
+					fmt.Printf("failed to write compact JSON: %v", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func benchmarkSubmit(ctx context.Context, mgr *job.Manager, measurementChan chan<- measurement, target uint32, targetType *flex.RemoteStorageTarget, workRequests int32, path string, count int) error {
+	defer close(measurementChan)
+	if target == 0 {
+		fmt.Println("Run performance benchmark against mocked target...")
+	} else {
+		fmt.Printf("Run performance benchmark against target %d...\n", target)
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	fileChan := benchmarkGetFilepaths(path, count)
+	baseRequest := &beeremote.JobRequest{RemoteStorageTarget: target}
+	switch targetType.WhichType() {
+	case flex.RemoteStorageTarget_S3_case:
+		baseRequest.Type = &beeremote.JobRequest_Sync{
+			Sync: &flex.SyncJob{
+				Operation: flex.SyncJob_UPLOAD,
+			},
+		}
+	case flex.RemoteStorageTarget_Mock_case:
+		baseRequest.Type = &beeremote.JobRequest_Mock{
+			Mock: &flex.MockJob{
+				FileSize:        1,
+				NumTestSegments: workRequests,
+				CanRetry:        true,
+			},
+		}
+	default:
+		return rst.ErrUnsupportedOpForRST
+	}
+
+	var counter atomic.Int64
+	previous := time.Now()
+	g, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < workers; i++ {
+		g.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case path, ok := <-fileChan:
+					if !ok {
+						return nil
+					}
+
+					request := proto.Clone(baseRequest).(*beeremote.JobRequest)
+					request.SetPath(path)
+					_, err := mgr.SubmitJobRequest(request)
+					if err != nil {
+						return err
+					}
+
+					count := counter.Add(1)
+					if count%2500 == 0 {
+						current := time.Now()
+						measurementChan <- measurement{elapsedTime: current.Sub(previous).Seconds(), count: count}
+						previous = current
+					}
+				}
+			}
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("unable to submit all upload job requests: %w", err)
+	}
+	fmt.Println("Performance benchmark complete.")
+
+	return nil
+}
+
+func benchmarkGetFilepaths(path string, count int) <-chan string {
+	fileChan := make(chan string, 1024)
+	go func() {
+		defer close(fileChan)
+		for i := 0; i < count; i++ {
+			fileChan <- fmt.Sprintf("%s/%d", path, i)
+		}
+	}()
+
+	return fileChan
+}
+
+func benchmarkMockTarget(cfg *config.AppConfig) filesystem.Provider {
+	cfg.WorkerMgr = workermgr.Config{}
+	cfg.Workers = []worker.Config{
+		{
+			ID:                  "0",
+			Name:                "test-node-0",
+			Type:                worker.Mock,
+			MaxReconnectBackOff: 5,
+			MockConfig: worker.MockConfig{
+				Expectations: []worker.MockExpectation{
+					{
+						MethodName: "connect",
+						ReturnArgs: []interface{}{false, nil},
+					},
+					{
+						MethodName: "SubmitWork",
+						Args:       []interface{}{mock.Anything},
+						ReturnArgs: []interface{}{
+							flex.Work_Status_builder{
+								State:   flex.Work_SCHEDULED,
+								Message: "test expects a scheduled request",
+							}.Build(),
+							nil,
+						},
+					},
+					{
+						MethodName: "UpdateWork",
+						Args:       []interface{}{mock.Anything},
+						ReturnArgs: []interface{}{
+							flex.Work_Status_builder{
+								State:   flex.Work_CANCELLED,
+								Message: "test expects a cancelled request",
+							}.Build(),
+							nil,
+						},
+					},
+					{
+						MethodName: "disconnect",
+						ReturnArgs: []interface{}{nil},
+					},
+				},
+			},
+		},
+	}
+	cfg.RemoteStorageTargets = []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{
+			Id:   0,
+			Mock: proto.String("test"),
+		}.Build(),
+	}
+	return filesystem.NewMockFS()
+}
+
+func filterOutliers(measurements []float64, stdCount float64) []float64 {
+	if len(measurements) == 0 {
+		return measurements
+	}
+	var sum float64
+	for _, measurement := range measurements {
+		sum += measurement
+	}
+	mean := sum / float64(len(measurements))
+
+	var sumSquares float64
+	for _, measurement := range measurements {
+		diff := measurement - mean
+		sumSquares += diff * diff
+	}
+	threshold := stdCount * math.Sqrt(sumSquares/float64(len(measurements)))
+
+	filtered := make([]float64, 0, len(measurements))
+	for _, measurement := range measurements {
+		if math.Abs(measurement-mean) <= threshold {
+			filtered = append(filtered, measurement)
+		}
+	}
+	return filtered
 }
