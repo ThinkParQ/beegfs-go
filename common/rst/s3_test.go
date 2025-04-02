@@ -23,10 +23,10 @@ var testS3Client = &S3Client{
 	},
 }
 
-func TestGenerateRequests(t *testing.T) {
+func TestGenerateWorkRequests(t *testing.T) {
 	var err error
 	mp := filesystem.NewMockFS()
-	mp.CreateWriteClose(baseTestJob.Request.GetPath(), make([]byte, 1023))
+	mp.CreateWriteClose(baseTestJob.Request.GetPath(), make([]byte, 1023), 0644, false)
 	// Ensure fast start max size is less than the size used for the mock file (1023). This way the
 	// client doesn't try to create a multi-part upload, which can't be done without a real bucket.
 	testS3Client.config.Policies.FastStartMaxSize = 1024
@@ -52,9 +52,8 @@ func TestGenerateRequests(t *testing.T) {
 	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Also test flex.SyncJob_DOWNLOAD once we have an s3MockProvider.
 	for i, op := range []flex.SyncJob_Operation{flex.SyncJob_UPLOAD} {
-		requests, retry, err := testS3Client.GenerateWorkRequests(context.Background(), nil, testJobs[i], 1)
+		requests, err := testS3Client.GenerateWorkRequests(context.Background(), nil, testJobs[i], 1)
 		assert.NoError(t, err)
-		assert.True(t, retry)
 		require.Len(t, requests, 1)
 		assert.Equal(t, "", requests[0].ExternalId)
 		assert.Equal(t, op, requests[0].GetSync().Operation)
@@ -63,22 +62,19 @@ func TestGenerateRequests(t *testing.T) {
 	// If an invalid job type is specified for this RST return the correct error:
 	jobMock := proto.Clone(jobWithNoExternalID).(*beeremote.Job)
 	jobMock.Request.Type = &beeremote.JobRequest_Mock{Mock: &flex.MockJob{}}
-	_, retry, err := testS3Client.GenerateWorkRequests(context.Background(), nil, jobMock, 1)
+	_, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobMock, 1)
 	assert.ErrorIs(t, err, ErrReqAndRSTTypeMismatch)
-	assert.False(t, retry)
 
 	// If the the job type is correct but the operation is not specified/supported, return the correct error:
 	jobSyncInvalid := proto.Clone(jobWithNoExternalID).(*beeremote.Job)
 	jobSyncInvalid.Request.Type = &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}}
-	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobSyncInvalid, 1)
+	_, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobSyncInvalid, 1)
 	assert.ErrorIs(t, err, ErrUnsupportedOpForRST)
-	assert.False(t, retry)
 
 	// If the job already as an external ID it should not be allowed to generate new requests.
 	jobWithExternalID := proto.Clone(baseTestJob).(*beeremote.Job)
-	_, retry, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobWithExternalID, 1)
+	_, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobWithExternalID, 1)
 	assert.ErrorIs(t, err, ErrJobAlreadyHasExternalID)
-	assert.False(t, retry)
 }
 
 // More complex testing around completing requests is not possible without mocking.

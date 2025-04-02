@@ -92,30 +92,40 @@ func (t *jobsTable) PrintRemaining() {
 
 // Row adds a row for the provided job. It is opinionated about what fields are included, and how
 // each field is displayed.
-func (t *jobsTable) Row(job *beeremote.JobResult) {
+func (t *jobsTable) Row(result *beeremote.JobResult) {
+	job := result.Job
+	request := job.GetRequest()
+	status := job.GetStatus()
+
 	var operation string
 	// Must be updated when new job types are supported:
-	if job.Job.GetRequest().GetSync() != nil {
-		operation = job.Job.GetRequest().GetSync().Operation.String()
+	if request.HasSync() {
+		syncJob := request.GetSync()
+		operation = syncJob.Operation.String()
+		if syncJob.Operation == flex.SyncJob_UPLOAD && job.Request.StubLocal {
+			operation = "OFFLOAD"
+		}
+	} else if request.HasBuilder() {
+		operation = "JOB BUILDER"
 	} else {
 		// Fallback and print the raw representation for unknown types:
-		operation = fmt.Sprintf("%v", job.Job.GetRequest().GetType())
+		operation = fmt.Sprintf("%v", request.GetType())
 	}
 
 	t.tbl.AddItem(
-		convertJobStateToEmoji(job.Job.GetStatus().GetState()),
-		job.Job.GetRequest().GetPath(),
-		job.Job.GetRequest().GetRemoteStorageTarget(),
-		job.Job.GetCreated().AsTime().Format(time.RFC3339),
-		job.Job.GetStatus().GetUpdated().AsTime().Format(time.RFC3339),
-		job.Job.GetStartMtime().AsTime().Format(time.RFC3339),
-		job.Job.GetStopMtime().AsTime().Format(time.RFC3339),
-		job.Job.GetId(),
+		convertJobStateToEmoji(status.GetState()),
+		request.GetPath(),
+		request.GetRemoteStorageTarget(),
+		job.GetCreated().AsTime().Format(time.RFC3339),
+		status.GetUpdated().AsTime().Format(time.RFC3339),
+		job.GetStartMtime().AsTime().Format(time.RFC3339),
+		job.GetStopMtime().AsTime().Format(time.RFC3339),
+		job.GetId(),
 		operation,
-		job.Job.GetStatus().GetState(),
-		wrapTextAtWidth(job.Job.GetStatus().GetMessage(), t.wrappingWidth),
-		t.getWorkRequestsForCell(job.GetWorkRequests()),
-		t.getWorkResultsForCell(job.GetWorkResults()),
+		status.GetState(),
+		wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
+		t.getWorkRequestsForCell(result.GetWorkRequests()),
+		t.getWorkResultsForCell(result.GetWorkResults()),
 		"",
 		// When making updates, also update MinimalRow().
 	)
@@ -148,14 +158,16 @@ func (t *jobsTable) MinimalRow(path string, explanation string) {
 func (t *jobsTable) getWorkRequestsForCell(workRequests []*flex.WorkRequest) string {
 	strBuilder := strings.Builder{}
 	for _, wr := range workRequests {
-		strBuilder.WriteString(fmt.Sprintf("===== request id: %s =====\n* external id: \n%s\n* offset start: %d\n* offset stop: %d\n* part start: %d\n* part stop: %d\n",
-			wr.RequestId,
-			wrapTextAtWidth(wr.ExternalId, t.wrappingWidth),
-			wr.Segment.OffsetStart,
-			wr.Segment.OffsetStop,
-			wr.Segment.PartsStart,
-			wr.Segment.PartsStop,
-		))
+		if wr.Segment != nil {
+			strBuilder.WriteString(fmt.Sprintf("===== request id: %s =====\n* external id: \n%s\n* offset start: %d\n* offset stop: %d\n* part start: %d\n* part stop: %d\n",
+				wr.RequestId,
+				wrapTextAtWidth(wr.ExternalId, t.wrappingWidth),
+				wr.Segment.OffsetStart,
+				wr.Segment.OffsetStop,
+				wr.Segment.PartsStart,
+				wr.Segment.PartsStop,
+			))
+		}
 	}
 	return strBuilder.String()
 }
@@ -264,6 +276,7 @@ var jobStateMap = map[beeremote.Job_State]jobStateEmoji{
 	beeremote.Job_FAILED:    {"❌", beeremote.Job_FAILED.String()},
 	beeremote.Job_CANCELLED: {"🚫", beeremote.Job_CANCELLED.String()},
 	beeremote.Job_COMPLETED: {"✅", beeremote.Job_COMPLETED.String()},
+	beeremote.Job_OFFLOADED: {"☁️", beeremote.Job_OFFLOADED.String()},
 }
 
 func convertWorkStateToEmoji(state flex.Work_State) string {

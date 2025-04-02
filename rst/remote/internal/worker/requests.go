@@ -37,10 +37,9 @@ func (wr *WorkResult) Status() *flex.Work_Status {
 }
 
 // InTerminalState() indicates the work request is no longer active, cannot be restarted, and will
-// not conflict with a new work request. This should mirror the InTerminalState() method for jobs.
-// Note jobs that are failed or have an error aren't considered in a terminal state because they
-// don't complete or abort the job request, meaning (for example) artifacts like multipart uploads
-// and partial uploads wouldn't not have been cleaned up.
+// not conflict with a new work request. Note jobs that are failed or have an error aren't
+// considered in a terminal state because they don't complete or abort the job request, meaning (for
+// example) artifacts like multipart uploads and partial uploads wouldn't not have been cleaned up.
 func (wr *WorkResult) InTerminalState() bool {
 	return wr.Status().GetState() == flex.Work_COMPLETED || wr.Status().GetState() == flex.Work_CANCELLED
 }

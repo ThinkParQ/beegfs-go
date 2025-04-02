@@ -38,6 +38,8 @@ func (s *ClientStore) Get(id uint32) (Provider, bool) {
 	return c, ok
 }
 
+const JobBuilderRstId = 0
+
 // UpdateConfig will check if the current configuration can be updated to the proposed
 // configuration, and return an error if the configuration update is invalid/not allowed.
 // As applying new configuration may require reaching out to a RST, a context is required
@@ -48,15 +50,19 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// If there are existing RSTs, verify the configuration did not change:
+	// If there are existing RSTs, verify the configuration did not change. Be aware that a job
+	// builder client is automatically added to the clientStore.
 	if len(s.clients) != 0 {
 		// The length won't match if subscribers were removed or added.
-		if len(s.clients) != len(rstConfigs) {
+		if len(rstConfigs) != len(s.clients)-1 {
 			return ErrConfigUpdateNotAllowed
 		}
 		// If the length matches then verify all the configurations match.
 		found := 0
 		for _, newConfig := range rstConfigs {
+			if newConfig.Id == JobBuilderRstId {
+				return ErrConfigUpdateNotAllowed
+			}
 			existingConfig, ok := s.clients[newConfig.Id]
 			if ok {
 				if !proto.Equal(existingConfig.GetConfig(), newConfig) {
@@ -67,7 +73,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 		}
 		// If we didn't find all of the existing RSTs in the updated config, then one or more were
 		// replaced in the new configuration.
-		if found != len(s.clients) {
+		if found != len(s.clients)-1 {
 			return ErrConfigUpdateNotAllowed
 		}
 	} else {
@@ -80,6 +86,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 			}
 			rstMap[config.Id] = rst
 		}
+		rstMap[JobBuilderRstId] = NewJobBuilderClient(ctx, rstMap, s.mountPoint)
 		s.clients = rstMap
 	}
 	return nil

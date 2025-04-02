@@ -62,10 +62,9 @@ func (j *Job) GetSegments() []*flex.WorkRequest_Segment {
 
 // InTerminalState() returns true the job cannot cannot be restarted, and there are no active work
 // requests that would conflict with a new job. Jobs in this state are safe to be deleted without
-// leaving orphaned requests on worker nodes. This should mirror the InTerminalState() method for
-// WorkResults.
+// leaving orphaned requests on worker nodes.
 func (j *Job) InTerminalState() bool {
-	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
+	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_OFFLOADED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
 }
 
 // InActiveState() returns true if the job is active and not in a failed or terminal state.
@@ -95,16 +94,15 @@ func (j *Job) InActiveState() bool {
 // function as a method to determine if a file has changed and it is safe to resume a job or if it
 // should be cancelled. It also ensures even if the file changes the original job submission can be
 // recreated for troubleshooting.
-func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, bool, error) {
+func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, error) {
 
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
-		var canRetry bool
 		var err error
-		workRequests, canRetry, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
+		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
 		if err != nil {
-			return workermgr.JobSubmission{}, canRetry, err
+			return workermgr.JobSubmission{}, err
 		}
 
 		j.Segments = make([]*Segment, 0, len(workRequests))
@@ -118,13 +116,10 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 	}
 
 	if len(workRequests) == 0 {
-		return workermgr.JobSubmission{}, false, fmt.Errorf("generated work request is empty (this is probably a bug in the RST package)")
+		return workermgr.JobSubmission{}, fmt.Errorf("generated work request is empty (this is probably a bug in the RST package)")
 	}
 
-	return workermgr.JobSubmission{
-		JobID:        j.GetId(),
-		WorkRequests: workRequests,
-	}, false, nil
+	return workermgr.JobSubmission{JobID: j.GetId(), WorkRequests: workRequests}, nil
 }
 
 // Complete should always be called before moving the job status to a terminal state. If the job
@@ -134,6 +129,7 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 // largely just a wrapper around the rst.Client CompleteRequests method to handle converting between
 // data types used by the Job and the RST packages.
 func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) error {
+
 	workResults := make([]*flex.Work, 0, len(j.WorkResults))
 	for _, r := range j.WorkResults {
 		workResults = append(workResults, r.WorkResult)
@@ -177,6 +173,8 @@ func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 	}
 
 	switch jobRequest.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return newJob, nil
 	case beeremote.JobRequest_Sync_case:
 		return newJob, nil
 	case beeremote.JobRequest_Mock_case:

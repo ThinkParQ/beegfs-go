@@ -47,7 +47,7 @@ func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	return nil
 }
 
-func (fs MockFS) CreateWriteClose(path string, buf []byte) error {
+func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	file, err := fs.Fs.Create(path)
 	if err != nil {
 		return err
@@ -91,6 +91,10 @@ func (fs MockFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 	}
 	return newLimitedFileWriter(file, offsetStart, offsetStop), nil
 
+}
+
+func (fs MockFS) CreateDir(path string, mode uint32) error {
+	return fmt.Errorf("not implemented")
 }
 
 func (fs MockFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {

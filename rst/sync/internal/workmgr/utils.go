@@ -82,22 +82,23 @@ func assertDBEntriesLenForTesting(mgr *Manager, expectedLen int) error {
 // newWorkFromRequest() accepts a work request and generates the initial work result. The state of
 // the new work will always be scheduled.
 func newWorkFromRequest(workRequest *workRequest) *work {
-
 	numberOfParts := workRequest.Segment.GetPartsStop() - workRequest.Segment.GetPartsStart() + 1
-
 	parts := make([]*flex.Work_Part, 0, numberOfParts)
-	genPart := generatePartsFromSegment(workRequest.Segment)
-
-	for {
-		if partNum, offsetStart, offsetStop := genPart(); partNum != -1 {
-			parts = append(parts, flex.Work_Part_builder{
-				PartNumber:  partNum,
-				OffsetStart: offsetStart,
-				OffsetStop:  offsetStop,
-			}.Build())
-			continue
+	if workRequest.Segment == nil {
+		parts = append(parts, &flex.Work_Part{})
+	} else {
+		genPart := generatePartsFromSegment(workRequest.Segment)
+		for {
+			if partNum, offsetStart, offsetStop := genPart(); partNum != -1 {
+				parts = append(parts, flex.Work_Part_builder{
+					PartNumber:  partNum,
+					OffsetStart: offsetStart,
+					OffsetStop:  offsetStop,
+				}.Build())
+				continue
+			}
+			break
 		}
-		break
 	}
 
 	return &work{

@@ -34,9 +34,9 @@ type Provider interface {
 	// presumed to already be a relative path inside the mount point and returned as is (possibly
 	// with '/' added).
 	GetRelativePathWithinMount(path string) (string, error)
-	// Returns the equivalent of an stat(2). Caution: Follows symbolic links (use lstat if needed).
+	// Returns the equivalent of an stat(2) with -L flag. Caution: Follows symbolic links (use lstat if needed).
 	Stat(name string) (os.FileInfo, error)
-	// Returns the equivalent of lstat(2). Does not follow symbolic links.
+	// Returns the equivalent of stat(2) without the -L flag. Does not follow symbolic links.
 	Lstat(name string) (os.FileInfo, error)
 	// Creates a file at the specified path returning an error if the file already exists, unless
 	// overwrite is true, then the file will be zeroed and overwritten. If created and supported by
@@ -47,9 +47,8 @@ type Provider interface {
 	// it is not safe to rely on CreatePreallocatedFile to securely wipe an existing file.
 	CreatePreallocatedFile(name string, size int64, overwrite bool) error
 	// CreateWriteClose creates the file specified by name and immediately writes the specified buf
-	// as the file contents then closes the file. This is mostly useful for generating files for
-	// testing.
-	CreateWriteClose(name string, buf []byte) error
+	// as the file contents then closes the file.
+	CreateWriteClose(name string, buf []byte, mode uint32, overwrite bool) error
 	// Removes the file specified by name.
 	Remove(name string) error
 	// Opens the file specified by name and returns it as an io.ReadCloser. The caller must close the
@@ -59,6 +58,8 @@ type Provider interface {
 	// into a new bytes buffer, calculates the sha256 checksum, then returns an io.Reader that
 	// allows limited access to the file and the base64 encoded sha256 checksum of the part.
 	ReadFilePart(name string, offsetStart int64, offsetStop int64) (reader io.Reader, checksumSHA256 string, err error)
+	// Recursively create any missing portion of the directory structure.
+	CreateDir(path string, mode uint32) error
 	// WriteFilePart will open the file at the specified path for writing, and immediately return an
 	// error if anything goes wrong (such as the file does not exist). Otherwise it returns a special
 	// WriteCloser that will only allow the caller to write to the file between the specified offsets
@@ -107,7 +108,9 @@ func NewFromMountPoint(path string) (Provider, error) {
 }
 
 // NewFromPath() automatically initializes a file system provider from the provided path. This works
-// by walking the path to find its mount point then using that path with NewFromMountPoint().
+// by walking the path to find its mount point then using that path with NewFromMountPoint(). The
+// path will be traversed regardless of the existence of the files or directories until a mounted
+// file system is determined.
 func NewFromPath(path string) (Provider, error) {
 
 	mountPath := ""
@@ -119,11 +122,16 @@ func NewFromPath(path string) (Provider, error) {
 	for {
 		currentStat, err := os.Lstat(absPath)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInitFSClient, err)
+			parentPath := filepath.Dir(absPath)
+			if parentPath == absPath {
+				return nil, fmt.Errorf("%s: %w", path, ErrInitFSClient)
+			}
+			absPath = parentPath
+			continue
 		}
 		parentPath := filepath.Dir(absPath)
 		if parentPath == absPath {
-			return nil, fmt.Errorf("%w: %s", ErrInitFSClient, path)
+			return nil, fmt.Errorf("%s: %w", path, ErrInitFSClient)
 		}
 		parentStat, err := os.Lstat(parentPath)
 		if err != nil {
@@ -190,9 +198,25 @@ func (fs BeeGFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	return file.Close()
 }
 
-func (fs BeeGFS) CreateWriteClose(path string, buf []byte) error {
-	// If useful we can actually implement this.
-	return fmt.Errorf("CreateWriteClose should only be used with MockFS")
+func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
+	var file *os.File
+	var err error
+	if overwrite {
+		file, err = os.OpenFile(filepath.Join(fs.MountPoint, path), os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.FileMode(mode))
+	} else {
+		file, err = os.OpenFile(filepath.Join(fs.MountPoint, path), os.O_RDWR|os.O_CREATE|os.O_EXCL, os.FileMode(mode))
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err := file.Write(buf); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return err
+	}
+	return file.Close()
 }
 
 func (fs BeeGFS) Remove(path string) error {
@@ -224,6 +248,14 @@ func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 		return nil, err
 	}
 	return newLimitedFileWriter(file, offsetStart, offsetStop), nil
+}
+
+func (fs BeeGFS) CreateDir(path string, mode uint32) error {
+	err := os.MkdirAll(filepath.Join(fs.MountPoint, path), os.FileMode(mode))
+	if err != nil {
+		return fmt.Errorf("error creating directories for path (%s): %v", path, err)
+	}
+	return nil
 }
 
 func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {

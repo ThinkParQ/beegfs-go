@@ -73,6 +73,10 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 
 	rstMap := make(map[uint32]rst.Provider)
 	for _, config := range rstConfigs {
+		configId := config.GetId()
+		if configId == rst.JobBuilderRstId {
+			return nil, fmt.Errorf("invalid remote storage target Id: %d", configId)
+		}
 		// We could provide a real context here it it ever became necessary, however `NewManager()`
 		// is not expected to be run in a separate goroutine so we shouldn't become blocked if the
 		// user tries to shutdown via Ctrl+C.
@@ -80,11 +84,13 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 		if err != nil {
 			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
 		}
-		if _, ok := rstMap[config.GetId()]; ok {
-			return nil, fmt.Errorf("found multiple remote storage targets with the same ID: %d", config.GetId())
+		if _, ok := rstMap[configId]; ok {
+			return nil, fmt.Errorf("found multiple remote storage targets with the same ID: %d", configId)
 		}
-		rstMap[config.GetId()] = rst
+		rstMap[configId] = rst
 	}
+
+	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint)
 
 	nodePools := make(map[worker.Type]*Pool, 0)
 	nodes, err := worker.NewWorkerNodesFromConfig(log, workerConfigs)
@@ -175,12 +181,13 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 			nodeType = worker.Mock
 		case flex.WorkRequest_Sync_case:
 			nodeType = worker.BeeSync
+		case flex.WorkRequest_Builder_case:
+			nodeType = worker.BeeSync
 		default:
 			nodeType = worker.Unknown
 		}
 
 		pool, ok := m.nodePools[nodeType]
-
 		if !ok {
 			err = fmt.Errorf("%s: %w", nodeType, ErrNoPoolsForNodeType)
 			result.WorkResult = flex.Work_builder{

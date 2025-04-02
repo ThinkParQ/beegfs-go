@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
+	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -141,28 +143,28 @@ func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (w *worker) processWork(a workAssignment) {
+func (w *worker) processWork(work workAssignment) {
 
 	// Regardless if the work request was processed successfully, tell WorkMgr when we stop
 	// processing this work item so it can pull more work into the queue.
 	defer func() {
-		w.completedWork <- a.workIdentifier
+		w.completedWork <- work.workIdentifier
 	}()
 
-	if a.ctx.Err() != nil {
+	if work.ctx.Err() != nil {
 		// If the work context was already cancelled there is nothing for us to do.
 		// Just return and pick up more work.
 		return
 	}
 
-	journalEntry, commitJournalEntry, err := w.workJournal.GetAndLockEntry(a.submissionID)
+	journalEntry, commitJournalEntry, err := w.workJournal.GetAndLockEntry(work.submissionID)
 	if err != nil {
 		if err == kvstore.ErrEntryAlreadyDeleted || err == kvstore.ErrEntryNotInDB {
 			// If the entry was already deleted or not found, then likely it was cancelled before we
 			// picked it up. There is nothing more for us to do. Just return and pick up more work.
 			return
 		}
-		w.log.Warn("unknown error getting work result entry", zap.Error(err), zap.Any("workIdentifier", a.workIdentifier))
+		w.log.Warn("unknown error getting work result entry", zap.Error(err), zap.Any("workIdentifier", work.workIdentifier))
 		// TODO: https://github.com/ThinkParQ/bee-remote/issues/57
 		// This scenario is unlikely unless there is some actual issue accessing the database, for
 		// example if the underlying disk died or was on a networked device that was temporarily in
@@ -175,7 +177,10 @@ func (w *worker) processWork(a workAssignment) {
 		return
 	}
 
-	log := w.log.With(zap.Any("jobID", a.jobID), zap.Any("requestID", a.workRequestID), zap.Any("submissionID", a.submissionID), zap.Any("workRequest", journalEntry.Value.WorkRequest))
+	request := journalEntry.Value.WorkRequest
+	result := journalEntry.Value.WorkResult
+	status := result.Status
+	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
 
 	// By default we just commit the updated journal entry to the database. However if we sent the
 	// results to BeeRemote and there is nothing left to do with this work request then
@@ -189,11 +194,11 @@ func (w *worker) processWork(a workAssignment) {
 	defer func() {
 		if cleanupEntries {
 
-			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(a.jobID)
+			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(work.jobID)
 			if err != nil {
 				log.Warn("error getting job entry while trying to complete work request", zap.Error(err))
 			} else {
-				_, ok := jobEntry.Value[a.workRequestID]
+				_, ok := jobEntry.Value[work.workRequestID]
 				if !ok {
 					// If this happens we'll still remove the journal entry because there is nothing
 					// to cleanup in the job entry anyway.
@@ -205,7 +210,7 @@ func (w *worker) processWork(a workAssignment) {
 						err = commitJob(kvstore.WithDeleteEntry(true))
 					} else {
 						// Otherwise just delete the single work request:
-						delete(jobEntry.Value, a.workRequestID)
+						delete(jobEntry.Value, work.workRequestID)
 						err = commitJob()
 					}
 					if err != nil {
@@ -244,61 +249,99 @@ func (w *worker) processWork(a workAssignment) {
 	// were able to lock the journal entry we know we have an exclusive lock on the request anyway.
 	// If the state is failed or an error we require the caller to update the state before we try
 	// again. We'll return a result to BeeRemote so it can make a decision how to proceed.
-	state := journalEntry.Value.WorkResult.Status.GetState()
+	state := status.GetState()
 	if state != flex.Work_SCHEDULED && state != flex.Work_RUNNING {
 		// The request might be completed if we were trying to send it to BeeRemote and were stopped
 		// for some reason (for example to restart if the BeeRemote gRPC client was misconfigured).
 		if state != flex.Work_COMPLETED {
 			log.Debug("unable to execute work request (invalid starting state)")
-			journalEntry.Value.WorkResult.Status.SetState(flex.Work_FAILED)
-			journalEntry.Value.WorkResult.Status.SetMessage("unable to execute work request: invalid starting state " + state.String())
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("unable to execute work request: invalid starting state " + state.String())
 		}
-		if w.sendWorkResult(a, journalEntry.Value.WorkResult.Work) {
+		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
 		return
 	}
 
-	client, ok := w.remoteStorageTargets.Get(journalEntry.Value.WorkRequest.RemoteStorageTarget)
+	client, ok := w.remoteStorageTargets.Get(request.RemoteStorageTarget)
 	if !ok {
 		log.Debug("work request specifies an unknown RST")
-		journalEntry.Value.WorkResult.Status.SetState(flex.Work_FAILED)
-		journalEntry.Value.WorkResult.Status.SetMessage("work request specifies an unknown RST")
-		if w.sendWorkResult(a, journalEntry.Value.WorkResult.Work) {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("work request specifies an unknown RST")
+		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
 		return
 	}
 
 	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
-	journalEntry.Value.WorkResult.Status.SetState(flex.Work_RUNNING)
-	journalEntry.Value.WorkResult.Status.SetMessage("attempting to carry out the work request")
+	status.SetState(flex.Work_RUNNING)
+	status.SetMessage("attempting to carry out the work request")
 	commitJournalEntry(kvstore.WithUpdateOnly(true))
+
+	if request.HasBuilder() {
+		builderErrCh := make(chan error, 1)
+		jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
+		go func() {
+			builderErrCh <- client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+			close(jobSubmissionChan)
+		}()
+
+		submitErrCount := 0
+	processJobs:
+		for {
+			select {
+			case <-work.ctx.Done():
+				status.SetState(flex.Work_CANCELLED)
+				status.SetMessage("the work context was cancelled before job requests could be created")
+				if w.sendWorkResult(work, result.Work) {
+					cleanupEntries = true
+				}
+				return
+			case jobRequest, ok := <-jobSubmissionChan:
+				if !ok {
+					break processJobs
+				}
+
+				if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
+					submitErrCount += 1
+				}
+			}
+		}
+
+		builderErr := <-builderErrCh
+		if builderErr != nil {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("job builder failed to complete: " + builderErr.Error())
+		} else if submitErrCount > 0 {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage(fmt.Sprintf("%d job request(s) failed! See `beegfs remote status/job list` for details", submitErrCount))
+		} else {
+			status.SetState(flex.Work_COMPLETED)
+			status.SetMessage("all jobs were submitted")
+		}
+
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+		return
+	}
 
 	// Loop over the parts and for any that haven't completed upload or download them.
 	// The work result and its parts were generated by SubmitWorkRequest().
 	completedParts := 0
-processParts:
-	for _, part := range journalEntry.Value.WorkResult.Parts {
-
+	for _, part := range result.Parts {
 		if part.GetCompleted() {
 			completedParts++
 			continue
 		}
 
-		var err error
-		select {
-		case <-a.ctx.Done():
-			// The WorkMgr context is the parent for all work contexts.
-			break processParts
-		default:
-			// Block until the request is completed. We pass a context to the request to handle
-			// graceful cancellation. If the context is cancelled we still want to update the
-			// journal with the latest result before exiting so we can resume later on. The part
-			// will simply not be marked completed if the context was cancelled.
-			err = client.ExecuteWorkRequestPart(a.ctx, journalEntry.Value.WorkRequest.WorkRequest, part)
-		}
-
+		// Block until the request is completed. We pass a context to the request to handle
+		// graceful cancellation. If the context is cancelled we still want to update the
+		// journal with the latest result before exiting so we can resume later on. The part
+		// will simply not be marked completed if the context was cancelled.
+		err = client.ExecuteWorkRequestPart(work.ctx, request.WorkRequest, part)
 		if err != nil {
 			// TODO: https://github.com/ThinkParQ/bee-remote/issues/55. ExecuteWorkRequestPart
 			// should return a boolean indicating if the specified error can be retried. Some
@@ -310,9 +353,9 @@ processParts:
 			// allow it to be resumed later on. This behavior may be modified depending on the
 			// outcome of: https://github.com/ThinkParQ/bee-remote/issues/27.
 			log.Debug("error transferring part", zap.Error(err))
-			journalEntry.Value.WorkResult.Status.SetState(flex.Work_FAILED)
-			journalEntry.Value.WorkResult.Status.SetMessage("error transferring part: " + err.Error())
-			if w.sendWorkResult(a, journalEntry.Value.WorkResult.Work) {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("error transferring part: " + err.Error())
+			if w.sendWorkResult(work, result.Work) {
 				cleanupEntries = true
 			}
 			return
@@ -327,12 +370,12 @@ processParts:
 	}
 
 	if len(journalEntry.Value.WorkResult.Parts) == completedParts {
-		journalEntry.Value.WorkResult.Status.SetState(flex.Work_COMPLETED)
-		journalEntry.Value.WorkResult.Status.SetMessage("all parts of this work request are completed")
+		status.SetState(flex.Work_COMPLETED)
+		status.SetMessage("all parts of this work request are completed")
 	} else {
-		if a.ctx.Err() != nil {
-			journalEntry.Value.WorkResult.Status.SetState(flex.Work_CANCELLED)
-			journalEntry.Value.WorkResult.Status.SetMessage("the work context was cancelled before all parts can be synced")
+		if work.ctx.Err() != nil {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("the work context was cancelled before all parts can be synced")
 			// Don't send the work result and don't try to cleanup entries. We don't know why we
 			// were asked to be done early so we'll let the caller handle either sending the result
 			// or retrying the request later.
@@ -340,11 +383,11 @@ processParts:
 		}
 		// This shouldn't happen so we set the state to failed to avoid making things worse and
 		// ensure we don't silently retry this forever.
-		journalEntry.Value.WorkResult.Status.SetState(flex.Work_FAILED)
-		journalEntry.Value.WorkResult.Status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
 	}
 
-	if w.sendWorkResult(a, journalEntry.Value.WorkResult.Work) {
+	if w.sendWorkResult(work, result.Work) {
 		cleanupEntries = true
 	}
 }

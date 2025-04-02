@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,6 +34,7 @@ type Provider interface {
 	init(config Config) error
 	disconnect() error
 	updateWork(ctx context.Context, workResult *flex.Work) error
+	submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error
 }
 
 // New returns an initialized BeeRemote client. The dynamic portion of the initialCfg can be set to
@@ -109,6 +111,7 @@ func (c *Client) UpdateWorkRequest(ctx context.Context, workResult *flex.Work) (
 	if c.Provider == nil {
 		return true, fmt.Errorf("BeeRemote client is not ready")
 	}
+
 	err = c.updateWork(ctx, workResult)
 	if err != nil {
 		if st, ok := status.FromError(err); !ok {
@@ -133,6 +136,23 @@ func (c *Client) UpdateWorkRequest(ctx context.Context, workResult *flex.Work) (
 		}
 	}
 	return false, nil
+}
+
+// SubmitJobRequest will forward the provided job request to BeeRemote.
+func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.JobRequest) error {
+	c.readyMu.RLock()
+	defer c.readyMu.RUnlock()
+	if c.Provider == nil {
+		return fmt.Errorf("BeeRemote client is not ready")
+	}
+
+	if err := c.submitJob(ctx, jobRequest); err != nil {
+		if _, ok := status.FromError(err); !ok {
+			return fmt.Errorf("received an unknown error (no gRPC status), most likely this is a bug: %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Client) Disconnect() error {

@@ -3,6 +3,7 @@ package rst
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -20,7 +21,7 @@ import (
 // To test directly (for example the RST package tests):
 //
 //	rstClient := &rst.MockClient{}
-//	mockClient.On("GenerateRequests",mock.Anything, fileSize, availWorkers).Return(externalID, requests, false, nil)
+//	mockClient.On("GenerateWorkRequests",mock.Anything, fileSize, availWorkers).Return(externalID, requests, false, nil)
 //
 // To test indirectly use the Mock RST type when initializing WorkerMgr:
 //
@@ -30,7 +31,7 @@ import (
 // If you are using the client directly, use type assertion to get at the underlying mock client to setup expectations:
 //
 //	mockClient, _ := workerManager.RemoteStorageTargets["0"].(*rst.MockClient)
-//	mockClient.On("GenerateRequests",mock.Anything, fileSize, availWorkers).Return(externalID, requests, false, nil)
+//	mockClient.On("GenerateWorkRequests",mock.Anything, fileSize, availWorkers).Return(externalID, requests, false, nil)
 //
 // Or if you are using the ClientStore, use the testing hook:
 //
@@ -47,27 +48,26 @@ type MockClient struct {
 
 var _ Provider = &MockClient{}
 
-func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
-	args := rst.Called()
-	return args.Get(0).(*flex.RemoteStorageTarget)
+func (r *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	return nil
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
+func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
-			return nil, job.Request.GetMock().CanRetry, fmt.Errorf("test requested an error")
+			return nil, fmt.Errorf("test requested an error")
 		}
 
 		workRequests := RecreateWorkRequests(job, generateSegments(job.Request.GetMock().FileSize, int64(job.Request.GetMock().NumTestSegments), 1))
-		return workRequests, job.Request.GetMock().CanRetry, nil
+		return workRequests, nil
 	}
 
 	args := rst.Called(job, availableWorkers)
-	if args.Error(3) != nil {
-		return nil, args.Bool(2), args.Error(3)
+	if args.Error(2) != nil {
+		return nil, args.Error(2)
 	}
-	return args.Get(0).([]*flex.WorkRequest), true, nil
+	return args.Get(0).([]*flex.WorkRequest), nil
 }
 
 func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
@@ -88,6 +88,11 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 	return err
 }
 
+// ExecuteJobBuilderRequest is not implemented and should never be called.
+func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
+	return ErrUnsupportedOpForRST
+}
+
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
 
 	if job.Request.GetMock() != nil {
@@ -99,4 +104,25 @@ func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.
 
 	args := rst.Called(job, workResults, abort)
 	return args.Error(0)
+}
+
+func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
+	args := rst.Called()
+	return args.Get(0).(*flex.RemoteStorageTarget)
+}
+
+func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+	return nil, ErrUnsupportedOpForRST
+}
+
+func (r *MockClient) SanitizeRemotePath(remotePath string) string {
+	return remotePath
+}
+
+func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
+	return 0, time.Time{}, ErrUnsupportedOpForRST
+}
+
+func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+	return "", ErrUnsupportedOpForRST
 }

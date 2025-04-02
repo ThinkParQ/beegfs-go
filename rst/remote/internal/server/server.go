@@ -99,10 +99,15 @@ func (s *BeeRemoteServer) Stop() {
 func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.SubmitJobRequest) (*beeremote.SubmitJobResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
-	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest())
+
 	var status beeremote.SubmitJobResponse_ResponseStatus = beeremote.SubmitJobResponse_CREATED
+	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest())
 	if err != nil {
-		if errors.Is(err, rst.ErrJobAlreadyExists) {
+		if errors.Is(err, rst.ErrJobAlreadyComplete) {
+			status = beeremote.SubmitJobResponse_ALREADY_COMPLETE
+		} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+			status = beeremote.SubmitJobResponse_ALREADY_OFFLOADED
+		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
 			status = beeremote.SubmitJobResponse_EXISTING
 		} else if errors.Is(err, rst.ErrJobNotAllowed) {
 			status = beeremote.SubmitJobResponse_NOT_ALLOWED

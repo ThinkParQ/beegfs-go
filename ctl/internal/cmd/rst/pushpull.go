@@ -9,8 +9,10 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
+
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
 )
 
 type pushPullCfg struct {
@@ -20,7 +22,7 @@ type pushPullCfg struct {
 
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
-	backendCfg := rst.SyncJobRequestCfg{}
+	backendCfg := flex.JobRequestCfg{}
 	cmd := &cobra.Command{
 		Use:   "push <path>",
 		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
@@ -34,27 +36,31 @@ If a fatal error occurs and the command exits early before trying to upload all 
 
 WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
+			if len(args) == 0 {
+				return fmt.Errorf("missing <path> argument")
+			}
+			if len(args) > 1 {
+				return fmt.Errorf("invalid number of arguments. Be sure to quote file glob pattern")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backendCfg.Path = args[0]
-			return runPushOrPullCmd(cmd, frontendCfg, backendCfg)
+			backendCfg.SetPath(args[0])
+			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RSTID, "remote-target", "t", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
 	return cmd
 }
 
 func newPullCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
-	backendCfg := rst.SyncJobRequestCfg{
+	backendCfg := flex.JobRequestCfg{
 		Download: true,
 	}
 	cmd := &cobra.Command{
@@ -62,35 +68,32 @@ func newPullCmd() *cobra.Command {
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
-			}
-			if backendCfg.RSTID == 0 {
-				return fmt.Errorf("invalid remote target (must be greater than zero)")
+				return fmt.Errorf("missing <path> argument")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backendCfg.Path = args[0]
-			return runPushOrPullCmd(cmd, frontendCfg, backendCfg)
+			backendCfg.SetPath(args[0])
+			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RSTID, "remote-target", "t", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
-	cmd.MarkFlagRequired("remote-target")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
-	cmd.Flags().StringVarP(&backendCfg.RemotePath, "remote-path", "p", "", "The name/path of the object/file in the remote target you wish to download.")
-	cmd.MarkFlagRequired("remote-path")
+	cmd.Flags().StringVarP(&backendCfg.RemotePath, "remote-path", "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
+	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")
+	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
+	cmd.Flags().MarkHidden("flatten")
 	cmd.Flags().MarkHidden("force")
-	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
+	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
 
-func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg rst.SyncJobRequestCfg) error {
+func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg *flex.JobRequestCfg) error {
 
 	// This could be made user configurable if it ever makes sense.
-	backendCfg.ChanSize = 1024
-	responses, err := rst.SubmitSyncJobRequests(cmd.Context(), backendCfg)
+	responses, err := rst.SubmitJobRequest(cmd.Context(), backendCfg, 1024)
 	if err != nil {
 		return err
 	}
@@ -100,6 +103,7 @@ func runPushOrPullCmd(cmd *cobra.Command, frontendCfg pushPullCfg, backendCfg rs
 	errStartingSync := 0
 	syncStarted := 0
 	syncCompleted := 0
+	syncOffloaded := 0
 	syncInProgress := 0
 	syncNotAllowed := 0
 
@@ -140,12 +144,12 @@ writeResponses:
 			switch resp.Status {
 			case beeremote.SubmitJobResponse_CREATED:
 				syncStarted++
+			case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
+				syncCompleted++
+			case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
+				syncOffloaded++
 			case beeremote.SubmitJobResponse_EXISTING:
-				if resp.Result.Job.GetStatus().GetState() == beeremote.Job_COMPLETED {
-					syncCompleted++
-				} else {
-					syncInProgress++
-				}
+				syncInProgress++
 			case beeremote.SubmitJobResponse_NOT_ALLOWED:
 				// This indicates the last job failed and requires manual intervention. Always print
 				// these jobs as the user will likely want to see them anyway.
@@ -168,11 +172,11 @@ writeResponses:
 
 	var result string
 	if viper.GetBool(config.DisableEmojisKey) {
-		result = fmt.Sprintf("%d already synced | %d already syncing | %d scheduled sync | %d previous sync failure | %d error starting sync | %d no remote target (ignored) | %d not supported (ignored)\n",
-			syncCompleted, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
+		result = fmt.Sprintf("%d synced | %d offloaded | %d syncing | %d scheduled | %d previous sync failure | %d error starting sync | %d no remote target (ignored) | %d not supported (ignored)\n",
+			syncCompleted, syncOffloaded, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
 	} else {
-		result = fmt.Sprintf("✅ %d already synced | 🔄 %d already syncing | ⏳ %d scheduled for sync | ❌ %d previous sync failure | \u26A0\ufe0f\u200C %d error starting sync | ⛔ %d no remote target (ignored) | 🚫 %d not supported (ignored)\n",
-			syncCompleted, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
+		result = fmt.Sprintf("✅ %d synced | ☁️ %d offloaded | 🔄 %d syncing | ⏳ %d scheduled | ❌ %d previous sync failure | \u26A0\ufe0f\u200C %d error starting sync | ⛔ %d no remote target (ignored) | 🚫 %d not supported (ignored)\n",
+			syncCompleted, syncOffloaded, syncInProgress, syncStarted, syncNotAllowed, errStartingSync, noRSTSpecified, fileNotSupported)
 	}
 
 	if errStartingSync != 0 || syncNotAllowed != 0 {
