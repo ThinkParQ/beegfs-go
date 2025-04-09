@@ -42,7 +42,7 @@ func (n *MockNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatRes
 
 func (n *MockNode) disconnect() error {
 	args := n.Called()
-	return args.Error(1)
+	return args.Error(0)
 }
 
 func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {

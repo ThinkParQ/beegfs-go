@@ -31,8 +31,12 @@ type AppConfig struct {
 	Workers              []worker.Config             `mapstructure:"worker"`
 	RemoteStorageTargets []*flex.RemoteStorageTarget `mapstructure:"remote-storage-target"`
 	Developer            struct {
-		PerfProfilingPort int  `mapstructure:"perf-profiling-port"`
-		DumpConfig        bool `mapstructure:"dump-config"`
+		PerfProfilingPort         int    `mapstructure:"perf-profiling-port"`
+		DumpConfig                bool   `mapstructure:"dump-config"`
+		BenchmarkTarget           uint32 `mapstructure:"benchmark-target"`
+		BenchmarkCount            int    `mapstructure:"benchmark-count"`
+		BenchmarkMockWorkRequests int    `mapstructure:"benchmark-mock-work-requests"`
+		BenchmarkMockBeeGFS       int    `mapstructure:"benchmark-mock-beegfs"`
 	}
 }
 

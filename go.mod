@@ -20,6 +20,7 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/thinkparq/protobuf v0.0.0-rc.0
 	go.uber.org/zap v1.27.0
+	golang.org/x/sync v0.10.0
 	golang.org/x/sys v0.29.0
 	golang.org/x/term v0.28.0
 	google.golang.org/grpc v1.69.4
