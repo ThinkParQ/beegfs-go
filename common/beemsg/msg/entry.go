@@ -251,7 +251,7 @@ type GetEntryInfoResponse struct {
 	MirrorNodeID     uint16
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
-	FileDataState    beegfs.FileDataState
+	FileState        beegfs.FileState
 }
 
 func (m *GetEntryInfoResponse) MsgId() uint16 {
@@ -266,7 +266,7 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.MirrorNodeID)
 	beeserde.DeserializeInt(d, &m.NumSessionsRead)
 	beeserde.DeserializeInt(d, &m.NumSessionsWrite)
-	beeserde.DeserializeInt(d, &m.FileDataState)
+	beeserde.DeserializeInt(d, &m.FileState)
 }
 
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
@@ -547,29 +547,29 @@ func (m *SetFilePatternResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
 
-type SetFileDataStateRequest struct {
+type SetFileStateRequest struct {
 	EntryInfo EntryInfo
-	DataState beegfs.FileDataState
+	FileState beegfs.FileState
 }
 
-func (m *SetFileDataStateRequest) MsgId() uint16 {
+func (m *SetFileStateRequest) MsgId() uint16 {
 	return 2131
 }
 
-func (m *SetFileDataStateRequest) Serialize(s *beeserde.Serializer) {
+func (m *SetFileStateRequest) Serialize(s *beeserde.Serializer) {
 	m.EntryInfo.Serialize(s)
-	beeserde.SerializeInt(s, m.DataState)
+	beeserde.SerializeInt(s, m.FileState)
 }
 
-type SetFileDataStateResponse struct {
+type SetFileStateResponse struct {
 	Result beegfs.OpsErr
 }
 
-func (m *SetFileDataStateResponse) MsgId() uint16 {
+func (m *SetFileStateResponse) MsgId() uint16 {
 	return 2132
 }
 
-func (m *SetFileDataStateResponse) Deserialize(d *beeserde.Deserializer) {
+func (m *SetFileStateResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &m.Result)
 }
 

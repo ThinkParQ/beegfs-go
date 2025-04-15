@@ -39,6 +39,9 @@ const (
 	OpsErr_NODATA                 OpsErr = 28
 	OpsErr_NOTSUPP                OpsErr = 29
 	OpsErr_UNKNOWNPOOL            OpsErr = 30
+	OpsErr_METAVERSIONMISMATCH    OpsErr = 31
+	OpsErr_INODELOCKED            OpsErr = 32
+	OpsErr_FILEACCESS_DENIED      OpsErr = 33
 )
 
 func (e OpsErr) Error() string {

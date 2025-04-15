@@ -79,7 +79,7 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 		return err
 	}
 	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets"}
-	allColumns := append(defaultColumns, "cool_down", "client_sessions", "data_state")
+	allColumns := append(defaultColumns, "cool_down", "client_sessions", "access", "state")
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {
@@ -234,7 +234,7 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		}
 
 		if info.Entry.Type == beegfs.EntryRegularFile {
-			fmt.Fprintf(entryToPrint, "Data state: %s\n", info.Entry.FileDataState)
+			fmt.Fprintf(entryToPrint, "File state: %s\n", info.Entry.FileState)
 		}
 
 		if info.Entry.EntryID != "root" && len(info.Entry.Verbose.DentryPath) != 0 {
@@ -332,7 +332,7 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	if info.Entry.Type == beegfs.EntryRegularFile {
 		row = append(row,
 			fmt.Sprintf("Reading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite),
-			info.Entry.FileDataState.String())
+			beegfs.AccessFlagsToString(info.Entry.FileState.GetAccessFlags()), fmt.Sprintf("%d", info.Entry.FileState.GetDataState()))
 	} else {
 		row = append(row, "(directory)", "(n/a)")
 	}

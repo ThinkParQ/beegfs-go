@@ -57,9 +57,11 @@ type Entry struct {
 	// that have this file open for writing at least once. If the same file has the a file opened
 	// multiple times, it is still treated as a single session for that client.
 	NumSessionsWrite uint32
-	// FileDataState is only applicable for regular files. It indicates the state of the file's data.
-	// (e.g., whether its completely stored within BeeGFS (local) or stored in external storage (offloaded)).
-	FileDataState beegfs.FileDataState
+	// FileState is only applicable for regular files. It stores access flags in the lower 5 bits and
+	// data state in the upper 3 bits. The access flags determine if the file is accessible for read/write
+	// operations or if access is restricted. The data state value is arbitrary and meaningful only to the
+	// data management application (or users).
+	FileState beegfs.FileState
 	// Only populated if GetEntryConfig.Verbose.
 	Verbose Verbose
 	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
@@ -109,7 +111,7 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 		},
 		NumSessionsRead:  entryInfo.NumSessionsRead,
 		NumSessionsWrite: entryInfo.NumSessionsWrite,
-		FileDataState:    entryInfo.FileDataState,
+		FileState:        entryInfo.FileState,
 	}
 	if entry.FeatureFlags.IsBuddyMirrored() {
 		e.MetaBuddyGroup = int(entry.OwnerID)

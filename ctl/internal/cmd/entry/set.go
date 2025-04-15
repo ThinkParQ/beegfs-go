@@ -32,7 +32,7 @@ func newEntrySetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <path> [<path>] ...",
 		Short: "Configure stripe patterns, storage pools, remote storage targets, and more",
-		Long: `Configure stripe patterns, storage pools, remote storage targets, and more. 
+		Long: `Configure stripe patterns, storage pools, remote storage targets, and more.
 New configurations will apply only to new files and sub-directories of the specified path(s), with the exception of Remote Storage Targets,
 which can be updated for existing files at any time. Enable the --verbose flag to view detailed configuration changes for each entry.
 
@@ -43,7 +43,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 NOTE: When updating multiple entries, non-directory entries will be silently ignored.
 
 Required Permissions:
-This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config. 
+This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config.
 This enables normal users to change the default number of targets and chunksize for directories they own. All other options can only be changed by root.`,
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -53,27 +53,28 @@ This enables normal users to change the default number of targets and chunksize 
 			return nil
 		},
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			// Early return if --file-data-state is not specified.
-			if backendCfg.FileDataState == nil {
+			// Early return if neither access flags nor data state are specified
+			if backendCfg.AccessFlags == nil && backendCfg.DataState == nil {
 				return nil
 			}
 
-			// Flags that are allowed to be used with file-data-state.
-			allowedFlags := []string{"file-data-state", "verbose", "yes", "recurse"}
+			// Flags that are allowed to be used with access flags and data state
+			allowedFlags := []string{"access-flags", "data-state", "verbose", "yes", "recurse", "stdin-delimiter"}
 
-			// Initialize a list to track any disallowed flags.
+			// Initialize a list to track any disallowed flags
 			disallowedFlags := []string{}
 
 			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-				// Only add flags that have been explicitly changed and are not allowed with set-stub flag.
+				// Only add flags that have been explicitly changed and are not allowed with file state flags
 				if flag.Changed && !slices.Contains(allowedFlags, flag.Name) {
 					disallowedFlags = append(disallowedFlags, flag.Name)
 				}
 			})
 
-			// Return an error if any disallowed flags are used with set-stub.
+			// Return an error if any disallowed flags are used with file state flags
 			if len(disallowedFlags) > 0 {
-				return fmt.Errorf("--file-data-state can't be used with the following flag(s): %s", strings.Join(disallowedFlags, ", "))
+				return fmt.Errorf("file state update flags (--access-flags, --data-state) can't be used with the following flag(s): %s",
+					strings.Join(disallowedFlags, ", "))
 			}
 
 			return nil
@@ -95,7 +96,7 @@ This enables normal users to change the default number of targets and chunksize 
 
 	// Entry options
 	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
-	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory. 
+	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory.
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
 	NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
@@ -111,9 +112,10 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().MarkHidden("remote-cooldown")
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
-	cmd.Flags().Var(newFileDataStateFlag(&backendCfg.FileDataState), "file-data-state",
-		"Set the data state for files. Valid values: local, locked, offloaded. Specify 'none' to unset the data state.")
-	cmd.Flags().MarkHidden("file-data-state")
+	cmd.Flags().Var(newAccessControlFlag(&backendCfg.AccessFlags), "access-flags", "Set access control restrictions for files (values: unlocked, read-lock, write-lock, read-write-lock). Specify 'none' to reset the access restrictions.")
+	cmd.Flags().MarkHidden("access-flags")
+	cmd.Flags().Var(newDataStateFlag(&backendCfg.DataState), "data-state", "Set the data state for regular files (numeric values: 0-7). Specify 'none' to reset the state.")
+	cmd.Flags().MarkHidden("data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd

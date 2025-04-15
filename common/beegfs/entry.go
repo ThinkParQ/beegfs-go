@@ -2,7 +2,6 @@ package beegfs
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Go representation of the BeeGFS `DirEntryType` enum defined in:
@@ -95,50 +94,98 @@ func (f *EntryFeatureFlags) SetBuddyMirrored() {
 	*f |= entryFeatureFlagBuddyMirrored
 }
 
-// FileDataState represents the possible states for file data tiering.
-// Equivalent to FileDataState enum in C++.
-type FileDataState uint8
+// FileState represents the combined AccessFlag (lower 5 bits) and DataState (upper 3 bits).
+type FileState uint8
 
+// AccessFlags represents the access control settings in the lower 5 bits of FileState
+type AccessFlags uint8
+
+// Constants for AccessFlags
 const (
-	// FileDataStateNone indicates no data state is set.
-	FileDataStateNone FileDataState = 0x00
-	// FileDataStateLocal indicates data is stored within BeeGFS (default).
-	FileDataStateLocal FileDataState = 0x01
-	// FileDataStateLocked indicates data is locked and cannot be accessed.
-	FileDataStateLocked FileDataState = 0x02
-	// FileDataStateOffloaded indicates data is stored in external storage
-	// e.g. S3, tape (i.e. file on metadata server is a stub).
-	FileDataStateOffloaded FileDataState = 0x03
+	// No access restrictions (default access mode)
+	AccessFlagUnlocked AccessFlags = 0x00
+	// Block read operations (file is "write-only")
+	AccessFlagReadLock AccessFlags = 0x01
+	// Block write operations (file is "read-only")
+	AccessFlagWriteLock AccessFlags = 0x02
+	// Reserved for future use
+	AccessFlagReserved3 AccessFlags = 0x04
+	// Reserved for future use
+	AccessFlagReserved4 AccessFlags = 0x08
 )
 
-func (state FileDataState) String() string {
-	switch state {
-	case FileDataStateNone:
-		return "None"
-	case FileDataStateLocal:
-		return "Local"
-	case FileDataStateLocked:
-		return "Locked"
-	case FileDataStateOffloaded:
-		return "Offloaded"
-	default:
-		// For unknown values, just return the numeric representation.
-		return fmt.Sprintf("unknown(%d)", state)
-	}
+// DataState represents an user/application defined data state (upper 3 bits of FileState)
+type DataState uint8
+
+// Masks for extracting parts of the state
+const (
+	// Mask for extracting access flags (lower 5 bits)
+	AccessFlagMask FileState = 0x1F
+	// Mask for extracting data state (upper 3 bits)
+	DataStateMask FileState = 0xE0
+	// Number of bits to shift for data state
+	DataStateShift = 5
+)
+
+// NewFileState combines AccessFlags and DataState into a single byte
+// Lower 5 bits represent access flags, upper 3 bits represent data state
+func NewFileState(AccessFlag AccessFlags, dataState DataState) FileState {
+	return (FileState(AccessFlag) & AccessFlagMask) |
+		(FileState(dataState<<DataStateShift) & DataStateMask)
 }
 
-// Helper function to parse a string into a FileDataState.
-func ParseFileDataState(s string) (FileDataState, error) {
-	switch strings.ToLower(s) {
-	case "none":
-		return FileDataStateNone, nil
-	case "local":
-		return FileDataStateLocal, nil
-	case "locked":
-		return FileDataStateLocked, nil
-	case "offloaded":
-		return FileDataStateOffloaded, nil
+// GetAccessFlags returns the access flags part of the file state.
+func (fs FileState) GetAccessFlags() AccessFlags {
+	return AccessFlags(fs & AccessFlagMask)
+}
+
+// GetDataState returns the data state part of the file state.
+func (fs FileState) GetDataState() DataState {
+	return DataState((fs & DataStateMask) >> DataStateShift) // Shift right to get the original value
+}
+
+// Helper methods for checking access restrictions
+func (fs FileState) IsUnlocked() bool {
+	return fs.GetAccessFlags() == AccessFlagUnlocked
+}
+
+func (fs FileState) IsReadLocked() bool {
+	return (fs.GetAccessFlags() & AccessFlagReadLock) != 0
+}
+
+func (fs FileState) IsWriteLocked() bool {
+	return (fs.GetAccessFlags() & AccessFlagWriteLock) != 0
+}
+
+func (fs FileState) IsReadWriteLocked() bool {
+	return fs.IsReadLocked() && fs.IsWriteLocked()
+}
+
+// GetRawValue returns the raw byte value of the file state
+func (fs FileState) GetRawValue() uint8 {
+	return uint8(fs)
+}
+
+// String returns a human-readable representation of the file state.
+func (state FileState) String() string {
+	accessFlagsStr := AccessFlagsToString(state.GetAccessFlags())
+	dataStateStr := fmt.Sprintf("%d", state.GetDataState())
+	return fmt.Sprintf("%s : %s", accessFlagsStr, dataStateStr)
+}
+
+// Helper function to convert access flags to a string.
+func AccessFlagsToString(flags AccessFlags) string {
+	switch flags {
+	case AccessFlagUnlocked:
+		return "Unlocked"
+	case AccessFlagReadLock:
+		return "Locked (read)" // Indicates READ operations are blocked (write-only)
+	case AccessFlagWriteLock:
+		return "Locked (write)" // Indicates WRITE operations are blocked (read-only)
+	case AccessFlagReadLock | AccessFlagWriteLock:
+		return "Locked (read+write)" // All access blocked
 	default:
-		return 0, fmt.Errorf("invalid file data state: %s (valid values: local, locked, offloaded,none)", s)
+		// For combinations with reserved bits
+		return fmt.Sprintf("Unknown(%d)", flags)
 	}
 }
