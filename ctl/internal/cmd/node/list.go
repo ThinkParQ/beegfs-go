@@ -31,6 +31,9 @@ func newListCmd() *cobra.Command {
 		Short:       "List BeeGFS nodes",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if reachabilityError {
+				cfg.ReachabilityCheck = true
+			}
 			return runListCmd(cmd, cfg, reachabilityError)
 		},
 	}
@@ -45,9 +48,10 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("reachability-check")
 	cmd.Flags().DurationVar(&cfg.ReachabilityTimeout, "reachability-timeout", 1*time.Second,
 		"Define the waiting time for responses when using --reachability-check.")
+	cmd.Flags().MarkHidden("reachability-timeout")
 	cmd.Flags().BoolVar(&reachabilityError, "reachability-error", false,
-		"Return an error if at least one node is completely unreachable.")
-
+		"Run a reachability check and return an error if at least one node is completely unreachable.")
+	cmd.Flags().MarkHidden("reachability-error")
 	return cmd
 }
 
