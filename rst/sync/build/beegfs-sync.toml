@@ -16,7 +16,7 @@ mount-point = "/mnt/beegfs"
 
 [log]
 level = 3
-type = 'syslog'
+type = "syslog"
 
 [server]
 address = "0.0.0.0:9011"
@@ -65,16 +65,16 @@ tls-disable = false
 # Note: Levels above 3 might decrease performance.
 
 # type: Defines the logger type. This can either be "syslog" to send log messages to the general
-# system logger, "logfile", "stderr", or "stdout". If set to 'logfile' logs will be written to the
+# system logger, "logfile", "stderr", or "stdout". If set to "logfile" logs will be written to the
 # below file and rotated based on the provided settings. 
 
-# file: The path to the desired log file when logType is 'logfile'. As needed the directory and all
+# file: The path to the desired log file when logType is "logfile". As needed the directory and all
 # parent directories will be created.
 
-# max-size: When type is set to 'logfile' this is the maximum size of the file in megabytes before
+# max-size: When type is set to "logfile" this is the maximum size of the file in megabytes before
 # it is rotated.
 
-# num-rotated-files: When type is 'logfile' the maximum number old file(s) to keep when max-size is
+# num-rotated-files: When type is "logfile" the maximum number old file(s) to keep when max-size is
 # reached and the log is rotated.
 
 

@@ -236,7 +236,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	completedWork := make(chan workIdentifier, 4096)
 
 	for i := 1; i <= m.config.NumWorkers; i++ {
-		log := m.log.With(zap.String("worker", strconv.Itoa(i)))
+		log := m.log.With(zap.String("goroutine", strconv.Itoa(i)))
 
 		w := &worker{
 			log:                  log,
