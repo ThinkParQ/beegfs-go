@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -208,7 +209,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 
 				for _, content := range output.Contents {
 					if usePattern {
-						if match, _ := filepath.Match(prefix, *content.Key); !match {
+						if match, _ := doublestar.Match(prefix, *content.Key); !match {
 							continue
 						}
 					}

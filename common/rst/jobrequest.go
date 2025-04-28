@@ -98,6 +98,9 @@ func buildJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremot
 
 	jobBuilder := false
 	if !pathInfo.Exists {
+		if !IsFileGlob(pathInfo.Path) && !cfg.Download {
+			return nil, fmt.Errorf("unable to upload file: %w", os.ErrNotExist)
+		}
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			return nil, fmt.Errorf("unable to send job requests! Invalid RST identifier")
 		}

@@ -65,11 +65,11 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	var walkChan <-chan *WalkResponse
 	var err error
 	if cfg.Download {
-		if !IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemotePath == "" {
-			// Since cfg.RemoteStorageTarget and remote path is not specified, walk the local path.
-			// Jobs will be created for each file with a single rstId. Files with zero rstIds will
-			// be ignored and those with multiple rstIds will fail since the source is ambiguous.
-			if walkChan, err = walkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
+		if walkLocalPathInsteadOfRemote(cfg) {
+			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
+			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
+			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
+			if walkChan, err = WalkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
 				return err
 			}
 		} else {
@@ -81,7 +81,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return err
 			}
 		}
-	} else if walkChan, err = walkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
+	} else if walkChan, err = WalkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
 		return err
 	}
 
@@ -113,11 +113,11 @@ func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
 }
 
 // GetRemoteInfo is not implemented and should never be called.
-func (r *JobBuilderClient) GetRemoteInfo(ctx context.Context, remotePath string, cfg *flex.JobRequestCfg, lockedInfo *flex.JobLockedInfo) (remoteSize int64, remoteMtime time.Time, externalId string, err error) {
+func (c *JobBuilderClient) GetRemoteInfo(ctx context.Context, remotePath string, cfg *flex.JobRequestCfg, lockedInfo *flex.JobLockedInfo) (remoteSize int64, remoteMtime time.Time, externalId string, err error) {
 	return 0, time.Time{}, "", ErrUnsupportedOpForRST
 }
 
-func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest) error {
+func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest) error {
 	builder := request.GetBuilder()
 	cfg := builder.GetCfg()
 	store, err := config.NodeStore(ctx)
@@ -129,12 +129,12 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		return err
 	}
 
-	var walkingPath bool
+	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
 	var remotePathDirName string
 	if cfg.Download {
-		walkingPath = !IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemotePath == ""
+		walkingLocalPath = walkLocalPathInsteadOfRemote(cfg)
 		remotePathDir, remotePathIsGlob = getRemotePathDirectory(cfg.RemotePath)
 		remotePathDirName = filepath.Base(remotePathDir)
 	}
@@ -142,6 +142,8 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g, ctx := errgroup.WithContext(ctx)
+
+	var count atomic.Uint32
 	var errCount atomic.Uint32
 	workers := 2
 	for range workers {
@@ -163,11 +165,10 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 					}
 
 					if cfg.Download {
-						if walkingPath {
-							// Walking cfg.Path to support stub file download.
+						if walkingLocalPath {
+							// Walking cfg.Path to support stub file download and files with a defined rst.
 							inMountPath = walkResp.Path
 						} else {
-							// Walking cfg.RemotePath
 							remotePath = normalizePath(walkResp.Path)
 							relPath, _ := filepath.Rel(remotePathDir, remotePath)
 							if cfg.Flatten {
@@ -175,18 +176,19 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 							}
 
 							if relPath == "." {
-								// remote-path is a key for a non-existing file.
+								// Since the walked path and the supplied path is the same then the
+								// remotePath is a key for a non-existent file.
 								inMountPath = filepath.Join(cfg.Path, remotePath)
 							} else if remotePathIsGlob {
-								// remote-path is file glob pattern
-								inMountPath = filepath.Join(cfg.Path, relPath) // No directory when glob pattern is used
+								inMountPath = filepath.Join(cfg.Path, relPath)
 							} else {
-								// remote-path is a prefix
+								// remotePath is a prefix so include the parent directory.
 								inMountPath = filepath.Join(cfg.Path, remotePathDirName, relPath)
 							}
 
 							// Ensure the local directory structure supports the object downloads
-							if err := r.mountPoint.CreateDir(filepath.Dir(inMountPath)); err != nil {
+							if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath)); err != nil {
+								cancel()
 								return err
 							}
 						}
@@ -198,23 +200,25 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 
 				var client Provider
 				if IsValidRstId(cfg.RemoteStorageTarget) {
-					client = r.rstMap[cfg.RemoteStorageTarget]
+					client = c.rstMap[cfg.RemoteStorageTarget]
 				}
 
-				jobRequests, err := BuildJobRequests(ctx, client, r.rstMap, r.mountPoint, store, mappings, inMountPath, remotePath, cfg)
-
+				jobRequests, err := BuildJobRequests(ctx, client, c.rstMap, c.mountPoint, store, mappings, inMountPath, remotePath, cfg)
 				if err != nil {
-					cancel()
-					return fmt.Errorf("fatal error occurred while building job requests: %w", err)
+					// Errors that occur in BuildJobRequests must not be fatal; otherwise, pushing a
+					// subset based on the set file rstId will fail whenever there's a file.
+					errCount.Add(1)
+					continue
 				}
 
 				for _, jobRequest := range jobRequests {
 					if jobRequest.Err != nil {
-						// TODO: What should we do with this error?
+						errCount.Add(1)
 						continue
 					}
 					jobSubmissionChan <- jobRequest.Request
 				}
+				count.Add(1)
 			}
 		})
 	}
@@ -223,6 +227,10 @@ func (r *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		if errCount.Load() > 0 {
 			return fmt.Errorf("failed to create %d job request(s)", errCount.Load())
 		}
+	}
+
+	if count.Load() == 0 {
+		return fmt.Errorf("no job requests were created")
 	}
 	return nil
 }
@@ -236,11 +244,16 @@ func normalizePath(path string) string {
 
 // getRemotePathDirectory returns the directory part of remotePath before any globbing pattern.
 func getRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
-	directory = StripGlobPattern(normalizePath(remotePath))
-	isGlob = directory != remotePath
+	normalizedRemotePath := normalizePath(remotePath)
+	directory = StripGlobPattern(normalizedRemotePath)
+	isGlob = directory != normalizedRemotePath
 	if isGlob && !strings.HasSuffix(directory, "/") {
 		directory = filepath.Dir(directory)
 	}
 
 	return
+}
+
+func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
+	return !IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemotePath == ""
 }

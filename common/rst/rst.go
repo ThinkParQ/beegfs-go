@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -499,83 +500,51 @@ type WalkResponse struct {
 	FatalErr bool
 }
 
-func walkPath(ctx context.Context, beegfs filesystem.Provider, pattern string, chanSize int) (<-chan *WalkResponse, error) {
-	if _, err := beegfs.Lstat(pattern); err != nil {
-		if walkChan, globErr := walkGlob(ctx, beegfs, pattern, chanSize); globErr == nil {
-			return walkChan, nil
+// WalkPath returns a channel streaming every file that matches the given pattern regardless of
+// whether it’s a single file, all files under a directory (recursively), or any glob pattern rooted
+// at the BeeGFS mount.
+func WalkPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, chanSize int) (<-chan *WalkResponse, error) {
+	fsys := os.DirFS(mountPoint.GetMountPath())
+	pattern = strings.TrimLeft(pattern, "/")
+	if !IsFileGlob(pattern) {
+		if stat, err := mountPoint.Lstat(pattern); err == nil && stat.IsDir() {
+			pattern = filepath.Join(pattern, "**")
 		}
-		return nil, fmt.Errorf("unable to walk local directory: %w", err)
 	}
 
 	walkChan := make(chan *WalkResponse, chanSize)
-	walkFunc := func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	go func() {
+		defer close(walkChan)
+		err := doublestar.GlobWalk(fsys, pattern, func(path string, d fs.DirEntry) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if d.IsDir() {
 				return nil
 			}
+			walkChan <- &WalkResponse{Path: path}
+			return nil
+		})
 
-			inMountPath, err := beegfs.GetRelativePathWithinMount(path)
-			if err != nil {
-				// An error at this point is unlikely given previous steps also get relative paths.
-				// To be safe note this in the error that is returned and just return the absolute
-				// path instead. This shouldn't be a security issue since the user should have
-				// access to this path if they were able to start a job request for it.
-				inMountPath = path
-				walkChan <- &WalkResponse{
-					Path:     inMountPath,
-					Err:      fmt.Errorf("unable to determine relative path: %w", err),
-					FatalErr: true,
-				}
-				return nil
-			}
-			walkChan <- &WalkResponse{Path: inMountPath}
+		if err != nil {
+			walkChan <- &WalkResponse{Err: err, FatalErr: true}
 		}
-		return nil
-	}
-
-	go func() {
-		defer close(walkChan)
-		beegfs.WalkDir(pattern, walkFunc)
 	}()
+
 	return walkChan, nil
 }
 
-func walkGlob(ctx context.Context, beegfs filesystem.Provider, glob string, chanSize int) (<-chan *WalkResponse, error) {
-	if _, err := filepath.Glob(glob); err != nil {
-		return nil, err
-	}
+const globCharacters = "*?["
 
-	absPath := filepath.Join(beegfs.GetMountPath(), glob)
-	paths, err := filepath.Glob(absPath)
-	if err != nil {
-		return nil, err
-	}
-
-	walkChan := make(chan *WalkResponse, chanSize)
-	go func() {
-		defer close(walkChan)
-		for _, path := range paths {
-			inMountPath, err := beegfs.GetRelativePathWithinMount(path)
-			if err != nil {
-				walkChan <- &WalkResponse{Path: path, Err: err, FatalErr: true}
-			}
-			walkChan <- &WalkResponse{Path: inMountPath}
-		}
-	}()
-	return walkChan, nil
+// IsFileGlob returns whether the pattern contains a glob pattern.
+func IsFileGlob(pattern string) bool {
+	return strings.ContainsAny(pattern, globCharacters)
 }
 
 // StripGlobPattern extracts the longest leading substring from the given pattern that contains
 // no glob characters (e.g., '*', '?', or '['). This base prefix is used to efficiently list
 // objects in an S3 bucket, while the original glob pattern is later applied to filter the results.
 func StripGlobPattern(pattern string) string {
-	globCharacters := "*?["
 	position := 0
 	for {
 		index := strings.IndexAny(pattern[position:], globCharacters)
