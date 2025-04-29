@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -107,10 +108,13 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		fmt.Printf("%s\n", json)
 	} else {
 		var features []string
+		var scopes []string
 		var numservers string
 		for _, f := range license.Data.DnsNames {
 			if strings.HasPrefix(f, "io.beegfs.numservers.") {
 				numservers = strings.TrimPrefix(f, "io.beegfs.numservers.")
+			} else if strings.HasPrefix(f, "io.beegfs.scope.") {
+				scopes = append(scopes, strings.TrimPrefix(f, "io.beegfs.scope."))
 			} else {
 				features = append(features, fmt.Sprintf("  - %s", f))
 			}
@@ -129,7 +133,16 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		if license.Result == pl.VerifyResult_VERIFY_INVALID {
 			color = "\033[31m" // Red if license is invalid
 		}
-		header := fmt.Sprintf("BeeGFS Customer License Certificate %s", license.Data.CommonName)
+		var header string
+		// A license can have multiple scopes, so we order them by "importance" here. Scopes will
+		// be listed below again.
+		if slices.Contains(scopes, "nfr") {
+			header = fmt.Sprintf("NOT FOR RESALE License Certificate %s", license.Data.CommonName)
+		} else if slices.Contains(scopes, "beeond") {
+			header = fmt.Sprintf("BeeOND Customer License Certificate %s", license.Data.CommonName)
+		} else {
+			header = fmt.Sprintf("BeeGFS Customer License Certificate %s", license.Data.CommonName)
+		}
 		// All BeeGFS license certificates are valid from 00:00 UTC-14 until 23:59 UTC+12, so we
 		// adjust for that in the output
 		validFrom := license.Data.ValidFrom.AsTime().Add(14 * time.Hour)
@@ -164,6 +177,15 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 			numservers)
 		for _, f := range features {
 			fmt.Println(f)
+		}
+		if len(scopes) > 0 {
+			fmt.Printf("\nLicense scopes and limitations:\n")
+			if slices.Contains(scopes, "nfr") {
+				fmt.Println("  - This license is NOT FOR RESALE and may be used for testing purposes only")
+			}
+			if slices.Contains(scopes, "beeond") {
+				fmt.Println("  - This is a license for BeeOND (BeeGFS On Demand) file systems")
+			}
 		}
 	}
 	return ret
