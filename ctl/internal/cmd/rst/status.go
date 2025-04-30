@@ -92,6 +92,7 @@ func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.G
 
 	totalEntries := 0
 	unsyncedFiles := 0
+	offloadedFiles := 0
 	syncedFiles := 0
 	notAttemptedFiles := 0
 	noTargetFiles := 0
@@ -113,6 +114,9 @@ run:
 			switch path.SyncStatus {
 			case rst.Synchronized:
 				syncedFiles++
+				printRowByDefault = false
+			case rst.Offloaded:
+				offloadedFiles++
 				printRowByDefault = false
 			case rst.Unsynchronized:
 				unsyncedFiles++
@@ -152,17 +156,17 @@ run:
 	tbl.PrintRemaining()
 
 	if viper.GetBool(config.DisableEmojisKey) {
-		cmdfmt.Printf("Summary: found %d entries | %d synchronized | %d unsynchronized | %d not attempted | %d without remote targets | %d not supported | %d directories\n",
-			totalEntries, syncedFiles, unsyncedFiles, notAttemptedFiles, noTargetFiles, notSupportedFiles, directories)
+		cmdfmt.Printf("Summary: found %d entries | %d synchronized | %d offloaded | %d unsynchronized | %d not attempted | %d without remote targets | %d not supported | %d directories\n",
+			totalEntries, syncedFiles, offloadedFiles, unsyncedFiles, notAttemptedFiles, noTargetFiles, notSupportedFiles, directories)
 	} else {
-		cmdfmt.Printf("Summary: found %d entries | %s %d synchronized | %s %d unsynchronized | %s %d not attempted | %s %d without remote targets | %s %d not supported | %s %d directories\n",
-			totalEntries, rst.Synchronized, syncedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
+		cmdfmt.Printf("Summary: found %d entries | %s %d synchronized | %s %d offloaded | %s %d unsynchronized | %s %d not attempted | %s %d without remote targets | %s %d not supported | %s %d directories\n",
+			totalEntries, rst.Synchronized, syncedFiles, rst.Offloaded, offloadedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
 	}
 	if noTargetFiles != 0 {
 		cmdfmt.Printf("INFO: not all files have remote targets configured\n")
 	}
 
-	if totalEntries != (syncedFiles + unsyncedFiles + notAttemptedFiles + noTargetFiles + notSupportedFiles + directories) {
+	if totalEntries != (syncedFiles + offloadedFiles + unsyncedFiles + notAttemptedFiles + noTargetFiles + notSupportedFiles + directories) {
 		return fmt.Errorf("the total number of entries does not match the number of entries in various states (this is probably a bug)")
 	}
 

@@ -86,6 +86,8 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 		rstMap[config.GetId()] = rst
 	}
 
+	rstMap[0] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint)
+
 	nodePools := make(map[worker.Type]*Pool, 0)
 	nodes, err := worker.NewWorkerNodesFromConfig(log, workerConfigs)
 	if err != nil {
@@ -175,12 +177,13 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 			nodeType = worker.Mock
 		case flex.WorkRequest_Sync_case:
 			nodeType = worker.BeeSync
+		case flex.WorkRequest_Builder_case:
+			nodeType = worker.BeeSync
 		default:
 			nodeType = worker.Unknown
 		}
 
 		pool, ok := m.nodePools[nodeType]
-
 		if !ok {
 			err = fmt.Errorf("%s: %w", nodeType, ErrNoPoolsForNodeType)
 			result.WorkResult = flex.Work_builder{

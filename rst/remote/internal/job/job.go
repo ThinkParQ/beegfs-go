@@ -62,10 +62,9 @@ func (j *Job) GetSegments() []*flex.WorkRequest_Segment {
 
 // InTerminalState() returns true the job cannot cannot be restarted, and there are no active work
 // requests that would conflict with a new job. Jobs in this state are safe to be deleted without
-// leaving orphaned requests on worker nodes. This should mirror the InTerminalState() method for
-// WorkResults.
+// leaving orphaned requests on worker nodes.
 func (j *Job) InTerminalState() bool {
-	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
+	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_OFFLOADED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
 }
 
 // InActiveState() returns true if the job is active and not in a failed or terminal state.
@@ -134,6 +133,7 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 // largely just a wrapper around the rst.Client CompleteRequests method to handle converting between
 // data types used by the Job and the RST packages.
 func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) error {
+
 	workResults := make([]*flex.Work, 0, len(j.WorkResults))
 	for _, r := range j.WorkResults {
 		workResults = append(workResults, r.WorkResult)
@@ -177,6 +177,8 @@ func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 	}
 
 	switch jobRequest.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return newJob, nil
 	case beeremote.JobRequest_Sync_case:
 		return newJob, nil
 	case beeremote.JobRequest_Mock_case:

@@ -78,7 +78,7 @@ func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest) (string, *flex.Work
 		for j := 0; j < poolSize; j++ {
 			if p.nodes[p.next].GetState() == worker.ONLINE {
 				assignedWorker := p.nodes[p.next].GetID()
-				resp, err := p.nodes[p.next].SubmitWork(wr)
+				work, err := p.nodes[p.next].SubmitWork(wr)
 
 				if err != nil {
 					errWithWorker := fmt.Errorf("node: %s - error: %w", assignedWorker, err)
@@ -99,7 +99,7 @@ func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest) (string, *flex.Work
 				// Ideally move to a weighted system that takes into consideration
 				// the size of the work request.
 				p.next = (p.next + 1) % poolSize
-				return assignedWorker, resp, nil
+				return assignedWorker, work, nil
 			} else {
 				p.next = (p.next + 1) % poolSize
 			}

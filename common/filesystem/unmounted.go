@@ -40,7 +40,7 @@ func (fs UnmountedFS) CreatePreallocatedFile(path string, size int64, overwrite 
 	return ErrUnmounted
 }
 
-func (fs UnmountedFS) CreateWriteClose(path string, buf []byte) error {
+func (fs UnmountedFS) CreateWriteClose(path string, buf []byte, overwrite bool) error {
 	return ErrUnmounted
 }
 
@@ -59,6 +59,10 @@ func (fs UnmountedFS) ReadFilePart(path string, offsetStart int64, offsetStop in
 
 func (fs UnmountedFS) WriteFilePart(path string, offsetStart int64, offsetStop int64) (io.WriteCloser, error) {
 	return nil, ErrUnmounted
+}
+
+func (fs UnmountedFS) CreateDir(path string) error {
+	return ErrUnmounted
 }
 
 func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) error {

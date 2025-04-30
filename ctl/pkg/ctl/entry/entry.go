@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -331,7 +332,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 		if err != nil {
 			return msg.EntryInfo{}, beegfs.Node{}, err
 		} else if resp.Result != 0 {
-			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unexpected search result for '%s': %s", searchPath, resp.Result)
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unexpected search result for '%s': %w", searchPath, resp.Result)
 		}
 
 		// If the directory is buddy mirrored, the owner ID will be a buddy group ID. We have to map
@@ -368,4 +369,65 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	}
 
 	return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("max search steps exceeded for path: %s", searchPath)
+}
+
+func ClearFileDataState(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) error {
+	// TODO: https://github.com/ThinkParQ/beegfs-core/issues/4167. Currently, FileDataStateLocal
+	// represents a local beegfs file but it will be changed to FileDataStateReadLock and
+	// FileDataStateNone will represent a local beegfs file.
+	return setFileDataState(ctx, mappings, store, path, beegfs.FileDataStateLocal)
+}
+
+func SetFileReadOnly(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) error {
+	// TODO: https://github.com/ThinkParQ/beegfs-core/issues/4167. Currently, there is no read-only
+	// fileDataState so we're currently going to use FileDataStateLocked until it's implemented.
+	return setFileDataState(ctx, mappings, store, path, beegfs.FileDataStateLocked)
+}
+
+func SetFileDataStateLocked(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) error {
+	return setFileDataState(ctx, mappings, store, path, beegfs.FileDataStateLocked)
+}
+
+func SetFileDataStateOffloaded(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) error {
+	// TODO: https://github.com/ThinkParQ/beegfs-core/issues/4167. This will have to set FileDataStateLocked and then populate the file with
+	return setFileDataState(ctx, mappings, store, path, beegfs.FileDataStateOffloaded)
+}
+
+func IsFileDataStateOffloaded(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) (bool, error) {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+	if err != nil {
+		return false, fmt.Errorf("unable to retrieve entry info: %w", err)
+	}
+
+	request := &msg.GetEntryInfoRequest{EntryInfo: entry}
+	resp := &msg.GetEntryInfoResponse{}
+	err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
+	if err != nil {
+		return true, fmt.Errorf("unable to complete entry's stub flag status request, %s: %w", path, err)
+	}
+
+	return resp.FileDataState == beegfs.FileDataStateOffloaded, nil
+}
+
+func setFileDataState(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string, state beegfs.FileDataState) error {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+	if err != nil {
+		return fmt.Errorf("unable to retrieve entry info: %w", err)
+	}
+
+	if entry.EntryType != beegfs.EntryRegularFile {
+		return fmt.Errorf("unable to set stub flag status! File must be a regular file: %w", errors.ErrUnsupported)
+	}
+
+	request := &msg.SetFileDataStateRequest{EntryInfo: entry, DataState: state}
+	resp := &msg.SetFileDataStateResponse{}
+	err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
+	if err != nil {
+		return fmt.Errorf("unable to complete request to set stub flag status, %s: %w", path, err)
+	}
+
+	if resp.Result != beegfs.OpsErr_SUCCESS {
+		return fmt.Errorf("server returned an error setting the stub flag status, %s: %w", path, resp.Result)
+	}
+	return nil
 }
