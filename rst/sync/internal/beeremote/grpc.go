@@ -44,7 +44,7 @@ func (c *grpcProvider) init(cfg Config) error {
 	c.conn = conn
 	c.client = beeremote.NewBeeRemoteClient(c.conn)
 
-	config.SetCtlGlobalFlags(
+	config.InitViperFromExternal(
 		config.GlobalConfig{
 			Mount:                       cfg.dynamic.Mount,
 			MgmtdAddress:                cfg.dynamic.MgmtdAddress,

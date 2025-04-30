@@ -506,13 +506,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				WorkResults:  getProtoWorkResults(lastJob.WorkResults),
 			}.Build(), err
 		} else {
-			// TODO: https://github.com/ThinkParQ/bee-remote/issues/27. If we decide to implement a
-			// method to allow jobs to be resumed after an error/failure occurs, it could make sense to
-			// create the job but leave the state as error or failed (depending on the results of #27),
-			// allowing the user to easily resume jobs impacted by some transient issue in the
-			// environment. For now just return an error. This is the original approach, cleanup
-			// depending on the results of #27:
-
 			// Create a failed job submission. It is important for errors to be submitted otherwise job
 			// requests walk files or objects in a directory or prefix will not have a record for the
 			// failure. Failing to do this will leave user's with the previous recorded state which may

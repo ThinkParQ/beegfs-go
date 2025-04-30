@@ -16,8 +16,8 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	iConfig "github.com/thinkparq/beegfs-go/rst/remote/internal/config"
+	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
@@ -104,12 +104,12 @@ Using environment variables:
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
-	cfgMgr, err := configmgr.New(pflag.CommandLine, envVarPrefix, &iConfig.AppConfig{}, iConfig.SetRSTTypeHook())
+	cfgMgr, err := configmgr.New(pflag.CommandLine, envVarPrefix, &config.AppConfig{}, config.SetRSTTypeHook())
 	if err != nil {
 		log.Fatalf("unable to get initial configuration: %s", err)
 	}
 	c := cfgMgr.Get()
-	initialCfg, ok := c.(*iConfig.AppConfig)
+	initialCfg, ok := c.(*config.AppConfig)
 	if !ok {
 		log.Fatalf("configuration manager returned invalid configuration (expected BeeRemote application configuration)")
 	}
@@ -129,8 +129,8 @@ Using environment variables:
 		}()
 	}
 
-	config.SetCtlGlobalFlags(
-		config.GlobalConfig{
+	ctl.InitViperFromExternal(
+		ctl.GlobalConfig{
 			Mount:                       initialCfg.MountPoint,
 			MgmtdAddress:                initialCfg.Management.Address,
 			MgmtdTLSCertFile:            initialCfg.Management.TLSCertFile,

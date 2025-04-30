@@ -15,7 +15,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
-	iConfig "github.com/thinkparq/beegfs-go/rst/sync/internal/config"
+	"github.com/thinkparq/beegfs-go/rst/sync/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"go.uber.org/zap"
@@ -85,12 +85,12 @@ Using environment variables:
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
-	cfgMgr, err := configmgr.New(pflag.CommandLine, envVarPrefix, &iConfig.AppConfig{})
+	cfgMgr, err := configmgr.New(pflag.CommandLine, envVarPrefix, &config.AppConfig{})
 	if err != nil {
 		log.Fatalf("unable to get initial configuration: %s", err)
 	}
 	c := cfgMgr.Get()
-	initialCfg, ok := c.(*iConfig.AppConfig)
+	initialCfg, ok := c.(*config.AppConfig)
 	if !ok {
 		log.Fatalf("configuration manager returned invalid configuration (expected BeeSync application configuration)")
 	}

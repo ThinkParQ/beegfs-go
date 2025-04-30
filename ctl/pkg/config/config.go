@@ -117,6 +117,58 @@ func (t OutputType) String() string {
 	}
 }
 
+// GlobalConfig is used with InitViperFromExternal when the CTL backend is consumed as a library.
+// While not all global configuration is applicable in this mode, it and InitViperFromExternal()
+// should be kept in sync with any global configuration needed to use CTL as a library.
+type GlobalConfig struct {
+	Mount                       string
+	MgmtdAddress                string
+	MgmtdTLSCertFile            string
+	MgmtdTLSDisableVerification bool
+	MgmtdTLSDisable             bool
+	AuthFile                    string
+	AuthDisable                 bool
+	RemoteAddress               string
+	LogLevel                    int8
+	NumWorkers                  int
+	ConnTimeoutMs               int
+}
+
+// InitViperFromExternal is used when the CTL backend is consumed as a library by applications other
+// than the CTL CLI frontend. It is used to initialize the backend Viper config singleton from
+// externally defined configuration. This approach gives callers flexibility in how they define
+// equivalent configuration parameters (via flags, env variables, config files, etc) that are then
+// passed through to CTL using the `GlobalConfig` struct.
+func InitViperFromExternal(cfg GlobalConfig) {
+	if cfg.NumWorkers < 1 {
+		cfg.NumWorkers = runtime.GOMAXPROCS(0)
+	}
+	if cfg.ConnTimeoutMs < 500 {
+		cfg.ConnTimeoutMs = 500
+	}
+
+	globalFlagSet := pflag.FlagSet{}
+	globalFlagSet.String(BeeGFSMountPointKey, cfg.Mount, "")
+	globalFlagSet.String(ManagementAddrKey, cfg.MgmtdAddress, "")
+	globalFlagSet.String(TlsCertFile, cfg.MgmtdTLSCertFile, "")
+	globalFlagSet.Bool(TlsDisableKey, cfg.MgmtdTLSDisable, "")
+	globalFlagSet.Bool(TlsDisableVerificationKey, cfg.MgmtdTLSDisableVerification, "")
+	globalFlagSet.String(AuthFileKey, cfg.AuthFile, "")
+	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
+	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
+	globalFlagSet.Int(NumWorkersKey, cfg.NumWorkers, "")
+	globalFlagSet.Duration(ConnTimeoutKey, time.Duration(cfg.ConnTimeoutMs)*time.Millisecond, "")
+	globalFlagSet.Int8(LogLevelKey, cfg.LogLevel, "")
+
+	viper.SetEnvPrefix("beegfs")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	os.Setenv("BEEGFS_BINARY_NAME", "beegfs")
+	globalFlagSet.VisitAll(func(flag *pflag.Flag) {
+		viper.BindEnv(flag.Name)
+		viper.BindPFlag(flag.Name, flag)
+	})
+}
+
 // The global config singleton
 var globalMount filesystem.Provider
 
@@ -447,49 +499,4 @@ func GetLogger() (*logger.Logger, error) {
 		}
 	}
 	return globalLogger, nil
-}
-
-type GlobalConfig struct {
-	Mount                       string
-	MgmtdAddress                string
-	MgmtdTLSCertFile            string
-	MgmtdTLSDisableVerification bool
-	MgmtdTLSDisable             bool
-	AuthFile                    string
-	AuthDisable                 bool
-	RemoteAddress               string
-	LogLevel                    int8
-	NumWorkers                  int
-	ConnTimeoutMs               int
-}
-
-// SetCtlGlobalFlags configures the environment variables required for ctl.
-func SetCtlGlobalFlags(cfg GlobalConfig) {
-	if cfg.NumWorkers < 1 {
-		cfg.NumWorkers = runtime.GOMAXPROCS(0)
-	}
-	if cfg.ConnTimeoutMs < 500 {
-		cfg.ConnTimeoutMs = 500
-	}
-
-	globalFlagSet := pflag.FlagSet{}
-	globalFlagSet.String(BeeGFSMountPointKey, cfg.Mount, "")
-	globalFlagSet.String(ManagementAddrKey, cfg.MgmtdAddress, "")
-	globalFlagSet.String(TlsCertFile, cfg.MgmtdTLSCertFile, "")
-	globalFlagSet.Bool(TlsDisableKey, cfg.MgmtdTLSDisable, "")
-	globalFlagSet.Bool(TlsDisableVerificationKey, cfg.MgmtdTLSDisableVerification, "")
-	globalFlagSet.String(AuthFileKey, cfg.AuthFile, "")
-	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
-	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
-	globalFlagSet.Int(NumWorkersKey, cfg.NumWorkers, "")
-	globalFlagSet.Duration(ConnTimeoutKey, time.Duration(cfg.ConnTimeoutMs)*time.Millisecond, "")
-	globalFlagSet.Int8(LogLevelKey, cfg.LogLevel, "")
-
-	viper.SetEnvPrefix("beegfs")
-	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	os.Setenv("BEEGFS_BINARY_NAME", "beegfs")
-	globalFlagSet.VisitAll(func(flag *pflag.Flag) {
-		viper.BindEnv(flag.Name)
-		viper.BindPFlag(flag.Name, flag)
-	})
 }
