@@ -198,12 +198,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 					}
 				}
 
-				var client Provider
-				if IsValidRstId(cfg.RemoteStorageTarget) {
-					client = c.rstMap[cfg.RemoteStorageTarget]
-				}
-
-				jobRequests, err := BuildJobRequests(ctx, client, c.rstMap, c.mountPoint, store, mappings, inMountPath, remotePath, cfg)
+				jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, store, mappings, inMountPath, remotePath, cfg)
 				if err != nil {
 					// Errors that occur in BuildJobRequests must not be fatal; otherwise, pushing a
 					// subset based on the set file rstId will fail whenever there's a file.

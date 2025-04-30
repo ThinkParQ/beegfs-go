@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 type JobResponse struct {
@@ -36,12 +34,12 @@ type JobResponse struct {
 // all outstanding goroutines will be immediately cancelled. In all cases the channel is closed once
 // there are no more responses to receive.
 func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int) (<-chan *JobResponse, error) {
-	requests, err := buildJobRequests(ctx, cfg)
+	remote, err := config.BeeRemoteClient()
 	if err != nil {
 		return nil, err
 	}
 
-	remote, err := config.BeeRemoteClient()
+	requests, err := prepareJobRequests(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -51,8 +49,14 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 		defer close(respChan)
 
 		for _, request := range requests {
-			resp := &JobResponse{Path: request.Path}
-			submission, err := remote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: request})
+			err := request.Err
+			if err != nil && !IsErrJobTerminalSentinel(err) {
+				respChan <- &JobResponse{Err: err}
+				continue
+			}
+
+			resp := &JobResponse{Path: request.Request.Path}
+			submission, err := remote.SubmitJob(ctx, &beeremote.SubmitJobRequest{Request: request.Request})
 			if err != nil {
 				resp.Err = err
 				// We have to check the error because submission could be nil so we shouldn't try and
@@ -78,17 +82,19 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 	return respChan, nil
 }
 
-// buildJobRequests creates all job requests required. If the path does not exist, unknown or a
-// directory the a job-builder request will be returned. Otherwise, the supplied cfg.rstId, stub
-// file url, or the file's rstIds will be used to generate rst specific job requests.
-func buildJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+// prepareJobRequests creates all job requests required. If the path does not exist, unknown, glob
+// pattern or a directory then a job-builder request will be returned. Otherwise, the supplied
+// cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
+// requests.
+func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*BuildJobRequestResponse, error) {
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
 	}
+
 	pathInfo, err := getMountPathInfo(mountPoint, cfg.Path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to determine information for path: %w", err)
 	}
 
 	cfg.SetPath(pathInfo.Path)
@@ -102,7 +108,7 @@ func buildJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremot
 			return nil, fmt.Errorf("unable to upload file: %w", os.ErrNotExist)
 		}
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
-			return nil, fmt.Errorf("unable to send job requests! Invalid RST identifier")
+			return nil, fmt.Errorf("unable to send job requests: %w", ErrFileHasNoRSTs)
 		}
 		jobBuilder = true
 	} else if pathInfo.IsDir || pathInfo.IsGlob {
@@ -111,8 +117,8 @@ func buildJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremot
 
 	if jobBuilder {
 		client := NewJobBuilderClient(ctx, nil, nil)
-		request := client.GetJobRequest(cfg)
-		return []*beeremote.JobRequest{request}, nil
+		request := BuildJobRequestResponse{Request: client.GetJobRequest(cfg)}
+		return []*BuildJobRequestResponse{&request}, nil
 	}
 
 	store, err := config.NodeStore(ctx)
@@ -123,32 +129,16 @@ func buildJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremot
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve RST mappings: %w", err)
 	}
-
-	var errs []error
-	var requests []*beeremote.JobRequest
-	lockedInfo, rstIds, err := GetLockedInfo(ctx, mountPoint, store, mappings, cfg, pathInfo.Path)
+	rstMap, err := getRstMap(ctx, mountPoint, mappings.RstIdToConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, rstId := range rstIds {
-		config := mappings.RstIdToConfig[rstId]
-		client, err := New(ctx, config, mountPoint)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		lockedInfoCopy := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
-		jobRequest := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, cfg.Path, cfg.RemotePath, cfg, lockedInfoCopy)
-		if jobRequest.Err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		requests = append(requests, jobRequest.Request)
+	requests, err := BuildJobRequests(ctx, rstMap, mountPoint, store, mappings, pathInfo.Path, cfg.RemotePath, cfg)
+	if err != nil {
+		return nil, err
 	}
-
-	return requests, errors.Join(errs...)
+	return requests, nil
 }
 
 type mountPathInfo struct {
@@ -158,25 +148,38 @@ type mountPathInfo struct {
 	IsGlob bool
 }
 
-func getMountPathInfo(beegfsProvider filesystem.Provider, path string) (mountPathInfo, error) {
+func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInfo, error) {
 	result := mountPathInfo{Path: path}
-	pathInMount, err := beegfsProvider.GetRelativePathWithinMount(path)
+	pathInMount, err := mountPoint.GetRelativePathWithinMount(path)
 	if err != nil {
 		return result, err
 	}
 	result.Path = pathInMount
 
-	info, err := beegfsProvider.Lstat(pathInMount)
+	info, err := mountPoint.Lstat(pathInMount)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return result, err
 		}
-		if _, err := filepath.Glob(path); err != nil {
-			result.IsGlob = true
-		}
+		result.IsGlob = IsFileGlob(path)
 		return result, nil
 	}
 	result.Exists = true
 	result.IsDir = info.IsDir()
 	return result, nil
+}
+
+func getRstMap(ctx context.Context, mountPoint filesystem.Provider, rstConfigMap map[uint32]*flex.RemoteStorageTarget) (map[uint32]Provider, error) {
+	rstMap := make(map[uint32]Provider)
+	for rstId, rstConfig := range rstConfigMap {
+		if !IsValidRstId(rstId) {
+			continue
+		}
+		rst, err := New(ctx, rstConfig, mountPoint)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
+		}
+		rstMap[rstId] = rst
+	}
+	return rstMap, nil
 }

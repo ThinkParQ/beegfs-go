@@ -22,7 +22,6 @@ import (
 	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 
@@ -113,11 +112,68 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}
 
+	if !IsFileLocked(sync.LockedInfo) {
+		return nil, false, fmt.Errorf("lockedInfo must be locked! This is a bug")
+
+		// TODO: Question: Should we retrieve the lockedInfo if needed?
+		/*
+			store, err := config.NodeStore(ctx)
+			if err != nil {
+				return nil, true, err
+			}
+			mappings, err := util.GetMappings(ctx)
+			if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
+				return nil, true, err
+			}
+			cfg := &flex.JobRequestCfg{
+				RemoteStorageTarget: request.RemoteStorageTarget,
+				Path:                request.Path,
+				RemotePath:          sync.RemotePath,
+				Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
+				StubLocal:           request.StubLocal,
+				Overwrite:           sync.Overwrite,
+				Flatten:             sync.Flatten,
+				Force:               request.Force,
+			}
+			lockedInfo, _, err := GetLockedInfo(ctx, r.mountPoint, store, mappings, cfg, request.Path)
+			if err != nil {
+				return nil, true, err
+			}
+			remoteSize, remoteMtime, externalId, err := r.GetRemoteInfo(ctx, sync.RemotePath, cfg, lockedInfo)
+			if err != nil {
+				return nil, true, err
+			}
+			lockedInfo.SetRemoteSize(remoteSize)
+			lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+			lockedInfo.SetExternalId(externalId)
+			sync.SetLockedInfo(lockedInfo)
+			if err := PrepareJob(ctx, r.mountPoint, store, mappings, request.Path, request.RemoteStorageTarget, sync.RemotePath, cfg, lockedInfo); err != nil {
+				return nil, true, err
+			}
+		*/
+	}
+	lockedInfo := sync.LockedInfo
+	job.SetExternalId(lockedInfo.ExternalId)
+
+	cfg := &flex.JobRequestCfg{
+		RemoteStorageTarget: request.RemoteStorageTarget,
+		Path:                request.Path,
+		RemotePath:          sync.RemotePath,
+		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
+		StubLocal:           request.StubLocal,
+		Overwrite:           sync.Overwrite,
+		Flatten:             sync.Flatten,
+		Force:               request.Force,
+	}
+	if err := PrepareFileStateForWorkRequests(ctx, r.mountPoint, nil, nil, request.Path, request.RemoteStorageTarget, sync.RemotePath, cfg, lockedInfo); err != nil {
+		return nil, false, err
+	}
+
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		return r.generateSyncJobWorkRequest_Upload(ctx, job, availableWorkers)
+		return r.generateSyncJobWorkRequest_Upload(job)
 	case flex.SyncJob_DOWNLOAD:
-		return r.generateSyncJobWorkRequest_Download(ctx, job, availableWorkers)
+		return r.generateSyncJobWorkRequest_Download(job)
 	}
 	return nil, false, ErrUnsupportedOpForRST
 }
@@ -241,17 +297,11 @@ func (r *S3Client) SanitizeRemotePath(remotePath string) string {
 	return strings.TrimLeft(remotePath, "/")
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Upload(ctx context.Context, job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, bool, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*flex.WorkRequest, bool, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
-
-	err := r.setLockedInfo(ctx, request, sync)
-	if err != nil {
-		return nil, true, err
-	}
 	lockedInfo := sync.LockedInfo
 	job.SetStartMtime(lockedInfo.Mtime)
-	job.SetExternalId(lockedInfo.ExternalId)
 
 	filemode := fs.FileMode(lockedInfo.Mode)
 	if filemode.Type()&fs.ModeSymlink != 0 {
@@ -263,108 +313,18 @@ func (r *S3Client) generateSyncJobWorkRequest_Upload(ctx context.Context, job *b
 		return nil, true, fmt.Errorf("%w", rst.ErrFileTypeUnsupported)
 	}
 
-	if IsFileAlreadySynced(lockedInfo) {
-		if request.StubLocal {
-			store, err := config.NodeStore(ctx)
-			if err != nil {
-				return nil, true, err
-			}
-			mappings, err := util.GetMappings(ctx)
-			if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-				return nil, true, err
-			}
-			if err := CreateOffloadedDataFile(ctx, r.mountPoint, store, mappings, request.Path, sync.RemotePath, request.RemoteStorageTarget, true); err != nil {
-				return nil, true, fmt.Errorf("file is already synced but failed to create stub file: %w", err)
-			}
-			return nil, true, ErrJobAlreadyOffloaded
-		}
-		return nil, true, ErrJobAlreadyComplete
-	}
-
-	if IsFileOffloaded(lockedInfo) {
-		if request.StubLocal {
-			if IsFileOffloadedUrlCorrect(request.RemoteStorageTarget, sync.RemotePath, lockedInfo) {
-				return nil, true, ErrJobAlreadyOffloaded
-			}
-			return nil, true, fmt.Errorf("failed to complete migration! File is already a stub")
-		}
-		return nil, true, fmt.Errorf("unable to upload stub file: %w", rst.ErrFileTypeUnsupported)
-	}
-
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.Size, segCount, partsPerSegment))
 	return workRequests, true, nil
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Download(ctx context.Context, job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, bool, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*flex.WorkRequest, bool, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
-
-	err := r.setLockedInfo(ctx, request, sync)
-	if err != nil {
-		return nil, true, err
-	}
 	lockedInfo := sync.LockedInfo
 	job.SetStartMtime(lockedInfo.RemoteMtime)
-	job.SetExternalId(lockedInfo.ExternalId)
-
-	overwrite := sync.Overwrite
-	if request.StubLocal {
-		if IsFileExist(lockedInfo) {
-			if IsFileOffloaded(lockedInfo) {
-				if IsFileOffloadedUrlCorrect(request.RemoteStorageTarget, sync.RemotePath, lockedInfo) {
-					return nil, true, ErrJobAlreadyOffloaded
-				} else if !overwrite {
-					return nil, true, fmt.Errorf("unable to create stub file: %w", ErrOffloadFileUrlMismatch)
-				}
-			} else if !overwrite {
-				return nil, true, fmt.Errorf("unable to create stub file: %w", fs.ErrExist)
-			}
-		}
-
-		store, err := config.NodeStore(ctx)
-		if err != nil {
-			return nil, true, err
-		}
-		mappings, err := util.GetMappings(ctx)
-		if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-			return nil, true, err
-		}
-		err = CreateOffloadedDataFile(ctx, r.mountPoint, store, mappings, request.Path, sync.RemotePath, request.RemoteStorageTarget, overwrite)
-		if err != nil {
-			return nil, true, err
-		}
-		return nil, true, ErrJobAlreadyOffloaded
-	}
-
-	if IsFileExist(lockedInfo) {
-		if IsFileOffloaded(lockedInfo) {
-			store, err := config.NodeStore(ctx)
-			if err != nil {
-				return nil, true, err
-			}
-			mappings, err := util.GetMappings(ctx)
-			if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-				return nil, true, err
-			}
-			if err := entry.ClearFileDataState(ctx, mappings, store, request.Path); err != nil {
-				return nil, true, fmt.Errorf("unable to clear stub file flag: %w", err)
-			}
-
-			overwrite = true
-		} else if IsFileAlreadySynced(lockedInfo) {
-			return nil, true, ErrJobAlreadyComplete
-		}
-	}
 
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize)
-	if !IsFileSizeMatched(lockedInfo) {
-		err = r.mountPoint.CreatePreallocatedFile(request.Path, lockedInfo.RemoteSize, overwrite)
-		if err != nil {
-			return nil, false, err
-		}
-	}
-
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.RemoteSize, segCount, partsPerSegment))
 	return workRequests, true, nil
 }
@@ -461,51 +421,6 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 				start.Format(time.RFC3339), stop.Format(time.RFC3339))
 		}
 	}
-	return nil
-}
-
-func (r *S3Client) setLockedInfo(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) error {
-	if sync.LockedInfo != nil && sync.LockedInfo.Locked {
-		return nil
-	}
-
-	store, err := config.NodeStore(ctx)
-	if err != nil {
-		return err
-	}
-	mappings, err := util.GetMappings(ctx)
-	if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-		return err
-	}
-
-	cfg := &flex.JobRequestCfg{
-		RemoteStorageTarget: r.config.Id,
-		Path:                request.Path,
-		RemotePath:          sync.RemotePath,
-		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
-		StubLocal:           request.StubLocal,
-		Overwrite:           sync.Overwrite,
-		Flatten:             sync.Flatten,
-		Force:               request.Force,
-	}
-
-	lockedInfo, _, err := GetLockedInfo(ctx, r.mountPoint, store, mappings, cfg, request.Path)
-	if err != nil {
-		return err
-	}
-	remoteSize, remoteMtime, externalId, err := r.GetRemoteInfo(ctx, sync.RemotePath, cfg, lockedInfo)
-	if err != nil {
-		return err
-	}
-	lockedInfo.SetRemoteSize(remoteSize)
-	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-	lockedInfo.SetExternalId(externalId)
-
-	rstId := r.GetConfig().Id
-	if err := PrepareJob(ctx, r.mountPoint, store, mappings, request.Path, rstId, sync.RemotePath, cfg, lockedInfo); err != nil {
-		return err
-	}
-	sync.SetLockedInfo(lockedInfo)
 	return nil
 }
 

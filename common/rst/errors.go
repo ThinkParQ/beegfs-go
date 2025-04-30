@@ -26,3 +26,7 @@ var (
 	ErrOffloadFileCreate            = errors.New("unable to create offload file")
 	ErrOffloadFileUrlMismatch       = errors.New("offload file url does not match")
 )
+
+func IsErrJobTerminalSentinel(err error) bool {
+	return errors.Is(err, ErrJobAlreadyComplete) || errors.Is(err, ErrJobAlreadyOffloaded)
+}

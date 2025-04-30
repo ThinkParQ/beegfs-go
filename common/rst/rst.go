@@ -30,6 +30,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -238,7 +239,6 @@ type BuildJobRequestResponse struct {
 // If the inMountPath is to be offloaded and it does not exist then one will be created.
 func BuildJobRequests(
 	ctx context.Context,
-	client Provider,
 	rstMap map[uint32]Provider,
 	mountPoint filesystem.Provider,
 	store *beemsg.NodeStore,
@@ -252,27 +252,30 @@ func BuildJobRequests(
 		return nil, err
 	}
 
-	if client != nil {
-		request := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, inMountPath, remotePath, cfg, lockedInfo)
-		return []*BuildJobRequestResponse{request}, nil
-	}
-
 	if len(rstIds) == 0 {
 		return nil, ErrFileHasNoRSTs
 	} else if cfg.Download && len(rstIds) > 1 {
 		return nil, ErrFileHasAmbiguousRSTs
 	}
 
+	var errs []error
 	for _, rstId := range rstIds {
 		client, ok := rstMap[rstId]
 		if !ok {
-			return nil, ErrConfigRSTTypeIsUnknown
+			errs = append(errs, ErrConfigRSTTypeIsUnknown)
+			continue
 		}
-		request := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, inMountPath, remotePath, cfg, lockedInfo)
+		lockedInfoCopy := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
+		request := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, inMountPath, remotePath, cfg, lockedInfoCopy)
 		requests = append(requests, request)
 	}
 
-	return requests, nil
+	return requests, errors.Join(errs...)
+}
+
+// IsFileLocked returns whether the file has acquired a lock.
+func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
+	return lockedInfo != nil && lockedInfo.Locked
 }
 
 // IsFileExist returns whether the file exists. It is the responsibility of the caller to ensure
@@ -305,9 +308,9 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 	return rstId == lockedInfo.StubUrlRstId && remotePath == lockedInfo.StubUrlPath
 }
 
-// PrepareAndBuildJobRequest adds required information about the remote resource to lockedInfo,
-// performs preliminary operations, and then returns a job request for the client's file or object.
-// It is the responsibility of the caller to ensure lockedInfo is already populated and locked.
+// PrepareAndBuildJobRequest adds required remote resource information to lockedInfo, performs
+// common checks and operations, and then returns a job request for the client's file or object. It
+// is the responsibility of the caller to ensure lockedInfo is already populated and locked.
 func PrepareAndBuildJobRequest(
 	ctx context.Context,
 	client Provider,
@@ -319,12 +322,19 @@ func PrepareAndBuildJobRequest(
 	cfg *flex.JobRequestCfg,
 	lockedInfo *flex.JobLockedInfo,
 ) *BuildJobRequestResponse {
+	if !IsFileLocked(lockedInfo) {
+		return &BuildJobRequestResponse{Err: fmt.Errorf("path lock has not been acquired! This is a bug")}
+	}
+
+	rstId := client.GetConfig().Id
 	sanitizedRemotePath := client.SanitizeRemotePath(remotePath)
 	if IsFileOffloaded(lockedInfo) {
 		if sanitizedRemotePath == "" {
 			sanitizedRemotePath = lockedInfo.StubUrlPath
 		} else if sanitizedRemotePath != lockedInfo.StubUrlPath {
-			return &BuildJobRequestResponse{Err: fmt.Errorf("remote path does not match stub file path")}
+			return &BuildJobRequestResponse{Err: fmt.Errorf("unexpected stub file path")}
+		} else if rstId != lockedInfo.StubUrlRstId {
+			return &BuildJobRequestResponse{Err: fmt.Errorf("unexpected stub file rst id")}
 		}
 	}
 
@@ -336,22 +346,45 @@ func PrepareAndBuildJobRequest(
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
 	lockedInfo.SetExternalId(externalId)
 
-	rstId := client.GetConfig().Id
-	if err := PrepareJob(ctx, mountPoint, store, mappings, inMountPath, rstId, sanitizedRemotePath, cfg, lockedInfo); err != nil {
+	err = PrepareFileStateForWorkRequests(ctx, mountPoint, store, mappings, inMountPath, rstId, sanitizedRemotePath, cfg, lockedInfo)
+	if err != nil && !IsErrJobTerminalSentinel(err) {
 		return &BuildJobRequestResponse{Err: err}
 	}
 
 	request, err := GetJobRequest(ctx, client, inMountPath, sanitizedRemotePath, cfg, lockedInfo)
-	if err != nil {
-		return &BuildJobRequestResponse{Err: err}
-	}
-	return &BuildJobRequestResponse{Request: request}
+	return &BuildJobRequestResponse{Request: request, Err: err}
 
 }
 
-// PrepareJob handles common job operations based on collected lockedInfo information. It is the
-// responsibility of the caller to ensure lockedInfo is already populated and locked.
-func PrepareJob(
+// EnsureStoreAndMappings is a helper that retrieves the store and mappings when needed.
+func EnsureStoreAndMappings(ctx context.Context, store *beemsg.NodeStore, mappings *util.Mappings) (*beemsg.NodeStore, *util.Mappings, error) {
+	var err error
+	if store == nil {
+		store, err = config.NodeStore(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if mappings == nil {
+		mappings, err = util.GetMappings(ctx)
+		if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
+			return nil, nil, err
+		}
+	}
+	return store, mappings, nil
+}
+
+// PrepareFileStateForWorkRequests handles preflight checks and common operations based on collected
+// lockedInfo. Terminal errors are returned when the file is already in the expected synced or
+// offloaded state. Terminal errors can be checked using IsErrJobTerminalSentinel.
+//
+// This should be called before the job request is created so common operations can be handled and
+// then subsequently in the provider's GenerateWorkRequests to check for terminal states.
+//
+// It is the responsibility of the caller to ensure lockedInfo is already populated and locked. The
+// store and mappings can be nil but if they're needed they will be retrieved.
+func PrepareFileStateForWorkRequests(
 	ctx context.Context,
 	mountPoint filesystem.Provider,
 	store *beemsg.NodeStore,
@@ -362,38 +395,67 @@ func PrepareJob(
 	cfg *flex.JobRequestCfg,
 	lockedInfo *flex.JobLockedInfo,
 ) error {
+	var err error
+	alreadySynced := IsFileAlreadySynced(lockedInfo)
+
 	if cfg.StubLocal {
-		alreadySynced := IsFileAlreadySynced(lockedInfo)
 		if (cfg.Download && !lockedInfo.Exists) || alreadySynced {
+			if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
+				return err
+			}
 			err := CreateOffloadedDataFile(ctx, mountPoint, store, mappings, inMountPath, remotePath, rstId, alreadySynced)
 			if err != nil {
 				return ErrOffloadFileCreate
 			}
 			lockedInfo.StubUrlRstId = rstId
 			lockedInfo.StubUrlPath = remotePath
+			return ErrJobAlreadyOffloaded
+		}
+
+		if IsFileOffloaded(lockedInfo) {
+			if !IsFileOffloadedUrlCorrect(rstId, remotePath, lockedInfo) {
+				return ErrOffloadFileUrlMismatch
+			}
+			return ErrJobAlreadyOffloaded
 		}
 	} else if IsFileExist(lockedInfo) {
+		if alreadySynced {
+			return ErrJobAlreadyComplete
+		}
+
 		if cfg.Download {
-			overwrite := cfg.Overwrite
 			if IsFileOffloaded(lockedInfo) {
+				if !cfg.Overwrite && !IsFileOffloadedUrlCorrect(rstId, remotePath, lockedInfo) {
+					return ErrOffloadFileUrlMismatch
+				}
+
+				if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
+					return err
+				}
 				if err := entry.ClearFileDataState(ctx, mappings, store, inMountPath); err != nil {
 					return fmt.Errorf("unable to clear stub file flag: %w", err)
 				}
 				lockedInfo.StubUrlRstId = 0
 				lockedInfo.StubUrlPath = ""
-				overwrite = true
+				cfg.SetOverwrite(true)
 			}
 
 			if !IsFileSizeMatched(lockedInfo) {
-				err := mountPoint.CreatePreallocatedFile(inMountPath, lockedInfo.RemoteSize, overwrite)
+				err := mountPoint.CreatePreallocatedFile(inMountPath, lockedInfo.RemoteSize, cfg.Overwrite)
 				if err != nil {
 					return err
 				}
 				lockedInfo.Size = lockedInfo.RemoteSize
 				lockedInfo.Mtime = timestamppb.Now()
 			}
+
+			if !cfg.Overwrite {
+				return fs.ErrExist
+			}
 		} else {
-			// Nothing common for uploads now
+			if IsFileOffloaded(lockedInfo) {
+				return fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
+			}
 		}
 	}
 
@@ -578,6 +640,9 @@ func CreateOffloadedDataFile(ctx context.Context, beegfs filesystem.Provider, st
 	return entry.SetFileDataStateOffloaded(ctx, mappings, store, path)
 }
 
+// GetOffloadedUrlParts extracts the remote target ID and path from an offloaded stub file.
+// Returns (0, "") if the file is not offloaded. Returns an error if the file cannot be read
+// or its data state is no able to be determined.
 func GetOffloadedUrlParts(ctx context.Context, beegfs filesystem.Provider, mappings *util.Mappings, store *beemsg.NodeStore, path string) (uint32, string, error) {
 	if isStub, err := entry.IsFileDataStateOffloaded(ctx, mappings, store, path); err != nil {
 		return 0, "", err
