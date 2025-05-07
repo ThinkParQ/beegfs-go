@@ -187,7 +187,7 @@ func matchPathAndGetStatus(
 		// When recursing start streaming back jobs from Remote to a reusable dbChan.
 		log.Debug("attempting to stream multiple paths from the Remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
 		*dbChan = make(chan *GetJobsResponse, 1024)
-		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath}, *dbChan); err != nil {
+		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, Recurse: true}, *dbChan); err != nil {
 			return nil, err
 		}
 		*dbPath, *dbOk = <-(*dbChan)
