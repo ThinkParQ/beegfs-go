@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"fmt"
 	"strings"
 
 	pb "github.com/thinkparq/protobuf/go/beegfs"
@@ -10,12 +11,15 @@ import (
 // (which is technically correct, a meta target can only be on a meta server after all).
 type NodeType int
 
+const InvalidNodeTypeString = "<invalid>"
 const (
 	InvalidNodeType NodeType = iota
 	Client
 	Meta
 	Storage
 	Management
+	Remote
+	Sync
 )
 
 // Create a NodeType from a string. Providing a non-ambiguous prefix is sufficient, e.g. for client,
@@ -34,12 +38,19 @@ func NodeTypeFromString(input string) NodeType {
 		return Management
 	}
 
+	// To avoid ambiguity with storage, specifying sync requires at least 2 characters.
+	if len(input) >= 2 && (strings.HasPrefix("sync", input)) {
+		return Sync
+	}
+
 	if strings.HasPrefix("client", input) {
 		return Client
 	} else if strings.HasPrefix("storage", input) {
 		return Storage
 	} else if strings.HasPrefix("metadata", input) {
 		return Meta
+	} else if strings.HasPrefix("remote", input) {
+		return Remote
 	}
 
 	return InvalidNodeType
@@ -55,6 +66,10 @@ func NodeTypeFromProto(input pb.NodeType) NodeType {
 		return Storage
 	case pb.NodeType_MANAGEMENT:
 		return Management
+	case pb.NodeType_REMOTE:
+		return Remote
+	case pb.NodeType_SYNC:
+		return Sync
 	}
 
 	return InvalidNodeType
@@ -72,6 +87,10 @@ func (n NodeType) ToProto() *pb.NodeType {
 		nt = pb.NodeType_STORAGE
 	case Management:
 		nt = pb.NodeType_MANAGEMENT
+	case Remote:
+		nt = pb.NodeType_REMOTE
+	case Sync:
+		nt = pb.NodeType_SYNC
 	}
 
 	return &nt
@@ -88,7 +107,34 @@ func (n NodeType) String() string {
 		return "storage"
 	case Management:
 		return "management"
+	case Remote:
+		return "remote"
+	case Sync:
+		return "sync"
 	default:
-		return "<invalid>"
+		return InvalidNodeTypeString
 	}
+}
+
+func (n *NodeType) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+
+	nodeType := NodeTypeFromString(s)
+	if nodeType == InvalidNodeType {
+		return fmt.Errorf("invalid node type: %q", s)
+	}
+
+	*n = nodeType
+	return nil
+}
+
+func (n NodeType) MarshalYAML() (any, error) {
+	str := n.String()
+	if str == InvalidNodeTypeString {
+		return nil, fmt.Errorf("cannot marshal invalid NodeType: %d", n)
+	}
+	return str, nil
 }
