@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -10,7 +11,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/agent/internal/config"
 	"github.com/thinkparq/beegfs-go/agent/internal/server"
-	"github.com/thinkparq/beegfs-go/agent/pkg/agent"
+	"github.com/thinkparq/beegfs-go/agent/pkg/reconciler"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"go.uber.org/zap"
@@ -30,7 +31,8 @@ var (
 
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
-	pflag.String("cfg-file", "", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). When Remote Storage Targets are configured using a file, they can be updated without restarting the application.")
+	pflag.String("cfg-file", "/etc/beegfs/agent.toml", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). When Remote Storage Targets are configured using a file, they can be updated without restarting the application.")
+	pflag.String("agent-id", "0", "A unique ID used to identify what nodes from the manifest this agent is responsible for. Should not change after initially starting the agent.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-remote.log", "The path to the desired log file when logType is 'log.file' (if needed the directory and all parent directories will be created).")
 	pflag.Int8("log.level", 3, "Adjust the logging level (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
@@ -41,6 +43,10 @@ func main() {
 	pflag.String("server.tls-cert-file", "/etc/beegfs/cert.pem", "Path to a certificate file that provides the identify of this Agent's gRPC server.")
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Agent's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Agent's gRPC server.")
+	pflag.String("reconciler.manifest-path", "/etc/beegfs/manifest.yaml", "The path to the BeeGFS manifest this agent should apply. The manifest will be identical to the active manifest if applied successfully.")
+	pflag.String("reconciler.active-manifest-path", "/etc/beegfs/.active.manifest.yaml", "The past to the last BeeGFS manifest successfully applied by this agent.")
+	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
+	pflag.CommandLine.MarkHidden("developer.dump-config")
 	pflag.CommandLine.SortFlags = false
 	pflag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -85,23 +91,26 @@ Using environment variables:
 	}
 	defer logger.Sync()
 
-	agentServer, err := server.New(logger.Logger, initialCfg.Server, agent.New(logger.Logger, initialCfg.Agent))
+	reconciler := reconciler.New(initialCfg.AgentID, logger.Logger, initialCfg.Reconciler)
+	cfgMgr.AddListener(reconciler)
+	agentServer, err := server.New(logger.Logger, initialCfg.Server, reconciler)
 	if err != nil {
 		logger.Fatal("unable to initialize gRPC server", zap.Error(err))
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
 	errChan := make(chan error, 2)
 	agentServer.ListenAndServe(errChan)
+	go cfgMgr.Manage(ctx, logger.Logger)
 
 	select {
 	case err := <-errChan:
 		logger.Error("component terminated unexpectedly", zap.Error(err))
-	case <-sigs:
+	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
+	cancel()
 	agentServer.Stop()
 	logger.Info("shutdown all components, exiting")
 }

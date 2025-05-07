@@ -2,17 +2,21 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path"
 	"reflect"
 	"sync"
 
-	"github.com/thinkparq/beegfs-go/agent/pkg/agent"
+	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
+	"github.com/thinkparq/beegfs-go/agent/pkg/reconciler"
 	"github.com/thinkparq/protobuf/go/beegfs"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 type Config struct {
@@ -23,15 +27,15 @@ type Config struct {
 }
 
 type AgentServer struct {
-	beegfs.UnimplementedAgentServer
+	beegfs.UnimplementedBeeAgentServer
 	log *zap.Logger
 	wg  *sync.WaitGroup
 	Config
 	grpcServer *grpc.Server
-	reconciler agent.Reconciler
+	reconciler reconciler.Reconciler
 }
 
-func New(log *zap.Logger, config Config, reconciler agent.Reconciler) (*AgentServer, error) {
+func New(log *zap.Logger, config Config, reconciler reconciler.Reconciler) (*AgentServer, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeOf(AgentServer{}).PkgPath())))
 
 	s := AgentServer{
@@ -51,7 +55,7 @@ func New(log *zap.Logger, config Config, reconciler agent.Reconciler) (*AgentSer
 		s.log.Warn("not using TLS because it was explicitly disabled or a certificate and/or key were not specified")
 	}
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
-	beegfs.RegisterAgentServer(s.grpcServer, &s)
+	beegfs.RegisterBeeAgentServer(s.grpcServer, &s)
 	return &s, nil
 }
 
@@ -77,29 +81,55 @@ func (s *AgentServer) Stop() {
 	s.wg.Wait()
 }
 
-func (s *AgentServer) Apply(ctx context.Context, request *beegfs.AgentApplyRequest) (*beegfs.AgentResponse, error) {
+func (s *AgentServer) Update(ctx context.Context, request *beegfs.AgentUpdateRequest) (*beegfs.AgentUpdateResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
-	result, err := s.reconciler.Apply(ctx, request.Config)
-	return &beegfs.AgentResponse{
-		Status: result.Status,
-	}, err
+	if err := s.reconciler.UpdateConfiguration(manifest.FromProto(request.GetConfig())); err != nil {
+		return nil, grpcStatusFrom(err)
+	}
+	return &beegfs.AgentUpdateResponse{
+		FsUuid:  s.reconciler.GetFsUUID(),
+		AgentId: s.reconciler.GetAgentID(),
+	}, nil
 }
 
-func (s *AgentServer) Destroy(ctx context.Context, request *beegfs.AgentDestroyRequest) (*beegfs.AgentResponse, error) {
+func (s *AgentServer) Status(ctx context.Context, request *beegfs.AgentStatusRequest) (*beegfs.AgentStatusResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
-	result, err := s.reconciler.Destroy(ctx, request.Config)
-	return &beegfs.AgentResponse{
-		Status: result.Status,
-	}, err
+	if result, err := s.reconciler.Status(); err != nil {
+		return nil, grpcStatusFrom(err)
+	} else {
+		return &beegfs.AgentStatusResponse{
+			Status:  result.Status,
+			FsUuid:  s.reconciler.GetFsUUID(),
+			AgentId: s.reconciler.GetAgentID(),
+		}, nil
+	}
 }
 
-func (s *AgentServer) Status(ctx context.Context, request *beegfs.AgentStatusRequest) (*beegfs.AgentResponse, error) {
+func (s *AgentServer) Cancel(ctx context.Context, request *beegfs.AgentCancelRequest) (*beegfs.AgentCancelResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
-	result, err := s.reconciler.Status(ctx)
-	return &beegfs.AgentResponse{
-		Status: result.Status,
-	}, err
+	if result, err := s.reconciler.Cancel(request.GetReason()); err != nil {
+		return nil, grpcStatusFrom(err)
+	} else {
+		return &beegfs.AgentCancelResponse{
+			Status:  result.Status,
+			FsUuid:  s.reconciler.GetFsUUID(),
+			AgentId: s.reconciler.GetAgentID(),
+		}, nil
+	}
+}
+
+func grpcStatusFrom(err error) error {
+	var grpcErr error
+	switch {
+	case errors.Is(err, reconciler.ErrSavingManifest):
+		grpcErr = status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, reconciler.ErrBadManifest):
+		grpcErr = status.Error(codes.InvalidArgument, err.Error())
+	default:
+		grpcErr = status.Error(codes.Unknown, err.Error())
+	}
+	return grpcErr
 }

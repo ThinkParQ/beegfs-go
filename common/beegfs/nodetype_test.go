@@ -15,6 +15,10 @@ func TestFromString(t *testing.T) {
 	assert.Equal(t, Client, NodeTypeFromString("c"))
 	assert.Equal(t, Management, NodeTypeFromString(" management "))
 	assert.Equal(t, Management, NodeTypeFromString("ma"))
+	assert.Equal(t, Remote, NodeTypeFromString(" remote "))
+	assert.Equal(t, Remote, NodeTypeFromString("r"))
+	assert.Equal(t, Sync, NodeTypeFromString(" sync "))
+	assert.Equal(t, Sync, NodeTypeFromString("sy"))
 
 	assert.Equal(t, InvalidNodeType, NodeTypeFromString(""))
 	assert.Equal(t, InvalidNodeType, NodeTypeFromString("abc"))

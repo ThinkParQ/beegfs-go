@@ -1,0 +1,67 @@
+common:
+  auth: secret
+
+meta_config:
+  quotaEnableEnforcement: true
+  storeClientXAttrs: true
+  storeClientACLs: true
+
+storage_config:
+  quotaEnableEnforcement: true
+
+client_config:
+  quotaEnabled: true
+
+agents:
+  agent1: # agent-id
+    nodes:
+      - type: meta
+        id: 1
+        interfaces:
+          - name: ib0
+            address: 10.0.0.101/16
+        targets:
+          - id: 101
+            ulfs:
+              device: /dev/sda1
+              type: ext4
+              format_flags: foo
+              mount_flags: baz
+  agent2: # agent-id
+    nodes:
+      - type: storage
+        id: 1
+        interfaces:
+          - name: ib0
+            address: 10.0.0.102/16
+        targets:
+          - id: 101
+            ulfs:
+              device: /dev/sda1
+              type: ext4
+              format_flags: foo
+              mount_flags: baz
+          - id: 102
+            ulfs:
+              device: /dev/sda1
+              type: ext4
+              format_flags: foo
+              mount_flags: baz
+      - type: storage
+        id: 2
+        interfaces:
+          - name: ib1
+            address: 10.0.0.102/16
+        targets:
+          - id: 201
+            ulfs:
+              device: /dev/sda2
+              type: ext4
+              format_flags: foo
+              mount_flags: baz
+          - id: 202
+            ulfs:
+              device: /dev/sda2
+              type: ext4
+              format_flags: foo
+              mount_flags: baz
