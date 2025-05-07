@@ -18,6 +18,7 @@ import (
 type GetJobsConfig struct {
 	JobID            string
 	Path             string
+	Recurse          bool
 	WithWorkRequests bool
 	WithWorkResults  bool
 	// Currently exactPath is not exported to only allow this mode to be used from within the rst
@@ -69,8 +70,10 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 		}
 	case cfg.exactPath:
 		request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: cfg.Path}
-	default:
+	case cfg.Recurse:
 		request.Query = &beeremote.GetJobsRequest_ByPathPrefix{ByPathPrefix: pathInMount}
+	default:
+		request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: pathInMount}
 	}
 
 	beeRemote, err := config.BeeRemoteClient()
