@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/thinkparq/protobuf/go/beegfs"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type state struct {
+	logger     *zap.Logger
 	current    beegfs.AgentStatus
 	historical map[time.Time]*beegfs.AgentStatus
 	mu         sync.Mutex
@@ -27,7 +29,7 @@ const (
 	mount      = "MOUNT"
 )
 
-func newAgentState() state {
+func newAgentState(l *zap.Logger) state {
 	return state{
 		current: beegfs.AgentStatus{
 			State:    beegfs.AgentStatus_IDLE,
@@ -36,6 +38,7 @@ func newAgentState() state {
 		},
 		historical: make(map[time.Time]*beegfs.AgentStatus),
 		mu:         sync.Mutex{},
+		logger:     l,
 	}
 }
 
@@ -44,6 +47,7 @@ func newAgentState() state {
 func (s *state) start() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", beegfs.AgentStatus_APPLYING.String()))
 	s.historical[time.Now()] = proto.Clone(&s.current).(*beegfs.AgentStatus)
 	s.current = beegfs.AgentStatus{
 		State:    beegfs.AgentStatus_APPLYING,
@@ -78,8 +82,9 @@ func (s *state) log(cat op, message string) {
 func (s *state) fail(message string) *beegfs.AgentStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", beegfs.AgentStatus_FAILED.String()))
 	s.current.State = beegfs.AgentStatus_FAILED
-	s.logUnlocked(agent, "failed reconciliation")
+	s.logUnlocked(agent, message)
 	s.ctxCancel()
 	return proto.Clone(&s.current).(*beegfs.AgentStatus)
 }
@@ -87,8 +92,9 @@ func (s *state) fail(message string) *beegfs.AgentStatus {
 func (s *state) cancel(message string) *beegfs.AgentStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", beegfs.AgentStatus_CANCELLED.String()))
 	s.current.State = beegfs.AgentStatus_CANCELLED
-	s.logUnlocked(agent, "cancelled reconciliation")
+	s.logUnlocked(agent, message)
 	s.ctxCancel()
 	return proto.Clone(&s.current).(*beegfs.AgentStatus)
 }
@@ -96,6 +102,7 @@ func (s *state) cancel(message string) *beegfs.AgentStatus {
 func (s *state) complete(finalState beegfs.AgentStatus_State) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", finalState.String()))
 	s.current.State = finalState
 	s.logUnlocked(agent, "finished reconciliation")
 	s.ctxCancel()
