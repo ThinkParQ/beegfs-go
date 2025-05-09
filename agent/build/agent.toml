@@ -10,5 +10,6 @@ tls-cert-file = "/etc/beegfs/cert.pem"
 tls-key-file = "/etc/beegfs/key.pem"
 
 [reconciler]
+deployment-strategy = "default"
 manifest-path = "/etc/beegfs/manifest.yaml"
 active-manifest-path = "/etc/beegfs/.active.manifest.yaml"

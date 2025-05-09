@@ -45,6 +45,7 @@ func main() {
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Agent's gRPC server.")
 	pflag.String("reconciler.manifest-path", "/etc/beegfs/manifest.yaml", "The path to the BeeGFS manifest this agent should apply. The manifest will be identical to the active manifest if applied successfully.")
 	pflag.String("reconciler.active-manifest-path", "/etc/beegfs/.active.manifest.yaml", "The past to the last BeeGFS manifest successfully applied by this agent.")
+	pflag.String("reconciler.deployment-strategy", "default", "The deployment strategy used by the reconciler.")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
 	pflag.CommandLine.MarkHidden("developer.dump-config")
 	pflag.CommandLine.SortFlags = false
@@ -91,7 +92,10 @@ Using environment variables:
 	}
 	defer logger.Sync()
 
-	reconciler := reconciler.New(initialCfg.AgentID, logger.Logger, initialCfg.Reconciler)
+	reconciler, err := reconciler.New(initialCfg.AgentID, logger.Logger, initialCfg.Reconciler)
+	if err != nil {
+		logger.Fatal("unable to initialize reconciler", zap.Error(err))
+	}
 	cfgMgr.AddListener(reconciler)
 	agentServer, err := server.New(logger.Logger, initialCfg.Server, reconciler)
 	if err != nil {
