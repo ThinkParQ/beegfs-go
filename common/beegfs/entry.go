@@ -112,6 +112,8 @@ const (
 	AccessFlagReserved3 AccessFlags = 0x04
 	// Reserved for future use
 	AccessFlagReserved4 AccessFlags = 0x08
+	// Reserved for future use
+	AccessFlagReserved5 AccessFlags = 0x10
 )
 
 // DataState represents an user/application defined data state (upper 3 bits of FileState)
