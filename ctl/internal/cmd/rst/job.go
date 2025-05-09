@@ -218,7 +218,7 @@ Jobs for each path are grouped together and sorted by remote target then by when
 	cmd.Flags().IntVar(&frontendCfg.history, "history", 1, "Limit the number of jobs returned for each path+RST combination (defaults to only the most recently created job).")
 	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Don't print output in a table and return all possible fields grouping jobs for each path by RST and sorting by when they were created.")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
-	cmd.Flags().BoolVar(&backendCfg.Recurse, "recurse", false, "Treat the provided path as a prefix and update all matching paths.")
+	cmd.Flags().BoolVar(&backendCfg.Recurse, "recurse", false, "Treat the provided path as a prefix.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 30, "Set the maximum width of some columns before they overflow.")
 	return cmd
 }
