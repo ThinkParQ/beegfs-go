@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -135,6 +136,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		walkingLocalPath = walkLocalPathInsteadOfRemote(cfg)
 		remotePathDir, remotePathIsGlob = GetDownloadRemotePathDirectory(cfg.RemotePath)
 	}
+	isPathDir := cfg.LockedInfo != nil && cfg.LockedInfo.Exists && !fs.FileMode(cfg.LockedInfo.Mode).IsDir()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -166,8 +168,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 							// Walking cfg.Path to support stub file download and files with a defined rst.
 							inMountPath = walkResp.Path
 						} else {
+
 							remotePath = NormalizePath(walkResp.Path)
-							inMountPath = GetDownloadInMountPath(cfg, remotePath, remotePathDir, remotePathIsGlob)
+							inMountPath = GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
 							// Ensure the local directory structure supports the object downloads
 							if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath)); err != nil {
 								cancel()

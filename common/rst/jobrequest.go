@@ -110,7 +110,7 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*BuildJ
 		if cfg.Download {
 			// Check if the downloaded file already exists
 			remotePathDir, _ := GetDownloadRemotePathDirectory(cfg.RemotePath)
-			inMountPath := GetDownloadInMountPath(cfg, cfg.RemotePath, remotePathDir, false)
+			inMountPath := GetDownloadInMountPath(cfg.Path, cfg.RemotePath, remotePathDir, false, true, cfg.Flatten)
 			inMountPathInfo, err := getMountPathInfo(mountPoint, inMountPath)
 			if err == nil && inMountPathInfo.Exists && !inMountPathInfo.IsDir {
 				pathInfo = inMountPathInfo

@@ -754,24 +754,29 @@ func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob
 	return
 }
 
-func GetDownloadInMountPath(cfg *flex.JobRequestCfg, remotePath string, remotePathDir string, remotePathIsGlob bool) string {
+func GetDownloadInMountPath(path string, remotePath string, remotePathDir string, remotePathIsGlob bool, isPathDir bool, flatten bool) string {
 	var inMountPath string
 	normalizedRemotePath := NormalizePath(remotePath)
 	relPath, _ := filepath.Rel(remotePathDir, normalizedRemotePath)
-	if cfg.Flatten {
+	if flatten {
 		relPath = strings.Replace(relPath, "/", "_", -1)
 	}
 
 	if relPath == "." {
 		// Since the walked path and the supplied path is the same then the remotePath is a key for
-		// a non-existent file.
-		inMountPath = filepath.Join(cfg.Path, normalizedRemotePath)
+		// a non-existent file. If the provided path is not a directory then we'll treat it as the
+		// desired destination.
+		if isPathDir {
+			inMountPath = filepath.Join(path, filepath.Base(normalizedRemotePath))
+		} else {
+			inMountPath = path
+		}
 	} else if remotePathIsGlob {
-		inMountPath = filepath.Join(cfg.Path, relPath)
+		inMountPath = filepath.Join(path, relPath)
 	} else {
 		// remotePath is a prefix so include the parent directory.
 		remotePathDirName := filepath.Base(remotePathDir)
-		inMountPath = filepath.Join(cfg.Path, remotePathDirName, relPath)
+		inMountPath = filepath.Join(path, remotePathDirName, relPath)
 	}
 
 	return inMountPath
