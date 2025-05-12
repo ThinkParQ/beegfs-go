@@ -467,36 +467,47 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
 			m.log.Debug("Offload is already complete", zap.Any("job", lastJob), zap.Any("err", err))
-			status := job.GetStatus()
-			status.State = beeremote.Job_OFFLOADED
-			status.Message = err.Error()
-			// Update the database if the last recorded status doesn't accurately reflect offloaded.
-			// This handles scenarios where the database state might diverge from reality due to corruption,
-			// deletion, or forced cancellation and subsequent manual cleanup.
+			// Update the database if the last recorded status does not accurately reflect
+			// offloaded. Discrepancies can occur due to preemptive handling by the job builder
+			// (resulting in no-op job requests), or from database issues such as corruption,
+			// deletion, forced cancellations, or manual cleanup.
 			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_OFFLOADED {
+				status := job.GetStatus()
 				pathEntry.Value[job.GetId()] = job
+				status.State = beeremote.Job_OFFLOADED
+				status.Message = "job already offloaded (detailed work requests/results are not available)"
+				pathEntry.Value[job.GetId()] = job
+				return beeremote.JobResult_builder{
+					Job:          job.Get(),
+					WorkRequests: []*flex.WorkRequest{},
+					WorkResults:  []*beeremote.JobResult_WorkResult{},
+				}.Build(), err
 			}
-
 			return beeremote.JobResult_builder{
-				Job:          job.Get(),
-				WorkRequests: []*flex.WorkRequest{},
-				WorkResults:  []*beeremote.JobResult_WorkResult{},
+				Job:          lastJob.Get(),
+				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
+				WorkResults:  getProtoWorkResults(lastJob.WorkResults),
 			}.Build(), err
 		} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
 			m.log.Debug("requested job is already complete", zap.Any("job", lastJob), zap.Any("err", err))
-			status := job.GetStatus()
-			status.State = beeremote.Job_COMPLETED
-			status.Message = err.Error()
-			// Update the database if the last recorded status doesn't accurately reflect completion.
-			// This handles scenarios where the database state might diverge from reality due to corruption,
-			// deletion, or forced cancellation and subsequent manual cleanup.
+			// Update the database if the last recorded status does not accurately reflect complete.
+			// Discrepancies can occur due to database issues such as corruption, deletion, forced
+			// cancellations, or manual cleanup.
 			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_COMPLETED {
+				status := job.GetStatus()
+				status.State = beeremote.Job_COMPLETED
+				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
 				pathEntry.Value[job.GetId()] = job
+				return beeremote.JobResult_builder{
+					Job:          job.Get(),
+					WorkRequests: []*flex.WorkRequest{},
+					WorkResults:  []*beeremote.JobResult_WorkResult{},
+				}.Build(), err
 			}
 			return beeremote.JobResult_builder{
-				Job:          job.Get(),
-				WorkRequests: []*flex.WorkRequest{},
-				WorkResults:  []*beeremote.JobResult_WorkResult{},
+				Job:          lastJob.Get(),
+				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
+				WorkResults:  getProtoWorkResults(lastJob.WorkResults),
 			}.Build(), err
 		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
 			m.log.Debug("an active job already exists for the requested job, returning that job instead of creating a new one", zap.Any("job", lastJob), zap.Any("err", err))
