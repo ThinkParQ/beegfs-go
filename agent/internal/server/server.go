@@ -84,11 +84,19 @@ func (s *AgentServer) Stop() {
 func (s *AgentServer) Update(ctx context.Context, request *beegfs.AgentUpdateRequest) (*beegfs.AgentUpdateResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
-	if err := s.reconciler.UpdateConfiguration(manifest.FromProto(request.GetConfig())); err != nil {
+
+	filesystems := make(map[string]manifest.Filesystem, len(request.GetConfig()))
+	for fsUUID, protoFS := range request.GetConfig() {
+		if protoFS == nil {
+			return nil, status.Error(codes.InvalidArgument, "file system configuration was unexpectedly nil for fsUUID "+fsUUID)
+		}
+		filesystems[fsUUID] = manifest.FromProto(protoFS)
+	}
+
+	if err := s.reconciler.UpdateConfiguration(filesystems); err != nil {
 		return nil, grpcStatusFrom(err)
 	}
 	return &beegfs.AgentUpdateResponse{
-		FsUuid:  s.reconciler.GetFsUUID(),
 		AgentId: s.reconciler.GetAgentID(),
 	}, nil
 }
@@ -101,7 +109,6 @@ func (s *AgentServer) Status(ctx context.Context, request *beegfs.AgentStatusReq
 	} else {
 		return &beegfs.AgentStatusResponse{
 			Status:  result.Status,
-			FsUuid:  s.reconciler.GetFsUUID(),
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil
 	}
@@ -115,7 +122,6 @@ func (s *AgentServer) Cancel(ctx context.Context, request *beegfs.AgentCancelReq
 	} else {
 		return &beegfs.AgentCancelResponse{
 			Status:  result.Status,
-			FsUuid:  s.reconciler.GetFsUUID(),
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil
 	}

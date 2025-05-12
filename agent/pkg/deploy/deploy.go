@@ -1,5 +1,7 @@
 package deploy
 
+import "context"
+
 // Deployer is responsible for carrying out the steps needed to manage a BeeGFS "node" and handles
 // starting/modifying/stopping various system resources.
 type Deployer interface {
@@ -7,24 +9,36 @@ type Deployer interface {
 	Networker
 	Mounter
 	Servicer
+	// Cleanup should be called once the deployer is no longer needed to cleanup any long lived
+	// resources created by setting up a particular deployment strategy.
+	Cleanup() error
 }
 
-func NewDefaultStrategy() (Deployer, error) {
-	pm, err := DetectPackageManager()
+func NewDefaultStrategy(ctx context.Context) (Deployer, error) {
+	packageManager, err := DetectPackageManager()
+	if err != nil {
+		return nil, err
+	}
+
+	systemd, err := NewSystemd(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &defaultStrategy{
-		Systemd: Systemd{},
-		Mount:   Mount{},
+		Package: packageManager,
 		IP:      IP{},
-		Package: Package{PackageManager: pm},
+		Mount:   Mount{},
+		Systemd: systemd,
 	}, nil
 }
 
 type defaultStrategy struct {
 	Package // implements Sourcerer
-	Mount   // implements Mounter
 	IP      // implements Networker
+	Mount   // implements Mounter
 	Systemd // implements Servicer
+}
+
+func (s *defaultStrategy) Cleanup() error {
+	return s.Systemd.Cleanup()
 }
