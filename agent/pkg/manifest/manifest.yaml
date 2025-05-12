@@ -1,80 +1,83 @@
-common:
-  auth: secret
-  meta_config:
-    quotaEnableEnforcement: true
-    storeClientXAttrs: true
-    storeClientACLs: true
-  storage_config:
-    quotaEnableEnforcement: true
-  client_config:
-    quotaEnabled: true
-  source:
-    type: package
-    repo: https://www.beegfs.io/release/beegfs_8.0/
-    meta: beegfs-meta=8.0.1
-    storage: beegfs-storage=8.0.1
+beegfs01: #fsUUID
+  common:
+    auth: secret
+    meta_config:
+      quotaEnableEnforcement: true
+      storeClientXAttrs: true
+      storeClientACLs: true
+    storage_config:
+      quotaEnableEnforcement: true
+    client_config:
+      quotaEnabled: true
+    source:
+      # type: package
+      type: local
+      repo: https://www.beegfs.io/release/beegfs_8.0/
+      meta: beegfs-meta=8.0.1
+      storage: beegfs-storage=8.0.1
 
-# source:
-#   type: container
-#   repo: ghcr.io/thinkparq
-#   meta: beegfs-meta:8.0.1
-#   storage: beegfs-storage:8.0.1
+  # source:
+  #   type: container
+  #   repo: ghcr.io/thinkparq
+  #   meta: beegfs-meta:8.0.1
+  #   storage: beegfs-storage:8.0.1
 
-agents:
-  agent1: # agent-id
-    interfaces:
-      - name: enp0s1
-        address: "192.168.64.5/24"
-    nodes:
-      - type: meta
-        id: 1
-        source:
-          type: local
-          ref: /home/joe/development/beegfs/meta/build/beegfs-meta
-        interfaces:
-          - name: enp0s1 # IP configuration handled globally
-        targets:
-          - id: 101
-            ulfs:
-              device: /dev/sda1
-              type: ext4
-              format_flags: foo
-              mount_flags: baz
-  # agent2: # agent-id
-  #   nodes:
-  #     - type: storage
-  #       id: 1
-  #       interfaces:
-  #         - name: ib0
-  #           address: 10.0.0.102/16
-  #       targets:
-  #         - id: 101
-  #           ulfs:
-  #             device: /dev/sda1
-  #             type: ext4
-  #             format_flags: foo
-  #             mount_flags: baz
-  #         - id: 102
-  #           ulfs:
-  #             device: /dev/sda1
-  #             type: ext4
-  #             format_flags: foo
-  #             mount_flags: baz
-  #     - type: storage
-  #       id: 2
-  #       interfaces:
-  #         - name: ib1
-  #           address: 10.0.0.102/16
-  #       targets:
-  #         - id: 201
-  #           ulfs:
-  #             device: /dev/sda2
-  #             type: ext4
-  #             format_flags: foo
-  #             mount_flags: baz
-  #         - id: 202
-  #           ulfs:
-  #             device: /dev/sda2
-  #             type: ext4
-  #             format_flags: foo
-  #             mount_flags: baz
+  agents:
+    agent1: # agentID
+      interfaces:
+        - name: enp0s1
+          address: "10.0.0.100/24"
+      nodes:
+        - type: meta
+          id: 1
+          source:
+            type: local
+            ref: /development/beegfs/meta/build/beegfs-meta
+          interfaces:
+            - name: enp0s1 # IP configuration handled globally
+          targets:
+            - id: 101
+              root_dir: /beegfs/
+              # ulfs:
+              #   device: /dev/sda1
+              #   type: ext4
+              #   format_flags: foo
+              #   mount_flags: baz
+    # agent2: # agent-id
+    #   nodes:
+    #     - type: storage
+    #       id: 1
+    #       interfaces:
+    #         - name: ib0
+    #           address: 10.0.0.102/16
+    #       targets:
+    #         - id: 101
+    #           ulfs:
+    #             device: /dev/sda1
+    #             type: ext4
+    #             format_flags: foo
+    #             mount_flags: baz
+    #         - id: 102
+    #           ulfs:
+    #             device: /dev/sda1
+    #             type: ext4
+    #             format_flags: foo
+    #             mount_flags: baz
+    #     - type: storage
+    #       id: 2
+    #       interfaces:
+    #         - name: ib1
+    #           address: 10.0.0.102/16
+    #       targets:
+    #         - id: 201
+    #           ulfs:
+    #             device: /dev/sda2
+    #             type: ext4
+    #             format_flags: foo
+    #             mount_flags: baz
+    #         - id: 202
+    #           ulfs:
+    #             device: /dev/sda2
+    #             type: ext4
+    #             format_flags: foo
+    #             mount_flags: baz

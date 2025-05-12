@@ -1,6 +1,8 @@
 package reconciler
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
@@ -36,6 +38,7 @@ type Reconciler interface {
 	Status() (ReconcileResult, error)
 	Cancel(string) (ReconcileResult, error)
 	UpdateConfiguration(any) error
+	Stop() error
 }
 
 type ReconcileResult struct {
@@ -43,22 +46,22 @@ type ReconcileResult struct {
 }
 
 type defaultReconciler struct {
-	agentID   string
-	log       *zap.Logger
-	mu        sync.Mutex
-	currentFS manifest.Filesystem
-	state     state
-	config    Config
-	strategy  deploy.Deployer
+	agentID        string
+	log            *zap.Logger
+	mu             sync.Mutex
+	activeManifest manifest.Filesystems
+	state          state
+	config         Config
+	strategy       deploy.Deployer
 }
 
-func New(agentID string, log *zap.Logger, config Config) (Reconciler, error) {
+func New(ctx context.Context, agentID string, log *zap.Logger, config Config) (Reconciler, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeOf(defaultReconciler{}).PkgPath())))
 	var deploymentStrategy deploy.Deployer
 	var err error
 	switch config.DeploymentStrategy {
 	case DefaultStrategy:
-		if deploymentStrategy, err = deploy.NewDefaultStrategy(); err != nil {
+		if deploymentStrategy, err = deploy.NewDefaultStrategy(ctx); err != nil {
 			return nil, fmt.Errorf("unable to configure deployment strategy: %w", err)
 		}
 	default:
@@ -72,6 +75,14 @@ func New(agentID string, log *zap.Logger, config Config) (Reconciler, error) {
 		mu:       sync.Mutex{},
 		strategy: deploymentStrategy,
 	}, nil
+}
+
+func (r *defaultReconciler) Stop() error {
+	r.log.Info("attempting to stop reconciler")
+	r.state.cancel("agent is shutting down")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.strategy.Cleanup()
 }
 
 func (r *defaultReconciler) GetAgentID() string {
@@ -110,7 +121,7 @@ func (r *defaultReconciler) UpdateConfiguration(config any) error {
 			return fmt.Errorf("%w: %w", ErrLoadingManifest, err)
 		}
 		return r.verify(newFS)
-	} else if newFS, ok := config.(manifest.Filesystem); ok {
+	} else if newFS, ok := config.(manifest.Filesystems); ok {
 		r.mu.Lock()
 		r.log.Info("saving file system manifest", zap.String("path", r.config.ActiveManifestPath))
 		err := manifest.ToDisk(newFS, r.config.ManifestPath)
@@ -125,37 +136,79 @@ func (r *defaultReconciler) UpdateConfiguration(config any) error {
 
 // Verify performs any checks that can be done without actually reconciling the manifest. This
 // allows a response to be returned quickly while the reconciliation happens in the background.
-func (r *defaultReconciler) verify(newFS manifest.Filesystem) error {
+func (r *defaultReconciler) verify(newManifest manifest.Filesystems) error {
 	r.log.Info("verifying manifest")
-	newFS.InheritGlobalConfig()
-	// TODO:
-	// * Avoid necessary reconciliations by seeing if the manifest changed.
-	// * Validate we can migrate from currentFS to newFS.
-	go r.reconcile(newFS)
+	if len(newManifest) == 0 {
+		return errors.New("manifest does not contain any file systems")
+	}
+	for fsUUID, fs := range newManifest {
+		// TODO:
+		//  * Avoid necessary reconciliations by seeing if the manifest changed.
+		//  * Validate we can migrate from currentFS to newFS.
+		//  * Validate the FS config:
+		//    * All nodes have IPs + targets.
+		//    * Nodes have the correct number of targets (i.e., 1 for mgmtd meta, remote, sync).
+		// Note these should be implemented as methods on manifest.Filesystem.
+		fs.InheritGlobalConfig(fsUUID)
+	}
+	go r.reconcile(newManifest)
 	return nil
 }
 
 // Reconcile attempts to move the local state from the currentFS to the newFS.
-func (r *defaultReconciler) reconcile(newFS manifest.Filesystem) {
+func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.log.Debug("reconciling", zap.Any("filesystem", newFS))
+	r.log.Debug("reconciling", zap.Any("filesystem", newManifest))
 	ctx := r.state.start()
 
-	agent, ok := newFS.Agents[r.agentID]
-	if !ok {
-		r.state.cancel("no configuration for this agent found in the provided manifest")
-		return
+	for fsUUID, fs := range newManifest {
+		agent, ok := fs.Agents[r.agentID]
+		if !ok {
+			// Not all file systems in this manifest may have configuration for this agent. It is
+			// also valid that this manifest has no nodes managed by this agent.
+			r.log.Debug("file system has no nodes assigned to this agent", zap.String("fsUUID", fsUUID))
+			continue
+		}
+
+		// Don't apply any common configuration if the agent doesn't have any nodes for this file system.
+		if err := r.strategy.ApplySource(ctx, fs.Common.Source); err != nil {
+			r.state.fail(fmt.Sprintf("unable to apply source configuration for %s: %s", fsUUID, err.Error()))
+			return
+		}
+
+		if err := r.strategy.ApplyInterfaces(ctx, agent.Interfaces); err != nil {
+			r.state.fail(fmt.Sprintf("unable to apply global interface configuration for %s: %s", fsUUID, err.Error()))
+			return
+		}
+
+		for _, node := range agent.Nodes {
+			if err := r.strategy.ApplyInterfaces(ctx, node.Interfaces); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply interface configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+				return
+			}
+			if err := r.strategy.ApplyTargets(ctx, node.Targets); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply target configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+				return
+			}
+
+			// Currently the source for the node should always be set by the user or inherited
+			// automatically from the global configuration. This might change so avoid a panic.
+			if node.Source != nil {
+				if err := r.strategy.ApplySourceInstall(ctx, *node.Source); err != nil {
+					r.state.fail(fmt.Sprintf("unable to apply source installation for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+				}
+			} else {
+				r.log.Warn("node source was unexpectedly nil (ignoring)", zap.String("fsUUID", fsUUID), zap.String("nodeType", node.Type.String()), zap.Any("nodeID", node.ID))
+			}
+
+			if err := r.strategy.ApplyService(ctx, node); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply service configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+				return
+			}
+		}
 	}
-
-	if err := r.strategy.AddInterfaces(ctx, agent.Interfaces); err != nil {
-		r.state.fail(err.Error())
-		return
-	}
-
-	// TODO
-
-	r.currentFS = newFS
-	manifest.ToDisk(r.currentFS, r.config.ActiveManifestPath)
+	r.activeManifest = newManifest
+	manifest.ToDisk(r.activeManifest, r.config.ActiveManifestPath)
 	r.state.complete(beegfs.AgentStatus_SUCCESS)
 }

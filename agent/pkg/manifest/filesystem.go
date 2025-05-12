@@ -7,6 +7,7 @@ package manifest
 import (
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -25,6 +26,9 @@ func New() Filesystem {
 		},
 	}
 }
+
+// Filesystems is a map of FsUUIDs to file systems.
+type Filesystems map[string]Filesystem
 
 type Filesystem struct {
 	Agents map[string]Agent `yaml:"agents"`
@@ -115,10 +119,11 @@ func (s Source) refForNodeType(t beegfs.NodeType) string {
 	}
 }
 
-func (f *Filesystem) InheritGlobalConfig() {
+func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
 	for agentID, agent := range f.Agents {
 		for i := range agent.Nodes {
 			node := &agent.Nodes[i]
+			node.fsUUID = fsUUID
 			// Inherit global interface configuration if there are no node specific interfaces.
 			if len(node.Interfaces) == 0 {
 				node.Interfaces = agent.Interfaces
@@ -138,6 +143,11 @@ func (f *Filesystem) InheritGlobalConfig() {
 					Type: f.Common.Source.Type,
 					Ref:  f.Common.Source.refForNodeType(node.Type),
 				}
+			}
+			// Inherit target configuration from the FS and node:
+			for t := range node.Targets {
+				agent.Nodes[i].Targets[t].fsUUID = fsUUID
+				agent.Nodes[i].Targets[t].nodeType = node.Type
 			}
 		}
 		f.Agents[agentID] = agent
@@ -171,12 +181,19 @@ type Agent struct {
 }
 
 type Node struct {
+	// fsUUID is set by InheritGlobalConfig and used internally to generate globally unique names
+	// and identifiers in case resources for multiple file systems exist on the same machine.
+	fsUUID     string
 	ID         beegfs.NumId      `yaml:"id"`
 	Type       beegfs.NodeType   `yaml:"type"`
 	Config     map[string]string `yaml:"config"`
 	Interfaces []Nic             `yaml:"interfaces"`
 	Targets    []Target          `yaml:"targets"`
 	Source     *NodeSource       `yaml:"source,omitempty"`
+}
+
+func (n Node) GetSystemdUnit() string {
+	return fmt.Sprintf("beegfs-%s-%s-%d.service", n.fsUUID, n.Type, n.ID)
 }
 
 type NodeSource struct {
@@ -190,9 +207,17 @@ type Nic struct {
 }
 
 type Target struct {
-	ID      beegfs.NumId  `yaml:"id"`
-	RootDir string        `yaml:"root_dir"`
-	ULFS    *UnderlyingFS `yaml:"ulfs"`
+	// fsUUID is set by InheritGlobalConfig and used internally to generate globally unique names
+	// and identifiers in case resources for multiple file systems exist on the same machine.
+	fsUUID   string
+	nodeType beegfs.NodeType
+	ID       beegfs.NumId  `yaml:"id"`
+	RootDir  string        `yaml:"root_dir"`
+	ULFS     *UnderlyingFS `yaml:"ulfs"`
+}
+
+func (t Target) GetPath() string {
+	return path.Join(t.RootDir, t.fsUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
 }
 
 type UnderlyingFS struct {
@@ -416,20 +441,20 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 	return pbFS
 }
 
-func FromDisk(path string) (Filesystem, error) {
+func FromDisk(path string) (Filesystems, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Filesystem{}, err
+		return nil, err
 	}
-	var fs Filesystem
-	if err := yaml.Unmarshal(data, &fs); err != nil {
-		return fs, err
+	var filesystems Filesystems
+	if err := yaml.Unmarshal(data, &filesystems); err != nil {
+		return nil, err
 	}
-	return fs, nil
+	return filesystems, nil
 }
 
-func ToDisk(fs Filesystem, path string) error {
-	data, err := yaml.Marshal(&fs)
+func ToDisk(filesystems Filesystems, path string) error {
+	data, err := yaml.Marshal(&filesystems)
 	if err != nil {
 		return err
 	}

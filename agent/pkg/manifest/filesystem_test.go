@@ -92,6 +92,12 @@ func TestInheritGlobalConfig(t *testing.T) {
 								Type:   beegfs.Meta,
 								ID:     1,
 								Config: map[string]string{"baz": "node-specific"},
+								Targets: []Target{
+									{
+										ID:      beegfs.NumId(1),
+										RootDir: "/beegfs/",
+									},
+								},
 							},
 						},
 					},
@@ -155,11 +161,16 @@ func TestInheritGlobalConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := tt.input
-			fs.InheritGlobalConfig()
+			fs.InheritGlobalConfig("testFS")
 			agent := fs.Agents["agent1"]
 			node := agent.Nodes[0]
 			assert.Equal(t, tt.expectedNIC, node.Interfaces[0].Name)
 			assert.Equal(t, tt.expectedCfg, node.Config)
+			assert.Equal(t, "testFS", node.fsUUID)
+			for _, target := range node.Targets {
+				assert.Equal(t, "/beegfs/testFS/meta_1", target.GetPath(), "generated target path did not match")
+			}
+
 		})
 	}
 }

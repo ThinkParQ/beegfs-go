@@ -91,8 +91,9 @@ Using environment variables:
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
 	defer logger.Sync()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	reconciler, err := reconciler.New(initialCfg.AgentID, logger.Logger, initialCfg.Reconciler)
+	reconciler, err := reconciler.New(ctx, initialCfg.AgentID, logger.Logger, initialCfg.Reconciler)
 	if err != nil {
 		logger.Fatal("unable to initialize reconciler", zap.Error(err))
 	}
@@ -101,8 +102,6 @@ Using environment variables:
 	if err != nil {
 		logger.Fatal("unable to initialize gRPC server", zap.Error(err))
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
 	errChan := make(chan error, 2)
 	agentServer.ListenAndServe(errChan)
@@ -116,5 +115,8 @@ Using environment variables:
 	}
 	cancel()
 	agentServer.Stop()
+	if err := reconciler.Stop(); err != nil {
+		logger.Error("error stopping reconciler", zap.Error(err))
+	}
 	logger.Info("shutdown all components, exiting")
 }
