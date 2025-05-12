@@ -265,8 +265,7 @@ func BuildJobRequests(
 			errs = append(errs, ErrConfigRSTTypeIsUnknown)
 			continue
 		}
-		lockedInfoCopy := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
-		request := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, inMountPath, remotePath, cfg, lockedInfoCopy)
+		request := PrepareAndBuildJobRequest(ctx, client, mountPoint, store, mappings, inMountPath, remotePath, cfg, lockedInfo)
 		requests = append(requests, request)
 	}
 
@@ -278,9 +277,9 @@ func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.Locked
 }
 
-// IsFileExist returns whether the file exists. It is the responsibility of the caller to ensure
+// FileExists returns whether the file exists. It is the responsibility of the caller to ensure
 // lockedInfo is already populated and locked.
-func IsFileExist(lockedInfo *flex.JobLockedInfo) bool {
+func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Exists
 }
 
@@ -322,36 +321,39 @@ func PrepareAndBuildJobRequest(
 	cfg *flex.JobRequestCfg,
 	lockedInfo *flex.JobLockedInfo,
 ) *BuildJobRequestResponse {
-	if !IsFileLocked(lockedInfo) {
-		return &BuildJobRequestResponse{Err: fmt.Errorf("path lock has not been acquired! This is a bug")}
+	if FileExists(lockedInfo) && !IsFileLocked(lockedInfo) {
+		return &BuildJobRequestResponse{Err: fmt.Errorf("path lock has not been acquired")}
 	}
+	requestLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
+	requestCfg := proto.Clone(cfg).(*flex.JobRequestCfg)
 
 	rstId := client.GetConfig().Id
 	sanitizedRemotePath := client.SanitizeRemotePath(remotePath)
-	if IsFileOffloaded(lockedInfo) {
+	if IsFileOffloaded(requestLockedInfo) {
 		if sanitizedRemotePath == "" {
-			sanitizedRemotePath = lockedInfo.StubUrlPath
-		} else if sanitizedRemotePath != lockedInfo.StubUrlPath {
+			sanitizedRemotePath = requestLockedInfo.StubUrlPath
+		} else if sanitizedRemotePath != requestLockedInfo.StubUrlPath {
 			return &BuildJobRequestResponse{Err: fmt.Errorf("unexpected stub file path")}
-		} else if rstId != lockedInfo.StubUrlRstId {
+		}
+		if rstId != requestLockedInfo.StubUrlRstId {
 			return &BuildJobRequestResponse{Err: fmt.Errorf("unexpected stub file rst id")}
 		}
 	}
 
-	remoteSize, remoteMtime, externalId, err := client.GetRemoteInfo(ctx, sanitizedRemotePath, cfg, lockedInfo)
+	remoteSize, remoteMtime, externalId, err := client.GetRemoteInfo(ctx, sanitizedRemotePath, requestCfg, requestLockedInfo)
 	if err != nil {
 		return &BuildJobRequestResponse{Err: err}
 	}
-	lockedInfo.SetRemoteSize(remoteSize)
-	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-	lockedInfo.SetExternalId(externalId)
+	requestLockedInfo.SetRemoteSize(remoteSize)
+	requestLockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+	requestLockedInfo.SetExternalId(externalId)
 
-	err = PrepareFileStateForWorkRequests(ctx, mountPoint, store, mappings, inMountPath, rstId, sanitizedRemotePath, cfg, lockedInfo)
+	err = PrepareFileStateForWorkRequests(ctx, mountPoint, store, mappings, inMountPath, rstId, sanitizedRemotePath, requestCfg, requestLockedInfo)
 	if err != nil && !IsErrJobTerminalSentinel(err) {
 		return &BuildJobRequestResponse{Err: err}
 	}
 
-	request, err := GetJobRequest(ctx, client, inMountPath, sanitizedRemotePath, cfg, lockedInfo)
+	request, err := GetJobRequest(ctx, client, inMountPath, sanitizedRemotePath, requestCfg, requestLockedInfo)
 	return &BuildJobRequestResponse{Request: request, Err: err}
 
 }
@@ -376,8 +378,11 @@ func EnsureStoreAndMappings(ctx context.Context, store *beemsg.NodeStore, mappin
 }
 
 // PrepareFileStateForWorkRequests handles preflight checks and common operations based on collected
-// lockedInfo. Terminal errors are returned when the file is already in the expected synced or
-// offloaded state. Terminal errors can be checked using IsErrJobTerminalSentinel.
+// lockedInfo. Sentinel errors are returned when the file is already in the expected synced or
+// offloaded state. Terminal errors can be checked using IsErrJobTerminalSentinel. Be aware that
+// locked info will be updated to reflect changes. Also, cfg.Overwrite will be set to true when
+// downloading an offloaded file or the file does not exist locally since the contents of the file
+// must be overwritten with the contents of the file.
 //
 // This should be called before the job request is created so common operations can be handled and
 // then subsequently in the provider's GenerateWorkRequests to check for terminal states.
@@ -395,20 +400,21 @@ func PrepareFileStateForWorkRequests(
 	cfg *flex.JobRequestCfg,
 	lockedInfo *flex.JobLockedInfo,
 ) error {
-	var err error
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 
 	if cfg.StubLocal {
-		if (cfg.Download && !lockedInfo.Exists) || alreadySynced {
+		if (cfg.Download && !FileExists(lockedInfo)) || alreadySynced {
+			var err error
 			if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
 				return err
 			}
-			err := CreateOffloadedDataFile(ctx, mountPoint, store, mappings, inMountPath, remotePath, rstId, alreadySynced)
+			err = CreateOffloadedDataFile(ctx, mountPoint, store, mappings, inMountPath, remotePath, rstId, alreadySynced)
 			if err != nil {
-				return ErrOffloadFileCreate
+				return fmt.Errorf("%w: %w", ErrOffloadFileCreate, err)
 			}
-			lockedInfo.StubUrlRstId = rstId
-			lockedInfo.StubUrlPath = remotePath
+			lockedInfo.SetExists(true)
+			lockedInfo.SetStubUrlRstId(rstId)
+			lockedInfo.SetStubUrlPath(remotePath)
 			return ErrJobAlreadyOffloaded
 		}
 
@@ -418,7 +424,7 @@ func PrepareFileStateForWorkRequests(
 			}
 			return ErrJobAlreadyOffloaded
 		}
-	} else if IsFileExist(lockedInfo) {
+	} else if FileExists(lockedInfo) {
 		if alreadySynced {
 			return ErrJobAlreadyComplete
 		}
@@ -429,14 +435,15 @@ func PrepareFileStateForWorkRequests(
 					return ErrOffloadFileUrlMismatch
 				}
 
+				var err error
 				if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
 					return err
 				}
-				if err := entry.ClearFileDataState(ctx, mappings, store, inMountPath); err != nil {
+				if err = entry.ClearFileDataState(ctx, mappings, store, inMountPath); err != nil {
 					return fmt.Errorf("unable to clear stub file flag: %w", err)
 				}
-				lockedInfo.StubUrlRstId = 0
-				lockedInfo.StubUrlPath = ""
+				lockedInfo.SetStubUrlRstId(0)
+				lockedInfo.SetStubUrlPath("")
 				cfg.SetOverwrite(true)
 			}
 
@@ -445,18 +452,37 @@ func PrepareFileStateForWorkRequests(
 				if err != nil {
 					return err
 				}
-				lockedInfo.Size = lockedInfo.RemoteSize
-				lockedInfo.Mtime = timestamppb.Now()
+				lockedInfo.SetSize(lockedInfo.RemoteSize)
+				lockedInfo.SetMtime(timestamppb.Now())
 			}
-
 			if !cfg.Overwrite {
 				return fs.ErrExist
 			}
-		} else {
-			if IsFileOffloaded(lockedInfo) {
-				return fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
-			}
+		} else if IsFileOffloaded(lockedInfo) {
+			// TODO: If the remote target is different then an option would be to download first and
+			// then upload to different remote target. For now just report the issue and let the
+			// user handle it.
+			return fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
 		}
+	} else if cfg.Download {
+		// File does not exist so preallocate space and update lockInfo.
+		err := mountPoint.CreatePreallocatedFile(inMountPath, lockedInfo.RemoteSize, cfg.Overwrite)
+		if err != nil {
+			return err
+		}
+
+		info, _, err := GetLockedInfo(ctx, mountPoint, store, mappings, cfg, inMountPath)
+		if err != nil {
+			return err
+		}
+		lockedInfo.SetLocked(info.Locked)
+		lockedInfo.SetExists(info.Exists)
+		lockedInfo.SetSize(info.Size)
+		lockedInfo.SetMtime(info.Mtime)
+		lockedInfo.SetMode(info.Mode)
+		cfg.SetOverwrite(true)
+	} else {
+		return fmt.Errorf("unable to upload file! %w", fs.ErrNotExist)
 	}
 
 	return nil
@@ -487,15 +513,18 @@ func GetLockedInfo(ctx context.Context,
 	inMountPath string,
 ) (*flex.JobLockedInfo, []uint32, error) {
 	var rstIds []uint32
+	lockedInfo := &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
 	}
 
 	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, inMountPath)
 	if err != nil {
-		if !errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
-			return nil, nil, err
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			return lockedInfo, rstIds, nil
+
 		}
+		return nil, nil, err
 	} else {
 
 		// TODO: Remove if the read-write and read-only methods can do these checks
@@ -520,7 +549,7 @@ func GetLockedInfo(ctx context.Context,
 		// TODO: Get file read-only lock
 		//  Should read-only lock check for files open with write privilege? If so, remove the GetEntry()/CheckEntry above
 	}
-	lockedInfo := &flex.JobLockedInfo{Locked: true}
+	lockedInfo.Locked = true
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
@@ -710,4 +739,47 @@ func CheckEntry(entry entry.Entry, ignoreReaders bool, ignoreWriters bool) error
 
 func IsValidRstId(rstId uint32) bool {
 	return rstId != 0
+}
+
+// GetDownloadRemotePathDirectory returns the directory part of remotePath before any globbing
+// pattern.
+func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
+	normalizedRemotePath := NormalizePath(remotePath)
+	directory = StripGlobPattern(normalizedRemotePath)
+	isGlob = directory != normalizedRemotePath
+	if isGlob && !strings.HasSuffix(directory, "/") {
+		directory = filepath.Dir(directory)
+	}
+
+	return
+}
+
+func GetDownloadInMountPath(cfg *flex.JobRequestCfg, remotePath string, remotePathDir string, remotePathIsGlob bool) string {
+	var inMountPath string
+	normalizedRemotePath := NormalizePath(remotePath)
+	relPath, _ := filepath.Rel(remotePathDir, normalizedRemotePath)
+	if cfg.Flatten {
+		relPath = strings.Replace(relPath, "/", "_", -1)
+	}
+
+	if relPath == "." {
+		// Since the walked path and the supplied path is the same then the remotePath is a key for
+		// a non-existent file.
+		inMountPath = filepath.Join(cfg.Path, normalizedRemotePath)
+	} else if remotePathIsGlob {
+		inMountPath = filepath.Join(cfg.Path, relPath)
+	} else {
+		// remotePath is a prefix so include the parent directory.
+		remotePathDirName := filepath.Base(remotePathDir)
+		inMountPath = filepath.Join(cfg.Path, remotePathDirName, relPath)
+	}
+
+	return inMountPath
+}
+
+// NormalizePath simply ensures that there is a single lead forward-slash. This is expected for all
+// in-mount BeeGFS paths. When mapping between local and remote paths it's important to be
+// consistent.
+func NormalizePath(path string) string {
+	return "/" + strings.TrimLeft(path, "/")
 }

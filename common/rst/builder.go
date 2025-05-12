@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -132,11 +131,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
-	var remotePathDirName string
 	if cfg.Download {
 		walkingLocalPath = walkLocalPathInsteadOfRemote(cfg)
-		remotePathDir, remotePathIsGlob = getRemotePathDirectory(cfg.RemotePath)
-		remotePathDirName = filepath.Base(remotePathDir)
+		remotePathDir, remotePathIsGlob = GetDownloadRemotePathDirectory(cfg.RemotePath)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -169,23 +166,8 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 							// Walking cfg.Path to support stub file download and files with a defined rst.
 							inMountPath = walkResp.Path
 						} else {
-							remotePath = normalizePath(walkResp.Path)
-							relPath, _ := filepath.Rel(remotePathDir, remotePath)
-							if cfg.Flatten {
-								relPath = strings.Replace(relPath, "/", "_", -1)
-							}
-
-							if relPath == "." {
-								// Since the walked path and the supplied path is the same then the
-								// remotePath is a key for a non-existent file.
-								inMountPath = filepath.Join(cfg.Path, remotePath)
-							} else if remotePathIsGlob {
-								inMountPath = filepath.Join(cfg.Path, relPath)
-							} else {
-								// remotePath is a prefix so include the parent directory.
-								inMountPath = filepath.Join(cfg.Path, remotePathDirName, relPath)
-							}
-
+							remotePath = NormalizePath(walkResp.Path)
+							inMountPath = GetDownloadInMountPath(cfg, remotePath, remotePathDir, remotePathIsGlob)
 							// Ensure the local directory structure supports the object downloads
 							if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath)); err != nil {
 								cancel()
@@ -228,25 +210,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		return fmt.Errorf("no job requests were created")
 	}
 	return nil
-}
-
-// normalizePath simply ensures that there is a single lead forward-slash. This is expected for all
-// in-mount BeeGFS paths. When mapping between local and remote paths it's important to be
-// consistent.
-func normalizePath(path string) string {
-	return "/" + strings.TrimLeft(path, "/")
-}
-
-// getRemotePathDirectory returns the directory part of remotePath before any globbing pattern.
-func getRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
-	normalizedRemotePath := normalizePath(remotePath)
-	directory = StripGlobPattern(normalizedRemotePath)
-	isGlob = directory != normalizedRemotePath
-	if isGlob && !strings.HasSuffix(directory, "/") {
-		directory = filepath.Dir(directory)
-	}
-
-	return
 }
 
 func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {

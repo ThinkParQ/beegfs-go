@@ -103,15 +103,27 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*BuildJ
 	}
 
 	jobBuilder := false
-	if !pathInfo.Exists {
-		if !IsFileGlob(pathInfo.Path) && !cfg.Download {
+	if pathInfo.IsGlob {
+		jobBuilder = true
+	} else if pathInfo.IsDir {
+		jobBuilder = true
+		if cfg.Download {
+			// Check if the downloaded file already exists
+			remotePathDir, _ := GetDownloadRemotePathDirectory(cfg.RemotePath)
+			inMountPath := GetDownloadInMountPath(cfg, cfg.RemotePath, remotePathDir, false)
+			inMountPathInfo, err := getMountPathInfo(mountPoint, inMountPath)
+			if err == nil && inMountPathInfo.Exists && !inMountPathInfo.IsDir {
+				pathInfo = inMountPathInfo
+				jobBuilder = false
+			}
+		}
+	} else if !pathInfo.Exists {
+		if !cfg.Download {
 			return nil, fmt.Errorf("unable to upload file: %w", os.ErrNotExist)
 		}
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			return nil, fmt.Errorf("unable to send job requests: %w", ErrFileHasNoRSTs)
 		}
-		jobBuilder = true
-	} else if pathInfo.IsDir || pathInfo.IsGlob {
 		jobBuilder = true
 	}
 

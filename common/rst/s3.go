@@ -112,46 +112,6 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}
 
-	if !IsFileLocked(sync.LockedInfo) {
-		return nil, false, fmt.Errorf("lockedInfo must be locked! This is a bug")
-
-		// TODO: Question: Should we retrieve the lockedInfo if needed?
-		/*
-			store, err := config.NodeStore(ctx)
-			if err != nil {
-				return nil, true, err
-			}
-			mappings, err := util.GetMappings(ctx)
-			if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-				return nil, true, err
-			}
-			cfg := &flex.JobRequestCfg{
-				RemoteStorageTarget: request.RemoteStorageTarget,
-				Path:                request.Path,
-				RemotePath:          sync.RemotePath,
-				Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
-				StubLocal:           request.StubLocal,
-				Overwrite:           sync.Overwrite,
-				Flatten:             sync.Flatten,
-				Force:               request.Force,
-			}
-			lockedInfo, _, err := GetLockedInfo(ctx, r.mountPoint, store, mappings, cfg, request.Path)
-			if err != nil {
-				return nil, true, err
-			}
-			remoteSize, remoteMtime, externalId, err := r.GetRemoteInfo(ctx, sync.RemotePath, cfg, lockedInfo)
-			if err != nil {
-				return nil, true, err
-			}
-			lockedInfo.SetRemoteSize(remoteSize)
-			lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-			lockedInfo.SetExternalId(externalId)
-			sync.SetLockedInfo(lockedInfo)
-			if err := PrepareJob(ctx, r.mountPoint, store, mappings, request.Path, request.RemoteStorageTarget, sync.RemotePath, cfg, lockedInfo); err != nil {
-				return nil, true, err
-			}
-		*/
-	}
 	lockedInfo := sync.LockedInfo
 	job.SetExternalId(lockedInfo.ExternalId)
 
@@ -167,6 +127,10 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	}
 	if err := PrepareFileStateForWorkRequests(ctx, r.mountPoint, nil, nil, request.Path, request.RemoteStorageTarget, sync.RemotePath, cfg, lockedInfo); err != nil {
 		return nil, false, err
+	}
+
+	if !IsFileLocked(lockedInfo) {
+		return nil, false, fmt.Errorf("lockedInfo must be locked! This is a bug")
 	}
 
 	switch sync.Operation {
