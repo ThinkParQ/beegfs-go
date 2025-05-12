@@ -553,7 +553,7 @@ func GetLockedInfo(ctx context.Context,
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			// TODO: Release Lock?
 			return nil, nil, err
 		}

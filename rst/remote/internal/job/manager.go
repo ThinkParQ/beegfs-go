@@ -660,6 +660,19 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	if err != nil {
 		return nil, fmt.Errorf("error getting jobs for path %s: %w", jobUpdate.GetPath(), err)
 	}
+
+	defer func() {
+		// Clear the BeeGFS file lock if there are no other active jobs.
+		for _, job := range pathEntry.Value {
+			if job.InActiveState() {
+				return
+			}
+		}
+
+		// TODO: Ensure the BeeGFS file lock is released
+
+	}()
+
 	// WARNING: releasePath() is not called using a defer so we can adjust how it is called below
 	// depending if the path entry should be deleted. Use caution when adding additional returns.
 
@@ -789,20 +802,20 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 // on the assigned worker nodes. To update the job state in reaction to job results returned by a
 // worker node use updateJobResults().
 func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool) (success bool, safeToDelete bool, message string) {
-
-	if job.Status.GetState() == beeremote.Job_COMPLETED && !forceUpdate {
+	status := job.GetStatus()
+	if status.GetState() == beeremote.Job_COMPLETED && !forceUpdate {
 		return true, false, fmt.Sprintf("rejecting update for completed job ID %s (use the force update flag to attempt anyway)", job.GetId())
 	}
 
 	if newState == beeremote.UpdateJobsRequest_DELETED {
 		// When returning ensure the timestamp on the job state is updated.
 		defer func() {
-			job.GetStatus().SetUpdated(timestamppb.Now())
+			status.SetUpdated(timestamppb.Now())
 		}()
 		if !job.InTerminalState() {
 			return false, false, fmt.Sprintf("unable to delete job %s because it has not reached a terminal state (cancel it first)", job.GetId())
 		}
-		job.GetStatus().SetMessage("job scheduled for deletion")
+		status.SetMessage("job scheduled for deletion")
 		return true, true, ""
 	}
 
@@ -820,15 +833,16 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		// understand if the job was in fact full cancelled. It may be helpful in the future to add
 		// a way to retry cancelling already cancelled jobs, but return an error if something goes
 		// wrong and fail the job, instead of just logging warnings and updating the state anyway.
-		if job.GetStatus().GetState() == beeremote.Job_CANCELLED && !forceUpdate {
+		if status.GetState() == beeremote.Job_CANCELLED && !forceUpdate {
 			return true, true, fmt.Sprintf("ignoring update for already cancelled job ID %s (use the force update flag to attempt anyway)", job.GetId())
 		}
 		// When returning ensure the timestamp on the job state is updated.
 		defer func() {
-			job.GetStatus().SetUpdated(timestamppb.Now())
+			status.SetUpdated(timestamppb.Now())
 		}()
+
 		// If the job is already failed we don't need to update the work requests unless the update was forced:
-		if job.GetStatus().GetState() != beeremote.Job_FAILED || forceUpdate {
+		if status.GetState() != beeremote.Job_FAILED || forceUpdate {
 			// If we're unable to definitively cancel on any node, success is set to false and the
 			// state of the job is failed.
 			job.WorkResults, success = m.workerManager.UpdateJob(workermgr.JobUpdate{
@@ -838,44 +852,44 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			})
 			if !success {
 				if !forceUpdate {
-					job.GetStatus().SetState(beeremote.Job_UNKNOWN)
-					job.GetStatus().SetMessage("unable to cancel job: unable to confirm work request(s) are no longer running on worker nodes (review work results for details and try again later)")
+					status.SetState(beeremote.Job_UNKNOWN)
+					status.SetMessage("unable to cancel job: unable to confirm work request(s) are no longer running on worker nodes (review work results for details and try again later)")
 					return false, false, ""
 				} else {
-					job.GetStatus().SetMessage("canceling job: unable to confirm work request(s) are no longer running on worker nodes (cancelling anyway because this is a forced update)")
+					status.SetMessage("canceling job: unable to confirm work request(s) are no longer running on worker nodes (cancelling anyway because this is a forced update)")
 				}
 			} else {
-				job.GetStatus().SetState(beeremote.Job_CANCELLED)
-				job.GetStatus().SetMessage("verified work requests are cancelled on all worker nodes")
+				status.SetState(beeremote.Job_CANCELLED)
+				status.SetMessage("verified work requests are cancelled on all worker nodes")
 			}
 		}
 
 		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
 		if !ok {
 			if forceUpdate {
-				job.GetStatus().SetState(beeremote.Job_CANCELLED)
-				job.GetStatus().SetMessage(job.GetStatus().GetMessage() + (job.GetStatus().GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
+				status.SetState(beeremote.Job_CANCELLED)
+				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
 				return true, true, ""
 			}
-			job.GetStatus().SetState(beeremote.Job_FAILED)
-			job.GetStatus().SetMessage(job.GetStatus().GetMessage() + (job.GetStatus().GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
+			status.SetState(beeremote.Job_FAILED)
+			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
 			return false, false, ""
 		}
 
 		err := job.Complete(m.ctx, rstClient, true)
 		if err != nil {
 			if forceUpdate {
-				job.GetStatus().SetState(beeremote.Job_CANCELLED)
-				job.GetStatus().SetMessage(job.GetStatus().GetMessage() + (job.GetStatus().GetMessage() + "; error requesting the RST abort this job (ignoring because this is a forced update): " + err.Error()))
+				status.SetState(beeremote.Job_CANCELLED)
+				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (ignoring because this is a forced update): " + err.Error()))
 				return true, true, ""
 			}
-			job.GetStatus().SetState(beeremote.Job_FAILED)
-			job.GetStatus().SetMessage(job.GetStatus().GetMessage() + (job.GetStatus().GetMessage() + "; error requesting the RST abort this job (try again or force the update to cancel the job anyway): " + err.Error()))
+			status.SetState(beeremote.Job_FAILED)
+			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (try again or force the update to cancel the job anyway): " + err.Error()))
 			return false, false, ""
 		}
 
-		job.GetStatus().SetState(beeremote.Job_CANCELLED)
-		job.GetStatus().SetMessage(job.GetStatus().GetMessage() + "; successfully requested the RST abort this job")
+		status.SetState(beeremote.Job_CANCELLED)
+		status.SetMessage(status.GetMessage() + "; successfully requested the RST abort this job")
 		m.log.Debug("successfully updated job", zap.Any("job", job))
 		return true, true, ""
 	}
@@ -930,6 +944,18 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	// From here on out we'll modify the job state, ensure the timestamp is also updated.
 	defer func() {
 		status.SetUpdated(timestamppb.Now())
+
+		// Clear the BeeGFS file lock if there are no other active jobs.
+		if !job.InActiveState() {
+			for _, pathEntryJob := range pathEntry.Value {
+				if pathEntryJob.InActiveState() {
+					return
+				}
+			}
+
+			// TODO: Release BeeGFS file lock
+
+		}
 	}()
 
 	// This might happen if WRs could complete on some nodes, but not on other nodes. This could be
@@ -965,7 +991,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		if err := job.Complete(m.ctx, rst, false); err != nil {
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage("error completing job: " + err.Error())
-		} else if job.GetStatus().GetState() == beeremote.Job_OFFLOADED {
+		} else if status.GetState() == beeremote.Job_OFFLOADED {
 			status.SetMessage("successfully offloaded")
 		} else {
 			status.SetState(beeremote.Job_COMPLETED)
