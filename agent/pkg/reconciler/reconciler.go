@@ -10,7 +10,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/agent/pkg/deploy"
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
-	"github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/agent"
 	"go.uber.org/zap"
 )
 
@@ -42,7 +42,7 @@ type Reconciler interface {
 }
 
 type ReconcileResult struct {
-	Status *beegfs.AgentStatus
+	Status *pb.Status
 }
 
 type defaultReconciler struct {
@@ -210,5 +210,5 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 	}
 	r.activeManifest = newManifest
 	manifest.ToDisk(r.activeManifest, r.config.ActiveManifestPath)
-	r.state.complete(beegfs.AgentStatus_SUCCESS)
+	r.state.complete(pb.Status_SUCCESS)
 }

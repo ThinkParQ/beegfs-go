@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/agent"
 	"gopkg.in/yaml.v3"
 )
 
