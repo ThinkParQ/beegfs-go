@@ -150,6 +150,10 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 	// unexpectedly updates that field on all other objects.
 	workRequests := make([]*flex.WorkRequest, 0)
 	if segments == nil {
+		if !request.HasBuilder() {
+			return workRequests
+		}
+
 		jobBuilderWorkRequest := &flex.WorkRequest{
 			JobId:               job.GetId(),
 			RequestId:           "0",
@@ -175,7 +179,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			// directly when they call RecreateWorkRequests().
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
-			StubLocal:           job.Request.StubLocal,
+			StubLocal:           request.GetStubLocal(),
 		}
 
 		switch request.WhichType() {
@@ -232,11 +236,8 @@ type BuildJobRequestResponse struct {
 	Err     error
 }
 
-// BuildJobRequests returns a list of job requests. If client is not specified then the rstMap will
-// be used to determine the client based on any inMountPath related rstId. Store and mappings can be
-// nil for convenience but should be avoided if BuildJobRequests is called multiple times.
-//
-// If the inMountPath is to be offloaded and it does not exist then one will be created.
+// BuildJobRequests returns a list of job requests, one for each remote target. The inMountPath and
+// remotePath values are used instead of cfg.Path and cfg.RemotePath.
 func BuildJobRequests(
 	ctx context.Context,
 	rstMap map[uint32]Provider,
@@ -330,6 +331,7 @@ func PrepareAndBuildJobRequest(
 	rstId := client.GetConfig().Id
 	sanitizedRemotePath := client.SanitizeRemotePath(remotePath)
 	if IsFileOffloaded(requestLockedInfo) {
+		// Use rst url from the stub file when a remote-path wasn't provided.
 		if sanitizedRemotePath == "" {
 			sanitizedRemotePath = requestLockedInfo.StubUrlPath
 		} else if sanitizedRemotePath != requestLockedInfo.StubUrlPath {

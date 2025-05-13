@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -35,7 +34,6 @@ func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountP
 	}
 }
 
-// GetJobRequest is not implemented and should never be called.
 func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
 	return &beeremote.JobRequest{
 		Path:                cfg.Path,
@@ -132,11 +130,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
+	var isPathDir bool
 	if cfg.Download {
 		walkingLocalPath = walkLocalPathInsteadOfRemote(cfg)
 		remotePathDir, remotePathIsGlob = GetDownloadRemotePathDirectory(cfg.RemotePath)
+		stat, err := c.mountPoint.Lstat(cfg.Path)
+		isPathDir = err == nil && stat.IsDir()
 	}
-	isPathDir := cfg.LockedInfo != nil && cfg.LockedInfo.Exists && !fs.FileMode(cfg.LockedInfo.Mode).IsDir()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
