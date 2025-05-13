@@ -2,11 +2,14 @@ module github.com/thinkparq/beegfs-go
 
 go 1.23.8
 
+replace github.com/thinkparq/protobuf => ../protobuf
+
 require (
 	github.com/aws/aws-sdk-go-v2 v1.25.2
 	github.com/aws/aws-sdk-go-v2/config v1.27.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.51.3
+	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/dgraph-io/badger/v4 v4.3.0
 	github.com/dsnet/golib/unitconv v1.0.2
 	github.com/google/uuid v1.6.0
@@ -25,6 +28,7 @@ require (
 	google.golang.org/grpc v1.71.1
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -47,6 +51,7 @@ require (
 	github.com/dgraph-io/ristretto v0.1.2-0.20240116140435-c67e07994f91 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/godbus/dbus/v5 v5.0.4 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
@@ -73,5 +78,4 @@ require (
 	golang.org/x/text v0.24.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250407143221-ac9807e6c755 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
