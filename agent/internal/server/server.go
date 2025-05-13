@@ -11,7 +11,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
 	"github.com/thinkparq/beegfs-go/agent/pkg/reconciler"
-	"github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/agent"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,7 +27,7 @@ type Config struct {
 }
 
 type AgentServer struct {
-	beegfs.UnimplementedBeeAgentServer
+	pb.UnimplementedBeeAgentServer
 	log *zap.Logger
 	wg  *sync.WaitGroup
 	Config
@@ -55,7 +55,7 @@ func New(log *zap.Logger, config Config, reconciler reconciler.Reconciler) (*Age
 		s.log.Warn("not using TLS because it was explicitly disabled or a certificate and/or key were not specified")
 	}
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
-	beegfs.RegisterBeeAgentServer(s.grpcServer, &s)
+	pb.RegisterBeeAgentServer(s.grpcServer, &s)
 	return &s, nil
 }
 
@@ -81,7 +81,7 @@ func (s *AgentServer) Stop() {
 	s.wg.Wait()
 }
 
-func (s *AgentServer) Update(ctx context.Context, request *beegfs.AgentUpdateRequest) (*beegfs.AgentUpdateResponse, error) {
+func (s *AgentServer) Update(ctx context.Context, request *pb.UpdateRequest) (*pb.UpdateResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 
@@ -96,31 +96,31 @@ func (s *AgentServer) Update(ctx context.Context, request *beegfs.AgentUpdateReq
 	if err := s.reconciler.UpdateConfiguration(filesystems); err != nil {
 		return nil, grpcStatusFrom(err)
 	}
-	return &beegfs.AgentUpdateResponse{
+	return &pb.UpdateResponse{
 		AgentId: s.reconciler.GetAgentID(),
 	}, nil
 }
 
-func (s *AgentServer) Status(ctx context.Context, request *beegfs.AgentStatusRequest) (*beegfs.AgentStatusResponse, error) {
+func (s *AgentServer) Status(ctx context.Context, request *pb.StatusRequest) (*pb.StatusResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 	if result, err := s.reconciler.Status(); err != nil {
 		return nil, grpcStatusFrom(err)
 	} else {
-		return &beegfs.AgentStatusResponse{
+		return &pb.StatusResponse{
 			Status:  result.Status,
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil
 	}
 }
 
-func (s *AgentServer) Cancel(ctx context.Context, request *beegfs.AgentCancelRequest) (*beegfs.AgentCancelResponse, error) {
+func (s *AgentServer) Cancel(ctx context.Context, request *pb.CancelRequest) (*pb.CancelResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 	if result, err := s.reconciler.Cancel(request.GetReason()); err != nil {
 		return nil, grpcStatusFrom(err)
 	} else {
-		return &beegfs.AgentCancelResponse{
+		return &pb.CancelResponse{
 			Status:  result.Status,
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil

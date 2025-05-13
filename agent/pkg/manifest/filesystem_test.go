@@ -5,7 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/agent"
+	pbb "github.com/thinkparq/protobuf/go/beegfs"
 )
 
 func TestFromToProto_RoundTrip(t *testing.T) {
@@ -28,7 +29,7 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 				Nodes: []*pb.Node{
 					{
 						NumId:    1,
-						NodeType: pb.NodeType_META,
+						NodeType: pbb.NodeType_META,
 						Config:   map[string]string{"nkey": "nval"},
 						Interfaces: []*pb.Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},

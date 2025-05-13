@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	pb "github.com/thinkparq/protobuf/go/beegfs"
+	pb "github.com/thinkparq/protobuf/go/agent"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -15,8 +15,8 @@ import (
 
 type state struct {
 	logger     *zap.Logger
-	current    pb.AgentStatus
-	historical map[time.Time]*pb.AgentStatus
+	current    pb.Status
+	historical map[time.Time]*pb.Status
 	mu         sync.Mutex
 	ctx        context.Context
 	ctxCancel  context.CancelFunc
@@ -24,12 +24,12 @@ type state struct {
 
 func newAgentState(l *zap.Logger) state {
 	return state{
-		current: pb.AgentStatus{
-			State:    pb.AgentStatus_IDLE,
+		current: pb.Status{
+			State:    pb.Status_IDLE,
 			Messages: []string{},
 			Updated:  timestamppb.Now(),
 		},
-		historical: make(map[time.Time]*pb.AgentStatus),
+		historical: make(map[time.Time]*pb.Status),
 		mu:         sync.Mutex{},
 		logger:     l,
 	}
@@ -44,10 +44,10 @@ func getFsNodeID(fsUUID string, nt beegfs.NodeType, id beegfs.NumId) string {
 func (s *state) start() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.AgentStatus_APPLYING.String()))
-	s.historical[time.Now()] = proto.Clone(&s.current).(*pb.AgentStatus)
-	s.current = pb.AgentStatus{
-		State:    pb.AgentStatus_APPLYING,
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.Status_APPLYING.String()))
+	s.historical[time.Now()] = proto.Clone(&s.current).(*pb.Status)
+	s.current = pb.Status{
+		State:    pb.Status_APPLYING,
 		Messages: []string{},
 		Updated:  timestamppb.Now(),
 	}
@@ -58,10 +58,10 @@ func (s *state) start() context.Context {
 	return s.ctx
 }
 
-func (s *state) get() *pb.AgentStatus {
+func (s *state) get() *pb.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return proto.Clone(&s.current).(*pb.AgentStatus)
+	return proto.Clone(&s.current).(*pb.Status)
 }
 
 func (s *state) logUnlocked(message string) {
@@ -76,27 +76,27 @@ func (s *state) log(message string) {
 	s.current.Messages = append(s.current.Messages, fmt.Sprintf("%s: %s", s.current.Updated.String(), message))
 }
 
-func (s *state) fail(message string) *pb.AgentStatus {
+func (s *state) fail(message string) *pb.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.AgentStatus_FAILED.String()), zap.Any("message", message))
-	s.current.State = pb.AgentStatus_FAILED
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.Status_FAILED.String()), zap.Any("message", message))
+	s.current.State = pb.Status_FAILED
 	s.logUnlocked(message)
 	s.ctxCancel()
-	return proto.Clone(&s.current).(*pb.AgentStatus)
+	return proto.Clone(&s.current).(*pb.Status)
 }
 
-func (s *state) cancel(message string) *pb.AgentStatus {
+func (s *state) cancel(message string) *pb.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.AgentStatus_CANCELLED.String()), zap.Any("message", message))
-	s.current.State = pb.AgentStatus_CANCELLED
+	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", pb.Status_CANCELLED.String()), zap.Any("message", message))
+	s.current.State = pb.Status_CANCELLED
 	s.logUnlocked(message)
 	s.ctxCancel()
-	return proto.Clone(&s.current).(*pb.AgentStatus)
+	return proto.Clone(&s.current).(*pb.Status)
 }
 
-func (s *state) complete(finalState pb.AgentStatus_State) {
+func (s *state) complete(finalState pb.Status_State) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logger.Info("state update", zap.String("oldState", s.current.State.String()), zap.String("newState", finalState.String()))
