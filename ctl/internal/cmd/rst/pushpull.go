@@ -70,9 +70,6 @@ func newPullCmd() *cobra.Command {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument")
 			}
-			if rst.IsValidRstId(backendCfg.RemoteStorageTarget) && backendCfg.RemotePath == "" {
-				return fmt.Errorf("--remote-path must be specified when downloading from specific remote storage target")
-			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {

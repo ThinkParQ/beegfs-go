@@ -99,11 +99,11 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
-		var canRetry bool
+		var cleanupRequired bool
 		var err error
-		workRequests, canRetry, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
+		workRequests, cleanupRequired, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
 		if err != nil {
-			return workermgr.JobSubmission{}, canRetry, err
+			return workermgr.JobSubmission{}, cleanupRequired, err
 		}
 
 		j.Segments = make([]*Segment, 0, len(workRequests))

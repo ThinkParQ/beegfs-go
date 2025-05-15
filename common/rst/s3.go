@@ -22,7 +22,6 @@ import (
 	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -94,11 +93,12 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 	}
 }
 
-func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
+func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
 	request := job.GetRequest()
 	if !request.HasSync() {
 		return nil, false, ErrReqAndRSTTypeMismatch
 	}
+
 	if job.GetExternalId() != "" {
 		return nil, false, ErrJobAlreadyHasExternalID
 	}
@@ -114,23 +114,8 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 
 	lockedInfo := sync.LockedInfo
 	job.SetExternalId(lockedInfo.ExternalId)
-
-	cfg := &flex.JobRequestCfg{
-		RemoteStorageTarget: request.RemoteStorageTarget,
-		Path:                request.Path,
-		RemotePath:          sync.RemotePath,
-		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
-		StubLocal:           request.StubLocal,
-		Overwrite:           sync.Overwrite,
-		Flatten:             sync.Flatten,
-		Force:               request.Force,
-	}
-	if err := PrepareFileStateForWorkRequests(ctx, r.mountPoint, nil, nil, request.Path, request.RemoteStorageTarget, sync.RemotePath, cfg, lockedInfo); err != nil {
-		return nil, false, err
-	}
-
 	if !IsFileLocked(lockedInfo) {
-		return nil, false, fmt.Errorf("lockedInfo must be locked! This is a bug")
+		return nil, false, fmt.Errorf("lockedInfo must be locked")
 	}
 
 	switch sync.Operation {
@@ -242,18 +227,22 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	return walkChan, nil
 }
 
-func (r *S3Client) GetRemoteInfo(ctx context.Context, remotePath string, cfg *flex.JobRequestCfg, lockedInfo *flex.JobLockedInfo) (remoteSize int64, remoteMtime time.Time, externalId string, err error) {
-	if remoteSize, remoteMtime, err = r.getObjectMetadata(ctx, remotePath, cfg.Download); err != nil {
-		return
-	}
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
+	return r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+}
 
+func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if !cfg.Download {
-		segCount, _ := r.recommendedSegments(lockedInfo.Size)
+		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			externalId, err = r.createUpload(ctx, remotePath, lockedInfo.Mtime.AsTime())
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime())
 		}
 	}
-	return
+	return "", nil
+}
+
+func (r *S3Client) AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error {
+	return r.abortUpload(ctx, externalId, request.Path)
 }
 
 func (r *S3Client) SanitizeRemotePath(remotePath string) string {
@@ -271,15 +260,15 @@ func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*fle
 	if filemode.Type()&fs.ModeSymlink != 0 {
 		// TODO: https://github.com/ThinkParQ/bee-remote/issues/25
 		// Support symbolic links.
-		return nil, true, fmt.Errorf("unable to upload symlink: %w", rst.ErrFileTypeUnsupported)
+		return nil, false, fmt.Errorf("unable to upload symlink: %w", ErrFileTypeUnsupported)
 	}
 	if !filemode.IsRegular() {
-		return nil, true, fmt.Errorf("%w", rst.ErrFileTypeUnsupported)
+		return nil, false, fmt.Errorf("%w", ErrFileTypeUnsupported)
 	}
 
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.Size, segCount, partsPerSegment))
-	return workRequests, true, nil
+	return workRequests, false, nil
 }
 
 func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*flex.WorkRequest, bool, error) {
@@ -290,7 +279,7 @@ func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*f
 
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.RemoteSize, segCount, partsPerSegment))
-	return workRequests, true, nil
+	return workRequests, false, nil
 }
 
 func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {

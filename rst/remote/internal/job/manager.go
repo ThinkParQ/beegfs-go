@@ -463,7 +463,22 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 		return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
 	}
 
-	jobSubmission, retry, err := job.GenerateSubmission(m.ctx, lastJob, rstClient)
+	var jobSubmission workermgr.JobSubmission
+	var cleanupRequired bool
+	if jr.GenerationStatus != nil {
+		status := jr.GenerationStatus
+		if status.AlreadyComplete {
+			err = rst.ErrJobAlreadyComplete
+		} else if status.AlreadyOffloaded {
+			err = rst.ErrJobAlreadyOffloaded
+		} else if status.Message != "" {
+			cleanupRequired = status.CleanupRequired
+			err = fmt.Errorf(status.Message)
+		}
+	} else {
+		jobSubmission, cleanupRequired, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
+	}
+
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
 			m.log.Debug("Offload is already complete", zap.Any("job", lastJob), zap.Any("err", err))
@@ -523,19 +538,28 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// be complete, failed, or non-existent; each state will like result in confusion.
 			status := job.GetStatus()
 			status.Message = err.Error()
-			// retry indicates whether the RST provider's GenerateWorkRequests() call left the job
-			// in a valid state. If true, the job can be safely retried. If false, the job should
-			// not be retried; the user must resolve the issue and cancel the job before attempting
-			// any subsequent retries.
-			status.State = beeremote.Job_FAILED
-			if retry {
-				status.State = beeremote.Job_CANCELLED
+			// cleanupRequired indicates whether the RST provider's GenerateWorkRequests() call left
+			// the job in an invalid state that requires cleanup. If false, the job can be safely
+			// retried. If true, the job should not be retried; the user must resolve the issue and
+			// cancel the job before retrying.
+			status.State = beeremote.Job_CANCELLED
+			if cleanupRequired {
+				status.State = beeremote.Job_FAILED
+			}
+
+			beeremoteJob := job.Get()
+			externalId := beeremoteJob.GetExternalId()
+			if externalId != "" {
+				if err := rstClient.AbortExternalId(m.ctx, externalId, beeremoteJob.GetRequest()); err != nil {
+					status.Message += fmt.Sprintf("; unable to abort external request! External Id: %s: %s", externalId, err.Error())
+					status.State = beeremote.Job_FAILED
+				}
 			}
 
 			pathEntry.Value[job.GetId()] = job
 			return beeremote.JobResult_builder{
-				Job:          job.Get(),
-				WorkRequests: rst.RecreateWorkRequests(job.Get(), job.GetSegments()),
+				Job:          beeremoteJob,
+				WorkRequests: rst.RecreateWorkRequests(beeremoteJob, job.GetSegments()),
 				WorkResults:  getProtoWorkResults(job.WorkResults),
 			}.Build(), err
 		}

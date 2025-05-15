@@ -52,15 +52,15 @@ func (r *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobReques
 	return nil
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
+func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
-			return nil, job.Request.GetMock().CanRetry, fmt.Errorf("test requested an error")
+			return nil, job.Request.GetMock().CleanupRequired, fmt.Errorf("test requested an error")
 		}
 
 		workRequests := RecreateWorkRequests(job, generateSegments(job.Request.GetMock().FileSize, int64(job.Request.GetMock().NumTestSegments), 1))
-		return workRequests, job.Request.GetMock().CanRetry, nil
+		return workRequests, job.Request.GetMock().CleanupRequired, nil
 	}
 
 	args := rst.Called(job, availableWorkers)
@@ -119,6 +119,14 @@ func (r *MockClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-func (r *MockClient) GetRemoteInfo(ctx context.Context, remotePath string, cfg *flex.JobRequestCfg, lockedInfo *flex.JobLockedInfo) (remoteSize int64, remoteMtime time.Time, externalId string, err error) {
-	return
+func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
+	return 0, time.Time{}, nil
+}
+
+func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+	return "", nil
+}
+
+func (r *MockClient) AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error {
+	return nil
 }

@@ -49,7 +49,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 }
 
 // GenerateWorkRequests for JobBuilderClient should simply pass a single
-func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, canRetry bool, err error) {
+func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
 	workRequests := RecreateWorkRequests(job, nil)
 	return workRequests, true, nil
 }
@@ -110,9 +110,17 @@ func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-// GetRemoteInfo is not implemented and should never be called.
-func (c *JobBuilderClient) GetRemoteInfo(ctx context.Context, remotePath string, cfg *flex.JobRequestCfg, lockedInfo *flex.JobLockedInfo) (remoteSize int64, remoteMtime time.Time, externalId string, err error) {
-	return 0, time.Time{}, "", ErrUnsupportedOpForRST
+// GetRemotePathInfo is not implemented and should never be called.
+func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
+	return 0, time.Time{}, ErrUnsupportedOpForRST
+}
+
+func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+	return "", nil
+}
+
+func (c *JobBuilderClient) AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error {
+	return nil
 }
 
 func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest) error {
@@ -192,9 +200,8 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 				}
 
 				for _, jobRequest := range jobRequests {
-					if jobRequest.Err != nil {
+					if jobRequest.Err != nil && !IsErrJobTerminalSentinel(jobRequest.Err) {
 						errCount.Add(1)
-						continue
 					}
 					jobSubmissionChan <- jobRequest.Request
 				}
@@ -203,12 +210,15 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		if errCount.Load() > 0 {
-			return fmt.Errorf("failed to create %d job request(s)", errCount.Load())
-		}
+	if err = g.Wait(); err != nil {
+		return fmt.Errorf("job builder request was aborted: %w", err)
 	}
-
+	if errCount.Load() > 0 {
+		if count.Load() == 0 {
+			return fmt.Errorf("failed to create %d job request(s)! No job requests were created", errCount.Load())
+		}
+		return fmt.Errorf("failed to create %d job request(s)", errCount.Load())
+	}
 	if count.Load() == 0 {
 		return fmt.Errorf("no job requests were created")
 	}
