@@ -112,6 +112,24 @@ func (t *jobsTable) Row(result *beeremote.JobResult) {
 		operation = fmt.Sprintf("%v", request.GetType())
 	}
 
+	if request.HasBuilder() {
+		t.tbl.AddItem(
+			convertJobStateToEmoji(status.GetState()),
+			request.GetPath(),
+			"-",
+			job.GetCreated().AsTime().Format(time.RFC3339),
+			status.GetUpdated().AsTime().Format(time.RFC3339),
+			"-",
+			"-",
+			job.GetId(),
+			operation,
+			status.GetState(),
+			wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
+			"-",
+			t.getWorkResultsForCell(result.GetWorkResults()),
+			"",
+		)
+	} else {
 	t.tbl.AddItem(
 		convertJobStateToEmoji(status.GetState()),
 		request.GetPath(),
@@ -129,6 +147,7 @@ func (t *jobsTable) Row(result *beeremote.JobResult) {
 		"",
 		// When making updates, also update MinimalRow().
 	)
+}
 }
 
 // MinimalRow() adds a row for a job that could not be created for some reason. This is helpful when
@@ -175,33 +194,56 @@ func (t *jobsTable) getWorkRequestsForCell(workRequests []*flex.WorkRequest) str
 // getWorkResultsForCell() takes a slice of work results and condenses the output to fit nicely into
 // a table cell. It is primarily intended to be used by Row().
 func (t *jobsTable) getWorkResultsForCell(workResults []*beeremote.JobResult_WorkResult) string {
-	strBuilder := strings.Builder{}
+	var sb strings.Builder
 	for _, wr := range workResults {
-		strBuilder.WriteString(fmt.Sprintf("===== request id: %s =====\n* status: %s\n* message: \n%s\n* part list:%s\n",
-			wr.GetWork().GetRequestId(),
-			wr.GetWork().GetStatus().GetState(),
-			wrapTextAtWidth(wr.GetWork().GetStatus().Message, t.wrappingWidth),
-			t.getPartsForCell(wr.GetWork().Parts),
+		work := wr.GetWork()
+		sb.WriteString(fmt.Sprintf(
+			"===== request id: %s =====\n"+
+				"* status: %s\n"+
+				"* message: \n%s\n",
+			work.GetRequestId(),
+			work.GetStatus().GetState(),
+			wrapTextAtWidth(work.GetStatus().GetMessage(), t.wrappingWidth),
 		))
+		if parts := t.getPartsForCell(work.Parts); parts != "" {
+			sb.WriteString(fmt.Sprintf("* part list:%s\n", parts))
 	}
-	return strBuilder.String()
+	}
+
+	return sb.String()
 }
 
 // getPartsForCell() takes a slice of parts and condenses the output to fit nicely into a table cell.
 // It is primarily intended to be used by Row().
 func (t *jobsTable) getPartsForCell(parts []*flex.Work_Part) string {
-	strBuilder := strings.Builder{}
+	var sb strings.Builder
+
 	for _, part := range parts {
-		strBuilder.WriteString(fmt.Sprintf("\n * part: %d\n  * offset start: %d\n  * offset stop: %d\n  * entity tag: \n%s\n  * sha256sum: \n%s",
+		if part.GetOffsetStart() == 0 &&
+			part.GetOffsetStop() == 0 &&
+			part.GetEntityTag() == "" &&
+			part.GetChecksumSha256() == "" {
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf(
+			"\n * part: %d\n"+
+				"  * offset start: %d\n"+
+				"  * offset stop: %d\n"+
+				"  * entity tag: \n%s\n"+
+				"  * sha256sum: \n%s",
 			part.GetPartNumber(),
 			part.GetOffsetStart(),
 			part.GetOffsetStop(),
 			wrapTextAtWidth(part.GetEntityTag(), t.wrappingWidth),
 			wrapTextAtWidth(part.GetChecksumSha256(), t.wrappingWidth),
 		))
-
 	}
-	return strBuilder.String()
+
+	if sb.Len() == 0 {
+		return ""
+	}
+	return sb.String()
 }
 
 // wrapTextAtWidth is used to wrap long text such as checksums or entity IDs across multiple rows
