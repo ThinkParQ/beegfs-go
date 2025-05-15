@@ -9,6 +9,7 @@ func NewCmd() *cobra.Command {
 		Use:   "target",
 		Short: "Query and manage targets",
 		Long:  "Contains commands related to target management.",
+		Args:  cobra.NoArgs,
 	}
 
 	cmd.AddCommand(newListCmd())

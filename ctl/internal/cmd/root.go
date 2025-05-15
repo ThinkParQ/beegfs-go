@@ -58,7 +58,7 @@ func Execute() int {
 %s
 This tool allows you to inspect, configure, and monitor BeeGFS.
 
-* View help for specific commands with "<command> help".
+* View help for specific commands with "<command> --help".
 * For full product documentation, visit: https://doc.beegfs.io/.
 * Questions?
   - If you have an active support contract, please visit: https://www.beegfs.io/c/enterprise/
@@ -160,7 +160,7 @@ func wrapAllCommands(cmd *cobra.Command) {
 func attachCustomArgsErr(argsFn cobra.PositionalArgs) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if err := argsFn(cmd, args); err != nil {
-			return fmt.Errorf("%w\nUsage: %s", err, cmd.Use)
+			return fmt.Errorf("%w\nUsage: %s --help", err, cmd.Use)
 		}
 		return nil
 	}
@@ -277,7 +277,7 @@ Exit Codes:
   %d - %s
   %d - %s
 {{ else }}
-See "beegfs help" for a list of global flags that also apply to this command.
+See "beegfs --help" for a list of global flags that also apply to this command.
 {{end}}
 `, util.Success, util.Success, util.GeneralError, util.GeneralError, util.PartialSuccess, util.PartialSuccess)
 

@@ -30,6 +30,7 @@ func newListCmd() *cobra.Command {
 		Use:         "list",
 		Short:       "List BeeGFS nodes",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if reachabilityError {
 				cfg.ReachabilityCheck = true
