@@ -56,6 +56,7 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "license",
 		Short: "Query license information",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLicenseCmd(cmd, cfg)
 		},

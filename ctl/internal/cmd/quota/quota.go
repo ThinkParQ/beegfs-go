@@ -50,6 +50,7 @@ func newListCmd() *cobra.Command {
 		Use:   "list-defaults",
 		Short: "List the default quota limits on pools",
 		Long:  "List the default quota limits on each pool. This is equivalent to `pool list --with-limits`.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return pool.RunListCmd(cmd, poolBackend.GetStoragePools_Config{WithLimits: true})
 		},
@@ -216,6 +217,7 @@ func newListLimitsCmd() *cobra.Command {
 		Short:       "List the explicitly set quota limits for users and groups",
 		Long:        "List the explicitly set quota limits for users and groups. By default only entries for the current user and their groups are listed. Only the root user can query limits for other user and group IDs.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListLimitsCmd(cmd, cfg)
 		},
@@ -337,6 +339,7 @@ func newListUsageCmd() *cobra.Command {
 		Short:       "List quota usage per user or group together with their effective limit",
 		Long:        "List the quota usage info for users and groups. By default only entries for the current user and their groups are listed. Only the root user can query limits for other user and group IDs.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListUsageCmd(cmd, cfg)
 		},

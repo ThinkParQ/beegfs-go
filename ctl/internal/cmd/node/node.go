@@ -10,6 +10,7 @@ func NewCmd() *cobra.Command {
 		Use:   "node",
 		Short: "Query and manage nodes",
 		Long:  "Contains commands related to node management.",
+		Args:  cobra.NoArgs,
 	}
 
 	// Add all the subcommands. If they are actual commands doing work, they should be placed in this same package / in the same folder

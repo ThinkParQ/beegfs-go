@@ -9,6 +9,7 @@ func NewCmd() *cobra.Command {
 		Use:   "stats",
 		Short: "Query and monitor IO statistics",
 		Long:  `Display IO statistics for BeeGFS servers, clients and users.`,
+		Args:  cobra.NoArgs,
 	}
 
 	cmd.AddCommand(newServerStatsCmd())
