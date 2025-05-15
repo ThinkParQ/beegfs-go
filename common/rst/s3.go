@@ -93,6 +93,21 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 	}
 }
 
+func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequestCfg {
+	sync := request.GetSync()
+	return &flex.JobRequestCfg{
+		RemoteStorageTarget: r.config.Id,
+		Path:                request.Path,
+		RemotePath:          sync.RemotePath,
+		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
+		StubLocal:           request.StubLocal,
+		Overwrite:           sync.Overwrite,
+		Flatten:             sync.Flatten,
+		Force:               request.Force,
+		LockedInfo:          sync.LockedInfo,
+	}
+}
+
 func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
 	request := job.GetRequest()
 	if !request.HasSync() {
@@ -113,10 +128,39 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	}
 
 	lockedInfo := sync.LockedInfo
-	job.SetExternalId(lockedInfo.ExternalId)
 	if !IsFileLocked(lockedInfo) {
-		return nil, false, fmt.Errorf("lockedInfo must be locked")
+		store, err := config.NodeStore(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		mappings, err := util.GetMappings(ctx)
+		if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
+			return nil, false, err
+		}
+
+		cfg := r.getJobRequestCfg(request)
+		lockedInfo, _, err = GetLockedInfo(ctx, r.mountPoint, store, mappings, cfg, cfg.Path)
+		if err != nil {
+			return nil, false, err
+		}
+		cfg.SetLockedInfo(lockedInfo)
+		sync.SetLockedInfo(lockedInfo)
+
+		response := PrepareAndBuildJobRequest(ctx, r, r.mountPoint, store, mappings, cfg)
+		if response.Err != nil {
+			status := response.Request.GetGenerationStatus()
+			if status.AlreadyComplete {
+				return nil, false, ErrJobAlreadyComplete
+			} else if status.AlreadyOffloaded {
+				return nil, false, ErrJobAlreadyOffloaded
+			}
+			return nil, status.CleanupRequired, fmt.Errorf(status.Message)
+		}
+		sync.SetRemotePath(cfg.RemotePath)
+		sync.SetFlatten(cfg.Flatten)
+		sync.SetOverwrite(cfg.Overwrite)
 	}
+	job.SetExternalId(lockedInfo.ExternalId)
 
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:

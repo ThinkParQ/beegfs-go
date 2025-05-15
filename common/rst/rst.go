@@ -326,7 +326,7 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 func PrepareAndBuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem.Provider, store *beemsg.NodeStore, mappings *util.Mappings, cfg *flex.JobRequestCfg) *BuildJobRequestResponse {
 	request := client.GetJobRequest(cfg)
 	lockedInfo := cfg.LockedInfo
-	if FileExists(lockedInfo) && !IsFileLocked(lockedInfo) {
+	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
 		return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("path lock has not been acquired")}
 	}
 
@@ -483,7 +483,10 @@ func PrepareFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.
 	return
 }
 
-// GetLockedInfo locks the in-mount file and returns the information collected under the file lock.
+// GetLockedInfo locks the in-mount file and returns the information collected under the acquired
+// file lock. cfg is used as a configuration reference for the inMountPath, so cfg.Path will be
+// ignored; this is necessary to avoid making unnecessary cfg clones since the lockedInfo can be
+// used for multiple jobs.
 func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, store *beemsg.NodeStore, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (*flex.JobLockedInfo, []uint32, error) {
 	var rstIds []uint32
 	lockedInfo := &flex.JobLockedInfo{}
