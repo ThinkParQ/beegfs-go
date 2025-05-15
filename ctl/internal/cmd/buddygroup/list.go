@@ -22,6 +22,7 @@ func newListCmd() *cobra.Command {
 		Use:         "list",
 		Short:       "List buddy groups",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runListCmd(cmd, cfg)
 		},

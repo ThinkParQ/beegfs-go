@@ -23,6 +23,7 @@ Subdirectories of the root directory will not be mirrored by this operation.
 
 Mirroring for files can be enabled by moving them from an unmirrored directory to a mirrored directory.	   
 		`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMirrorRootInode(cmd, execute)
 		},

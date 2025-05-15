@@ -31,6 +31,7 @@ func newListCmd() *cobra.Command {
 		Use:         "list",
 		Short:       "List BeeGFS targets",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targets, err := target.GetTargets(cmd.Context())
 			if err != nil {

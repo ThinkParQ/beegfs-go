@@ -40,6 +40,7 @@ the defaults (10 pings, 1ms interval) should work fine.
 If -p/--parallel is supplied, nodes will be pinged in parallel instead of
 sequentially. The global --%s flag will be used to determine how
 many pings to do in parallel. `, config.NumWorkersKey),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPingCmd(cmd, cfg)
 		},
