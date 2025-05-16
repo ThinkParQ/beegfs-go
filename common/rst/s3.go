@@ -108,14 +108,14 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 	}
 }
 
-func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
+func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	request := job.GetRequest()
 	if !request.HasSync() {
-		return nil, false, ErrReqAndRSTTypeMismatch
+		return nil, ErrReqAndRSTTypeMismatch
 	}
 
 	if job.GetExternalId() != "" {
-		return nil, false, ErrJobAlreadyHasExternalID
+		return nil, ErrJobAlreadyHasExternalID
 	}
 
 	sync := request.GetSync()
@@ -131,17 +131,17 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	if !IsFileLocked(lockedInfo) {
 		store, err := config.NodeStore(ctx)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		mappings, err := util.GetMappings(ctx)
 		if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-			return nil, false, err
+			return nil, err
 		}
 
 		cfg := r.getJobRequestCfg(request)
 		lockedInfo, _, err = GetLockedInfo(ctx, r.mountPoint, store, mappings, cfg, cfg.Path)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		cfg.SetLockedInfo(lockedInfo)
 		sync.SetLockedInfo(lockedInfo)
@@ -149,12 +149,12 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		response := PrepareAndBuildJobRequest(ctx, r, r.mountPoint, store, mappings, cfg)
 		if response.Err != nil {
 			status := response.Request.GetGenerationStatus()
-			if status.AlreadyComplete {
-				return nil, false, ErrJobAlreadyComplete
-			} else if status.AlreadyOffloaded {
-				return nil, false, ErrJobAlreadyOffloaded
+			if status.State == beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE {
+				return nil, ErrJobAlreadyComplete
+			} else if status.State == beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED {
+				return nil, ErrJobAlreadyOffloaded
 			}
-			return nil, status.CleanupRequired, fmt.Errorf(status.Message)
+			return nil, fmt.Errorf(status.Message)
 		}
 		sync.SetRemotePath(cfg.RemotePath)
 		sync.SetFlatten(cfg.Flatten)
@@ -168,7 +168,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	case flex.SyncJob_DOWNLOAD:
 		return r.generateSyncJobWorkRequest_Download(job)
 	}
-	return nil, false, ErrUnsupportedOpForRST
+	return nil, ErrUnsupportedOpForRST
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
@@ -285,16 +285,12 @@ func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestC
 	return "", nil
 }
 
-func (r *S3Client) AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error {
-	return r.abortUpload(ctx, externalId, request.Path)
-}
-
 func (r *S3Client) SanitizeRemotePath(remotePath string) string {
 	// Valid s3 prefixes do not start with a '/' (e.g. myfolder/*/subdir?[a-z])
 	return strings.TrimLeft(remotePath, "/")
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*flex.WorkRequest, bool, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*flex.WorkRequest, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
 	lockedInfo := sync.LockedInfo
@@ -304,18 +300,18 @@ func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*fle
 	if filemode.Type()&fs.ModeSymlink != 0 {
 		// TODO: https://github.com/ThinkParQ/bee-remote/issues/25
 		// Support symbolic links.
-		return nil, false, fmt.Errorf("unable to upload symlink: %w", ErrFileTypeUnsupported)
+		return nil, fmt.Errorf("unable to upload symlink: %w", ErrFileTypeUnsupported)
 	}
 	if !filemode.IsRegular() {
-		return nil, false, fmt.Errorf("%w", ErrFileTypeUnsupported)
+		return nil, fmt.Errorf("%w", ErrFileTypeUnsupported)
 	}
 
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.Size, segCount, partsPerSegment))
-	return workRequests, false, nil
+	return workRequests, nil
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*flex.WorkRequest, bool, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*flex.WorkRequest, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
 	lockedInfo := sync.LockedInfo
@@ -323,7 +319,7 @@ func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*f
 
 	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.RemoteSize, segCount, partsPerSegment))
-	return workRequests, false, nil
+	return workRequests, nil
 }
 
 func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
@@ -403,14 +399,25 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	mtime := sync.LockedInfo.RemoteMtime.AsTime()
 	job.SetStopMtime(timestamppb.New(mtime))
 
-	absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
-	if err := os.Chtimes(absPath, mtime, mtime); err != nil {
-		return fmt.Errorf("failed to update download's mtime: %w", err)
-	}
+	if abort {
+		// If the file is offloaded restore the stub file's rst url.
+		if IsFileOffloaded(sync.LockedInfo) {
+			rstUrl := fmt.Appendf(nil, "rst://%d:%s", r.config.Id, sync.RemotePath)
+			if err := r.mountPoint.CreateWriteClose(request.Path, rstUrl, true); err != nil {
+				return err
+			}
+		}
 
-	// Skip checking the file was modified if we were told to abort since the mtime may not have
-	// been set correctly anyway given the error check is skipped above.
-	if !abort {
+	} else {
+
+		// Update the downloaded file's access and modification times so they accurately reflect the beegfs_mtime.
+		absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
+		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
+			return fmt.Errorf("failed to update download's mtime: %w", err)
+		}
+
+		// Skip checking the file was modified if we were told to abort since the mtime may not have
+		// been set correctly anyway given the error check is skipped above.
 		start := job.GetStartMtime().AsTime()
 		stop := job.GetStopMtime().AsTime()
 		if !start.Equal(stop) {

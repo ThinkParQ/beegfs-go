@@ -49,9 +49,9 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 }
 
 // GenerateWorkRequests for JobBuilderClient should simply pass a single
-func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error) {
+func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	workRequests := RecreateWorkRequests(job, nil)
-	return workRequests, true, nil
+	return workRequests, nil
 }
 
 func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
@@ -117,10 +117,6 @@ func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobR
 
 func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	return "", nil
-}
-
-func (c *JobBuilderClient) AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error {
-	return nil
 }
 
 func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest) error {

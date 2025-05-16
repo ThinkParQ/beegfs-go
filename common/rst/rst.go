@@ -66,9 +66,8 @@ type Provider interface {
 	//
 	// ErrJobAlreadyComplete and ErrJobAlreadyOffloaded should be returned to indicate synced and
 	// offloaded states that require no further action. When relevant to the operation,
-	// job.StartMtime should be set. Return cleanupRequired==true when the job state is state is
-	// invalid and requires manual cleanup.
-	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, cleanupRequired bool, err error)
+	// job.StartMtime should be set.
+	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
 	// ExecuteJobBuilderRequest is specifically designed for providers that generate subsequent job
 	// requests.
 	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error
@@ -103,8 +102,6 @@ type Provider interface {
 	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
-	// AbortExternalId should cancel any external request generated in GenerateExternalId().
-	AbortExternalId(ctx context.Context, externalId string, request *beeremote.JobRequest) error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -375,7 +372,7 @@ func PrepareAndBuildJobRequest(ctx context.Context, client Provider, mountPoint 
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
 
-	cleanupRequired, err := PrepareFileStateForWorkRequests(ctx, mountPoint, store, mappings, cfg)
+	err = PrepareFileStateForWorkRequests(ctx, mountPoint, store, mappings, cfg)
 	if err == nil {
 		var externalId string
 		externalId, err = client.GenerateExternalId(ctx, cfg)
@@ -383,11 +380,11 @@ func PrepareAndBuildJobRequest(ctx context.Context, client Provider, mountPoint 
 			lockedInfo.SetExternalId(externalId)
 		}
 	} else if errors.Is(err, ErrJobAlreadyComplete) {
-		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{AlreadyComplete: true}
+		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE}
 	} else if errors.Is(err, ErrJobAlreadyOffloaded) {
-		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{AlreadyOffloaded: true}
+		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED}
 	} else {
-		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{Message: err.Error(), CleanupRequired: cleanupRequired}
+		request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ERROR, Message: err.Error()}
 	}
 
 	return &BuildJobRequestResponse{Request: request, Err: err}
@@ -424,88 +421,83 @@ func EnsureStoreAndMappings(ctx context.Context, store *beemsg.NodeStore, mappin
 //
 // It is the responsibility of the caller to ensure lockedInfo is already populated and locked. The
 // store and mappings can be nil but if they're needed they will be retrieved.
-func PrepareFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Provider, store *beemsg.NodeStore, mappings *util.Mappings, cfg *flex.JobRequestCfg) (cleanupRequired bool, err error) {
+func PrepareFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Provider, store *beemsg.NodeStore, mappings *util.Mappings, cfg *flex.JobRequestCfg) error {
 	lockedInfo := cfg.LockedInfo
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 
 	if cfg.StubLocal {
 		if (cfg.Download && !FileExists(lockedInfo)) || alreadySynced {
+			var err error
 			if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
-				return false, fmt.Errorf("unable to clear file data state: %w", err)
+				return fmt.Errorf("unable to clear file data state: %w", err)
 			}
 			if err = CreateOffloadedDataFile(ctx, mountPoint, store, mappings, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, alreadySynced); err != nil {
-				return false, fmt.Errorf("failed to create stub file: %w", err)
+				return fmt.Errorf("failed to create stub file: %w", err)
 			}
 			lockedInfo.SetExists(true)
 			lockedInfo.SetStubUrlRstId(cfg.RemoteStorageTarget)
 			lockedInfo.SetStubUrlPath(cfg.RemotePath)
-			return false, ErrJobAlreadyOffloaded
+			return ErrJobAlreadyOffloaded
 		}
 
 		if IsFileOffloaded(lockedInfo) {
 			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
-				return false, ErrOffloadFileUrlMismatch
+				return ErrOffloadFileUrlMismatch
 			}
-			return false, ErrJobAlreadyOffloaded
+			return ErrJobAlreadyOffloaded
 		}
 	} else if FileExists(lockedInfo) {
 		if alreadySynced {
-			return false, ErrJobAlreadyComplete
+			return ErrJobAlreadyComplete
 		}
 
 		if cfg.Download {
 			if IsFileOffloaded(lockedInfo) {
 				if !cfg.Overwrite && !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
-					return false, ErrOffloadFileUrlMismatch
+					return ErrOffloadFileUrlMismatch
 				}
-				if store, mappings, err = EnsureStoreAndMappings(ctx, store, mappings); err != nil {
-					return false, fmt.Errorf("unable to clear file data state: %w", err)
-				}
-				if err = entry.ClearFileDataState(ctx, mappings, store, cfg.Path); err != nil {
-					return false, fmt.Errorf("unable to clear stub file flag: %w", err)
-				}
-				lockedInfo.SetStubUrlRstId(0)
-				lockedInfo.SetStubUrlPath("")
+				// Since the file is offloaded it's safe and required to force the file to be overwritten.
 				cfg.SetOverwrite(true)
 			}
 
 			if !IsFileSizeMatched(lockedInfo) {
-				if err = mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
-					return false, fmt.Errorf("unable to preallocate space for file: %w", err)
+				if err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
+					return fmt.Errorf("unable to preallocate space for file: %w", err)
 				}
 				lockedInfo.SetSize(lockedInfo.RemoteSize)
 				lockedInfo.SetMtime(timestamppb.Now())
 			}
 			if !cfg.Overwrite {
-				return false, fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
+				return fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
 			}
 		} else if IsFileOffloaded(lockedInfo) {
 			// TODO: If the remote target is different then an option would be to download first and
 			// then upload to different remote target. For now just report the issue and let the
 			// user handle it.
-			return false, fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
+			return fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
 		}
 	} else if cfg.Download {
-		if err = mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
-			return false, fmt.Errorf("unable to preallocate space for file: %w", err)
+		if err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
+			return fmt.Errorf("unable to preallocate space for file: %w", err)
 		}
 
 		var info *flex.JobLockedInfo
-		info, _, err = GetLockedInfo(ctx, mountPoint, store, mappings, cfg, cfg.Path)
+		info, _, err := GetLockedInfo(ctx, mountPoint, store, mappings, cfg, cfg.Path)
 		if err != nil {
-			return false, fmt.Errorf("failed to collect information for new file: %w", err)
+			return fmt.Errorf("failed to collect information for new file: %w", err)
 		}
 		lockedInfo.SetLocked(info.Locked)
 		lockedInfo.SetExists(info.Exists)
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)
+		// Since the file didn't exist it's safe and required to force the file to be overwritten.
 		cfg.SetOverwrite(true)
 	} else {
-		return false, fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
+		return fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
 	}
 
-	return
+	return nil
 }
 
 // GetLockedInfo locks the in-mount file and returns the information collected under the acquired

@@ -94,16 +94,15 @@ func (j *Job) InActiveState() bool {
 // function as a method to determine if a file has changed and it is safe to resume a job or if it
 // should be cancelled. It also ensures even if the file changes the original job submission can be
 // recreated for troubleshooting.
-func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, bool, error) {
+func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, error) {
 
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
-		var cleanupRequired bool
 		var err error
-		workRequests, cleanupRequired, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
+		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
 		if err != nil {
-			return workermgr.JobSubmission{}, cleanupRequired, err
+			return workermgr.JobSubmission{}, err
 		}
 
 		j.Segments = make([]*Segment, 0, len(workRequests))
@@ -117,13 +116,10 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 	}
 
 	if len(workRequests) == 0 {
-		return workermgr.JobSubmission{}, false, fmt.Errorf("generated work request is empty (this is probably a bug in the RST package)")
+		return workermgr.JobSubmission{}, fmt.Errorf("generated work request is empty (this is probably a bug in the RST package)")
 	}
 
-	return workermgr.JobSubmission{
-		JobID:        j.GetId(),
-		WorkRequests: workRequests,
-	}, false, nil
+	return workermgr.JobSubmission{JobID: j.GetId(), WorkRequests: workRequests}, nil
 }
 
 // Complete should always be called before moving the job status to a terminal state. If the job

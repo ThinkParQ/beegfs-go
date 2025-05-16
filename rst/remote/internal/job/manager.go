@@ -464,19 +464,19 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	}
 
 	var jobSubmission workermgr.JobSubmission
-	var cleanupRequired bool
 	if jr.GenerationStatus != nil {
 		status := jr.GenerationStatus
-		if status.AlreadyComplete {
+		if status.State == beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE {
 			err = rst.ErrJobAlreadyComplete
-		} else if status.AlreadyOffloaded {
+		} else if status.State == beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED {
 			err = rst.ErrJobAlreadyOffloaded
-		} else if status.Message != "" {
-			cleanupRequired = status.CleanupRequired
+		} else if status.State == beeremote.JobRequest_GenerationStatus_ERROR {
 			err = fmt.Errorf(status.Message)
+		} else {
+			err = fmt.Errorf("failure occurred while generating job request and the state is unknown! This is a bug")
 		}
 	} else {
-		jobSubmission, cleanupRequired, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
+		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
 	}
 
 	if err != nil {
@@ -538,24 +538,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// be complete, failed, or non-existent; each state will like result in confusion.
 			status := job.GetStatus()
 			status.Message = err.Error()
-			// cleanupRequired indicates whether the RST provider's GenerateWorkRequests() call left
-			// the job in an invalid state that requires cleanup. If false, the job can be safely
-			// retried. If true, the job should not be retried; the user must resolve the issue and
-			// cancel the job before retrying.
-			status.State = beeremote.Job_CANCELLED
-			if cleanupRequired {
-				status.State = beeremote.Job_FAILED
-			}
-
 			beeremoteJob := job.Get()
-			externalId := beeremoteJob.GetExternalId()
-			if externalId != "" {
-				if err := rstClient.AbortExternalId(m.ctx, externalId, beeremoteJob.GetRequest()); err != nil {
-					status.Message += fmt.Sprintf("; unable to abort external request! External Id: %s: %s", externalId, err.Error())
-					status.State = beeremote.Job_FAILED
-				}
-			}
-
+			status.State = beeremote.Job_FAILED
 			pathEntry.Value[job.GetId()] = job
 			return beeremote.JobResult_builder{
 				Job:          beeremoteJob,
