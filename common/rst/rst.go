@@ -32,9 +32,12 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -334,12 +337,34 @@ func PrepareAndBuildJobRequest(ctx context.Context, client Provider, mountPoint 
 	if IsFileOffloaded(lockedInfo) {
 		// Use rst url from the stub file when a remote-path wasn't provided.
 		if cfg.RemotePath == "" {
-			cfg.SetRemotePath(lockedInfo.StubUrlPath)
+			cfg.SetRemotePath(client.SanitizeRemotePath(lockedInfo.StubUrlPath))
 		} else if cfg.RemotePath != lockedInfo.StubUrlPath {
 			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unexpected stub file path")}
 		}
 		if cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
 			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unexpected stub file rst id")}
+		}
+	}
+
+	if cfg.Download && cfg.RemotePath == "" {
+		if !FileExists(lockedInfo) {
+			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unable to determine remote path: %w", fs.ErrNotExist)}
+		}
+
+		beeRemote, err := config.BeeRemoteClient()
+		if err != nil {
+			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unable to determine remote path: %w", err)}
+		}
+		job, err := GetLastCompletedJob(ctx, beeRemote, cfg.Path)
+		if err != nil {
+			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unable to determine remote path: %w", err)}
+		}
+
+		switch job.Request.WhichType() {
+		case beeremote.JobRequest_Sync_case:
+			cfg.SetRemotePath(client.SanitizeRemotePath(job.Request.GetSync().RemotePath))
+		default:
+			return &BuildJobRequestResponse{Request: request, Err: fmt.Errorf("unable to determine remote path: %w", err)}
 		}
 	}
 
@@ -770,4 +795,35 @@ func GetDownloadInMountPath(path string, remotePath string, remotePathDir string
 // consistent.
 func NormalizePath(path string) string {
 	return "/" + strings.TrimLeft(path, "/")
+}
+
+// Retrieve the last complete job for the BeeGFS path.
+func GetLastCompletedJob(ctx context.Context, beeRemote beeremote.BeeRemoteClient, inMountPath string) (*beeremote.Job, error) {
+	request := &beeremote.GetJobsRequest{Query: &beeremote.GetJobsRequest_ByExactPath{ByExactPath: inMountPath}}
+	stream, err := beeRemote.GetJobs(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := stream.Recv()
+	if err != nil {
+		if rpcStatus, ok := status.FromError(err); ok {
+			if rpcStatus.Code() == codes.NotFound {
+				return nil, rst.ErrEntryNotFound
+			}
+		}
+		return nil, err
+	}
+
+	var lastCompletedJob *beeremote.Job
+	for _, result := range resp.Results {
+		job := result.GetJob()
+		if job != nil && job.Status.State == beeremote.Job_COMPLETED {
+			if lastCompletedJob == nil || job.Created.Seconds > lastCompletedJob.Created.Seconds {
+				lastCompletedJob = job
+			}
+		}
+	}
+
+	return lastCompletedJob, nil
 }

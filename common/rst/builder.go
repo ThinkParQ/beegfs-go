@@ -226,5 +226,5 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 }
 
 func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
-	return !IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemotePath == ""
+	return cfg.RemotePath == ""
 }

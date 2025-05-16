@@ -423,6 +423,12 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
 func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, error) {
+	if key == "" {
+		if keyMustExist {
+			return 0, time.Time{}, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
+		}
+		return 0, time.Time{}, nil
+	}
 
 	headObjectInput := &s3.HeadObjectInput{
 		Bucket: aws.String(r.config.GetS3().Bucket),
