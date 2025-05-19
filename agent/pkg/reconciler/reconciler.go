@@ -172,7 +172,7 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 		}
 
 		// Don't apply any common configuration if the agent doesn't have any nodes for this file system.
-		if err := r.strategy.ApplySource(ctx, fs.Common.Source); err != nil {
+		if err := r.strategy.ApplySourceRepo(ctx, fs.Common.InstallSource); err != nil {
 			r.state.fail(fmt.Sprintf("unable to apply source configuration for %s: %s", fsUUID, err.Error()))
 			return
 		}
@@ -194,8 +194,8 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 
 			// Currently the source for the node should always be set by the user or inherited
 			// automatically from the global configuration. This might change so avoid a panic.
-			if node.Source != nil {
-				if err := r.strategy.ApplySourceInstall(ctx, *node.Source); err != nil {
+			if node.InstallSource != nil {
+				if err := r.strategy.ApplyInstall(ctx, *node.InstallSource); err != nil {
 					r.state.fail(fmt.Sprintf("unable to apply source installation for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
 				}
 			} else {

@@ -45,12 +45,12 @@ func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
 				node.Config = inheritMapDefaults(commonNodeConfig, node.Config)
 			}
 			// Inherit global source configuration based on the node type.
-			if node.Source == nil || node.Source.Ref == "" {
-				node.Source = &NodeSource{
-					Type: f.Common.Source.Type,
+			if node.InstallSource == nil || node.InstallSource.Ref == "" {
+				node.InstallSource = &NodeInstallSource{
+					Type: f.Common.InstallSource.Type,
 				}
-				if ref, ok := f.Common.Source.Refs[node.Type]; ok {
-					node.Source.Ref = ref
+				if ref, ok := f.Common.InstallSource.Refs[node.Type]; ok {
+					node.InstallSource.Ref = ref
 				}
 			}
 			// Inherit target configuration from the FS and node:
@@ -81,10 +81,10 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 		return fs
 	}
 
-	pSrc := protoFS.GetCommon().GetSource()
+	pSrc := protoFS.GetCommon().GetInstallSource()
 	fs.Common = Common{
 		GlobalConfig: nodeConfigsFromProto(protoFS.Common.GetGlobalConfig()),
-		Source: Source{
+		InstallSource: InstallSource{
 			Type: sourceTypeFromProto(pSrc.Type),
 			Repo: pSrc.Repo,
 			Refs: sourceRefsFromProto(pSrc.Refs),
@@ -125,10 +125,10 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 				Targets:    make([]Target, 0),
 			}
 
-			if n.Source != nil {
-				node.Source = &NodeSource{
-					Type: sourceTypeFromProto(n.GetSource().GetType()),
-					Ref:  n.GetSource().GetRef(),
+			if n.InstallSource != nil {
+				node.InstallSource = &NodeInstallSource{
+					Type: sourceTypeFromProto(n.GetInstallSource().GetType()),
+					Ref:  n.GetInstallSource().GetRef(),
 				}
 			}
 
@@ -166,10 +166,10 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 	pbFS := &pb.Filesystem{
 		Common: &pb.Filesystem_Common{
 			GlobalConfig: fs.Common.GlobalConfig.toProto(),
-			Source: &pb.Source{
-				Type: fs.Common.Source.Type.ToProto(),
-				Repo: fs.Common.Source.Repo,
-				Refs: fs.Common.Source.Refs.toProto(),
+			InstallSource: &pb.InstallSource{
+				Type: fs.Common.InstallSource.Type.ToProto(),
+				Repo: fs.Common.InstallSource.Repo,
+				Refs: fs.Common.InstallSource.Refs.toProto(),
 			},
 		},
 		Agent: make(map[string]*pb.Agent),
@@ -208,10 +208,10 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 				Targets:    make([]*pb.Target, 0, len(node.Targets)),
 			}
 
-			if node.Source != nil {
-				pbNode.Source = &pb.Node_Source{
-					Type: node.Source.Type.ToProto(),
-					Ref:  node.Source.Ref,
+			if node.InstallSource != nil {
+				pbNode.InstallSource = &pb.Node_InstallSource{
+					Type: node.InstallSource.Type.ToProto(),
+					Ref:  node.InstallSource.Ref,
 				}
 			}
 
