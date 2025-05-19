@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/agent/pkg/deploy"
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pb "github.com/thinkparq/protobuf/go/agent"
 	"go.uber.org/zap"
 )
@@ -205,6 +206,21 @@ func (r *defaultReconciler) reconcile(newFilesystems manifest.Filesystems) {
 			return
 		}
 
+		// Install packages for all services types managed by this agent:
+		installPackages := map[beegfs.NodeType]struct{}{}
+		for _, service := range agent.Services {
+			if _, ok := installPackages[service.Type]; ok {
+				continue
+			}
+			installPackages[service.Type] = struct{}{}
+			if ref, ok := fs.Common.InstallSource.Refs[service.Type]; ok {
+				if err := r.strategy.ApplyInstall(ctx, ref); err != nil {
+					r.state.fail(fmt.Sprintf("unable to apply service installation for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
+				}
+			}
+		}
+
+		// Roll out services:
 		for _, service := range agent.Services {
 			if err := r.strategy.ApplyInterfaces(ctx, service.Interfaces); err != nil {
 				r.state.fail(fmt.Sprintf("unable to apply interface configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
@@ -214,17 +230,6 @@ func (r *defaultReconciler) reconcile(newFilesystems manifest.Filesystems) {
 				r.state.fail(fmt.Sprintf("unable to apply target configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				return
 			}
-
-			// Currently the source for the services should always be set by the user or inherited
-			// automatically from the global configuration. This might change so avoid a panic.
-			if service.InstallSource != nil {
-				if err := r.strategy.ApplyInstall(ctx, *service.InstallSource); err != nil {
-					r.state.fail(fmt.Sprintf("unable to apply source installation for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
-				}
-			} else {
-				r.log.Warn("service install source was unexpectedly nil (ignoring)", zap.String("fsUUID", fsUUID), zap.String("type", service.Type.String()), zap.Any("id", service.ID))
-			}
-
 			if err := r.strategy.ApplyService(ctx, service); err != nil {
 				r.state.fail(fmt.Sprintf("unable to apply service configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				return

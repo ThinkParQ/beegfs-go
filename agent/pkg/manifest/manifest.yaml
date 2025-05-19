@@ -55,9 +55,7 @@ filesystems:
                 path: /beegfs/
           - type: meta
             id: 1
-            install-source:
-              type: local
-              ref: /home/tux/development/beegfs/meta/build/beegfs-meta
+            executable: /home/tux/development/beegfs/meta/build/beegfs-meta
             interfaces:
               - name: enp0s1 # IP configuration handled globally
             targets:

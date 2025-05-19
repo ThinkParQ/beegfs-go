@@ -2,9 +2,15 @@ package manifest
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pb "github.com/thinkparq/protobuf/go/agent"
+)
+
+const (
+	DefaultExecutablePath = "/opt/beegfs/sbin/"
 )
 
 type Common struct {
@@ -71,6 +77,30 @@ type InstallSource struct {
 	Type InstallType `yaml:"type"`
 	Repo string      `yaml:"repo"`
 	Refs SourceRefs  `yaml:"refs"`
+}
+
+// nodeTypeToExecutablePath takes a node type and returns the default path to that node's binary.
+func (s InstallSource) nodeTypeToExecutablePath(nodeType beegfs.NodeType) string {
+	switch nodeType {
+	case beegfs.Management:
+		return filepath.Clean(DefaultExecutablePath + "beegfs-mgmtd")
+	default:
+		return filepath.Clean(DefaultExecutablePath + nodeType.String())
+	}
+}
+
+// refToExecutablePath takes a reference to a package, container image, etc. and generates a default
+// executable path based on the install source type and reference string format.
+func (s InstallSource) refToExecutablePath(ref string) string {
+	switch s.Type {
+	case PackageInstall, LocalInstall:
+		if r := strings.Split(ref, "="); len(r) == 2 {
+			return filepath.Clean(DefaultExecutablePath + r[0])
+		}
+		return filepath.Clean(DefaultExecutablePath + ref)
+	default:
+		return ref
+	}
 }
 
 type SourceRefs map[beegfs.NodeType]string
