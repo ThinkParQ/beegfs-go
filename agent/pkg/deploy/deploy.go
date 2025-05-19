@@ -2,8 +2,8 @@ package deploy
 
 import "context"
 
-// Deployer is responsible for carrying out the steps needed to manage a BeeGFS "node" and handles
-// starting/modifying/stopping various system resources.
+// Deployer is responsible for carrying out the steps needed to manage a BeeGFS "service" and
+// handles starting/modifying/stopping various system resources.
 type Deployer interface {
 	Installer
 	Networker

@@ -12,8 +12,8 @@ import (
 type Installer interface {
 	ApplySourceRepo(ctx context.Context, add manifest.InstallSource) error
 	DeleteSourceRepo(ctx context.Context, remove manifest.InstallSource) error
-	ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error
-	DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error
+	ApplyInstall(ctx context.Context, source manifest.ServiceInstallSource) error
+	DeleteInstall(ctx context.Context, source manifest.ServiceInstallSource) error
 }
 
 func DetectPackageManager() (Package, error) {
@@ -56,14 +56,14 @@ func (p *Package) DeleteSourceRepo(ctx context.Context, remove manifest.InstallS
 	return p.manager.DeleteSourceRepo(ctx, remove)
 }
 
-func (p *Package) ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+func (p *Package) ApplyInstall(ctx context.Context, source manifest.ServiceInstallSource) error {
 	if p.isLocal || source.Type == manifest.LocalInstall {
 		return nil
 	}
 	return p.manager.ApplyInstall(ctx, source)
 }
 
-func (p *Package) DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+func (p *Package) DeleteInstall(ctx context.Context, source manifest.ServiceInstallSource) error {
 	if p.isLocal || source.Type == manifest.LocalInstall {
 		return nil
 	}
@@ -80,10 +80,10 @@ func (p *AptPackage) DeleteSourceRepo(ctx context.Context, remove manifest.Insta
 	return errors.New("not implemented")
 }
 
-func (p *AptPackage) ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+func (p *AptPackage) ApplyInstall(ctx context.Context, source manifest.ServiceInstallSource) error {
 	return errors.New("not implemented")
 }
 
-func (p *AptPackage) DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+func (p *AptPackage) DeleteInstall(ctx context.Context, source manifest.ServiceInstallSource) error {
 	return errors.New("not implemented")
 }

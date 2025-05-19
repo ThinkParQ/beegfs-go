@@ -40,7 +40,7 @@ func newAgentState(l *zap.Logger) state {
 	}
 }
 
-func getFsNodeID(fsUUID string, nt beegfs.NodeType, id beegfs.NumId) string {
+func getFsServiceID(fsUUID string, nt beegfs.NodeType, id beegfs.NumId) string {
 	return fmt.Sprintf("%s:%s:%d", fsUUID, nt, id)
 }
 

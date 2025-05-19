@@ -146,8 +146,8 @@ func (r *defaultReconciler) verify(newManifest manifest.Filesystems) error {
 		//  * Avoid necessary reconciliations by seeing if the manifest changed.
 		//  * Validate we can migrate from currentFS to newFS.
 		//  * Validate the FS config:
-		//    * All nodes have IPs + targets.
-		//    * Nodes have the correct number of targets (i.e., 1 for mgmtd meta, remote, sync).
+		//    * All services have IPs + targets.
+		//    * Services have the correct number of targets (i.e., 1 for mgmtd meta, remote, sync).
 		// Note these should be implemented as methods on manifest.Filesystem.
 		fs.InheritGlobalConfig(fsUUID)
 	}
@@ -166,12 +166,12 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 		agent, ok := fs.Agents[r.agentID]
 		if !ok {
 			// Not all file systems in this manifest may have configuration for this agent. It is
-			// also valid that this manifest has no nodes managed by this agent.
-			r.log.Debug("file system has no nodes assigned to this agent", zap.String("fsUUID", fsUUID))
+			// also valid that this manifest has no services managed by this agent.
+			r.log.Debug("file system has no services assigned to this agent", zap.String("fsUUID", fsUUID))
 			continue
 		}
 
-		// Don't apply any common configuration if the agent doesn't have any nodes for this file system.
+		// Don't apply any common configuration if the agent doesn't have any services for this file system.
 		if err := r.strategy.ApplySourceRepo(ctx, fs.Common.InstallSource); err != nil {
 			r.state.fail(fmt.Sprintf("unable to apply source configuration for %s: %s", fsUUID, err.Error()))
 			return
@@ -182,28 +182,28 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 			return
 		}
 
-		for _, node := range agent.Nodes {
-			if err := r.strategy.ApplyInterfaces(ctx, node.Interfaces); err != nil {
-				r.state.fail(fmt.Sprintf("unable to apply interface configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+		for _, service := range agent.Services {
+			if err := r.strategy.ApplyInterfaces(ctx, service.Interfaces); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply interface configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				return
 			}
-			if err := r.strategy.ApplyTargets(ctx, node.Targets); err != nil {
-				r.state.fail(fmt.Sprintf("unable to apply target configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+			if err := r.strategy.ApplyTargets(ctx, service.Targets); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply target configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				return
 			}
 
-			// Currently the source for the node should always be set by the user or inherited
+			// Currently the source for the services should always be set by the user or inherited
 			// automatically from the global configuration. This might change so avoid a panic.
-			if node.InstallSource != nil {
-				if err := r.strategy.ApplyInstall(ctx, *node.InstallSource); err != nil {
-					r.state.fail(fmt.Sprintf("unable to apply source installation for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+			if service.InstallSource != nil {
+				if err := r.strategy.ApplyInstall(ctx, *service.InstallSource); err != nil {
+					r.state.fail(fmt.Sprintf("unable to apply source installation for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				}
 			} else {
-				r.log.Warn("node source was unexpectedly nil (ignoring)", zap.String("fsUUID", fsUUID), zap.String("nodeType", node.Type.String()), zap.Any("nodeID", node.ID))
+				r.log.Warn("service install source was unexpectedly nil (ignoring)", zap.String("fsUUID", fsUUID), zap.String("type", service.Type.String()), zap.Any("id", service.ID))
 			}
 
-			if err := r.strategy.ApplyService(ctx, node); err != nil {
-				r.state.fail(fmt.Sprintf("unable to apply service configuration for %s: %s", getFsNodeID(fsUUID, node.Type, node.ID), err.Error()))
+			if err := r.strategy.ApplyService(ctx, service); err != nil {
+				r.state.fail(fmt.Sprintf("unable to apply service configuration for %s: %s", getFsServiceID(fsUUID, service.Type, service.ID), err.Error()))
 				return
 			}
 		}
