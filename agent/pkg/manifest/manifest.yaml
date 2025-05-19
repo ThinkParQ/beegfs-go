@@ -8,15 +8,20 @@ beegfs01: #fsUUID
       cert: |
         tlsCert
     config:
+      mgmtd:
+        beemsg-port: 10000
       meta:
+        connMetaPort: 0
         quotaEnableEnforcement: true
         storeClientXAttrs: true
         storeClientACLs: true
       storage:
+        connStoragePort: 0
         quotaEnableEnforcement: true
       client:
+        connClientPort: 0
         quotaEnabled: true
-    source:
+    install-source:
       type: package
       repo: https://www.beegfs.io/release/beegfs_8.0/
       refs:
@@ -38,13 +43,18 @@ beegfs01: #fsUUID
     #     sync: beegfs-sync:8.0.1
   agents:
     agent1: # agentID
+      address: "127.0.0.1:9010"
       interfaces:
         - name: enp0s1
-          address: "10.10.10.1/16"
+          address: "127.0.0.1/24"
       nodes:
+        - type: mgmtd
+          targets:
+            - id: 101
+              root_dir: /beegfs/
         - type: meta
           id: 1
-          source:
+          install-source:
             type: local
             ref: /home/tux/development/beegfs/meta/build/beegfs-meta
           interfaces:
@@ -57,3 +67,12 @@ beegfs01: #fsUUID
               #   type: ext4
               #   format_flags: foo
               #   mount_flags: baz
+    agent2: # agentID
+      nodes:
+        - type: storage
+          id: 1
+          config:
+            tuneNumWorkers: 28
+    agent3: # agentID
+      nodes:
+        - type: client

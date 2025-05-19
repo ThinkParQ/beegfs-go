@@ -8,10 +8,10 @@ import (
 )
 
 type Common struct {
-	Auth         *Auth       `yaml:"auth"`
-	TLS          *TLS        `yaml:"tls"`
-	GlobalConfig NodeConfigs `yaml:"config"`
-	Source       Source      `yaml:"source"`
+	Auth          *Auth         `yaml:"auth"`
+	TLS           *TLS          `yaml:"tls"`
+	GlobalConfig  NodeConfigs   `yaml:"config"`
+	InstallSource InstallSource `yaml:"install-source"`
 }
 
 type Auth struct {
@@ -67,10 +67,10 @@ func nodeConfigsFromProto(m []*pb.NodeConfig) NodeConfigs {
 	return nsm
 }
 
-type Source struct {
-	Type SourceType `yaml:"type"`
-	Repo string     `yaml:"repo"`
-	Refs SourceRefs `yaml:"refs"`
+type InstallSource struct {
+	Type InstallType `yaml:"type"`
+	Repo string      `yaml:"repo"`
+	Refs SourceRefs  `yaml:"refs"`
 }
 
 type SourceRefs map[beegfs.NodeType]string
@@ -117,57 +117,57 @@ func sourceRefsFromProto(r []*pb.SourceRef) SourceRefs {
 	return srs
 }
 
-type SourceType int
+type InstallType int
 
 const (
-	UnknownSource SourceType = iota
-	LocalSource
-	PackageSource
+	UnknownInstall InstallType = iota
+	LocalInstall
+	PackageInstall
 )
 
-func (s SourceType) ToProto() pb.SourceType {
+func (s InstallType) ToProto() pb.InstallType {
 	switch s {
-	case LocalSource:
-		return pb.SourceType_LOCAL
-	case PackageSource:
-		return pb.SourceType_PACKAGE
+	case LocalInstall:
+		return pb.InstallType_LOCAL
+	case PackageInstall:
+		return pb.InstallType_PACKAGE
 	default:
-		return pb.SourceType_UNKNOWN
+		return pb.InstallType_UNKNOWN
 	}
 }
 
-func sourceTypeFromProto(st pb.SourceType) SourceType {
+func sourceTypeFromProto(st pb.InstallType) InstallType {
 	switch st {
-	case pb.SourceType_LOCAL:
-		return LocalSource
-	case pb.SourceType_PACKAGE:
-		return PackageSource
+	case pb.InstallType_LOCAL:
+		return LocalInstall
+	case pb.InstallType_PACKAGE:
+		return PackageInstall
 	default:
-		return UnknownSource
+		return UnknownInstall
 	}
 }
 
-func (s *SourceType) UnmarshalYAML(unmarshal func(any) error) error {
+func (s *InstallType) UnmarshalYAML(unmarshal func(any) error) error {
 	var str string
 	if err := unmarshal(&str); err != nil {
 		return err
 	}
 	switch str {
 	case "local":
-		*s = LocalSource
+		*s = LocalInstall
 	case "package":
-		*s = PackageSource
+		*s = PackageInstall
 	default:
-		*s = UnknownSource
+		*s = UnknownInstall
 	}
 	return nil
 }
 
-func (s SourceType) MarshalYAML() (any, error) {
+func (s InstallType) MarshalYAML() (any, error) {
 	switch s {
-	case LocalSource:
+	case LocalInstall:
 		return "local", nil
-	case PackageSource:
+	case PackageInstall:
 		return "package", nil
 	default:
 		return "unknown", nil

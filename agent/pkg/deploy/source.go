@@ -9,11 +9,11 @@ import (
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
 )
 
-type Sourcerer interface {
-	ApplySource(ctx context.Context, add manifest.Source) error
-	DeleteSource(ctx context.Context, remove manifest.Source) error
-	ApplySourceInstall(ctx context.Context, source manifest.NodeSource) error
-	DeleteSourceInstall(ctx context.Context, source manifest.NodeSource) error
+type Installer interface {
+	ApplySourceRepo(ctx context.Context, add manifest.InstallSource) error
+	DeleteSourceRepo(ctx context.Context, remove manifest.InstallSource) error
+	ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error
+	DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error
 }
 
 func DetectPackageManager() (Package, error) {
@@ -33,57 +33,57 @@ func DetectPackageManager() (Package, error) {
 // Package provides the ability to install BeeGFS using the package manager. It implements any
 // general functionality and defers to the actual manager based on the specific distribution.
 type Package struct {
-	manager Sourcerer
+	manager Installer
 	// isLocal is set if the manifest specifies the source type is local. This indicates all package
 	// manager operations should be a no-op for this FS in the manifest. This allows the manifest to
 	// fully control the installation source independent of the deployment strategy for each agent.
 	isLocal bool
 }
 
-func (p *Package) ApplySource(ctx context.Context, add manifest.Source) error {
-	if add.Type == manifest.LocalSource {
+func (p *Package) ApplySourceRepo(ctx context.Context, add manifest.InstallSource) error {
+	if add.Type == manifest.LocalInstall {
 		p.isLocal = true
 		return nil
 	}
-	return p.manager.ApplySource(ctx, add)
+	return p.manager.ApplySourceRepo(ctx, add)
 }
 
-func (p *Package) DeleteSource(ctx context.Context, remove manifest.Source) error {
-	if remove.Type == manifest.LocalSource {
+func (p *Package) DeleteSourceRepo(ctx context.Context, remove manifest.InstallSource) error {
+	if remove.Type == manifest.LocalInstall {
 		p.isLocal = false
 		return nil
 	}
-	return p.manager.DeleteSource(ctx, remove)
+	return p.manager.DeleteSourceRepo(ctx, remove)
 }
 
-func (p *Package) ApplySourceInstall(ctx context.Context, source manifest.NodeSource) error {
-	if p.isLocal || source.Type == manifest.LocalSource {
+func (p *Package) ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+	if p.isLocal || source.Type == manifest.LocalInstall {
 		return nil
 	}
-	return p.manager.ApplySourceInstall(ctx, source)
+	return p.manager.ApplyInstall(ctx, source)
 }
 
-func (p *Package) DeleteSourceInstall(ctx context.Context, source manifest.NodeSource) error {
-	if p.isLocal || source.Type == manifest.LocalSource {
+func (p *Package) DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error {
+	if p.isLocal || source.Type == manifest.LocalInstall {
 		return nil
 	}
-	return p.manager.DeleteSourceInstall(ctx, source)
+	return p.manager.DeleteInstall(ctx, source)
 }
 
 type AptPackage struct{}
 
-func (p *AptPackage) ApplySource(ctx context.Context, add manifest.Source) error {
+func (p *AptPackage) ApplySourceRepo(ctx context.Context, add manifest.InstallSource) error {
 	return errors.New("not implemented")
 }
 
-func (p *AptPackage) DeleteSource(ctx context.Context, remove manifest.Source) error {
+func (p *AptPackage) DeleteSourceRepo(ctx context.Context, remove manifest.InstallSource) error {
 	return errors.New("not implemented")
 }
 
-func (p *AptPackage) ApplySourceInstall(ctx context.Context, source manifest.NodeSource) error {
+func (p *AptPackage) ApplyInstall(ctx context.Context, source manifest.NodeInstallSource) error {
 	return errors.New("not implemented")
 }
 
-func (p *AptPackage) DeleteSourceInstall(ctx context.Context, source manifest.NodeSource) error {
+func (p *AptPackage) DeleteInstall(ctx context.Context, source manifest.NodeInstallSource) error {
 	return errors.New("not implemented")
 }

@@ -25,8 +25,8 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 					StringMap: map[string]string{"key": "val"},
 				},
 			},
-			Source: &pb.Source{
-				Type: pb.SourceType_PACKAGE,
+			InstallSource: &pb.InstallSource{
+				Type: pb.InstallType_PACKAGE,
 				Refs: []*pb.SourceRef{
 					{
 						NodeType: pbb.NodeType_META,
@@ -49,8 +49,8 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 						Interfaces: []*pb.Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},
 						},
-						Source: &pb.Node_Source{
-							Type: pb.SourceType_LOCAL,
+						InstallSource: &pb.Node_InstallSource{
+							Type: pb.InstallType_LOCAL,
 							Ref:  "12345",
 						},
 						Targets: []*pb.Target{
@@ -83,7 +83,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 		input       Filesystem
 		expectedNIC string // Expected NIC name in node if inherited
 		expectedCfg map[string]string
-		expectedSrc NodeSource
+		expectedSrc NodeInstallSource
 	}{
 		{
 			name: "inherit source, NIC and meta config",
@@ -93,9 +93,9 @@ func TestInheritGlobalConfig(t *testing.T) {
 						"foo": "bar",           // inherited
 						"baz": "node-specific", // overridden
 					}},
-					Source: Source{
+					InstallSource: InstallSource{
 						Refs: SourceRefs{beegfs.Meta: "beegfs-meta=8.0.1"},
-						Type: PackageSource,
+						Type: PackageInstall,
 						Repo: "repoURL",
 					},
 				},
@@ -125,8 +125,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 				"foo": "bar",           // inherited
 				"baz": "node-specific", // overridden
 			},
-			expectedSrc: NodeSource{
-				Type: PackageSource,
+			expectedSrc: NodeInstallSource{
+				Type: PackageInstall,
 				Ref:  "beegfs-meta=8.0.1",
 			},
 		},
@@ -139,8 +139,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 							"quota": "enabled",
 						},
 					},
-					Source: Source{
-						Type: PackageSource,
+					InstallSource: InstallSource{
+						Type: PackageInstall,
 						Refs: SourceRefs{beegfs.Meta: "beegfs-meta=8.0.1"},
 						Repo: "repoURL",
 					},
@@ -158,8 +158,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 									{Name: "eth0", Addr: "192.168.0.1/24"},
 								},
 								Config: map[string]string{"quota": "override"},
-								Source: &NodeSource{
-									Type: LocalSource,
+								InstallSource: &NodeInstallSource{
+									Type: LocalInstall,
 									Ref:  "/home/tux/beegfs-meta",
 								},
 							},
@@ -171,8 +171,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 			expectedCfg: map[string]string{
 				"quota": "override",
 			},
-			expectedSrc: NodeSource{
-				Type: LocalSource,
+			expectedSrc: NodeInstallSource{
+				Type: LocalInstall,
 				Ref:  "/home/tux/beegfs-meta",
 			},
 		},
