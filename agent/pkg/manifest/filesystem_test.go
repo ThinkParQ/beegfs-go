@@ -181,14 +181,14 @@ func TestInheritGlobalConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := tt.input
-			fs.InheritGlobalConfig("testFS")
+			fs.InheritGlobalConfig("3b6f972b-64c7-4378-9f8e-172cf88c7d93")
 			agent := fs.Agents["agent1"]
 			service := agent.Services[0]
 			assert.Equal(t, tt.expectedNIC, service.Interfaces[0].Name)
 			assert.Equal(t, tt.expectedCfg, service.Config)
-			assert.Equal(t, "testFS", service.fsUUID)
+			assert.Equal(t, "3b6f972b", service.shortUUID)
 			for _, target := range service.Targets {
-				assert.Equal(t, "/beegfs/testFS/meta_1", target.GetPath(), "generated target path did not match")
+				assert.Equal(t, "/beegfs/3b6f972b/meta_1", target.GetPath(), "generated target path did not match")
 			}
 
 		})

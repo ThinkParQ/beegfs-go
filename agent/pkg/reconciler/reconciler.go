@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/agent/pkg/deploy"
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
 	pb "github.com/thinkparq/protobuf/go/agent"
@@ -142,7 +144,27 @@ func (r *defaultReconciler) verify(newFilesystems manifest.Filesystems) error {
 	if len(newFilesystems) == 0 {
 		return errors.New("manifest does not contain any file systems")
 	}
+
+	// shortToFullUUIDs is used to ensure the short UUIDs derived from the full v4 FS UUID do not
+	// have any collisions. While true collisions are HIGHLY unlikely from properly generated v4
+	// UUIDs, this might happen if there are user generated UUIDs, typos, or copy/paste errors.
+	shortToFullUUIDs := map[string]string{}
 	for fsUUID, fs := range newFilesystems {
+		fsUUID = strings.ToLower(fsUUID)
+		u, err := uuid.Parse(fsUUID)
+		if err != nil {
+			return fmt.Errorf("error parsing file system UUID: %w (is it a valid v4 UUID?)", err)
+		} else if u.Version() != 4 {
+			return fmt.Errorf("unsupported file system UUID version: %d (must be v4)", u.Version())
+		}
+		shortUUID := manifest.ShortUUID(u)
+		if conflictingUUID, ok := shortToFullUUIDs[shortUUID]; ok {
+			return fmt.Errorf(
+				"short UUID collision: %q derived from %q and %q (first %d characters are identical)",
+				shortUUID, fsUUID, conflictingUUID, manifest.ShortUUIDLen,
+			)
+		}
+		shortToFullUUIDs[shortUUID] = fsUUID
 		// TODO:
 		//  * Avoid necessary reconciliations by seeing if the manifest changed.
 		//  * Validate we can migrate from currentFS to newFS.
@@ -150,7 +172,7 @@ func (r *defaultReconciler) verify(newFilesystems manifest.Filesystems) error {
 		//    * All services have IPs + targets.
 		//    * Services have the correct number of targets (i.e., 1 for mgmtd meta, remote, sync).
 		// Note these should be implemented as methods on manifest.Filesystem.
-		fs.InheritGlobalConfig(fsUUID)
+		fs.InheritGlobalConfig(shortUUID)
 	}
 	go r.reconcile(newFilesystems)
 	return nil

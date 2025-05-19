@@ -7,10 +7,17 @@ package manifest
 import (
 	"os"
 
+	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pb "github.com/thinkparq/protobuf/go/agent"
 	"gopkg.in/yaml.v3"
 )
+
+const ShortUUIDLen = 8
+
+func ShortUUID(u uuid.UUID) string {
+	return u.String()[:ShortUUIDLen]
+}
 
 type Filesystem struct {
 	Agents map[string]Agent `yaml:"agents"`
@@ -28,11 +35,15 @@ type Nic struct {
 	Addr string `yaml:"address"`
 }
 
-func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
+// InheritGlobalConfig accepts a shortUUID used internally to generate globally unique names and
+// identifiers in case resources for multiple file systems exist on the same machine. Derived by
+// taking the first ShortUUIDLen hex digits of the full 128-bit v4 UUID. The caller is responsible
+// for validating the shortUUID including verifying no collisions are possible in this manifest.
+func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
 	for agentID, agent := range f.Agents {
 		for i := range agent.Services {
 			service := &agent.Services[i]
-			service.fsUUID = fsUUID
+			service.shortUUID = shortUUID
 			// Inherit global interface configuration if there are no service specific interfaces.
 			if len(service.Interfaces) == 0 {
 				service.Interfaces = agent.Interfaces
@@ -52,7 +63,7 @@ func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
 			}
 			// Inherit target configuration from the FS and service:
 			for t := range service.Targets {
-				agent.Services[i].Targets[t].fsUUID = fsUUID
+				agent.Services[i].Targets[t].shortUUID = shortUUID
 				agent.Services[i].Targets[t].nodeType = service.Type
 			}
 		}
