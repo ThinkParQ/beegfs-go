@@ -49,10 +49,7 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 						Interfaces: []*pb.Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},
 						},
-						InstallSource: &pb.Service_InstallSource{
-							Type: pb.InstallType_LOCAL,
-							Ref:  "12345",
-						},
+						Executable: "/opt/beegfs/beegfs-meta",
 						Targets: []*pb.Target{
 							{
 								NumId: 101,
@@ -79,11 +76,11 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 
 func TestInheritGlobalConfig(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       Filesystem
-		expectedNIC string // Expected NIC name in service if inherited
-		expectedCfg map[string]string
-		expectedSrc ServiceInstallSource
+		name         string
+		input        Filesystem
+		expectedNIC  string // Expected NIC name in service if inherited
+		expectedCfg  map[string]string
+		expectedExec string
 	}{
 		{
 			name: "inherit source, NIC and meta config",
@@ -125,10 +122,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 				"foo": "bar",              // inherited
 				"baz": "service-specific", // overridden
 			},
-			expectedSrc: ServiceInstallSource{
-				Type: PackageInstall,
-				Ref:  "beegfs-meta=8.0.1",
-			},
+			expectedExec: "/opt/beegfs/beegfs-meta",
 		},
 		{
 			name: "no inheritance if NICs or source are present",
@@ -157,11 +151,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 								Interfaces: []Nic{
 									{Name: "eth0", Addr: "192.168.0.1/24"},
 								},
-								Config: map[string]string{"quota": "override"},
-								InstallSource: &ServiceInstallSource{
-									Type: LocalInstall,
-									Ref:  "/home/tux/beegfs-meta",
-								},
+								Config:     map[string]string{"quota": "override"},
+								Executable: "/tmp/beegfs-meta",
 							},
 						},
 					},
@@ -171,17 +162,15 @@ func TestInheritGlobalConfig(t *testing.T) {
 			expectedCfg: map[string]string{
 				"quota": "override",
 			},
-			expectedSrc: ServiceInstallSource{
-				Type: LocalInstall,
-				Ref:  "/home/tux/beegfs-meta",
-			},
+			expectedExec: "/tmp/beegfs-meta",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := tt.input
-			fs.InheritGlobalConfig("3b6f972b-64c7-4378-9f8e-172cf88c7d93")
+			// 3b6f972b-64c7-4378-9f8e-172cf88c7d93
+			fs.InheritGlobalConfig("3b6f972b")
 			agent := fs.Agents["agent1"]
 			service := agent.Services[0]
 			assert.Equal(t, tt.expectedNIC, service.Interfaces[0].Name)

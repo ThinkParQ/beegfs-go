@@ -53,12 +53,14 @@ func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
 				service.Config = inheritMapDefaults(commonServiceConfig, service.Config)
 			}
 			// Inherit global source configuration based on the service type.
-			if service.InstallSource == nil || service.InstallSource.Ref == "" {
-				service.InstallSource = &ServiceInstallSource{
-					Type: f.Common.InstallSource.Type,
-				}
+			if service.Executable == "" {
 				if ref, ok := f.Common.InstallSource.Refs[service.Type]; ok {
-					service.InstallSource.Ref = ref
+					// If there is a global install reference for this service type use this to
+					// derive the executable path.
+					service.Executable = f.Common.InstallSource.refToExecutablePath(ref)
+				} else {
+					// Otherwise get the default executable path for this service type.
+					service.Executable = f.Common.InstallSource.nodeTypeToExecutablePath(service.Type)
 				}
 			}
 			// Inherit target configuration from the FS and service:
@@ -66,6 +68,10 @@ func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
 				agent.Services[i].Targets[t].shortUUID = shortUUID
 				agent.Services[i].Targets[t].nodeType = service.Type
 			}
+
+			// TODO: Inherit global conn.auth and TLS config based on service type. Return an error
+			// if users try to manually specify this in the global or per-service config somehow.
+			// Maybe this is implemented as methods on the Auth and TLS structs?
 		}
 		f.Agents[agentID] = agent
 	}
@@ -131,13 +137,7 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 				Config:     s.GetConfig(),
 				Interfaces: make([]Nic, 0),
 				Targets:    make([]Target, 0),
-			}
-
-			if s.InstallSource != nil {
-				service.InstallSource = &ServiceInstallSource{
-					Type: sourceTypeFromProto(s.GetInstallSource().GetType()),
-					Ref:  s.GetInstallSource().GetRef(),
-				}
+				Executable: s.GetExecutable(),
 			}
 
 			for _, i := range s.GetInterfaces() {
@@ -214,13 +214,7 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 				Config:      service.Config,
 				Interfaces:  make([]*pb.Nic, 0, len(service.Interfaces)),
 				Targets:     make([]*pb.Target, 0, len(service.Targets)),
-			}
-
-			if service.InstallSource != nil {
-				pbService.InstallSource = &pb.Service_InstallSource{
-					Type: service.InstallSource.Type.ToProto(),
-					Ref:  service.InstallSource.Ref,
-				}
+				Executable:  service.Executable,
 			}
 
 			for _, nic := range service.Interfaces {
