@@ -10,8 +10,8 @@ import (
 )
 
 type Servicer interface {
-	ApplyService(ctx context.Context, add manifest.Node) error
-	DestroyService(ctx context.Context, remove manifest.Node) error
+	ApplyService(ctx context.Context, add manifest.Service) error
+	DestroyService(ctx context.Context, remove manifest.Service) error
 }
 
 func NewSystemd(ctx context.Context) (Systemd, error) {
@@ -25,7 +25,7 @@ func NewSystemd(ctx context.Context) (Systemd, error) {
 
 }
 
-// Systemd provides a method to deploy BeeGFS nodes using systemd.
+// Systemd provides a method to deploy BeeGFS services using systemd.
 type Systemd struct {
 	conn *dbus.Conn
 }
@@ -35,10 +35,10 @@ func (d *Systemd) Cleanup() error {
 	return nil
 }
 
-func (d *Systemd) ApplyService(ctx context.Context, add manifest.Node) error {
+func (d *Systemd) ApplyService(ctx context.Context, add manifest.Service) error {
 	return errors.New("not implemented")
 }
 
-func (d *Systemd) DestroyService(ctx context.Context, remove manifest.Node) error {
+func (d *Systemd) DestroyService(ctx context.Context, remove manifest.Service) error {
 	return errors.New("not implemented")
 }

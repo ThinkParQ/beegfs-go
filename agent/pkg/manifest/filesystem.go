@@ -21,8 +21,8 @@ type Filesystem struct {
 }
 
 type Agent struct {
-	Nodes []Node `yaml:"nodes"`
-	// Global agent interfaces potentially reused by multiple nodes.
+	Services []Service `yaml:"services"`
+	// Global agent interfaces potentially reused by multiple services.
 	Interfaces []Nic `yaml:"interfaces"`
 }
 
@@ -33,30 +33,30 @@ type Nic struct {
 
 func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
 	for agentID, agent := range f.Agents {
-		for i := range agent.Nodes {
-			node := &agent.Nodes[i]
-			node.fsUUID = fsUUID
-			// Inherit global interface configuration if there are no node specific interfaces.
-			if len(node.Interfaces) == 0 {
-				node.Interfaces = agent.Interfaces
+		for i := range agent.Services {
+			service := &agent.Services[i]
+			service.fsUUID = fsUUID
+			// Inherit global interface configuration if there are no service specific interfaces.
+			if len(service.Interfaces) == 0 {
+				service.Interfaces = agent.Interfaces
 			}
-			// Inherit global node configuration based on the node type.
-			if commonNodeConfig, ok := f.Common.GlobalConfig[agent.Nodes[i].Type]; ok {
-				node.Config = inheritMapDefaults(commonNodeConfig, node.Config)
+			// Inherit global service configuration based on the service type.
+			if commonServiceConfig, ok := f.Common.GlobalConfig[agent.Services[i].Type]; ok {
+				service.Config = inheritMapDefaults(commonServiceConfig, service.Config)
 			}
-			// Inherit global source configuration based on the node type.
-			if node.InstallSource == nil || node.InstallSource.Ref == "" {
-				node.InstallSource = &NodeInstallSource{
+			// Inherit global source configuration based on the service type.
+			if service.InstallSource == nil || service.InstallSource.Ref == "" {
+				service.InstallSource = &ServiceInstallSource{
 					Type: f.Common.InstallSource.Type,
 				}
-				if ref, ok := f.Common.InstallSource.Refs[node.Type]; ok {
-					node.InstallSource.Ref = ref
+				if ref, ok := f.Common.InstallSource.Refs[service.Type]; ok {
+					service.InstallSource.Ref = ref
 				}
 			}
-			// Inherit target configuration from the FS and node:
-			for t := range node.Targets {
-				agent.Nodes[i].Targets[t].fsUUID = fsUUID
-				agent.Nodes[i].Targets[t].nodeType = node.Type
+			// Inherit target configuration from the FS and service:
+			for t := range service.Targets {
+				agent.Services[i].Targets[t].fsUUID = fsUUID
+				agent.Services[i].Targets[t].nodeType = service.Type
 			}
 		}
 		f.Agents[agentID] = agent
@@ -83,7 +83,7 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 
 	pSrc := protoFS.GetCommon().GetInstallSource()
 	fs.Common = Common{
-		GlobalConfig: nodeConfigsFromProto(protoFS.Common.GetGlobalConfig()),
+		GlobalConfig: serviceConfigsFromProto(protoFS.Common.GetGlobalConfig()),
 		InstallSource: InstallSource{
 			Type: sourceTypeFromProto(pSrc.Type),
 			Repo: pSrc.Repo,
@@ -107,7 +107,7 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 	fs.Agents = make(map[string]Agent, len(protoFS.GetAgent()))
 	for id, a := range protoFS.GetAgent() {
 		agent := Agent{
-			Nodes:      make([]Node, 0),
+			Services:   make([]Service, 0),
 			Interfaces: make([]Nic, 0),
 		}
 		for _, i := range a.GetInterfaces() {
@@ -116,30 +116,30 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 				Addr: i.Addr,
 			})
 		}
-		for _, n := range a.GetNodes() {
-			node := Node{
-				ID:         beegfs.NumId(n.GetNumId()),
-				Type:       beegfs.NodeTypeFromProto(n.NodeType),
-				Config:     n.GetConfig(),
+		for _, s := range a.GetServices() {
+			service := Service{
+				ID:         beegfs.NumId(s.GetNumId()),
+				Type:       beegfs.NodeTypeFromProto(s.ServiceType),
+				Config:     s.GetConfig(),
 				Interfaces: make([]Nic, 0),
 				Targets:    make([]Target, 0),
 			}
 
-			if n.InstallSource != nil {
-				node.InstallSource = &NodeInstallSource{
-					Type: sourceTypeFromProto(n.GetInstallSource().GetType()),
-					Ref:  n.GetInstallSource().GetRef(),
+			if s.InstallSource != nil {
+				service.InstallSource = &ServiceInstallSource{
+					Type: sourceTypeFromProto(s.GetInstallSource().GetType()),
+					Ref:  s.GetInstallSource().GetRef(),
 				}
 			}
 
-			for _, i := range n.GetInterfaces() {
-				node.Interfaces = append(node.Interfaces, Nic{
+			for _, i := range s.GetInterfaces() {
+				service.Interfaces = append(service.Interfaces, Nic{
 					Name: i.Name,
 					Addr: i.Addr,
 				})
 			}
 
-			for _, t := range n.GetTargets() {
+			for _, t := range s.GetTargets() {
 				target := Target{
 					ID:   beegfs.NumId(t.GetNumId()),
 					Path: t.GetPath(),
@@ -153,9 +153,9 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 					}
 
 				}
-				node.Targets = append(node.Targets, target)
+				service.Targets = append(service.Targets, target)
 			}
-			agent.Nodes = append(agent.Nodes, node)
+			agent.Services = append(agent.Services, service)
 		}
 		fs.Agents[id] = agent
 	}
@@ -190,7 +190,7 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 
 	for agentID, agent := range fs.Agents {
 		pbAgent := &pb.Agent{
-			Nodes:      make([]*pb.Node, 0, len(agent.Nodes)),
+			Services:   make([]*pb.Service, 0, len(agent.Services)),
 			Interfaces: make([]*pb.Nic, 0, len(agent.Interfaces)),
 		}
 		for _, i := range agent.Interfaces {
@@ -199,29 +199,29 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 				Addr: i.Addr,
 			})
 		}
-		for _, node := range agent.Nodes {
-			pbNode := &pb.Node{
-				NumId:      uint32(node.ID),
-				NodeType:   *node.Type.ToProto(),
-				Config:     node.Config,
-				Interfaces: make([]*pb.Nic, 0, len(node.Interfaces)),
-				Targets:    make([]*pb.Target, 0, len(node.Targets)),
+		for _, service := range agent.Services {
+			pbService := &pb.Service{
+				NumId:       uint32(service.ID),
+				ServiceType: *service.Type.ToProto(),
+				Config:      service.Config,
+				Interfaces:  make([]*pb.Nic, 0, len(service.Interfaces)),
+				Targets:     make([]*pb.Target, 0, len(service.Targets)),
 			}
 
-			if node.InstallSource != nil {
-				pbNode.InstallSource = &pb.Node_InstallSource{
-					Type: node.InstallSource.Type.ToProto(),
-					Ref:  node.InstallSource.Ref,
+			if service.InstallSource != nil {
+				pbService.InstallSource = &pb.Service_InstallSource{
+					Type: service.InstallSource.Type.ToProto(),
+					Ref:  service.InstallSource.Ref,
 				}
 			}
 
-			for _, nic := range node.Interfaces {
-				pbNode.Interfaces = append(pbNode.Interfaces, &pb.Nic{
+			for _, nic := range service.Interfaces {
+				pbService.Interfaces = append(pbService.Interfaces, &pb.Nic{
 					Name: nic.Name,
 					Addr: nic.Addr,
 				})
 			}
-			for _, tgt := range node.Targets {
+			for _, tgt := range service.Targets {
 				pbTarget := &pb.Target{
 					NumId: uint32(tgt.ID),
 					Path:  tgt.Path,
@@ -234,9 +234,9 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 						MountFlags:  tgt.ULFS.MountFlags,
 					}
 				}
-				pbNode.Targets = append(pbNode.Targets, pbTarget)
+				pbService.Targets = append(pbService.Targets, pbTarget)
 			}
-			pbAgent.Nodes = append(pbAgent.Nodes, pbNode)
+			pbAgent.Services = append(pbAgent.Services, pbService)
 		}
 		pbFS.Agent[agentID] = pbAgent
 	}

@@ -19,18 +19,18 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 				Key:  "tlsKey",
 				Cert: "tlsCert",
 			},
-			GlobalConfig: []*pb.NodeConfig{
+			GlobalConfig: []*pb.ServiceConfig{
 				{
-					NodeType:  pbb.NodeType_META,
-					StringMap: map[string]string{"key": "val"},
+					ServiceType: pbb.NodeType_META,
+					StringMap:   map[string]string{"key": "val"},
 				},
 			},
 			InstallSource: &pb.InstallSource{
 				Type: pb.InstallType_PACKAGE,
 				Refs: []*pb.SourceRef{
 					{
-						NodeType: pbb.NodeType_META,
-						Ref:      "ref",
+						ServiceType: pbb.NodeType_META,
+						Ref:         "ref",
 					},
 				},
 			},
@@ -41,15 +41,15 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 				Interfaces: []*pb.Nic{
 					{Name: "eth0", Addr: "11.0.0.1/16"},
 				},
-				Nodes: []*pb.Node{
+				Services: []*pb.Service{
 					{
-						NumId:    1,
-						NodeType: pbb.NodeType_META,
-						Config:   map[string]string{"nkey": "nval"},
+						NumId:       1,
+						ServiceType: pbb.NodeType_META,
+						Config:      map[string]string{"nkey": "nval"},
 						Interfaces: []*pb.Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},
 						},
-						InstallSource: &pb.Node_InstallSource{
+						InstallSource: &pb.Service_InstallSource{
 							Type: pb.InstallType_LOCAL,
 							Ref:  "12345",
 						},
@@ -81,17 +81,17 @@ func TestInheritGlobalConfig(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       Filesystem
-		expectedNIC string // Expected NIC name in node if inherited
+		expectedNIC string // Expected NIC name in service if inherited
 		expectedCfg map[string]string
-		expectedSrc NodeInstallSource
+		expectedSrc ServiceInstallSource
 	}{
 		{
 			name: "inherit source, NIC and meta config",
 			input: Filesystem{
 				Common: Common{
-					GlobalConfig: NodeConfigs{beegfs.Meta: map[string]string{
-						"foo": "bar",           // inherited
-						"baz": "node-specific", // overridden
+					GlobalConfig: ServiceConfigs{beegfs.Meta: map[string]string{
+						"foo": "bar",              // inherited
+						"baz": "service-specific", // overridden
 					}},
 					InstallSource: InstallSource{
 						Refs: SourceRefs{beegfs.Meta: "beegfs-meta=8.0.1"},
@@ -104,11 +104,11 @@ func TestInheritGlobalConfig(t *testing.T) {
 						Interfaces: []Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},
 						},
-						Nodes: []Node{
+						Services: []Service{
 							{
 								Type:   beegfs.Meta,
 								ID:     1,
-								Config: map[string]string{"baz": "node-specific"},
+								Config: map[string]string{"baz": "service-specific"},
 								Targets: []Target{
 									{
 										ID:   beegfs.NumId(1),
@@ -122,10 +122,10 @@ func TestInheritGlobalConfig(t *testing.T) {
 			},
 			expectedNIC: "ib0",
 			expectedCfg: map[string]string{
-				"foo": "bar",           // inherited
-				"baz": "node-specific", // overridden
+				"foo": "bar",              // inherited
+				"baz": "service-specific", // overridden
 			},
-			expectedSrc: NodeInstallSource{
+			expectedSrc: ServiceInstallSource{
 				Type: PackageInstall,
 				Ref:  "beegfs-meta=8.0.1",
 			},
@@ -134,7 +134,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 			name: "no inheritance if NICs or source are present",
 			input: Filesystem{
 				Common: Common{
-					GlobalConfig: NodeConfigs{
+					GlobalConfig: ServiceConfigs{
 						beegfs.Meta: map[string]string{
 							"quota": "enabled",
 						},
@@ -150,7 +150,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 						Interfaces: []Nic{
 							{Name: "ib0", Addr: "10.0.0.1/16"},
 						},
-						Nodes: []Node{
+						Services: []Service{
 							{
 								Type: beegfs.Meta,
 								ID:   2,
@@ -158,7 +158,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 									{Name: "eth0", Addr: "192.168.0.1/24"},
 								},
 								Config: map[string]string{"quota": "override"},
-								InstallSource: &NodeInstallSource{
+								InstallSource: &ServiceInstallSource{
 									Type: LocalInstall,
 									Ref:  "/home/tux/beegfs-meta",
 								},
@@ -171,7 +171,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 			expectedCfg: map[string]string{
 				"quota": "override",
 			},
-			expectedSrc: NodeInstallSource{
+			expectedSrc: ServiceInstallSource{
 				Type: LocalInstall,
 				Ref:  "/home/tux/beegfs-meta",
 			},
@@ -183,11 +183,11 @@ func TestInheritGlobalConfig(t *testing.T) {
 			fs := tt.input
 			fs.InheritGlobalConfig("testFS")
 			agent := fs.Agents["agent1"]
-			node := agent.Nodes[0]
-			assert.Equal(t, tt.expectedNIC, node.Interfaces[0].Name)
-			assert.Equal(t, tt.expectedCfg, node.Config)
-			assert.Equal(t, "testFS", node.fsUUID)
-			for _, target := range node.Targets {
+			service := agent.Services[0]
+			assert.Equal(t, tt.expectedNIC, service.Interfaces[0].Name)
+			assert.Equal(t, tt.expectedCfg, service.Config)
+			assert.Equal(t, "testFS", service.fsUUID)
+			for _, target := range service.Targets {
 				assert.Equal(t, "/beegfs/testFS/meta_1", target.GetPath(), "generated target path did not match")
 			}
 

@@ -1,4 +1,4 @@
-beegfs01: #fsUUID
+3b6f972b-64c7-4378-9f8e-172cf88c7d93: #fsUUID
   common:
     auth:
       secret: "sharedSecret"
@@ -47,7 +47,7 @@ beegfs01: #fsUUID
       interfaces:
         - name: enp0s1
           address: "127.0.0.1/24"
-      nodes:
+      services:
         - type: mgmtd
           targets:
             - id: 101
@@ -68,11 +68,11 @@ beegfs01: #fsUUID
               #   format_flags: foo
               #   mount_flags: baz
     agent2: # agentID
-      nodes:
+      services:
         - type: storage
           id: 1
           config:
             tuneNumWorkers: 28
     agent3: # agentID
-      nodes:
+      services:
         - type: client

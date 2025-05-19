@@ -8,10 +8,10 @@ import (
 )
 
 type Common struct {
-	Auth          *Auth         `yaml:"auth"`
-	TLS           *TLS          `yaml:"tls"`
-	GlobalConfig  NodeConfigs   `yaml:"config"`
-	InstallSource InstallSource `yaml:"install-source"`
+	Auth          *Auth          `yaml:"auth"`
+	TLS           *TLS           `yaml:"tls"`
+	GlobalConfig  ServiceConfigs `yaml:"config"`
+	InstallSource InstallSource  `yaml:"install-source"`
 }
 
 type Auth struct {
@@ -23,9 +23,9 @@ type TLS struct {
 	Cert string `yaml:"cert"`
 }
 
-type NodeConfigs map[beegfs.NodeType]map[string]string
+type ServiceConfigs map[beegfs.NodeType]map[string]string
 
-func (s *NodeConfigs) UnmarshalYAML(unmarshal func(any) error) error {
+func (s *ServiceConfigs) UnmarshalYAML(unmarshal func(any) error) error {
 	// We cannot directly apply validation to map[beegfs.NodeType]... during unmarshal because the
 	// YAML input uses string keys and as a result things blow up (spectacularly).
 	intermediate := map[string]map[string]string{}
@@ -33,7 +33,7 @@ func (s *NodeConfigs) UnmarshalYAML(unmarshal func(any) error) error {
 		return err
 	}
 
-	result := make(NodeConfigs, len(intermediate))
+	result := make(ServiceConfigs, len(intermediate))
 	for key, val := range intermediate {
 		nodeType := beegfs.NodeTypeFromString(key)
 		if nodeType == beegfs.InvalidNodeType {
@@ -46,22 +46,22 @@ func (s *NodeConfigs) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
-func (c NodeConfigs) toProto() []*pb.NodeConfig {
-	pbNodeConfigs := make([]*pb.NodeConfig, 0, len(c))
-	for nodeType, nodeMap := range c {
-		pbNodeConfigs = append(pbNodeConfigs, &pb.NodeConfig{
-			NodeType:  *nodeType.ToProto(),
-			StringMap: nodeMap,
+func (c ServiceConfigs) toProto() []*pb.ServiceConfig {
+	pbServiceConfigs := make([]*pb.ServiceConfig, 0, len(c))
+	for nodeType, serviceMap := range c {
+		pbServiceConfigs = append(pbServiceConfigs, &pb.ServiceConfig{
+			ServiceType: *nodeType.ToProto(),
+			StringMap:   serviceMap,
 		})
 	}
-	return pbNodeConfigs
+	return pbServiceConfigs
 }
 
-func nodeConfigsFromProto(m []*pb.NodeConfig) NodeConfigs {
-	nsm := make(NodeConfigs, len(m))
-	for _, node := range m {
-		if node != nil && node.GetStringMap() != nil {
-			nsm[beegfs.NodeTypeFromProto(node.NodeType)] = node.GetStringMap()
+func serviceConfigsFromProto(m []*pb.ServiceConfig) ServiceConfigs {
+	nsm := make(ServiceConfigs, len(m))
+	for _, service := range m {
+		if service != nil && service.GetStringMap() != nil {
+			nsm[beegfs.NodeTypeFromProto(service.ServiceType)] = service.GetStringMap()
 		}
 	}
 	return nsm
@@ -100,8 +100,8 @@ func (c SourceRefs) toProto() []*pb.SourceRef {
 	pbSourceRefs := make([]*pb.SourceRef, 0, len(c))
 	for nodeType, ref := range c {
 		pbSourceRefs = append(pbSourceRefs, &pb.SourceRef{
-			NodeType: *nodeType.ToProto(),
-			Ref:      ref,
+			ServiceType: *nodeType.ToProto(),
+			Ref:         ref,
 		})
 	}
 	return pbSourceRefs
@@ -111,7 +111,7 @@ func sourceRefsFromProto(r []*pb.SourceRef) SourceRefs {
 	srs := make(SourceRefs, len(r))
 	for _, ref := range r {
 		if ref != nil {
-			srs[beegfs.NodeTypeFromProto(ref.NodeType)] = ref.GetRef()
+			srs[beegfs.NodeTypeFromProto(ref.ServiceType)] = ref.GetRef()
 		}
 	}
 	return srs

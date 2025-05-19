@@ -32,7 +32,7 @@ var (
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
 	pflag.String("cfg-file", "/etc/beegfs/agent.toml", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). When Remote Storage Targets are configured using a file, they can be updated without restarting the application.")
-	pflag.String("agent-id", "0", "A unique ID used to identify what nodes from the manifest this agent is responsible for. Should not change after initially starting the agent.")
+	pflag.String("agent-id", "0", "A unique ID used to identify what services from the manifest this agent is responsible for. Should not change after initially starting the agent.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-remote.log", "The path to the desired log file when logType is 'log.file' (if needed the directory and all parent directories will be created).")
 	pflag.Int8("log.level", 3, "Adjust the logging level (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
