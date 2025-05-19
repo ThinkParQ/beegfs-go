@@ -5,27 +5,12 @@
 package manifest
 
 import (
-	"fmt"
 	"os"
-	"path"
-	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pb "github.com/thinkparq/protobuf/go/agent"
 	"gopkg.in/yaml.v3"
 )
-
-func New() Filesystem {
-	return Filesystem{
-		Agents: make(map[string]Agent),
-		Common: Common{
-			MetaConfig:    make(map[string]string),
-			StorageConfig: make(map[string]string),
-			ClientConfig:  make(map[string]string),
-			Source:        Source{},
-		},
-	}
-}
 
 // Filesystems is a map of FsUUIDs to file systems.
 type Filesystems map[string]Filesystem
@@ -35,88 +20,15 @@ type Filesystem struct {
 	Common Common           `yaml:"common"`
 }
 
-type SourceType int
-
-const (
-	UnknownSource SourceType = iota
-	LocalSource
-	PackageSource
-)
-
-func (s SourceType) ToProto() pb.SourceType {
-	switch s {
-	case LocalSource:
-		return pb.SourceType_LOCAL
-	case PackageSource:
-		return pb.SourceType_PACKAGE
-	default:
-		return pb.SourceType_UNKNOWN
-	}
+type Agent struct {
+	Nodes []Node `yaml:"nodes"`
+	// Global agent interfaces potentially reused by multiple nodes.
+	Interfaces []Nic `yaml:"interfaces"`
 }
 
-func SourceTypeFromProto(st pb.SourceType) SourceType {
-	switch st {
-	case pb.SourceType_LOCAL:
-		return LocalSource
-	case pb.SourceType_PACKAGE:
-		return PackageSource
-	default:
-		return UnknownSource
-	}
-}
-
-func (s *SourceType) UnmarshalYAML(unmarshal func(any) error) error {
-	var str string
-	if err := unmarshal(&str); err != nil {
-		return err
-	}
-	switch str {
-	case "local":
-		*s = LocalSource
-	case "package":
-		*s = PackageSource
-	default:
-		*s = UnknownSource
-	}
-	return nil
-}
-
-func (s SourceType) MarshalYAML() (any, error) {
-	switch s {
-	case LocalSource:
-		return "local", nil
-	case PackageSource:
-		return "package", nil
-	default:
-		return "unknown", nil
-	}
-}
-
-type Source struct {
-	Type       SourceType `yaml:"type"`
-	Repo       string     `yaml:"repo"`
-	Management string     `yaml:"management"`
-	Meta       string     `yaml:"meta"`
-	Storage    string     `yaml:"storage"`
-	Remote     string     `yaml:"remote"`
-	Sync       string     `yaml:"sync"`
-}
-
-func (s Source) refForNodeType(t beegfs.NodeType) string {
-	switch t {
-	case beegfs.Meta:
-		return s.Meta
-	case beegfs.Storage:
-		return s.Storage
-	case beegfs.Management:
-		return s.Management
-	case beegfs.Remote:
-		return s.Remote
-	case beegfs.Sync:
-		return s.Sync
-	default:
-		return ""
-	}
+type Nic struct {
+	Name string `yaml:"name"`
+	Addr string `yaml:"address"`
 }
 
 func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
@@ -129,19 +41,16 @@ func (f *Filesystem) InheritGlobalConfig(fsUUID string) {
 				node.Interfaces = agent.Interfaces
 			}
 			// Inherit global node configuration based on the node type.
-			switch agent.Nodes[i].Type {
-			case beegfs.Meta:
-				node.Config = inheritMapDefaults(f.Common.MetaConfig, node.Config)
-			case beegfs.Storage:
-				node.Config = inheritMapDefaults(f.Common.StorageConfig, node.Config)
-			case beegfs.Client:
-				node.Config = inheritMapDefaults(f.Common.ClientConfig, node.Config)
+			if commonNodeConfig, ok := f.Common.GlobalConfig[agent.Nodes[i].Type]; ok {
+				node.Config = inheritMapDefaults(commonNodeConfig, node.Config)
 			}
 			// Inherit global source configuration based on the node type.
 			if node.Source == nil || node.Source.Ref == "" {
 				node.Source = &NodeSource{
 					Type: f.Common.Source.Type,
-					Ref:  f.Common.Source.refForNodeType(node.Type),
+				}
+				if ref, ok := f.Common.Source.Refs[node.Type]; ok {
+					node.Source.Ref = ref
 				}
 			}
 			// Inherit target configuration from the FS and node:
@@ -166,148 +75,36 @@ func inheritMapDefaults(defaults, target map[string]string) map[string]string {
 	return target
 }
 
-type Common struct {
-	Auth          string            `yaml:"auth"`
-	MetaConfig    map[string]string `yaml:"meta_config"`
-	StorageConfig map[string]string `yaml:"storage_config"`
-	ClientConfig  map[string]string `yaml:"client_config"`
-	Source        Source            `yaml:"source"`
-}
-
-type Agent struct {
-	Nodes []Node `yaml:"nodes"`
-	// Global interfaces potentially reused by multiple nodes.
-	Interfaces []Nic `yaml:"interfaces"`
-}
-
-type Node struct {
-	// fsUUID is set by InheritGlobalConfig and used internally to generate globally unique names
-	// and identifiers in case resources for multiple file systems exist on the same machine.
-	fsUUID     string
-	ID         beegfs.NumId      `yaml:"id"`
-	Type       beegfs.NodeType   `yaml:"type"`
-	Config     map[string]string `yaml:"config"`
-	Interfaces []Nic             `yaml:"interfaces"`
-	Targets    []Target          `yaml:"targets"`
-	Source     *NodeSource       `yaml:"source,omitempty"`
-}
-
-func (n Node) GetSystemdUnit() string {
-	return fmt.Sprintf("beegfs-%s-%s-%d.service", n.fsUUID, n.Type, n.ID)
-}
-
-type NodeSource struct {
-	Type SourceType `yaml:"type"`
-	Ref  string     `yaml:"ref"`
-}
-
-type Nic struct {
-	Name string `yaml:"name"`
-	Addr string `yaml:"address"`
-}
-
-type Target struct {
-	// fsUUID is set by InheritGlobalConfig and used internally to generate globally unique names
-	// and identifiers in case resources for multiple file systems exist on the same machine.
-	fsUUID   string
-	nodeType beegfs.NodeType
-	ID       beegfs.NumId  `yaml:"id"`
-	RootDir  string        `yaml:"root_dir"`
-	ULFS     *UnderlyingFS `yaml:"ulfs"`
-}
-
-func (t Target) GetPath() string {
-	return path.Join(t.RootDir, t.fsUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
-}
-
-type UnderlyingFS struct {
-	Device      string           `yaml:"device"`
-	Type        UnderlyingFSType `yaml:"type"`
-	FormatFlags string           `yaml:"format_flags"`
-	MountFlags  string           `yaml:"mount_flags"`
-}
-
-type UnderlyingFSType int
-
-const (
-	UnknownUnderlyingFS UnderlyingFSType = iota
-	EXT4UnderlyingFS
-)
-
-func (t UnderlyingFSType) String() string {
-	switch t {
-	case EXT4UnderlyingFS:
-		return "ext4"
-	default:
-		return "unknown"
-	}
-}
-
-func (t *UnderlyingFSType) UnmarshalYAML(unmarshal func(any) error) error {
-	var s string
-	if err := unmarshal(&s); err != nil {
-		return err
-	}
-
-	switch strings.ToLower(s) {
-	case "ext4":
-		*t = EXT4UnderlyingFS
-	default:
-		return fmt.Errorf("invalid underlying fs type: %s", s)
-	}
-	return nil
-}
-
-func (t UnderlyingFSType) MarshalYAML() (any, error) {
-	switch t {
-	case EXT4UnderlyingFS:
-		return "ext4", nil
-	default:
-		return nil, fmt.Errorf("unknown fs type: %d", t)
-	}
-}
-
-func fsTypeFromProto(fs pb.Target_UnderlyingFSOpts_FsType) UnderlyingFSType {
-	switch fs {
-	case pb.Target_UnderlyingFSOpts_EXT4:
-		return EXT4UnderlyingFS
-	default:
-		return UnknownUnderlyingFS
-	}
-}
-
-func fsTypeToProto(fs UnderlyingFSType) pb.Target_UnderlyingFSOpts_FsType {
-	switch fs {
-	case EXT4UnderlyingFS:
-		return pb.Target_UnderlyingFSOpts_EXT4
-	default:
-		return pb.Target_UnderlyingFSOpts_UNSPECIFIED
-	}
-}
-
 func FromProto(protoFS *pb.Filesystem) Filesystem {
-	fs := New()
+	var fs Filesystem
 	if protoFS == nil {
 		return fs
 	}
 
 	pSrc := protoFS.GetCommon().GetSource()
 	fs.Common = Common{
-		Auth:          protoFS.GetCommon().GetAuth(),
-		MetaConfig:    protoFS.GetCommon().GetMetaConfig(),
-		StorageConfig: protoFS.GetCommon().GetStorageConfig(),
-		ClientConfig:  protoFS.GetCommon().GetClientConfig(),
+		GlobalConfig: nodeConfigsFromProto(protoFS.Common.GetGlobalConfig()),
 		Source: Source{
-			Type:       SourceTypeFromProto(pSrc.Type),
-			Repo:       pSrc.Repo,
-			Management: pSrc.Management,
-			Meta:       pSrc.Meta,
-			Storage:    pSrc.Storage,
-			Remote:     pSrc.Remote,
-			Sync:       pSrc.Sync,
+			Type: sourceTypeFromProto(pSrc.Type),
+			Repo: pSrc.Repo,
+			Refs: sourceRefsFromProto(pSrc.Refs),
 		},
 	}
 
+	if protoFS.GetCommon().GetAuth() != nil {
+		fs.Common.Auth = &Auth{
+			Secret: protoFS.GetCommon().GetAuth().GetSecret(),
+		}
+	}
+
+	if protoFS.GetCommon().GetTls() != nil {
+		fs.Common.TLS = &TLS{
+			Key:  protoFS.GetCommon().GetTls().GetKey(),
+			Cert: protoFS.GetCommon().GetTls().GetCert(),
+		}
+	}
+
+	fs.Agents = make(map[string]Agent, len(protoFS.GetAgent()))
 	for id, a := range protoFS.GetAgent() {
 		agent := Agent{
 			Nodes:      make([]Node, 0),
@@ -330,7 +127,7 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 
 			if n.Source != nil {
 				node.Source = &NodeSource{
-					Type: SourceTypeFromProto(n.GetSource().GetType()),
+					Type: sourceTypeFromProto(n.GetSource().GetType()),
 					Ref:  n.GetSource().GetRef(),
 				}
 			}
@@ -350,7 +147,7 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 				if t.GetUlfs() != nil {
 					target.ULFS = &UnderlyingFS{
 						Device:      t.GetUlfs().GetDevice(),
-						Type:        fsTypeFromProto(t.GetUlfs().GetType()),
+						Type:        ulfsTypeFromProto(t.GetUlfs().GetType()),
 						FormatFlags: t.GetUlfs().GetFormatFlags(),
 						MountFlags:  t.GetUlfs().GetMountFlags(),
 					}
@@ -368,22 +165,27 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 func ToProto(fs *Filesystem) *pb.Filesystem {
 	pbFS := &pb.Filesystem{
 		Common: &pb.Filesystem_Common{
-			Auth:          fs.Common.Auth,
-			MetaConfig:    fs.Common.MetaConfig,
-			StorageConfig: fs.Common.StorageConfig,
-			ClientConfig:  fs.Common.ClientConfig,
-			Source: &pb.Filesystem_Common_Source{
-				Type:       fs.Common.Source.Type.ToProto(),
-				Repo:       fs.Common.Source.Repo,
-				Management: fs.Common.Source.Management,
-				Meta:       fs.Common.Source.Meta,
-				Storage:    fs.Common.Source.Storage,
-				Remote:     fs.Common.Source.Remote,
-				Sync:       fs.Common.Source.Sync,
+			GlobalConfig: fs.Common.GlobalConfig.toProto(),
+			Source: &pb.Source{
+				Type: fs.Common.Source.Type.ToProto(),
+				Repo: fs.Common.Source.Repo,
+				Refs: fs.Common.Source.Refs.toProto(),
 			},
 		},
-
 		Agent: make(map[string]*pb.Agent),
+	}
+
+	if fs.Common.Auth != nil {
+		pbFS.Common.Auth = &pb.Auth{
+			Secret: fs.Common.Auth.Secret,
+		}
+	}
+
+	if fs.Common.TLS != nil {
+		pbFS.Common.Tls = &pb.TLS{
+			Key:  fs.Common.TLS.Key,
+			Cert: fs.Common.TLS.Cert,
+		}
 	}
 
 	for agentID, agent := range fs.Agents {
@@ -427,7 +229,7 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 				if tgt.ULFS != nil {
 					pbTarget.Ulfs = &pb.Target_UnderlyingFSOpts{
 						Device:      tgt.ULFS.Device,
-						Type:        fsTypeToProto(tgt.ULFS.Type),
+						Type:        tgt.ULFS.Type.toProto(),
 						FormatFlags: tgt.ULFS.FormatFlags,
 						MountFlags:  tgt.ULFS.MountFlags,
 					}

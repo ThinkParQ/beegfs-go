@@ -12,12 +12,27 @@ import (
 func TestFromToProto_RoundTrip(t *testing.T) {
 	original := &pb.Filesystem{
 		Common: &pb.Filesystem_Common{
-			Auth:          "secret",
-			MetaConfig:    map[string]string{"key1": "val1"},
-			StorageConfig: map[string]string{"key2": "val2"},
-			ClientConfig:  map[string]string{"key3": "val3"},
-			Source: &pb.Filesystem_Common_Source{
+			Auth: &pb.Auth{
+				Secret: "secret",
+			},
+			Tls: &pb.TLS{
+				Key:  "tlsKey",
+				Cert: "tlsCert",
+			},
+			GlobalConfig: []*pb.NodeConfig{
+				{
+					NodeType:  pbb.NodeType_META,
+					StringMap: map[string]string{"key": "val"},
+				},
+			},
+			Source: &pb.Source{
 				Type: pb.SourceType_PACKAGE,
+				Refs: []*pb.SourceRef{
+					{
+						NodeType: pbb.NodeType_META,
+						Ref:      "ref",
+					},
+				},
 			},
 		},
 
@@ -74,13 +89,14 @@ func TestInheritGlobalConfig(t *testing.T) {
 			name: "inherit source, NIC and meta config",
 			input: Filesystem{
 				Common: Common{
-					MetaConfig: map[string]string{
-						"foo": "bar",
-						"baz": "global",
-					},
+					GlobalConfig: NodeConfigs{beegfs.Meta: map[string]string{
+						"foo": "bar",           // inherited
+						"baz": "node-specific", // overridden
+					}},
 					Source: Source{
+						Refs: SourceRefs{beegfs.Meta: "beegfs-meta=8.0.1"},
 						Type: PackageSource,
-						Meta: "beegfs-meta=8.0.1",
+						Repo: "repoURL",
 					},
 				},
 				Agents: map[string]Agent{
@@ -118,12 +134,15 @@ func TestInheritGlobalConfig(t *testing.T) {
 			name: "no inheritance if NICs or source are present",
 			input: Filesystem{
 				Common: Common{
-					MetaConfig: map[string]string{
-						"quota": "enabled",
+					GlobalConfig: NodeConfigs{
+						beegfs.Meta: map[string]string{
+							"quota": "enabled",
+						},
 					},
 					Source: Source{
 						Type: PackageSource,
-						Meta: "beegfs-meta=8.0.1",
+						Refs: SourceRefs{beegfs.Meta: "beegfs-meta=8.0.1"},
+						Repo: "repoURL",
 					},
 				},
 				Agents: map[string]Agent{
