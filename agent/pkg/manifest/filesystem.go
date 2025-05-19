@@ -12,9 +12,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Filesystems is a map of FsUUIDs to file systems.
-type Filesystems map[string]Filesystem
-
 type Filesystem struct {
 	Agents map[string]Agent `yaml:"agents"`
 	Common Common           `yaml:"common"`
@@ -243,20 +240,20 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 	return pbFS
 }
 
-func FromDisk(path string) (Filesystems, error) {
+func FromDisk(path string) (Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return Manifest{}, err
 	}
-	var filesystems Filesystems
-	if err := yaml.Unmarshal(data, &filesystems); err != nil {
-		return nil, err
+	var manifest Manifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return Manifest{}, err
 	}
-	return filesystems, nil
+	return manifest, nil
 }
 
-func ToDisk(filesystems Filesystems, path string) error {
-	data, err := yaml.Marshal(&filesystems)
+func ToDisk(manifest Manifest, path string) error {
+	data, err := yaml.Marshal(&manifest)
 	if err != nil {
 		return err
 	}
