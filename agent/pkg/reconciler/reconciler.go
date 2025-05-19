@@ -7,6 +7,7 @@ import (
 	"path"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/agent/pkg/deploy"
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
@@ -46,13 +47,13 @@ type ReconcileResult struct {
 }
 
 type defaultReconciler struct {
-	agentID        string
-	log            *zap.Logger
-	mu             sync.Mutex
-	activeManifest manifest.Filesystems
-	state          state
-	config         Config
-	strategy       deploy.Deployer
+	agentID  string
+	log      *zap.Logger
+	mu       sync.Mutex
+	active   manifest.Manifest
+	state    state
+	config   Config
+	strategy deploy.Deployer
 }
 
 func New(ctx context.Context, agentID string, log *zap.Logger, config Config) (Reconciler, error) {
@@ -115,33 +116,33 @@ func (r *defaultReconciler) UpdateConfiguration(config any) error {
 		r.mu.Lock()
 		r.config = configurer.GetReconcilerConfig()
 		r.log.Info("loading file system manifest", zap.String("path", r.config.ManifestPath))
-		newFS, err := manifest.FromDisk(r.config.ManifestPath)
+		newManifest, err := manifest.FromDisk(r.config.ManifestPath)
 		r.mu.Unlock()
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrLoadingManifest, err)
 		}
-		return r.verify(newFS)
-	} else if newFS, ok := config.(manifest.Filesystems); ok {
+		return r.verify(newManifest.Filesystems)
+	} else if newManifest, ok := config.(manifest.Manifest); ok {
 		r.mu.Lock()
 		r.log.Info("saving file system manifest", zap.String("path", r.config.ActiveManifestPath))
-		err := manifest.ToDisk(newFS, r.config.ManifestPath)
+		err := manifest.ToDisk(newManifest, r.config.ManifestPath)
 		r.mu.Unlock()
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrBadManifest, err)
+			return fmt.Errorf("%w: %w", ErrSavingManifest, err)
 		}
-		return r.verify(newFS)
+		return r.verify(newManifest.Filesystems)
 	}
-	return fmt.Errorf("received unexpected reconciler configuration (most likely this indicates a bug and a report should be filed)")
+	return fmt.Errorf("%w: received unexpected manifest (most likely this indicates a bug and a report should be filed)", ErrBadManifest)
 }
 
 // Verify performs any checks that can be done without actually reconciling the manifest. This
 // allows a response to be returned quickly while the reconciliation happens in the background.
-func (r *defaultReconciler) verify(newManifest manifest.Filesystems) error {
+func (r *defaultReconciler) verify(newFilesystems manifest.Filesystems) error {
 	r.log.Info("verifying manifest")
-	if len(newManifest) == 0 {
+	if len(newFilesystems) == 0 {
 		return errors.New("manifest does not contain any file systems")
 	}
-	for fsUUID, fs := range newManifest {
+	for fsUUID, fs := range newFilesystems {
 		// TODO:
 		//  * Avoid necessary reconciliations by seeing if the manifest changed.
 		//  * Validate we can migrate from currentFS to newFS.
@@ -151,18 +152,18 @@ func (r *defaultReconciler) verify(newManifest manifest.Filesystems) error {
 		// Note these should be implemented as methods on manifest.Filesystem.
 		fs.InheritGlobalConfig(fsUUID)
 	}
-	go r.reconcile(newManifest)
+	go r.reconcile(newFilesystems)
 	return nil
 }
 
 // Reconcile attempts to move the local state from the currentFS to the newFS.
-func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
+func (r *defaultReconciler) reconcile(newFilesystems manifest.Filesystems) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.log.Debug("reconciling", zap.Any("filesystem", newManifest))
+	r.log.Debug("reconciling", zap.Any("filesystem", newFilesystems))
 	ctx := r.state.start()
 
-	for fsUUID, fs := range newManifest {
+	for fsUUID, fs := range newFilesystems {
 		agent, ok := fs.Agents[r.agentID]
 		if !ok {
 			// Not all file systems in this manifest may have configuration for this agent. It is
@@ -208,7 +209,12 @@ func (r *defaultReconciler) reconcile(newManifest manifest.Filesystems) {
 			}
 		}
 	}
-	r.activeManifest = newManifest
-	manifest.ToDisk(r.activeManifest, r.config.ActiveManifestPath)
+	r.active = manifest.Manifest{
+		Metadata: manifest.Metadata{
+			Updated: time.Now(),
+		},
+		Filesystems: newFilesystems,
+	}
+	manifest.ToDisk(r.active, r.config.ActiveManifestPath)
 	r.state.complete(pb.Status_SUCCESS)
 }

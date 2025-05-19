@@ -81,7 +81,7 @@ func (s *AgentServer) Stop() {
 	s.wg.Wait()
 }
 
-func (s *AgentServer) Update(ctx context.Context, request *pb.UpdateRequest) (*pb.UpdateResponse, error) {
+func (s *AgentServer) UpdateManifest(ctx context.Context, request *pb.UpdateManifestRequest) (*pb.UpdateManifestResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 
@@ -93,34 +93,36 @@ func (s *AgentServer) Update(ctx context.Context, request *pb.UpdateRequest) (*p
 		filesystems[fsUUID] = manifest.FromProto(protoFS)
 	}
 
-	if err := s.reconciler.UpdateConfiguration(filesystems); err != nil {
+	if err := s.reconciler.UpdateConfiguration(manifest.Manifest{
+		Filesystems: filesystems,
+	}); err != nil {
 		return nil, grpcStatusFrom(err)
 	}
-	return &pb.UpdateResponse{
+	return &pb.UpdateManifestResponse{
 		AgentId: s.reconciler.GetAgentID(),
 	}, nil
 }
 
-func (s *AgentServer) Status(ctx context.Context, request *pb.StatusRequest) (*pb.StatusResponse, error) {
+func (s *AgentServer) ReconciliationStatus(ctx context.Context, request *pb.ReconciliationStatusRequest) (*pb.ReconciliationStatusResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 	if result, err := s.reconciler.Status(); err != nil {
 		return nil, grpcStatusFrom(err)
 	} else {
-		return &pb.StatusResponse{
+		return &pb.ReconciliationStatusResponse{
 			Status:  result.Status,
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil
 	}
 }
 
-func (s *AgentServer) Cancel(ctx context.Context, request *pb.CancelRequest) (*pb.CancelResponse, error) {
+func (s *AgentServer) CancelReconciliation(ctx context.Context, request *pb.CancelReconciliationRequest) (*pb.CancelReconciliationResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 	if result, err := s.reconciler.Cancel(request.GetReason()); err != nil {
 		return nil, grpcStatusFrom(err)
 	} else {
-		return &pb.CancelResponse{
+		return &pb.CancelReconciliationResponse{
 			Status:  result.Status,
 			AgentId: s.reconciler.GetAgentID(),
 		}, nil
