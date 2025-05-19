@@ -23,6 +23,9 @@ type state struct {
 }
 
 func newAgentState(l *zap.Logger) state {
+	// Always initialize with a valid context even though it is always replaced when starting a
+	// reconciliation. Otherwise stopping the reconciler would SIGSEGV when calling cancel.
+	ctx, cancel := context.WithCancel(context.Background())
 	return state{
 		current: pb.Status{
 			State:    pb.Status_IDLE,
@@ -32,6 +35,8 @@ func newAgentState(l *zap.Logger) state {
 		historical: make(map[time.Time]*pb.Status),
 		mu:         sync.Mutex{},
 		logger:     l,
+		ctx:        ctx,
+		ctxCancel:  cancel,
 	}
 }
 
