@@ -51,7 +51,7 @@ beegfs01: #fsUUID
         - type: mgmtd
           targets:
             - id: 101
-              root_dir: /beegfs/
+              path: /beegfs/
         - type: meta
           id: 1
           install-source:
@@ -61,7 +61,7 @@ beegfs01: #fsUUID
             - name: enp0s1 # IP configuration handled globally
           targets:
             - id: 101
-              root_dir: /beegfs/
+              path: /beegfs/
               # ulfs:
               #   device: /dev/sda1
               #   type: ext4

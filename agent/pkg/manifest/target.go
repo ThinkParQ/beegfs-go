@@ -15,12 +15,12 @@ type Target struct {
 	fsUUID   string
 	nodeType beegfs.NodeType
 	ID       beegfs.NumId  `yaml:"id"`
-	RootDir  string        `yaml:"root_dir"`
+	Path     string        `yaml:"path"`
 	ULFS     *UnderlyingFS `yaml:"ulfs"`
 }
 
 func (t Target) GetPath() string {
-	return path.Join(t.RootDir, t.fsUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
+	return path.Join(t.Path, t.fsUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
 }
 
 type UnderlyingFS struct {
