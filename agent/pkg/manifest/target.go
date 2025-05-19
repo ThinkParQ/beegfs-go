@@ -10,17 +10,17 @@ import (
 )
 
 type Target struct {
-	// fsUUID is set by InheritGlobalConfig and used internally to generate globally unique names
+	// shortUUID is set by InheritGlobalConfig and used internally to generate globally unique names
 	// and identifiers in case resources for multiple file systems exist on the same machine.
-	fsUUID   string
-	nodeType beegfs.NodeType
-	ID       beegfs.NumId  `yaml:"id"`
-	Path     string        `yaml:"path"`
-	ULFS     *UnderlyingFS `yaml:"ulfs"`
+	shortUUID string
+	nodeType  beegfs.NodeType
+	ID        beegfs.NumId  `yaml:"id"`
+	Path      string        `yaml:"path"`
+	ULFS      *UnderlyingFS `yaml:"ulfs"`
 }
 
 func (t Target) GetPath() string {
-	return path.Join(t.Path, t.fsUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
+	return path.Join(t.Path, t.shortUUID, fmt.Sprintf("%s_%d", t.nodeType, t.ID))
 }
 
 type UnderlyingFS struct {
