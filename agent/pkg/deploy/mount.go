@@ -23,7 +23,7 @@ func (m *Mount) ApplyTargets(ctx context.Context, add []manifest.Target) error {
 			return fmt.Errorf("unable to apply target %d: formatting and/or mounting an underlying file system is not implemented yet", target.ID)
 		}
 		if err := os.MkdirAll(target.GetPath(), 0700); err != nil {
-			return fmt.Errorf("unable to apply target %d: unable to create root directory %s: %w", target.ID, target.RootDir, err)
+			return fmt.Errorf("unable to apply target %d: unable to create root directory %s: %w", target.ID, target.Path, err)
 		}
 	}
 	return nil

@@ -55,8 +55,8 @@ func TestFromToProto_RoundTrip(t *testing.T) {
 						},
 						Targets: []*pb.Target{
 							{
-								NumId:   101,
-								RootDir: "/mnt",
+								NumId: 101,
+								Path:  "/mnt",
 								Ulfs: &pb.Target_UnderlyingFSOpts{
 									Device:      "/dev/sda1",
 									Type:        pb.Target_UnderlyingFSOpts_EXT4,
@@ -111,8 +111,8 @@ func TestInheritGlobalConfig(t *testing.T) {
 								Config: map[string]string{"baz": "node-specific"},
 								Targets: []Target{
 									{
-										ID:      beegfs.NumId(1),
-										RootDir: "/beegfs/",
+										ID:   beegfs.NumId(1),
+										Path: "/beegfs/",
 									},
 								},
 							},

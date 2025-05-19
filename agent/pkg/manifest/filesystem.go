@@ -141,8 +141,8 @@ func FromProto(protoFS *pb.Filesystem) Filesystem {
 
 			for _, t := range n.GetTargets() {
 				target := Target{
-					ID:      beegfs.NumId(t.GetNumId()),
-					RootDir: t.GetRootDir(),
+					ID:   beegfs.NumId(t.GetNumId()),
+					Path: t.GetPath(),
 				}
 				if t.GetUlfs() != nil {
 					target.ULFS = &UnderlyingFS{
@@ -223,8 +223,8 @@ func ToProto(fs *Filesystem) *pb.Filesystem {
 			}
 			for _, tgt := range node.Targets {
 				pbTarget := &pb.Target{
-					NumId:   uint32(tgt.ID),
-					RootDir: tgt.RootDir,
+					NumId: uint32(tgt.ID),
+					Path:  tgt.Path,
 				}
 				if tgt.ULFS != nil {
 					pbTarget.Ulfs = &pb.Target_UnderlyingFSOpts{
