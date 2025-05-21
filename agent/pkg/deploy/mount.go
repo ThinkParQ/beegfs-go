@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/thinkparq/beegfs-go/agent/pkg/manifest"
 )
@@ -24,6 +26,13 @@ func (m *Mount) ApplyTargets(ctx context.Context, add []manifest.Target) error {
 		}
 		if err := os.MkdirAll(target.GetPath(), 0700); err != nil {
 			return fmt.Errorf("unable to apply target %d: unable to create root directory %s: %w", target.ID, target.Path, err)
+		}
+		name, args := target.GetInitCmd()
+		output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+		if err != nil {
+			if !strings.Contains(string(output), "already exists") {
+				return fmt.Errorf("unable to initialize target %d: %s (%w)", target.ID, output, err)
+			}
 		}
 	}
 	return nil

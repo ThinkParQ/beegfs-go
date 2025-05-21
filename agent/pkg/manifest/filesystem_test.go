@@ -170,7 +170,7 @@ func TestInheritGlobalConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := tt.input
 			// 3b6f972b-64c7-4378-9f8e-172cf88c7d93
-			fs.InheritGlobalConfig("3b6f972b")
+			fs.InheritGlobalConfig("3b6f972b", "3b6f972b-64c7-4378-9f8e-172cf88c7d93")
 			agent := fs.Agents["agent1"]
 			service := agent.Services[0]
 			assert.Equal(t, tt.expectedNIC, service.Interfaces[0].Name)
