@@ -5,6 +5,7 @@
 package manifest
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/google/uuid"
@@ -39,11 +40,12 @@ type Nic struct {
 // identifiers in case resources for multiple file systems exist on the same machine. Derived by
 // taking the first ShortUUIDLen hex digits of the full 128-bit v4 UUID. The caller is responsible
 // for validating the shortUUID including verifying no collisions are possible in this manifest.
-func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
+func (f *Filesystem) InheritGlobalConfig(shortUUID string, longUUID string) error {
 	for agentID, agent := range f.Agents {
 		for i := range agent.Services {
 			service := &agent.Services[i]
 			service.shortUUID = shortUUID
+			service.longUUID = longUUID
 			// Inherit global interface configuration if there are no service specific interfaces.
 			if len(service.Interfaces) == 0 {
 				service.Interfaces = agent.Interfaces
@@ -65,8 +67,22 @@ func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
 			}
 			// Inherit target configuration from the FS and service:
 			for t := range service.Targets {
+				agent.Services[i].Targets[t].longUUID = longUUID
 				agent.Services[i].Targets[t].shortUUID = shortUUID
 				agent.Services[i].Targets[t].nodeType = service.Type
+				// TODO: May be different for each service type.
+				agent.Services[i].Targets[t].initCmd = service.Executable
+			}
+
+			if targetConfig, err := service.GetTargetsConfig(); err != nil {
+				return err
+			} else {
+				for k, v := range targetConfig {
+					if user, ok := service.Config[k]; ok {
+						return fmt.Errorf("auto-generated target config for %s=%s would overwrite user config %s (user config must be removed)", k, v, user)
+					}
+					service.Config[k] = v
+				}
 			}
 
 			// TODO: Inherit global conn.auth and TLS config based on service type. Return an error
@@ -75,6 +91,7 @@ func (f *Filesystem) InheritGlobalConfig(shortUUID string) {
 		}
 		f.Agents[agentID] = agent
 	}
+	return nil
 }
 
 func inheritMapDefaults(defaults, target map[string]string) map[string]string {

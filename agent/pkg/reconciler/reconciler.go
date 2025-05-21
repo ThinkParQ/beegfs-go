@@ -173,7 +173,9 @@ func (r *defaultReconciler) verify(newFilesystems manifest.Filesystems) error {
 		//    * All services have IPs + targets.
 		//    * Services have the correct number of targets (i.e., 1 for mgmtd meta, remote, sync).
 		// Note these should be implemented as methods on manifest.Filesystem.
-		fs.InheritGlobalConfig(shortUUID)
+		if err := fs.InheritGlobalConfig(shortUUID, fsUUID); err != nil {
+			return fmt.Errorf("error propagating global configuration: %w", err)
+		}
 	}
 	go r.reconcile(newFilesystems)
 	return nil

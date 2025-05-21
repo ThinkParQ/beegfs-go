@@ -3,6 +3,7 @@ package manifest
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -13,10 +14,24 @@ type Target struct {
 	// shortUUID is set by InheritGlobalConfig and used internally to generate globally unique names
 	// and identifiers in case resources for multiple file systems exist on the same machine.
 	shortUUID string
+	longUUID  string
 	nodeType  beegfs.NodeType
+	initCmd   string
 	ID        beegfs.NumId  `yaml:"id"`
 	Path      string        `yaml:"path"`
 	ULFS      *UnderlyingFS `yaml:"ulfs"`
+}
+
+func (t Target) GetInitCmd() (string, []string) {
+	if t.nodeType == beegfs.Management {
+		return t.initCmd, []string{
+			fmt.Sprintf("--fs-uuid=%s", t.longUUID),
+			fmt.Sprintf("--init"),
+			fmt.Sprintf("--db-file=%s", filepath.Clean(t.GetPath()+"/mgmtd.sqlite")),
+		}
+	}
+	// TODO: Setup init commands for other node types.
+	return t.initCmd, []string{}
 }
 
 func (t Target) GetPath() string {
