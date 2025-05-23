@@ -150,6 +150,8 @@ writeResponses:
 				syncOffloaded++
 			case beeremote.SubmitJobResponse_EXISTING:
 				syncInProgress++
+			case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
+				errStartingSync++
 			case beeremote.SubmitJobResponse_NOT_ALLOWED:
 				// This indicates the last job failed and requires manual intervention. Always print
 				// these jobs as the user will likely want to see them anyway.

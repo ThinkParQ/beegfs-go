@@ -67,19 +67,6 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 			} else {
 				resp.Result = submission.Result
 				resp.Status = submission.GetStatus()
-
-				switch submission.GetStatus() {
-				case beeremote.SubmitJobResponse_CREATED:
-				case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
-				case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
-				case beeremote.SubmitJobResponse_EXISTING:
-				case beeremote.SubmitJobResponse_NOT_ALLOWED:
-				default:
-					genStatus := request.GetGenerationStatus()
-					if genStatus != nil && (genStatus.State == beeremote.JobRequest_GenerationStatus_ERROR || genStatus.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
-						resp.Err = fmt.Errorf(genStatus.Message)
-					}
-				}
 			}
 
 			respChan <- resp

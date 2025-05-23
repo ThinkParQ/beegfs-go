@@ -109,6 +109,8 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 			status = beeremote.SubmitJobResponse_ALREADY_OFFLOADED
 		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
 			status = beeremote.SubmitJobResponse_EXISTING
+		} else if errors.Is(err, rst.ErrJobFailedPrecondition) {
+			status = beeremote.SubmitJobResponse_FAILED_PRECONDITION
 		} else if errors.Is(err, rst.ErrJobNotAllowed) {
 			status = beeremote.SubmitJobResponse_NOT_ALLOWED
 		} else {
