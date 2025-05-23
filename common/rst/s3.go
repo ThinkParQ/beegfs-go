@@ -395,7 +395,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 		start := job.GetStartMtime().AsTime()
 		stop := job.GetStopMtime().AsTime()
 		if !start.Equal(stop) {
-			return fmt.Errorf("successfully completed all work requests but the file appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
+			return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
 				start.Format(time.RFC3339), stop.Format(time.RFC3339))
 		}
 
