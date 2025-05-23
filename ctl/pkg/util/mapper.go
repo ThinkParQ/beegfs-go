@@ -14,10 +14,12 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
-	ErrMappingRSTs          = errors.New("error mapping Remote Storage Targets")
+	ErrMappingRSTs          = errors.New("unable to download remote storage targets")
 	ErrMapperNotInitialized = errors.New("mapper not initialized (this is likely a bug)")
 	ErrMapperNotFound       = errors.New("requested entity ID not found in the mapper")
 )
@@ -91,6 +93,11 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 	// Don't call the RST package because that calls GetEntry which would cause an import cycle.
 	rsts, err := beeRemote.GetRSTConfig(ctx, &beeremote.GetRSTConfigRequest{})
 	if err != nil {
+		if st, ok := status.FromError(err); ok {
+			if st.Code() == codes.Unavailable {
+				return mappings, fmt.Errorf("%w: %w (hint: did you configure the right --%s=address:port?)", ErrMappingRSTs, err, config.BeeRemoteAddrKey)
+			}
+		}
 		return mappings, fmt.Errorf("%w: %w", ErrMappingRSTs, err)
 	}
 	mappings.RstIdToConfig = MapRstIdToConfig(rsts)

@@ -107,7 +107,7 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without entity mappings including remote targets: %w", err)
+		return nil, nil, fmt.Errorf("unable to fetch required mappings: %w", err)
 	}
 
 	var dbChan = new(chan *GetJobsResponse)
