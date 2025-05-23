@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -216,16 +215,26 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		return fmt.Errorf("job builder request was aborted: %w", err)
 	}
 
-	var messages []string
+	var errMessage string
 	if submittedTotal.Load() == 0 {
-		messages = append(messages, "no requests were submitted")
-	}
-	if submittedWithErrors.Load() > 0 {
-		messages = append(messages, fmt.Sprintf("%d request(s) were submitted with errors", submittedWithErrors.Load()))
+		if cfg.Download {
+			if walkingLocalPath {
+				errMessage = fmt.Sprintf("walking local path since --remote-path was not provided; No matches found in path: %s", cfg.Path)
+			} else {
+				errMessage = fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath)
+			}
+		} else {
+			errMessage = fmt.Sprintf("no matches found in local path: %s", cfg.Path)
+		}
+	} else if submittedWithErrors.Load() > 0 {
+		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", submittedWithErrors.Load(), submittedTotal.Load())
 	}
 
-	if len(messages) > 0 {
-		return fmt.Errorf(strings.Join(messages, "; "))
+	if errMessage != "" {
+		if !IsValidRstId(cfg.RemoteStorageTarget) {
+			errMessage += "; --remote-target was provided so relying on configured rstIds and stub urls"
+		}
+		return fmt.Errorf(errMessage)
 	}
 	return nil
 }
