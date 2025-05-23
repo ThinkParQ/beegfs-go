@@ -383,12 +383,6 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	mtime := sync.LockedInfo.RemoteMtime.AsTime()
 	job.SetStopMtime(timestamppb.New(mtime))
 
-	// Update the downloaded file's access and modification times so they accurately reflect the beegfs_mtime.
-	absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
-	if err := os.Chtimes(absPath, mtime, mtime); err != nil {
-		return fmt.Errorf("failed to update download's mtime: %w", err)
-	}
-
 	// Skip checking the file was modified if we were told to abort since the mtime may not have
 	// been set correctly anyway given the error check is skipped above.
 	if !abort {
@@ -397,6 +391,12 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 		if !start.Equal(stop) {
 			return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
 				start.Format(time.RFC3339), stop.Format(time.RFC3339))
+		}
+
+		// Update the downloaded file's access and modification times so they accurately reflect the beegfs_mtime.
+		absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
+		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
+			return fmt.Errorf("failed to update download's mtime: %w", err)
 		}
 
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
