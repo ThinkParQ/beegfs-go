@@ -407,7 +407,10 @@ func PrepareAndBuildJobRequest(ctx context.Context, client Provider, mountPoint 
 
 	if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, store, mappings, cfg); err != nil {
 		if errors.Is(err, ErrJobAlreadyComplete) {
-			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE}
+			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
+			}
 		} else if errors.Is(err, ErrJobAlreadyOffloaded) {
 			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED}
 		} else {
@@ -493,7 +496,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 	} else if FileExists(lockedInfo) {
 		if alreadySynced {
-			return ErrJobAlreadyComplete
+			return GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 		}
 
 		if cfg.Download {

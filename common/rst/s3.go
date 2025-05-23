@@ -430,7 +430,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		if status != nil {
 			switch status.State {
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
-				return ErrJobAlreadyComplete
+				return GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 				return ErrJobAlreadyOffloaded
 			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:

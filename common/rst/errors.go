@@ -2,6 +2,8 @@ package rst
 
 import (
 	"errors"
+	"fmt"
+	"time"
 )
 
 var (
@@ -30,4 +32,18 @@ var (
 
 func IsErrJobTerminalSentinel(err error) bool {
 	return errors.Is(err, ErrJobAlreadyComplete) || errors.Is(err, ErrJobAlreadyOffloaded)
+}
+
+type MtimeErr struct {
+	Time time.Time
+	Err  error
+}
+
+func (m *MtimeErr) Error() string {
+	return fmt.Sprintf("%s (mtime %s)", m.Err.Error(), m.Time.String())
+}
+func (m *MtimeErr) Mtime() time.Time { return m.Time }
+func (m *MtimeErr) Unwrap() error    { return m.Err }
+func GetErrJobAlreadyCompleteWithMtime(mtime time.Time) *MtimeErr {
+	return &MtimeErr{Err: ErrJobAlreadyComplete, Time: mtime}
 }

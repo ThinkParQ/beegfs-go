@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -469,7 +470,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 		if status != nil {
 			switch status.State {
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
-				err = rst.ErrJobAlreadyComplete
+				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
+				// mark the job as complete so ignore the err.
+				mtime, _ := time.ParseDateTime(status.Message)
+				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
 			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 				err = rst.ErrJobAlreadyOffloaded
 			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
@@ -517,6 +521,16 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status := job.GetStatus()
 				status.State = beeremote.Job_COMPLETED
 				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
+
+				var mtimeErr *rst.MtimeErr
+				if errors.As(err, &mtimeErr) {
+					pbMtime := timestamppb.New(mtimeErr.Mtime())
+					job.SetStartMtime(pbMtime)
+					job.SetStopMtime(pbMtime)
+				} else {
+					status.Message += "; file mtime is not available! This is a bug"
+				}
+
 				pathEntry.Value[job.GetId()] = job
 				return beeremote.JobResult_builder{
 					Job:          job.Get(),
