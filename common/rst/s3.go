@@ -189,9 +189,6 @@ func (r *S3Client) GetConfig() *flex.RemoteStorageTarget {
 	return proto.Clone(r.config).(*flex.RemoteStorageTarget)
 }
 
-// walkPrefix lists objects in an S3 bucket that match the specified prefix, returning results via
-// the *WalkPrefixResponse channel.Results can also be filtered using file globbing in the pattern
-// which includes double start for directory recursion.
 func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-chan *WalkResponse, error) {
 	prefix = r.SanitizeRemotePath(prefix)
 	if _, err := filepath.Match(prefix, ""); err != nil {
@@ -199,11 +196,33 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	}
 
 	prefixWithoutPattern := StripGlobPattern(prefix)
-	usePattern := prefix != prefixWithoutPattern
+	isKey := prefix == prefixWithoutPattern
+	if isKey {
+		chanSize = 1
+	}
 
 	walkChan := make(chan *WalkResponse, chanSize)
 	go func() {
 		defer close(walkChan)
+
+		if isKey {
+			_, err := r.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(r.config.GetS3().Bucket),
+				Key:    aws.String(prefix),
+			})
+			if err != nil {
+				var apiErr smithy.APIError
+				if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound" {
+					walkChan <- &WalkResponse{Err: fmt.Errorf("key not found: %s", prefix)}
+				} else {
+					walkChan <- &WalkResponse{Err: fmt.Errorf("query failed: %w", err)}
+				}
+				return
+			}
+
+			walkChan <- &WalkResponse{Path: prefix}
+			return
+		}
 
 		var err error
 		var output *s3.ListObjectsV2Output
@@ -225,10 +244,8 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 			}
 
 			for _, content := range output.Contents {
-				if usePattern {
-					if match, _ := doublestar.Match(prefix, *content.Key); !match {
-						continue
-					}
+				if match, _ := doublestar.Match(prefix, *content.Key); !match {
+					continue
 				}
 				walkChan <- &WalkResponse{Path: *content.Key}
 			}

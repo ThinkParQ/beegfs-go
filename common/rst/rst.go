@@ -89,8 +89,9 @@ type Provider interface {
 	CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
-	// Walk streams WalkResponse entries for each file or object in the path. The function must be
-	// able to represent the remote directory or prefix as well as a single file or object.
+	// GetWalk returns a channel that streams *WalkResponse entries for matching files or objects.
+	// If the provided path includes a file glob pattern, all matching entries will be streamed.
+	// Otherwise, only the specified file or object is returned if it exists.
 	GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
