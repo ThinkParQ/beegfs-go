@@ -157,6 +157,7 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 	if entry.FileState.GetDataState() == DataStateOffloaded {
 		// Use the file's rstId if set; otherwise, use a job builder to complete the operation.
 		if len(entry.Remote.RSTIDs) == 1 {
+			cfg.SetRemoteStorageTarget(entry.Remote.RSTIDs[0])
 			request := rstMap[cfg.RemoteStorageTarget].GetJobRequest(cfg)
 			return []*beeremote.JobRequest{request}, nil
 		}
