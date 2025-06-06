@@ -96,7 +96,7 @@ func TestGetCachedMappings_CacheHit_NoBackgroundUpdate(t *testing.T) {
 func TestGetCachedMappings_CacheHit_BackgroundUpdate(t *testing.T) {
 	cachedMappings = &Mappings{}
 	cachedMappingsErr = nil
-	cachedMappingsLastModified = time.Now().Add(-cachedMappingsUpdateDelaySec * time.Second)
+	cachedMappingsLastModified = time.Now().Add(-cachedMappingsUpdateDelay * time.Second)
 	mockedMappings := &Mappings{}
 	getMappingsFunc = func(context.Context) (*Mappings, error) {
 		if cachedMappings != mockedMappings {
@@ -128,7 +128,7 @@ func TestGetCachedMappings_CacheHit_BackgroundUpdate(t *testing.T) {
 
 func TestUpdateCachedMappingsInBackground_NoUpdateWhenAlreadyActive(t *testing.T) {
 	activeCachedMappingsUpdate = true
-	cachedMappingsLastModified = time.Now().Add(-cachedMappingsUpdateDelaySec * time.Second)
+	cachedMappingsLastModified = time.Now().Add(-cachedMappingsUpdateDelay * time.Second)
 	cachedMappings = &Mappings{}
 	cachedMappingsErr = nil
 	MappingsForceUpdate = false

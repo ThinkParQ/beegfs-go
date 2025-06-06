@@ -76,16 +76,16 @@ func GetCachedMappings(ctx context.Context) (*Mappings, error) {
 	return cachedMappings, cachedMappingsErr
 }
 
-var activeCachedMappingsUpdate bool                 // mappings are actively being updated
-var cachedMappingsLastModified time.Time            // last time mappings were updated
-var cachedMappingsUpdateDelaySec = time.Second * 60 // minimum delay before permitting mappings update
+var activeCachedMappingsUpdate bool              // mappings are actively being updated
+var cachedMappingsLastModified time.Time         // last time mappings were updated
+var cachedMappingsUpdateDelay = time.Second * 60 // minimum delay before permitting mappings update in seconds
 var activeCachedMappingsUpdateMu sync.RWMutex
 
 // updateCachedMappingsInBackground launches a goroutine to refresh the mappings cache if no update
 // is running and the cache is older than cachedMappingsUpdateDelay.
 func updateCachedMappingsInBackground(ctx context.Context) {
 	activeCachedMappingsUpdateMu.RLock()
-	if activeCachedMappingsUpdate || time.Since(cachedMappingsLastModified) < cachedMappingsUpdateDelaySec {
+	if activeCachedMappingsUpdate || time.Since(cachedMappingsLastModified) < cachedMappingsUpdateDelay {
 		activeCachedMappingsUpdateMu.RUnlock()
 		return
 	}

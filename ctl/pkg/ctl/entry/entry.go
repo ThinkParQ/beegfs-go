@@ -372,8 +372,8 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("max search steps exceeded for path: %s", searchPath)
 }
 
-func SetFileRstIds(ctx context.Context, mappings *util.Mappings, path string, rstIds []uint32) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func SetFileRstIds(ctx context.Context, path string, rstIds []uint32) error {
+	entry, ownerNode, err := getEntryAndOwnerFromPath(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -385,16 +385,16 @@ func SetFileRstIds(ctx context.Context, mappings *util.Mappings, path string, rs
 	return nil
 }
 
-func GetFileDataState(ctx context.Context, mappings *util.Mappings, path string) (beegfs.DataState, error) {
-	state, err := getFileState(ctx, mappings, path)
+func GetFileDataState(ctx context.Context, path string) (beegfs.DataState, error) {
+	state, err := getFileState(ctx, path)
 	if err != nil {
 		return beegfs.DataStateMask.GetDataState(), fmt.Errorf("failed to get file data state: %w", err)
 	}
 	return state.GetDataState(), nil
 }
 
-func SetDataState(ctx context.Context, mappings *util.Mappings, path string, state beegfs.DataState) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func SetFileDataState(ctx context.Context, path string, state beegfs.DataState) error {
+	entry, ownerNode, err := getEntryAndOwnerFromPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve entry info: %w", err)
 	}
@@ -422,30 +422,30 @@ func SetDataState(ctx context.Context, mappings *util.Mappings, path string, sta
 	return nil
 }
 
-func GetFileAccessFlags(ctx context.Context, mappings *util.Mappings, path string) (beegfs.AccessFlags, error) {
-	state, err := getFileState(ctx, mappings, path)
+func GetFileAccessFlags(ctx context.Context, path string) (beegfs.AccessFlags, error) {
+	state, err := getFileState(ctx, path)
 	if err != nil {
 		return beegfs.AccessFlagMask.GetAccessFlags(), fmt.Errorf("failed to get file access flags: %w", err)
 	}
 	return state.GetAccessFlags(), nil
 }
 
-func SetAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags) error {
-	if err := setAccessFlags(ctx, mappings, path, flags, false); err != nil {
+func SetAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+	if err := setAccessFlags(ctx, path, flags, false); err != nil {
 		return fmt.Errorf("failed to set file access flags: %w", err)
 	}
 	return nil
 }
 
-func ClearAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags) error {
-	if err := setAccessFlags(ctx, mappings, path, flags, true); err != nil {
+func ClearAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+	if err := setAccessFlags(ctx, path, flags, true); err != nil {
 		return fmt.Errorf("failed to clear file access flags: %w", err)
 	}
 	return nil
 }
 
-func getFileState(ctx context.Context, mappings *util.Mappings, path string) (beegfs.FileState, error) {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func getFileState(ctx context.Context, path string) (beegfs.FileState, error) {
+	entry, ownerNode, err := getEntryAndOwnerFromPath(ctx, path)
 	if err != nil {
 		mask := beegfs.NewFileState(beegfs.AccessFlagMask.GetAccessFlags(), beegfs.AccessFlagMask.GetDataState())
 		return mask, err
@@ -468,8 +468,8 @@ func getFileState(ctx context.Context, mappings *util.Mappings, path string) (be
 	return resp.FileState, nil
 }
 
-func setAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags, clearFlags bool) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, clearFlags bool) error {
+	entry, ownerNode, err := getEntryAndOwnerFromPath(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -523,4 +523,25 @@ func setFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.No
 	}
 
 	return nil
+}
+
+// getEntryAndOwnerFromPath returns the results from GetEntryAndOwnerFromPath() using the
+// cached mappings. If there's a failure for any reason a subsequent attempt will be made after
+// updating the cached mappings.
+func getEntryAndOwnerFromPath(ctx context.Context, path string) (msg.EntryInfo, beegfs.Node, error) {
+	getEntryAndOwner := func() (msg.EntryInfo, beegfs.Node, error) {
+		mappings, err := util.GetCachedMappings(ctx)
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, err
+		}
+		return GetEntryAndOwnerFromPath(ctx, mappings, path)
+	}
+
+	entry, ownerNode, err := getEntryAndOwner()
+	if err != nil {
+		util.MappingsForceUpdate = true
+		entry, ownerNode, err = getEntryAndOwner()
+	}
+
+	return entry, ownerNode, err
 }
