@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -127,11 +126,6 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 }
 
 func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest, cfg *flex.JobRequestCfg) error {
-	mappings, err := util.GetMappings(ctx)
-	if err != nil {
-		return err
-	}
-
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
@@ -143,6 +137,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		isPathDir = err == nil && stat.IsDir()
 	}
 
+	var err error
 	var submittedTotal atomic.Uint32
 	var submittedWithErrors atomic.Uint32
 	workers := 2
@@ -189,7 +184,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 					}
 				}
 
-				jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, mappings, inMountPath, remotePath, cfg)
+				jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
 				if err != nil {
 					// Errors that occur in BuildJobRequests must not be fatal; otherwise, pushing a
 					// subset based on the set file rstId will fail whenever there's a file.
