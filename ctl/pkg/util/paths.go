@@ -5,14 +5,53 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 
+	"github.com/expr-lang/expr"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
 type PathInputType int
+
+type FileInfo struct {
+	Path  string    // Full file path
+	Name  string    // Base name of the file
+	Size  int64     // File size in bytes
+	Mode  uint32    // raw mode bits from syscall.Stat_t (type + permissions)
+	Perm  uint32    // just the permission bits (mode & 0777)
+	Mtime time.Time // Modification time
+	Atime time.Time // Access time
+	Ctime time.Time // Change time
+	Uid   uint32    // User ID
+	Gid   uint32    // Group ID
+}
+
+var (
+	octRe    = regexp.MustCompile(`\b0[0-7]{2,3}\b`)
+	timeRe   = regexp.MustCompile(`\b(?i)(mtime|atime|ctime)\s*(<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)?[smhdMyw]+)\b`)
+	sizeRe   = regexp.MustCompile(`\b(?i)(size)\s*(<=|>=|<|>|!=|=)\s*([0-9]+(?:\.[0-9]+)?(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB))\b`)
+	globRe   = regexp.MustCompile(`\b(?i)(name|path)\s*=~\s*"([^"\*\?]*[\*\?][^"\*\?]*)"`)
+	regexRe  = regexp.MustCompile(`\b(?i)(name|path)\s*=~\s*"([^"\*\?][^"\*\?]*)"`)
+	identRe  = regexp.MustCompile(`\b(?i)(mtime|atime|ctime|size|name|uid|gid|path|mode|perm)\b`)
+	fieldMap = map[string]string{
+		"mtime": "Mtime", "atime": "Atime", "ctime": "Ctime",
+		"size": "Size", "name": "Name", "uid": "Uid", "gid": "Gid",
+		"path": "Path", "mode": "Mode", "perm": "Perm",
+	}
+	unitFactors = map[string]float64{
+		"B":  1,
+		"KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12,
+		"KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40,
+	}
+)
 
 const (
 	PathInputInvalid PathInputType = iota
@@ -93,6 +132,7 @@ func DeterminePathInputMethod(paths []string, recurse bool, stdinDelimiter strin
 // ProcessPathOpts contains any settings that should always be determined by the backend.
 type ProcessPathOpts struct {
 	RecurseLexicographically bool
+	FilterExpr               string
 }
 
 type ProcessPathOpt func(*ProcessPathOpts)
@@ -100,6 +140,12 @@ type ProcessPathOpt func(*ProcessPathOpts)
 func RecurseLexicographically(l bool) ProcessPathOpt {
 	return func(args *ProcessPathOpts) {
 		args.RecurseLexicographically = l
+	}
+}
+
+func FilterExpr(f string) ProcessPathOpt {
+	return func(args *ProcessPathOpts) {
+		args.FilterExpr = f
 	}
 }
 
@@ -142,7 +188,7 @@ func ProcessPaths[ResultT any](
 		go ReadFromStdin(ctx, method.stdinDelimiter, pathsChan, errChan)
 		resultsChan = startProcessing(ctx, pathsChan, errChan, singleWorker, processEntry, true)
 	} else if method.pathsViaRecursion != "" {
-		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errChan, args.RecurseLexicographically)
+		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errChan, args.RecurseLexicographically, args.FilterExpr)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -257,7 +303,7 @@ func startProcessing[ResultT any](
 
 // Asynchronously walks a directory from startingPath, immediately returning a channel where the
 // paths will be sent, or an error if anything goes wrong setting up.
-func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lexicographically bool) (<-chan string, error) {
+func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lexicographically bool, filterExpr string) (<-chan string, error) {
 
 	beegfsClient, err := config.BeeGFSClient(startingPath)
 	if err != nil {
@@ -270,11 +316,42 @@ func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lex
 	}
 
 	pathChan := make(chan string, 1024)
+
+	var filterFunc func(FileInfo) (bool, error)
+	if filterExpr != "" {
+		filterFunc, err = compileFilter(filterExpr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filter: %w", err)
+		}
+	}
+
 	go func() {
 		walkDirFunc := func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
+
+			if filterFunc != nil {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				sys := info.Sys()
+				statT, ok := sys.(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("unsupported platform (%T): only Linux & Darwin are supported", sys)
+				}
+				fi := statToFileInfo(path, statT)
+
+				keep, err := filterFunc(fi)
+				if err != nil {
+					return fmt.Errorf("eval failed on %s: %w", path, err)
+				}
+				if !keep {
+					return nil
+				}
+			}
+
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -294,4 +371,137 @@ func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lex
 	}()
 
 	return pathChan, nil
+}
+
+// compileFilter turns a DSL expression into a filter function.
+func compileFilter(query string) (func(FileInfo) (bool, error), error) {
+	// Preprocess DSL (includes octal normalization now)
+	q := preprocessDSL(query)
+
+	prog, err := expr.Compile(q,
+		expr.Env(FileInfo{}),
+		expr.Function("ago", func(params ...any) (any, error) { return ago(params[0].(string)) }),
+		expr.Function("bytes", func(params ...any) (any, error) { return parseBytes(params[0].(string)) }),
+		expr.Function("glob", func(params ...any) (any, error) { return globMatch(params[0].(string), params[1].(string)) }),
+		expr.Function("regex", func(params ...any) (any, error) { return regexMatch(params[0].(string), params[1].(string)) }),
+		expr.Function("now", func(params ...any) (any, error) { return time.Now(), nil }),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(fi FileInfo) (bool, error) {
+		out, err := expr.Run(prog, fi)
+		if err != nil {
+			return false, err
+		}
+		return out.(bool), nil
+	}, nil
+}
+
+// preprocessDSL applies all DSL→Go rewrites, including octal normalization.
+func preprocessDSL(q string) string {
+	// octal to decimal
+	q = octRe.ReplaceAllStringFunc(q, func(oct string) string {
+		v, _ := strconv.ParseInt(oct, 8, 64)
+		return strconv.FormatInt(v, 10)
+	})
+	// time shifts
+	q = timeRe.ReplaceAllStringFunc(q, func(m string) string {
+		parts := timeRe.FindStringSubmatch(m)
+		f, op, val := strings.ToLower(parts[1]), parts[2], parts[3]
+		if goF, ok := fieldMap[f]; ok {
+			switch op {
+			case ">":
+				op = "<"
+			case "<":
+				op = ">"
+			case ">=":
+				op = "<="
+			case "<=":
+				op = ">="
+			}
+			return fmt.Sprintf("%s %s ago(%q)", goF, op, val)
+		}
+		return m
+	})
+	// size units
+	q = sizeRe.ReplaceAllString(q, `$1 $2 bytes("$3")`)
+	// globs and regex
+	q = globRe.ReplaceAllString(q, `glob($1,"$2")`)
+	q = regexRe.ReplaceAllString(q, `regex($1,"$2")`)
+	// identifiers
+	q = identRe.ReplaceAllStringFunc(q, func(s string) string {
+		if goF, ok := fieldMap[strings.ToLower(s)]; ok {
+			return goF
+		}
+		return s
+	})
+	return q
+}
+
+// ago returns time.Now() minus parsed duration.
+func ago(durationStr string) (time.Time, error) {
+	d, err := parseExtendedDuration(durationStr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().Add(-d), nil
+}
+
+// parseExtendedDuration supports standard and custom units (d, M, y).
+func parseExtendedDuration(s string) (time.Duration, error) {
+	// fast path for Go durations
+	sfx := s[len(s)-1]
+	if strings.IndexByte("nsmh", sfx) != -1 {
+		return time.ParseDuration(s)
+	}
+	var factor time.Duration
+	num, unit := s[:len(s)-1], s[len(s)-1:]
+	switch unit {
+	case "d":
+		factor = 24 * time.Hour
+	case "M":
+		factor = 30 * 24 * time.Hour
+	case "y":
+		factor = 365 * 24 * time.Hour
+	default:
+		return time.ParseDuration(s)
+	}
+	f, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	return time.Duration(f * float64(factor)), nil
+}
+
+// parseBytes converts size strings into byte counts.
+func parseBytes(sizeStr string) (int64, error) {
+	i := len(sizeStr)
+	for i > 0 && (sizeStr[i-1] < '0' || sizeStr[i-1] > '9') {
+		i--
+	}
+	num, unit := sizeStr[:i], strings.TrimSpace(sizeStr[i:])
+	if unit == "" {
+		unit = "B"
+	}
+	mul, ok := unitFactors[unit]
+	if !ok {
+		return 0, fmt.Errorf("unknown size unit %q", unit)
+	}
+	f, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", sizeStr, err)
+	}
+	return int64(f * mul), nil
+}
+
+// globMatch uses filepath.Match
+func globMatch(s, pattern string) (bool, error) {
+	return filepath.Match(pattern, s)
+}
+
+// regexMatch uses precompiled regex
+func regexMatch(s, pattern string) (bool, error) {
+	return regexp.MatchString(pattern, s)
 }
