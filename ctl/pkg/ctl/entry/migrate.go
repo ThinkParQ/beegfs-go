@@ -97,6 +97,7 @@ type MigrateCfg struct {
 	SkipMirrors bool
 	UpdateDirs  bool
 	DryRun      bool
+	FilterExpr  string
 }
 
 type MigrateResult struct {
@@ -239,7 +240,7 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		return migrateEntry(ctx, mappings, migration, path)
 	}
 
-	return util.ProcessPaths(ctx, pm, false, processEntry)
+	return util.ProcessPaths(ctx, pm, false, processEntry, util.FilterExpr(cfg.FilterExpr))
 }
 
 // migrateEntry determines if an entry has any chunks on targets or mirror groups that need to be

@@ -86,6 +86,8 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().BoolVar(&backendCfg.UpdateDirs, "update-directories", false, "Update directories to use the specified storage pool.")
 	cmd.Flags().BoolVar(&backendCfg.SkipMirrors, "skip-mirrors", false, "Migrate only files that are not buddy mirrored.")
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "",
+		"Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid,gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\"")
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")
 	cmd.MarkFlagRequired("pool")
 	return cmd
