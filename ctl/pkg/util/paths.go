@@ -339,7 +339,7 @@ func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lex
 				sys := info.Sys()
 				statT, ok := sys.(*syscall.Stat_t)
 				if !ok {
-					return fmt.Errorf("unsupported platform (%T): only Linux & Darwin are supported", sys)
+					return fmt.Errorf("unsupported platform (%T): only Linux is supported", sys)
 				}
 				fi := statToFileInfo(path, statT)
 
@@ -438,6 +438,21 @@ func preprocessDSL(q string) string {
 		return s
 	})
 	return q
+}
+
+func statToFileInfo(path string, st *syscall.Stat_t) FileInfo {
+	return FileInfo{
+		Path:  path,
+		Name:  filepath.Base(path),
+		Size:  st.Size,
+		Mode:  st.Mode,
+		Perm:  st.Mode & uint32(os.ModePerm),
+		Atime: time.Unix(st.Atim.Sec, st.Atim.Nsec),
+		Mtime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec),
+		Ctime: time.Unix(st.Ctim.Sec, st.Ctim.Nsec),
+		Uid:   st.Uid,
+		Gid:   st.Gid,
+	}
 }
 
 // ago returns time.Now() minus parsed duration.
