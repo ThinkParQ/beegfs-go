@@ -17,7 +17,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -1129,18 +1128,13 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 			}
 		}
 
-		mappings, err := util.GetMappings(ctx)
-		if err != nil {
-			return err
-		}
-
-		if dataState, err := entry.GetFileDataState(ctx, mappings, path); err != nil {
+		if dataState, err := entry.GetFileDataState(ctx, path); err != nil {
 			return err
 		} else if dataState == rst.DataStateOffloaded {
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, mappings, path, rst.LockedAccessFlags); err != nil {
+		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil
