@@ -40,7 +40,7 @@ the defaults (10 pings, 1ms interval) should work fine.
 If -p/--parallel is supplied, nodes will be pinged in parallel instead of
 sequentially. The global --%s flag will be used to determine how
 many pings to do in parallel. `, config.NumWorkersKey),
-		Args: cobra.NoArgs,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPingCmd(cmd, cfg)
 		},
@@ -64,15 +64,9 @@ func runPingCmd(cmd *cobra.Command, cfg node.PingConfig) error {
 	}
 
 	if cmd.Flags().NArg() > 0 {
-		// We got a node type or some nodeIDs configured explicitly, let's parse them
-		if tpe := beegfs.NodeTypeFromString(cmd.Flags().Arg(0)); tpe != beegfs.InvalidNodeType {
-			// The first argument is a valid node type, so we ping all nodes of that type
-			if cmd.Flags().NArg() > 1 {
-				return fmt.Errorf("ping accepts either a single node type or one or more node aliases or IDs as positional arguments")
-			}
-			cfg.NodeType = tpe
-		} else {
-			// The first argument was not a node type, so we assume we got one or more nodes
+		nodeType := beegfs.NodeTypeFromString(cmd.Flags().Arg(0))
+		if cmd.Flags().NArg() > 1 || nodeType == beegfs.InvalidNodeType {
+			// Multiple arguments were provided or nodeType was not valid so assume nodes.
 			idParser := beegfs.NewEntityIdSliceParser(16, beegfs.Management, beegfs.Meta, beegfs.Storage)
 			var err error
 			cfg.NodeIDs, err = idParser.Parse(strings.Join(cmd.Flags().Args(), ","))
@@ -83,6 +77,8 @@ func runPingCmd(cmd *cobra.Command, cfg node.PingConfig) error {
 			if len(cfg.NodeIDs) == 0 {
 				return fmt.Errorf("node list empty after parsing")
 			}
+		} else {
+			cfg.NodeType = nodeType
 		}
 	}
 
