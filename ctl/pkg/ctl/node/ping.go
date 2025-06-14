@@ -78,8 +78,6 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 	}
 	client := clients[0] // By now, all clients should be equivalent
 
-	nodeUids := make(map[beegfs.Uid]struct{})
-	toPing := []beegfs.Node{}
 	nodes, err := config.NodeStore(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to download nodes: %w", err)
@@ -94,6 +92,9 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 		if len(cfg.NodeIDs) == 0 && len(cfg.NodeTypes) == 0 {
 			cfg.NodeTypes = []beegfs.NodeType{beegfs.Meta, beegfs.Storage, beegfs.Management}
 		}
+
+		nodeUids := make(map[beegfs.Uid]struct{})
+		toPing := []beegfs.Node{}
 
 		// Add all specified nodes to ping list
 		if len(cfg.NodeIDs) > 0 {
@@ -118,11 +119,6 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 		if len(cfg.NodeTypes) > 0 {
 			for _, node := range nodes.GetNodes() {
 				nodeType := beegfs.NodeType(node.Id.NodeType)
-				if nodeType != beegfs.Meta && nodeType != beegfs.Storage && nodeType != beegfs.Management {
-					log.Debug("Can not ping node of this type:", zap.Any("node", node))
-					continue
-				}
-
 				for _, cfgNodeType := range cfg.NodeTypes {
 					if cfgNodeType == nodeType || cfgNodeType == beegfs.InvalidNodeType {
 						if _, ok := nodeUids[node.Uid]; !ok {
@@ -152,6 +148,16 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 					if !ok {
 						return
 					}
+
+					if n.Id.NodeType == beegfs.InvalidNodeType || n.Id.NodeType == beegfs.Client {
+						log.Debug("Can not ping node of this type:", zap.Any("node", n))
+						errs <- &PingError{
+							NodeID: n.Id,
+							Inner:  fmt.Errorf("client may not be reachable from other clients. Skipping"),
+						}
+						continue
+					}
+
 					res, err := ioctl.PingNode(client.Mount.Path, n.Id, cfg.Count, cfg.Interval)
 					if err != nil {
 						errs <- &PingError{
