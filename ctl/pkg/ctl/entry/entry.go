@@ -410,6 +410,9 @@ func SetDataState(ctx context.Context, mappings *util.Mappings, path string, sta
 	}
 
 	fs := info.FileState.WithDataState(state)
+	if fs == info.FileState {
+		return nil
+	}
 
 	response := &msg.SetFileStateResponse{}
 	err = store.RequestTCP(ctx, ownerNode.Uid, &msg.SetFileStateRequest{EntryInfo: entry, FileState: fs}, response)
@@ -417,6 +420,30 @@ func SetDataState(ctx context.Context, mappings *util.Mappings, path string, sta
 		return err
 	}
 	if response.Result != beegfs.OpsErr_SUCCESS {
+		// It is possible for multiple requests to attempt to set the same file's data state
+		// concurrently. In these cases, OpsErr_INODELOCKED is returned and will be retried once
+		// more.
+		if response.Result == beegfs.OpsErr_INODELOCKED {
+			err = store.RequestTCP(ctx, ownerNode.Uid, &msg.GetEntryInfoRequest{EntryInfo: entry}, info)
+			if err != nil {
+				return fmt.Errorf("unable to get data state for path, %s: %w", path, err)
+			}
+
+			fs := info.FileState.WithDataState(state)
+			if fs == info.FileState {
+				return nil
+			}
+
+			err = store.RequestTCP(ctx, ownerNode.Uid, &msg.SetFileStateRequest{EntryInfo: entry, FileState: fs}, response)
+			if err != nil {
+				return err
+			}
+
+			if response.Result == beegfs.OpsErr_SUCCESS {
+				return nil
+			}
+		}
+
 		return fmt.Errorf("server returned an error setting data state for path, %s: %w", path, response.Result)
 	}
 	return nil
@@ -492,12 +519,39 @@ func setAccessFlags(ctx context.Context, mappings *util.Mappings, path string, f
 		fs = fs.WithAccessState(flags)
 	}
 
+	if fs == info.FileState {
+		return nil
+	}
+
 	response := &msg.SetFileStateResponse{}
 	err = store.RequestTCP(ctx, ownerNode.Uid, &msg.SetFileStateRequest{EntryInfo: entry, FileState: fs}, response)
 	if err != nil {
 		return err
 	}
 	if response.Result != beegfs.OpsErr_SUCCESS {
+		// It is possible for multiple requests to attempt to set the same file's data state
+		// concurrently. In these cases, OpsErr_INODELOCKED is returned and will be retried once
+		// more.
+		if response.Result == beegfs.OpsErr_INODELOCKED {
+			info := &msg.GetEntryInfoResponse{}
+			err = store.RequestTCP(ctx, ownerNode.Uid, &msg.GetEntryInfoRequest{EntryInfo: entry}, info)
+			if err != nil {
+				return err
+			}
+
+			if fs == info.FileState {
+				return nil
+			}
+
+			err = store.RequestTCP(ctx, ownerNode.Uid, &msg.SetFileStateRequest{EntryInfo: entry, FileState: fs}, response)
+			if err != nil {
+				return err
+			}
+			if response.Result == beegfs.OpsErr_SUCCESS {
+				return nil
+			}
+
+		}
 		return fmt.Errorf("server returned an error setting file access flags, %s: %w", path, response.Result)
 	}
 	return nil
