@@ -245,21 +245,13 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 //
 // A returned error indicates that one or more job request were not able to be built. However, if
 // a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequests(
-	ctx context.Context,
-	rstMap map[uint32]Provider,
-	mountPoint filesystem.Provider,
-	mappings *util.Mappings,
-	inMountPath string,
-	remotePath string,
-	cfg *flex.JobRequestCfg,
-) ([]*beeremote.JobRequest, error) {
+func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
 	keepLock := false
-	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
+	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath)
 
 	defer func() {
 		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, mappings, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -298,9 +290,9 @@ func BuildJobRequests(
 			continue
 		}
 
-		request := BuildJobRequest(ctx, client, mountPoint, mappings, requestCfg)
+		request := BuildJobRequest(ctx, client, mountPoint, requestCfg)
 		if request.GetGenerationStatus() == nil {
-			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, mappings, requestCfg); err != nil {
+			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, requestCfg); err != nil {
 				if errors.Is(err, ErrJobAlreadyComplete) {
 					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
@@ -370,7 +362,7 @@ func HasRemotePathInfo(lockedInfo *flex.JobLockedInfo) bool {
 // lockedInfo is already locked.
 //
 // Be aware that cfg's remote information will be updated.
-func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
 	getRequestWithFailedPrecondition := func(message string) *beeremote.JobRequest {
 		request := client.GetJobRequest(cfg)
 		status := &beeremote.JobRequest_GenerationStatus{
@@ -436,7 +428,8 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 // the file does not exist, it will be created and cfg.LockedInfo will be updated.
 //
 // The store and mappings can be nil but if they're needed they will be retrieved.
-func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg) (err error) {
+// func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg) (err error) {
+func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (err error) {
 	lockedInfo := cfg.LockedInfo
 
 	fileDataStateCleared := false
@@ -446,7 +439,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		if err != nil {
 			if IsFileOffloaded(lockedInfo) {
 				if fileDataStateCleared {
-					if restoreErr := entry.SetDataState(ctx, mappings, cfg.Path, DataStateOffloaded); restoreErr != nil {
+					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, DataStateOffloaded); restoreErr != nil {
 						err = fmt.Errorf("%w: unable to restore offloaded data state: %s", err, restoreErr.Error())
 					}
 				}
@@ -469,18 +462,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
 		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
-			if mappings == nil {
-				mappings, err = util.GetMappings(ctx)
-				if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
-					return
-				}
-			}
-
-			if err = CreateOffloadedDataFile(ctx, mountPoint, mappings, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
+			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
 				err = fmt.Errorf("failed to create stub file: %w", err)
 				return
 			}
-			err = entry.SetAccessFlags(ctx, mappings, cfg.Path, LockedAccessFlags)
+			err = entry.SetAccessFlags(ctx, cfg.Path, LockedAccessFlags)
 			if err != nil {
 				return
 			}
@@ -513,7 +499,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 					return
 				}
 
-				if err = entry.SetDataState(ctx, mappings, cfg.Path, DataStateNone); err != nil {
+				if err = entry.SetFileDataState(ctx, cfg.Path, DataStateNone); err != nil {
 					return
 				}
 				fileDataStateCleared = true
@@ -544,15 +530,8 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		fileCreated = true
 		filePreallocated = true
 
-		if mappings == nil {
-			mappings, err = util.GetMappings(ctx)
-			if err != nil {
-				return
-			}
-		}
-
 		var info *flex.JobLockedInfo
-		if info, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
+		if info, _, _, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -583,10 +562,16 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
 // unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
 // writeLockSet will be true when the write lock was set.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+// func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
+	}
+
+	mappings, err := util.GetCachedMappings(ctx)
+	if err != nil {
+		return
 	}
 
 	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, inMountPath)
@@ -594,7 +579,20 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
 			return lockedInfo, writeLockSet, rstIds, nil
 		}
-		return
+
+		// Retry with latest mappings
+		util.MappingsForceUpdate = true
+		mappings, err = util.GetCachedMappings(ctx)
+		if err != nil {
+			return
+		}
+
+		if entryInfo, err = entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, inMountPath); err != nil {
+			if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+				return lockedInfo, writeLockSet, rstIds, nil
+			}
+			return
+		}
 	}
 	lockedInfo.Exists = true
 
@@ -603,7 +601,7 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 	}
 
 	if !entryInfo.Entry.FileState.IsReadWriteLocked() {
-		err = entry.SetAccessFlags(ctx, mappings, inMountPath, LockedAccessFlags)
+		err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
 		if err != nil {
 			return
 		}
@@ -713,12 +711,12 @@ func StripGlobPattern(pattern string) string {
 }
 
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
-func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, path string, remotePath string, rstId uint32, overwrite bool) error {
+func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
 	if err := mountPoint.CreateWriteClose(path, rstUrl, 0644, overwrite); err != nil {
 		return err
 	}
-	if err := entry.SetDataState(ctx, mappings, path, DataStateOffloaded); err != nil {
+	if err := entry.SetFileDataState(ctx, path, DataStateOffloaded); err != nil {
 		return fmt.Errorf("unable to set offloaded data state: %w", err)
 	}
 
