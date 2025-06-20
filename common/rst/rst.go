@@ -331,8 +331,8 @@ func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.ReadWriteLocked
 }
 
-// FileExists returns whether the file exists.
-func FileExists(lockedInfo *flex.JobLockedInfo) bool {
+// FileExistedBeforeJob returns whether the file exists when the job was created.
+func FileExistedBeforeJob(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Exists
 }
 
@@ -382,7 +382,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	}
 
 	lockedInfo := cfg.LockedInfo
-	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
+	if !IsFileLocked(lockedInfo) && FileExistedBeforeJob(lockedInfo) {
 		return getRequestWithFailedPrecondition("path lock has not been acquired")
 
 	}
@@ -401,7 +401,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	}
 
 	if cfg.Download && cfg.RemotePath == "" {
-		if !FileExists(lockedInfo) {
+		if !FileExistedBeforeJob(lockedInfo) {
 			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
 		}
 
@@ -468,7 +468,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
-		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
+		if (cfg.Download && (cfg.Overwrite || !FileExistedBeforeJob(lockedInfo))) || alreadySynced {
 			if mappings == nil {
 				mappings, err = util.GetMappings(ctx)
 				if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
@@ -496,11 +496,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			return ErrJobAlreadyOffloaded
 		}
 
-		if cfg.Download && !cfg.Overwrite && FileExists(lockedInfo) {
+		if cfg.Download && !cfg.Overwrite && FileExistedBeforeJob(lockedInfo) {
 			err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
 			return
 		}
-	} else if FileExists(lockedInfo) {
+	} else if FileExistedBeforeJob(lockedInfo) {
 		if alreadySynced {
 			return GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 		}
@@ -556,8 +556,8 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
+		lockedInfo.SetExists(false) // Setting to false since the file did not previously exist.
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		lockedInfo.SetExists(info.Exists)
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)
@@ -596,7 +596,7 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 		}
 		return
 	}
-	lockedInfo.Exists = true
+	lockedInfo.SetExists(true)
 
 	if rstIds == nil {
 		rstIds = entryInfo.Entry.Remote.RSTIDs
