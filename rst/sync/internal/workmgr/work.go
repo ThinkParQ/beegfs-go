@@ -40,6 +40,13 @@ type workEntry struct {
 	WorkResult *work
 }
 
+type workEntryWaitQueue struct {
+	SubmissionID  string
+	ExecutionTime int64
+	WorkRequest   *workRequest
+	WorkResult    *work
+}
+
 // workRequest is a wrapper around the protobuf defined WorkRequest type to
 // allow encoding/decoding to work properly through encoding/gob.
 type workRequest struct {
@@ -124,6 +131,7 @@ type worker struct {
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
 	workJournal          *kvstore.MapStore[workEntry]
+	workWaitQueueJournal *kvstore.MapStore[workEntryWaitQueue]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 }
@@ -272,6 +280,44 @@ func (w *worker) processWork(work workAssignment) {
 		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
+		return
+	}
+
+	// Check if work request is ready
+	ready, retryTime, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest)
+	if err != nil {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("failed to determine if work request is ready")
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+	}
+	if !ready {
+		status.SetMessage("waiting for work request to be ready")
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+
+		baseKey, err := w.workWaitQueueJournal.GenerateNextPK()
+		if err != nil {
+			// TODO:  // return nil, fmt.Errorf("unable to generate database key for job ID %s: %w", request.GetJobId(), err)
+		}
+
+		key := createSubmissionID(baseKey, submissionIDPriority(work.submissionID))
+		_, waitEntry, commitAndReleaseWait, err := w.workWaitQueueJournal.CreateAndLockEntry(key)
+		if err != nil {
+			// TODO: return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", request.GetJobId(), request.GetRequestId(), err)
+		}
+
+		waitEntry.Value.ExecutionTime = retryTime.Unix()
+		waitEntry.Value.SubmissionID = work.submissionID
+		waitEntry.Value.WorkRequest = &workRequest{WorkRequest: request.WorkRequest}
+		waitEntry.Value.WorkResult = result
+
+		if err := commitAndReleaseWait(); err != nil {
+			w.log.Error("unable to release work wait queue journal entry", zap.Error(err), zap.Any("jobID", request.GetJobId()))
+		}
+
 		return
 	}
 

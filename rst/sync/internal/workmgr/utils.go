@@ -3,6 +3,7 @@ package workmgr
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -178,4 +179,86 @@ func generatePartsFromSegment(segment *flex.WorkRequest_Segment) func() (int32, 
 		}
 		return partNumber, offsetStart, offsetStop
 	}
+}
+
+/*
+The highest base value for the submissionID is ^uint64(0) which is 3w5e11264sgsf in base-36. This
+can be fit multiple times within 13-character base-36 string so defined ranges are utilized to
+represent five priority ranges.
+
+In order to simplify parsing, 8-9 have been ignore and priority 2 begins at the 'a'. The following
+table shows the ranges. The lead-byte represents the first character in the submissionID string.
+
+| ASCII | Offset | Lead Byte | Priority |
+| ----- | ------ | --------- | -------- |
+|   48  |    0   |    `0`    |    0     |
+|   49  |    1   |    `1`    |    0     |
+|   50  |    2   |    `2`    |    0     |
+|   51  |    3   |    `3`    |    0     |
+|   52  |    4   |    `4`    |    1     |
+|   53  |    5   |    `5`    |    1     |
+|   54  |    6   |    `6`    |    1     |
+|   55  |    7   |    `7`    |    1     |
+|   56  |    8   |    `8`    | ignored  |
+|   57  |    9   |    `9`    | ignored  |
+|   97  |   49   |    `a`    |    2     |
+|   98  |   50   |    `b`    |    2     |
+|   99  |   51   |    `c`    |    2     |
+|  100  |   52   |    `d`    |    2     |
+|  101  |   53   |    `e`    |    3     |
+|  102  |   54   |    `f`    |    3     |
+|  103  |   55   |    `g`    |    3     |
+|  104  |   56   |    `h`    |    3     |
+|  105  |   57   |    `i`    |    4     |
+|  106  |   58   |    `j`    |    4     |
+|  107  |   59   |    `k`    |    4     |
+|  108  |   60   |    `l`    |    4     |
+*/
+const priorityCount = 5
+const submissionIdPriorityTableStart = byte(48)
+
+var submissionIdPriorityOffsetTable = []byte{0, 4, 49, 53, 57, 61}
+
+// getInitialPrioritySubmissionIDs returns the priority count and a list of PriorityCount+1
+// submission ids which define the start and stop of the priority ranges.
+func getSubmissionIDPriorityRanges() (int, [priorityCount + 1]string) {
+	var submissionIds [priorityCount + 1]string
+	for i, _ := range submissionIds {
+		submissionIds[i] = createSubmissionID(fmt.Sprintf("%013s", "0"), int32(i))
+	}
+	return priorityCount, submissionIds
+}
+
+func createSubmissionID(baseKey string, priority int32) string {
+	leadByte := baseKey[0] + submissionIdPriorityOffsetTable[priority]
+	return string(leadByte) + baseKey[1:]
+}
+
+func submissionIDPriority(key string) int32 {
+	leadByte := key[0]
+	i := int32(priorityCount - 1)
+	for ; i >= 0; i-- {
+		priorityStartByte := submissionIdPriorityTableStart + submissionIdPriorityOffsetTable[i]
+		if leadByte >= priorityStartByte {
+			break
+		}
+	}
+	return i
+}
+
+func incrementSubmissionID(key string) (string, error) {
+	priority := submissionIDPriority(key)
+	value, err := strconv.ParseUint(submissionBaseKey(key), 36, 64)
+	if err != nil {
+		return "", fmt.Errorf("unable to cast last submission ID to an integer '%s': %w", key, err)
+	}
+
+	baseKey := fmt.Sprintf("%013s", strconv.FormatUint(value+1, 36))
+	return createSubmissionID(baseKey, priority), nil
+}
+
+func submissionBaseKey(key string) string {
+	leadByte := key[0]
+	leadByte -= submissionIdPriorityOffsetTable[submissionIDPriority(key)]
+	return string(leadByte) + key[1:]
 }
