@@ -128,6 +128,14 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		jobBuilder = true
 	}
 
+	if cfg.Priority == nil {
+		var priority int32 = 3
+		if jobBuilder {
+			priority = 4
+		}
+		cfg.Priority = &priority
+	}
+
 	if jobBuilder {
 		client := NewJobBuilderClient(ctx, nil, nil)
 		request := client.GetJobRequest(cfg)

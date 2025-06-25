@@ -110,6 +110,10 @@ type Provider interface {
 	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
+	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
+	// start work requests that have been placed into a wait queue. This is useful for providers
+	// that need the ability to wait for resources to be made available before continuing.
+	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -175,6 +179,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             nil,
 			RemoteStorageTarget: 0,
 			Type:                &flex.WorkRequest_Builder{Builder: proto.Clone(request.GetBuilder()).(*flex.BuilderJob)},
+			Priority:            proto.Int32(request.GetPriority()),
 		}
 		return []*flex.WorkRequest{jobBuilderWorkRequest}
 	}
@@ -192,6 +197,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
+			Priority:            proto.Int32(request.GetPriority()),
 		}
 
 		switch request.WhichType() {

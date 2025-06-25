@@ -26,6 +26,7 @@ func newPushCmd() *cobra.Command {
 		Update: new(bool),
 	}
 
+	var priority int32
 	var metadata map[string]string
 	var tagging map[string]string
 	cmd := &cobra.Command{
@@ -62,6 +63,15 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 				}
 			}
 			backendCfg.Metadata = metadata
+
+			priorityFlag := cmd.Flags().Lookup("priority")
+			if priorityFlag.Changed {
+				if priority < 1 || priority > 5 {
+					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
+				}
+				backendCfg.Priority = &priority
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -70,6 +80,8 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 		},
 	}
 	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Int32Var(&priority, "priority", 0, "Set job priority (1-5, 1 is the highest)")
+	cmd.Flags().Lookup("priority").DefValue = "auto"
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
@@ -90,6 +102,8 @@ func newPullCmd() *cobra.Command {
 		Download: true,
 		Update:   new(bool),
 	}
+
+	var priority int32
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
@@ -100,6 +114,15 @@ func newPullCmd() *cobra.Command {
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
 				return errors.New("--update requires a valid --remote-target to be specified")
 			}
+
+			priorityFlag := cmd.Flags().Lookup("priority")
+			if priorityFlag.Changed {
+				if priority < 1 || priority > 5 {
+					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
+				}
+				backendCfg.Priority = &priority
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -113,6 +136,8 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")
 	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
+	cmd.Flags().Int32Var(&priority, "priority", 0, "Set job priority (1-5, 1 is the highest)")
+	cmd.Flags().Lookup("priority").DefValue = "auto"
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")

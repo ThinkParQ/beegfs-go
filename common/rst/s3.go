@@ -92,6 +92,7 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 		Path:                cfg.Path,
 		RemoteStorageTarget: cfg.RemoteStorageTarget,
 		StubLocal:           cfg.StubLocal,
+		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Sync{
 			Sync: &flex.SyncJob{
@@ -118,6 +119,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		StubLocal:           request.StubLocal,
 		Overwrite:           sync.Overwrite,
 		Flatten:             sync.Flatten,
+		Priority:            &request.Priority,
 		Force:               request.Force,
 		LockedInfo:          sync.LockedInfo,
 		Update:              request.Update,
@@ -177,6 +179,10 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 // ExecuteJobBuilderRequest is not implemented and should never be called.
 func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
 	return ErrUnsupportedOpForRST
+}
+
+func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	return true, 0, nil
 }
 
 func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {

@@ -24,12 +24,17 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var shouldReportIdleStatus bool = true
-var shouldReportActiveStatus bool = true
-
-var beeSyncReceivedWorkRequest = expvar.NewInt("beesync_received_work_requests")
-var beeSyncQueuedWork = expvar.NewInt("beesync_queued_work")
-var beeSyncActiveWork = expvar.NewInt("beesync_active_work")
+// priorityIdMap maps each priority level to its string representation. Valid priorities range from
+// 1–5. Priority 0 is included only for backward compatibility with work requests from earlier
+// versions, which may still exist in the work journal. These legacy requests already have
+// submissionIds assigned to the highest priority.
+var priorityIdMap = map[int32]string{0: "1", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
+var beeSyncPriorityQueue = expvar.NewMap("beesync_priority_queue")
+var beeSyncActiveQueue = expvar.NewMap("beesync_active_queue")
+var beeSyncActiveWork = expvar.NewMap("beesync_active_work")
+var beeSyncWaitQueue = expvar.NewMap("beesync_wait_queue")
+var beeSyncComplete = expvar.NewMap("beesync_complete")
+var beeSyncPriorityFairnessMode = expvar.NewString("beesync_priority_fairness_mode")
 
 type Config struct {
 	WorkJournalPath string `mapstructure:"journal-db"`
@@ -111,6 +116,11 @@ type Manager struct {
 	// The manage loop picks up work from the workJournal and sends it to the worker goroutines
 	// using the activeWorkQueue while simultaneously adding it to the activeWork map.
 	activeWorkQueue chan workAssignment
+	// The scheduler manages how many work requests can be add at any given time. Its objective is
+	// to keep the workers busy without overloading the activeWorkQueue channel. This allows
+	// activeWorkQueue to drain quickly enough to minimize priority inversion (long delays for
+	// high-priority work caused by a backlog of lower-priority tasks).
+	scheduler *scheduler
 }
 
 func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
@@ -133,6 +143,17 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 		activeWork:           make(map[workIdentifier]workContext),
 		activeWorkMu:         sync.RWMutex{},
 		activeWorkQueue:      make(chan workAssignment, config.ActiveWorkQueueSize),
+	}
+
+	priorityFairness := AGGRESSIVE
+	beeSyncPriorityFairnessMode.Set(priorityFairness.String())
+	for i := range priorityLevels {
+		priority := priorityIdMap[int32(i+1)]
+		beeSyncPriorityQueue.Set(priority, new(expvar.Int))
+		beeSyncActiveQueue.Set(priority, new(expvar.Int))
+		beeSyncActiveWork.Set(priority, new(expvar.Int))
+		beeSyncComplete.Set(priority, new(expvar.Int))
+		beeSyncWaitQueue.Set(priority, new(expvar.Int))
 	}
 
 	// If anything goes wrong we want to execute all deferred functions
@@ -172,9 +193,29 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 	deferredFuncs = append(deferredFuncs, closeJobStore)
 	m.jobStore = jobStore
 
+	// Setup and initialize scheduler:
+	scheduler, closeScheduler := NewScheduler(m.mgrCtx, log, m.activeWorkQueue, priorityFairness, WithMinimumAllowedTokens(m.config.NumWorkers))
+	deferredFuncs = append(deferredFuncs, closeScheduler)
+	m.scheduler = scheduler
+
+	allEntriesFound := 0
+	for priority := range priorityLevels {
+		entriesFound, err := m.initScheduler(SubmissionIdPriorityRange(priority))
+		if err != nil {
+			m.log.Error("failed to initialize scheduler", zap.Error(err))
+			break
+		}
+		allEntriesFound += entriesFound
+	}
+	if allEntriesFound > 0 {
+		m.log.Info("discovered work requests from previous run", zap.Int("requests", allEntriesFound))
+	}
+
 	// We successfully completed initialization so lets handoff the deferred
 	// functions to the manage loop.
 	executeDefersImmediately = false
+
+	m.mgrWG.Add(1)
 	go m.manage(deferredFuncs)
 	return m, nil
 }
@@ -218,8 +259,6 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 // Once manage is started it will not exit until the context is cancelled. If an error happens it
 // will continue to retry the operation indefinitely.
 func (m *Manager) manage(deferredFuncs []func() error) {
-
-	m.mgrWG.Add(1)
 	defer func() {
 		// Deferred function calls should happen LIFO.
 		for i := len(deferredFuncs) - 1; i >= 0; i-- {
@@ -246,28 +285,32 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			workJournal:          m.workJournal,
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
+			rescheduleWork:       m.scheduler.AddWorkToken,
 		}
+		m.workerWG.Add(1)
 		go w.run(m.workerCtx, m.workerWG)
 	}
-
 	m.log.Info("finished startup")
-	var nextExpectedSubmissionID = ""
-	var err error
 
-	pollForWorkTicker := time.NewTicker(1500 * time.Millisecond)
-	defer pollForWorkTicker.Stop()
+	var err error
+	nextPriority := GetNextPriority()
 	for {
 		select {
 		case <-m.mgrCtx.Done():
 			return
-		case <-pollForWorkTicker.C:
-			// Add new work to the queue on a fixed interval. This is meant to allow us to add work
-			// to the queue in batches, which should be more efficient than always only adding one
-			// item to the queue. Provided a large enough queue workers should always be busy.
-			nextExpectedSubmissionID, err = m.pullInNewWork(nextExpectedSubmissionID)
-			if err != nil {
-				// Keep trying if there was an error.
-				continue
+		case allowedTokens := <-m.scheduler.tokensReleased:
+			for priority, ok := nextPriority(); ok; priority, ok = nextPriority() {
+				tokensDistributed := allowedTokens[priority]
+				if tokensDistributed == 0 {
+					continue
+				}
+
+				start, stop := SubmissionIdPriorityRange(priority)
+				err = m.pullInWork(start, stop, allowedTokens[priority])
+				if err != nil {
+					m.log.Error("failed to pull in new work", zap.Error(err))
+					break
+				}
 			}
 		case completion := <-completedWork:
 			m.activeWorkMu.Lock()
@@ -291,94 +334,100 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	}
 }
 
-// pullInNewWork will startAtSubmissionID and add work from the work journal to the active
-// work map and active work queue, up to the configured ActiveWorkQueueSize. It returns the ID of
-// the last entry it was able to add + 1 (the ID of the next expected submission ID). If the journal
-// is empty it always returns an empty string. If there are any errors it always returns an empty
-// string. It is idempotent and will not re-add items to the work map or queue that already exist in
-// the work map. This means it is safe to call it with a previously provided submission ID (or an
-// empty string), for example if it returns an error and the caller isn't sure what entries were
-// actually added to the active work queue.
-func (m *Manager) pullInNewWork(startAtSubmissionID string) (string, error) {
+// pullInWork moves ready work from the priority range to the activeWork map.
+func (m *Manager) pullInWork(start string, stop string, availableTokens int) error {
+	if availableTokens <= 0 {
+		return nil
+	}
 
 	m.activeWorkMu.Lock()
 	defer m.activeWorkMu.Unlock()
 
-	nextItem, cleanupNext, err := m.workJournal.GetEntries(kvstore.WithStartingKey(startAtSubmissionID))
+	nextItem, cleanupNext, err := m.workJournal.GetEntries(
+		kvstore.WithStartingKey(start),
+		kvstore.WithStopKey(stop),
+	)
 	if err != nil {
-		return "", fmt.Errorf("unable to get work journal entries: %w", err)
+		return fmt.Errorf("unable to get work journal entries: %w", err)
 	}
 	defer cleanupNext()
 
-	// Record the last valid submission ID so we can tell the caller what the
-	// nextExpectedSubmissionID is.
-	lastSubmissionID := ""
+	item, err := nextItem()
+	if err != nil {
+		return fmt.Errorf("unable to get work journal entry: %w", err)
+	}
+	if item == nil {
+		return nil
+	}
 
-	// Completely fill up the active work queue then record the last submission ID.
-	// Take into account if there are already entries in the work queue.
-	for i := len(m.activeWorkQueue); i <= m.config.ActiveWorkQueueSize; i++ {
-		entry, err := nextItem()
-		if err != nil {
-			return "", fmt.Errorf("unable to get work journal entry: %w", err)
-		}
-		if entry == nil {
-			break // No more entries are left in the work journal.
-		}
+	currentTime := time.Now()
+	for item != nil && availableTokens > 0 {
+		submissionID := item.Key
+		entry := item.Entry.Value
 
-		workIdentifier := workIdentifier{
-			submissionID:  entry.Key,
-			jobID:         entry.Entry.Value.WorkRequest.JobId,
-			workRequestID: entry.Entry.Value.WorkRequest.RequestId,
-		}
+		if currentTime.After(entry.ExecuteAfter) {
+			workId := workIdentifier{
+				submissionID:  submissionID,
+				jobID:         entry.WorkRequest.JobId,
+				workRequestID: entry.WorkRequest.RequestId,
+			}
 
-		_, ok := m.activeWork[workIdentifier]
-		if ok {
 			// Check based on the work identifier if there is already an existing workContext in the
 			// activeWork map. If so skip adding it to the map or queue again as we could block a worker
 			// when it tries to lock the journal entry if another worker is already handling the WR.
-			continue
+			if _, ok := m.activeWork[workId]; !ok {
+				workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
+				activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
+				m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
+				m.activeWorkQueue <- activeWork
+				availableTokens -= 1
+				m.scheduler.RemoveWorkToken(submissionID)
+				priority := priorityIdMap[entry.WorkRequest.GetPriority()]
+				beeSyncActiveQueue.Add(priority, 1)
+			}
 		}
 
-		workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
-		activeWork := workAssignment{
-			ctx:            workCtx,
-			workIdentifier: workIdentifier,
-		}
-
-		m.activeWork[activeWork.workIdentifier] = workContext{
-			ctx:    workCtx,
-			cancel: workCtxCancel,
-		}
-		m.activeWorkQueue <- activeWork
-		lastSubmissionID = entry.Key
-		shouldReportIdleStatus = true
-		if shouldReportActiveStatus {
-			m.log.Info("worker node is no longer idle")
-			shouldReportActiveStatus = false
-		}
-		beeSyncQueuedWork.Add(1)
-	}
-
-	nextExpectedSubmissionID := ""
-	if lastSubmissionID != "" {
-		lastSubmissionIDInt64, err := strconv.ParseInt(lastSubmissionID, 10, 64)
+		item, err = nextItem()
 		if err != nil {
-			// This is likely only to happen if somehow we end up with unexpected entries in the DB.
-			// For example if someone manually made an entry, or there is a bug somewhere else with
-			// how DB keys are generated.
-			return "", fmt.Errorf("unable to cast last submission ID to an integer '%s': %w", lastSubmissionID, err)
+			break
 		}
-		lastSubmissionIDInt64++
-		// Submission IDs are base36 encoded strings padded to a fixed width of 13 characters
-		// ensuring we can encode the max value of an int64 in base36.
-		nextExpectedSubmissionID = fmt.Sprintf("%013s", strconv.FormatInt(int64(lastSubmissionIDInt64), 36))
-	} else if shouldReportIdleStatus && len(m.activeWork) == 0 {
-		m.log.Info("worker node is idle")
-		shouldReportIdleStatus = false
-		shouldReportActiveStatus = true
 	}
 
-	return nextExpectedSubmissionID, nil
+	return err
+}
+
+// initScheduler adds tokens for unfinished work requests so they can be handled when the Sync
+// node starts.
+func (m *Manager) initScheduler(start string, stop string) (int, error) {
+	nextItem, cleanupNext, err := m.workJournal.GetEntries(
+		kvstore.WithStartingKey(start),
+		kvstore.WithStopKey(stop),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("unable to get work journal entries: %w", err)
+	}
+	defer cleanupNext()
+
+	submission, err := nextItem()
+	if err != nil {
+		return 0, fmt.Errorf("unable to get work journal entry: %w", err)
+	}
+	if submission == nil {
+		return 0, nil
+	}
+
+	entriesFound := 0
+	for submission != nil {
+		m.scheduler.AddWorkToken(submission.Key)
+		entriesFound++
+
+		submission, err = nextItem()
+		if err != nil {
+			break
+		}
+	}
+
+	return entriesFound, err
 }
 
 func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
@@ -386,53 +435,60 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 		return nil, status.Errorf(codes.FailedPrecondition, "%s", ErrNotReady)
 	}
 
+	jobId := wr.GetJobId()
+	workRequestId := wr.GetRequestId()
+
 	// First create or get the existing entry for this job and lock it to prevent anyone else from
 	// adding an entry for this WR. We also ensure there isn't an existing entry for the WR.
 	_, job, commitAndReleaseJob, err := m.jobStore.CreateAndLockEntry(
-		wr.GetJobId(),
+		jobId,
 		kvstore.WithAllowExisting(true),
 		kvstore.WithValue(make(map[string]string)),
 	)
 	if err != nil && !errors.Is(err, kvstore.ErrEntryAlreadyExistsInDB) {
-		return nil, fmt.Errorf("unable to create new entry or get existing entry for job ID %s: %w", wr.GetJobId(), err)
+		return nil, fmt.Errorf("unable to create new entry or get existing entry for job ID %s: %w", jobId, err)
 	}
 
-	if _, ok := job.Value[wr.GetRequestId()]; ok {
+	if _, ok := job.Value[workRequestId]; ok {
 		if err := commitAndReleaseJob(); err != nil {
-			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", wr.GetJobId()))
+			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
-		return nil, status.Errorf(codes.AlreadyExists, "%s", fmt.Errorf("already handling work request ID %s for job ID %s (refusing to create duplicate entries)", wr.GetRequestId(), wr.GetJobId()))
+		return nil, status.Errorf(codes.AlreadyExists, "%s", fmt.Errorf("already handling work request ID %s for job ID %s (refusing to create duplicate entries)", workRequestId, jobId))
 	}
 
 	defer func() {
 		if err := commitAndReleaseJob(); err != nil {
-			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", wr.GetJobId()))
+			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
 	}()
 
 	// Have the MapStore auto generate the submission ID based. This will be a base 36 encoded
 	// string padded to a fixed width of 13 characters. Generally we should not need to worry about
 	// manually generating IDs, except for pullInNewWork() which needs to increment the ID.
-	workEntryKey, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry("")
+	key, err := m.workJournal.GenerateNextPK()
 	if err != nil {
-		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", wr.GetJobId(), wr.GetRequestId(), err)
+		return nil, fmt.Errorf("unable to generate database key for job ID %s: %w", jobId, err)
+	}
+
+	submissionId, priority := CreateSubmissionId(key, wr.GetPriority())
+	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}
 	defer func() {
 		if err := commitAndReleaseWork(); err != nil {
-			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", wr.GetJobId()))
+			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
+		m.scheduler.AddWorkToken(submissionId)
+		beeSyncPriorityQueue.Add(priorityIdMap[priority], 1)
 	}()
 
-	workEntry.Value.WorkRequest = &workRequest{
-		WorkRequest: wr,
-	}
-
+	wr.SetPriority(priority)
+	workEntry.Value.WorkRequest = &workRequest{WorkRequest: wr}
 	workResult := newWorkFromRequest(workEntry.Value.WorkRequest)
-
 	workEntry.Value.WorkResult = workResult
-	job.Value[wr.GetRequestId()] = workEntryKey
+	job.Value[workRequestId] = submissionId
 
-	beeSyncReceivedWorkRequest.Add(1)
 	return workResult.Work, nil
 }
 
@@ -586,6 +642,7 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	case flex.Work_SCHEDULED:
 		workResult.GetStatus().SetState(flex.Work_CANCELLED)
 		workResult.GetStatus().SetMessage("cancelled scheduled work request")
+		m.scheduler.RemoveWorkToken(submissionID)
 	case flex.Work_CANCELLED:
 		// If a worker was already handling this work request the state should be cancelled.
 	case flex.Work_FAILED:

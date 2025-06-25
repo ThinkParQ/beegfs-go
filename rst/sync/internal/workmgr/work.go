@@ -18,6 +18,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const workDelayMinimum time.Duration = time.Second
+
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
 func init() {
@@ -38,7 +40,8 @@ type workEntry struct {
 	WorkRequest *workRequest
 	// WorkResult represents the result of the work being carried out by this worker node including the
 	// latest status and details about what parts have/haven't been completed from the work request.
-	WorkResult *work
+	WorkResult   *work
+	ExecuteAfter time.Time
 }
 
 // workRequest is a wrapper around the protobuf defined WorkRequest type to
@@ -127,10 +130,10 @@ type worker struct {
 	workJournal          *kvstore.MapStore[workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
+	rescheduleWork       func(string)
 }
 
 func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
-	wg.Add(1)
 	defer wg.Done()
 
 	for {
@@ -138,7 +141,6 @@ func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case work := <-w.workQueue:
-			beeSyncActiveWork.Add(1)
 			w.processWork(work)
 		}
 	}
@@ -180,8 +182,10 @@ func (w *worker) processWork(work workAssignment) {
 
 	request := journalEntry.Value.WorkRequest
 	result := journalEntry.Value.WorkResult
-	status := result.Status
+	status := result.GetStatus()
+	mappedPriorityId := priorityIdMap[request.GetPriority()]
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
+	beeSyncActiveWork.Add(mappedPriorityId, 1)
 
 	// By default we just commit the updated journal entry to the database. However if we sent the
 	// results to BeeRemote and there is nothing left to do with this work request then
@@ -251,7 +255,7 @@ func (w *worker) processWork(work workAssignment) {
 	// If the state is failed or an error we require the caller to update the state before we try
 	// again. We'll return a result to BeeRemote so it can make a decision how to proceed.
 	state := status.GetState()
-	if state != flex.Work_SCHEDULED && state != flex.Work_RUNNING {
+	if state != flex.Work_SCHEDULED && state != flex.Work_RESCHEDULED && state != flex.Work_RUNNING {
 		// The request might be completed if we were trying to send it to BeeRemote and were stopped
 		// for some reason (for example to restart if the BeeRemote gRPC client was misconfigured).
 		if state != flex.Work_COMPLETED {
@@ -273,6 +277,27 @@ func (w *worker) processWork(work workAssignment) {
 		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
+		return
+	}
+
+	// Check whether the work request is ready. If not, reschedule the work for a later time.
+	if isWorkReady, workDelay, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest); err != nil {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("failed to determine if work request is ready: " + err.Error())
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+		return
+	} else if !isWorkReady {
+		if workDelay <= workDelayMinimum {
+			workDelay = workDelayMinimum
+		}
+		journalEntry.Value.ExecuteAfter = time.Now().Add(workDelay)
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for work request to be ready")
+		w.sendWorkResult(work, result.Work)
+		w.rescheduleWork(work.submissionID)
+		beeSyncWaitQueue.Add(mappedPriorityId, 1)
 		return
 	}
 
@@ -321,6 +346,7 @@ func (w *worker) processWork(work workAssignment) {
 		} else {
 			status.SetState(flex.Work_COMPLETED)
 			status.SetMessage("all jobs were submitted")
+			beeSyncComplete.Add(mappedPriorityId, 1)
 		}
 
 		if w.sendWorkResult(work, result.Work) {
@@ -378,6 +404,7 @@ func (w *worker) processWork(work workAssignment) {
 	if len(journalEntry.Value.WorkResult.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
+		beeSyncComplete.Add(mappedPriorityId, 1)
 	} else {
 		if work.ctx.Err() != nil {
 			status.SetState(flex.Work_CANCELLED)

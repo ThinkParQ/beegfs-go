@@ -192,7 +192,7 @@ func TestCreateAndGetEntryAutoGenKey(t *testing.T) {
 	for i := 0; i <= 10; i++ {
 		entry, err := getNext()
 		require.NoError(t, err)
-		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatUint(uint64(i), 36))
 		assert.Equal(t, expectedKey, entry.Key)
 		assert.Equal(t, i, entry.Entry.Value)
 		assert.Equal(t, expectedKey, entry.Key)
@@ -420,6 +420,66 @@ func TestGetEntries(t *testing.T) {
 	require.Equal(t, "/baz/0", n.Key)
 	require.Equal(t, 999, n.Entry.Value)
 	cleanupIterator()
+
+	// Test when a stop key and prefix are specified.
+	nextItem, cleanupIterator, err = ms.GetEntries(WithKeyPrefix("/foo"), WithStopKey("/foo/20"))
+	require.NoError(t, err)
+	defer cleanupIterator() // No error to test.
+
+	for index := range 100 {
+		expectedKey := expectedFileOrder[index]
+		if expectedKey == "/foo/20" {
+			break
+		}
+		expectedValue, err := strconv.Atoi(strings.Split(expectedKey, "/")[2])
+
+		require.NoError(t, err)
+		n, err := nextItem()
+		if err != nil {
+			break
+		}
+		require.NoError(t, err)
+		require.Equal(t, expectedKey, n.Key)
+		require.Equal(t, expectedValue, n.Entry.Value)
+	}
+	n, err = nextItem()
+	require.Nil(t, n)
+	require.NoError(t, err)
+	cleanupIterator()
+
+	// Test when both start and stop key and prefix are specified.
+	nextItem, cleanupIterator, err = ms.GetEntries(WithKeyPrefix("/foo"), WithStartingKey("/foo/10"), WithStopKey("/foo/20"))
+	require.NoError(t, err)
+	defer cleanupIterator() // No error to test.
+
+	startFound := false
+	for index := range 100 {
+		expectedKey := expectedFileOrder[index]
+		if !startFound {
+			if expectedKey != "/foo/10" {
+				continue
+			}
+			startFound = true
+		}
+
+		if expectedKey == "/foo/20" {
+			break
+		}
+		expectedValue, err := strconv.Atoi(strings.Split(expectedKey, "/")[2])
+
+		require.NoError(t, err)
+		n, err := nextItem()
+		if err != nil {
+			break
+		}
+		require.NoError(t, err)
+		require.Equal(t, expectedKey, n.Key)
+		require.Equal(t, expectedValue, n.Entry.Value)
+	}
+	n, err = nextItem()
+	require.Nil(t, n)
+	require.NoError(t, err)
+	cleanupIterator()
 }
 
 func TestGetAndLockEntry(t *testing.T) {
@@ -540,7 +600,7 @@ func BenchmarkCreateAndGetEntryAutoGenKey(b *testing.B) {
 	for i := 0; i <= b.N; i++ {
 		entry, err := getNext()
 		require.NoError(b, err)
-		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatUint(uint64(i), 36))
 		assert.Equal(b, expectedKey, entry.Key)
 		assert.Equal(b, i+1, entry.Entry.Value)
 	}

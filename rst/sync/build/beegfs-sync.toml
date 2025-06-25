@@ -102,8 +102,8 @@ tls-disable = false
 # Manager configuration must be specified under [manager]. These settings affect how work requests
 # are tracked and stored internally by the Sync node.
 
-# journal-db: The path where a journal of all work requests assigned to this node will be kept. This
-# is used to resume outstanding work requests after the Sync node restarts or crashes.
+# journal-db: The path where a journal of scheduled work requests assigned to this node will be
+# kept. This is used to resume outstanding work requests after the Sync node restarts or crashes.
 
 # job-db: The path where a database of all jobs with active work requests on this node is stored.
 

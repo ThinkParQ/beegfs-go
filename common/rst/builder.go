@@ -37,6 +37,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 		Path:                cfg.Path,
 		RemoteStorageTarget: 0,
 		StubLocal:           cfg.StubLocal,
+		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Builder{
 			Builder: &flex.BuilderJob{
@@ -90,6 +91,10 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	}
 
 	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
+}
+
+func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	return true, 0, nil
 }
 
 // ExecuteWorkRequestPart is not implemented and should never be called.
