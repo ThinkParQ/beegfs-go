@@ -302,22 +302,25 @@ func (w *worker) processWork(work workAssignment) {
 
 		baseKey, err := w.workWaitQueueJournal.GenerateNextPK()
 		if err != nil {
-			// TODO:  // return nil, fmt.Errorf("unable to generate database key for job ID %s: %w", request.GetJobId(), err)
+			w.log.Error("unable to generate database key for wor request wait queue", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("unable to generate database key for work request wait queue for job ID " + request.GetJobId() + ": " + err.Error())
 		}
 
 		key := createSubmissionID(baseKey, submissionIDPriority(work.submissionID))
 		_, waitEntry, commitAndReleaseWait, err := w.workWaitQueueJournal.CreateAndLockEntry(key)
 		if err != nil {
-			// TODO: return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", request.GetJobId(), request.GetRequestId(), err)
+			w.log.Error("unable to create work journal entry for wor request wait queue", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("unable to generate database key for work request wait queue for job ID " + request.GetJobId() + ": " + err.Error())
 		}
 
 		waitEntry.Value.ExecutionTime = retryTime.Unix()
 		waitEntry.Value.SubmissionID = work.submissionID
 		waitEntry.Value.WorkRequest = &workRequest{WorkRequest: request.WorkRequest}
 		waitEntry.Value.WorkResult = result
-
 		if err := commitAndReleaseWait(); err != nil {
-			w.log.Error("unable to release work wait queue journal entry", zap.Error(err), zap.Any("jobID", request.GetJobId()))
+			w.log.Error("unable to release work wait queue journal entry", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
 		}
 
 		return
