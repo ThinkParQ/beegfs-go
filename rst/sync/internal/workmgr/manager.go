@@ -514,12 +514,12 @@ func (m *Manager) resumeWorkRequest(waitQueueSubmissionId string, waitQueueWorkE
 
 	_, workEntry, commitJournalEntry, err := m.workJournal.CreateAndLockEntry(submissionID)
 	if err != nil {
-		fmt.Printf("unable to create work journal entry for job ID %s work request ID %s: %s\n", jobID, workRequestID, err.Error())
+		return false, fmt.Errorf("failed to create work journal entry for job ID %s: %w", jobID, err)
+
 	}
 	defer func() {
 		if err = commitJournalEntry(); err != nil {
 			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobID))
-
 		}
 	}()
 
@@ -529,7 +529,7 @@ func (m *Manager) resumeWorkRequest(waitQueueSubmissionId string, waitQueueWorkE
 
 	_, waitQueueCommitJournalEntry, err := m.workWaitQueueJournal.GetAndLockEntry(waitQueueSubmissionId)
 	if err != nil {
-		return false, fmt.Errorf("failed to get waitQueue work journal entry. What should we do?")
+		return false, fmt.Errorf("failed to get waitQueue work journal entry for job ID %s: %w", jobID, err)
 	}
 	defer func() {
 		if err = waitQueueCommitJournalEntry(kvstore.WithDeleteEntry(true)); err != nil {
