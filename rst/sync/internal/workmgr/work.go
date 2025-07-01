@@ -288,10 +288,11 @@ func (w *worker) processWork(work workAssignment) {
 	ready, retryTime, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest)
 	if err != nil {
 		status.SetState(flex.Work_FAILED)
-		status.SetMessage("failed to determine if work request is ready")
+		status.SetMessage("failed to determine if work request is ready: " + err.Error())
 		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
+		return
 	}
 	if !ready {
 		status.SetMessage("waiting for work request to be ready")
