@@ -335,3 +335,7 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # s3.partitionid: Generally the partition ID does not need to specified and the default partition
 # for the S3 provider can be used. If your S3 bucket is in a specialized region such as AWS GovCloud
 # this may need to be specified/
+
+# s3.archiveRestoreRetentionDays: Number of days a restored object from an archival storage class
+# (e.g. Glacier) remains available in the primary (readable) tier before being moved back to
+# archival storage. Must be ≥ 1; defaults to 7.
