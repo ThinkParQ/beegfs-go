@@ -107,9 +107,13 @@ type Provider interface {
 	// It is important for providers to maintain beegfs-mtime which is the file's last modification
 	// time of the prior upload operation. Beegfs-mtime is used in conjunction with the file's size
 	// to determine whether the file is sync.
-	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, err error)
+	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
+	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
+	// start work requests that have been placed into a wait queue. This is useful for providers
+	// that need the ability to wait for resources to be made available before continuing.
+	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, retryTime time.Time, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -192,6 +196,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
+			Priority:            request.GetPriority(),
 		}
 
 		switch request.WhichType() {
@@ -418,12 +423,13 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		}
 	}
 
-	remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, cfg)
+	remoteSize, remoteMtime, isArchived, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+	lockedInfo.SetIsArchived(isArchived)
 
 	return client.GetJobRequest(cfg)
 }

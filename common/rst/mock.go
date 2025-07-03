@@ -119,10 +119,14 @@ func (r *MockClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
-	return 0, time.Time{}, ErrUnsupportedOpForRST
+func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, error) {
+	return 0, time.Time{}, true, ErrUnsupportedOpForRST
 }
 
 func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	return "", ErrUnsupportedOpForRST
+}
+
+func (r *MockClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Time, error) {
+	return true, time.Time{}, nil
 }
