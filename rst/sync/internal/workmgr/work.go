@@ -40,6 +40,13 @@ type workEntry struct {
 	WorkResult *work
 }
 
+type workEntryWaitQueue struct {
+	SubmissionID  string
+	ExecutionTime int64
+	WorkRequest   *workRequest
+	WorkResult    *work
+}
+
 // workRequest is a wrapper around the protobuf defined WorkRequest type to
 // allow encoding/decoding to work properly through encoding/gob.
 type workRequest struct {
@@ -124,6 +131,7 @@ type worker struct {
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
 	workJournal          *kvstore.MapStore[workEntry]
+	workWaitQueueJournal *kvstore.MapStore[workEntryWaitQueue]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 }
@@ -272,6 +280,48 @@ func (w *worker) processWork(work workAssignment) {
 		if w.sendWorkResult(work, result.Work) {
 			cleanupEntries = true
 		}
+		return
+	}
+
+	// Check if work request is ready
+	ready, retryTime, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest)
+	if err != nil {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("failed to determine if work request is ready: " + err.Error())
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+		return
+	}
+	if !ready {
+		status.SetMessage("waiting for work request to be ready")
+		if w.sendWorkResult(work, result.Work) {
+			cleanupEntries = true
+		}
+
+		baseKey, err := w.workWaitQueueJournal.GenerateNextPK()
+		if err != nil {
+			w.log.Error("unable to generate database key for wor request wait queue", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("unable to generate database key for work request wait queue for job ID " + request.GetJobId() + ": " + err.Error())
+		}
+
+		key := createSubmissionID(baseKey, submissionIDPriority(work.submissionID))
+		_, waitEntry, commitAndReleaseWait, err := w.workWaitQueueJournal.CreateAndLockEntry(key)
+		if err != nil {
+			w.log.Error("unable to create work journal entry for wor request wait queue", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("unable to generate database key for work request wait queue for job ID " + request.GetJobId() + ": " + err.Error())
+		}
+
+		waitEntry.Value.ExecutionTime = retryTime.Unix()
+		waitEntry.Value.SubmissionID = work.submissionID
+		waitEntry.Value.WorkRequest = &workRequest{WorkRequest: request.WorkRequest}
+		waitEntry.Value.WorkResult = result
+		if err := commitAndReleaseWait(); err != nil {
+			w.log.Error("unable to release work wait queue journal entry", zap.Error(err), zap.Any("jobID", request.GetJobId()), zap.Any("workID", request.GetRequestId()))
+		}
+
 		return
 	}
 
