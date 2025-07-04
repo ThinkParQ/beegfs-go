@@ -161,6 +161,14 @@ type EntityIdSet struct {
 	LegacyId LegacyId `json:"id"`
 }
 
+func (s *EntityIdSet) Clone() EntityIdSet {
+	return EntityIdSet{
+		Uid:      s.Uid,
+		Alias:    s.Alias,
+		LegacyId: s.LegacyId,
+	}
+}
+
 func EntityIdSetFromProto(input *pb.EntityIdSet) (EntityIdSet, error) {
 	if input == nil || input.LegacyId == nil {
 		return EntityIdSet{}, fmt.Errorf("proto EntityIdSet is invalid")

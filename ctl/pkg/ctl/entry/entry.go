@@ -317,10 +317,13 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 			EntryID:       []byte("root"),
 			FileName:      []byte(filepath.Base(searchPath)),
 			EntryType:     1,
-			// TODO: https://github.com/thinkparq/ctl/issues/55
-			// Correctly set the FeatureFlags if the root metadata node is mirrored. Technically
-			// this doesn't matter, but may in the future if things change.
-			FeatureFlags: 0,
+			FeatureFlags: func() beegfs.EntryFeatureFlags {
+				var ff beegfs.EntryFeatureFlags
+				if store.HasMetaRootMirror() {
+					ff.SetBuddyMirrored()
+				}
+				return ff
+			}(),
 		},
 	}
 
