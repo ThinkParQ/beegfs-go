@@ -23,6 +23,8 @@ type NodeStore struct {
 
 	// The meta node which has the root inode
 	metaRootNode *beegfs.Node
+	// buddy‐mirror group for the root metadata
+	metaRootMirror *beegfs.EntityIdSet
 
 	// The pointers to the connection stores
 	connsByUid map[beegfs.Uid]*util.NodeConns
@@ -121,6 +123,41 @@ func (store *NodeStore) GetMetaRootNode() *beegfs.Node {
 	}
 	rootMeta := store.metaRootNode.Clone()
 	return &rootMeta
+}
+
+// SetMetaRootMirror sets the buddy-mirror node for the root metadata.
+// It resolves the given EntityId to a node UID, verifies it’s a meta node,
+// and stores it in the store.metaRootMirror field.
+func (store *NodeStore) SetMetaRootMirror(rootMirror beegfs.EntityIdSet) error {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	if rootMirror.Uid == 0 {
+		store.metaRootMirror = nil
+		return nil
+	}
+
+	store.metaRootMirror = &rootMirror
+	return nil
+}
+
+// GetMetaRootMirror returns a deep-copy of the buddy-mirror node for the root metadata.
+// If no mirror has been set, it returns nil.
+func (store *NodeStore) GetMetaRootMirror() *beegfs.EntityIdSet {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.metaRootMirror == nil {
+		return nil
+	}
+	mirrorCopy := store.metaRootMirror.Clone()
+	return &mirrorCopy
+}
+
+// HasMetaRootMirror returns true if a buddy-mirror node for the root metadata is set.
+func (store *NodeStore) HasMetaRootMirror() bool {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	return store.metaRootMirror != nil
 }
 
 // Returns a single node from the store if the given EntityId exists. The returned Node is a deep
