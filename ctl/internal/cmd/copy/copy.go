@@ -159,12 +159,14 @@ should take measures to perform additional verification the source and destinati
 		bflag.Flag("nodes", "n", "Start the copy using this many nodes from the machine file (selected top to bottom). The default (0) will use all nodes.", "-n", 0),
 		bflag.Flag("keep-atime", "a", `Do not modify the access time of the source file(s). 
 This only works if supported and enabled on the source file system.`, "-a", false),
-		bflag.Flag("chunksize", "c", "Chunk size for copy operations (in MB).", "-c", 128),
+		bflag.Flag("chunksize", "c", `Chunk size for copy operations (in MB).
+Default chunk size: 128 MB.`, "-c", 128),
 		bflag.Flag("keep-mtime", "k", `Keep the original modification time from the source in the destination. 
 This only works if supported and enabled on the destination file system.`, "-k", false),
 		bflag.Flag("partition-threshold", "p", `Partition copy threshold (in MB).
 To accelerate the copy operation, large files are partitioned and copied using multiple threads.
-Files with a size below the partition-threshold are processed by a single thread.`, "-p", 1000),
+Files with a size below the partition-threshold are processed by a single thread.
+Default partition threshold: 1024 MB.`, "-p", 1024),
 		bflag.Flag("list-diff", "l", `Do not make any changes and just list differences between the source and destination paths. 
 This mode will list missing files and directories, and files with different sizes or older
 modification times in the destination. Only one source path is accepted, and can be either 
