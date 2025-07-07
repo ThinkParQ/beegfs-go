@@ -319,7 +319,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 			EntryType:     1,
 			FeatureFlags: func() beegfs.EntryFeatureFlags {
 				var ff beegfs.EntryFeatureFlags
-				if store.HasMetaRootMirror() {
+				if store.HasMetaRootBuddyGroup() {
 					ff.SetBuddyMirrored()
 				}
 				return ff

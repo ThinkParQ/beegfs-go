@@ -443,11 +443,11 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 			return nil, err
 		}
 
-		rootMirror, err := beegfs.EntityIdSetFromProto(nodes.GetMetaRootMirror())
+		rootMirror, err := beegfs.EntityIdSetFromProto(nodes.GetMetaRootBuddyGroup())
 		if err != nil {
 			return nil, fmt.Errorf("error parsing meta root mirror: %w", err)
 		}
-		nodeStore.SetMetaRootMirror(rootMirror)
+		nodeStore.SetMetaRootBuddyGroup(rootMirror)
 	}
 	return nodeStore, nil
 }
