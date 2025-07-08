@@ -116,7 +116,7 @@ func (m *ListDirFromOffsetRequest) Serialize(s *beeserde.Serializer) {
 type ListDirFromOffsetResponse struct {
 	NewServerOffset int64
 	ServerOffsets   []int64
-	Result          int32
+	Result          beegfs.OpsErr
 	EntryTypes      []uint8
 	EntryIDs        [][]byte
 	Names           [][]byte
@@ -243,7 +243,7 @@ func (m *GetEntryInfoRequest) Serialize(s *beeserde.Serializer) {
 }
 
 type GetEntryInfoResponse struct {
-	Result  int32
+	Result  beegfs.OpsErr
 	Pattern StripePattern
 	Path    PathInfo
 	RST     RemoteStorageTarget
