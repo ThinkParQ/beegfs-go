@@ -138,7 +138,7 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve RST mappings: %w", err)
 	}
-	rstMap, err := getRstMap(ctx, mountPoint, mappings.RstIdToConfig)
+	rstMap, err := GetRstMap(ctx, mountPoint, mappings.RstIdToConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -208,19 +208,4 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 	result.Exists = true
 	result.IsDir = info.IsDir()
 	return result, nil
-}
-
-func getRstMap(ctx context.Context, mountPoint filesystem.Provider, rstConfigMap map[uint32]*flex.RemoteStorageTarget) (map[uint32]Provider, error) {
-	rstMap := make(map[uint32]Provider)
-	for rstId, rstConfig := range rstConfigMap {
-		if !IsValidRstId(rstId) {
-			continue
-		}
-		rst, err := New(ctx, rstConfig, mountPoint)
-		if err != nil {
-			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
-		}
-		rstMap[rstId] = rst
-	}
-	return rstMap, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -283,7 +284,7 @@ func getPathStatus(ctx context.Context, cfg GetStatusCfg, mappings *util.Mapping
 	} else if dbPath.Err != nil {
 		// Otherwise we should check if there were any errors getting this entry. NotFound is
 		// expected when we are not recursively checking paths and calling GetJobs for each path.
-		if errors.Is(dbPath.Err, ErrEntryNotFound) {
+		if errors.Is(dbPath.Err, rst.ErrEntryNotFound) {
 			return &GetStatusResult{
 				Path:       fsPath,
 				SyncStatus: NotAttempted,

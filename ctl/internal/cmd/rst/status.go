@@ -59,6 +59,7 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
+	cmd.Flags().BoolVar(&backendCfg.CheckRemote, "check-remote", false, "Verify the status against the remote resource.")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }
@@ -66,14 +67,22 @@ Specifying Paths:
 func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.GetStatusCfg) error {
 
 	log, _ := config.GetLogger()
+	paths := cmd.Flags().Args()
+	ctx := cmd.Context()
 
-	// Setup the method for sending paths to the backend:
-	method, err := util.DeterminePathInputMethod(cmd.Flags().Args(), frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	var err error
+	backendCfg.MountPoint, err = config.BeeGFSClient(paths[0])
 	if err != nil {
 		return err
 	}
 
-	resultChan, errChan, err := rst.GetStatus(cmd.Context(), method, backendCfg)
+	// Setup the method for sending paths to the backend:
+	method, err := util.DeterminePathInputMethod(paths, frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	if err != nil {
+		return err
+	}
+
+	resultChan, errChan, err := rst.GetStatus(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
