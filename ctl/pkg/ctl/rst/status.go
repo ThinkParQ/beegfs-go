@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -20,6 +21,8 @@ import (
 )
 
 type GetStatusCfg struct {
+	CheckRemote bool
+	MountPoint  filesystem.Provider
 	// By default the sync status for each path is determined by the remote targets configured using
 	// BeeGFS metadata. Optionally check the status of each path with specific RemoteTargets and
 	// ignore any remote targets configured via BeeGFS metadata.
@@ -110,116 +113,183 @@ func (s PathStatus) String() string {
 // Note this is setup more similarly to the entry.GetEntries() function rather than other functions
 // in the rst package.
 func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, <-chan error, error) {
-
-	mappings, err := util.GetMappings(ctx)
+	var mappings *util.Mappings
+	var rstMap map[uint32]rst.Provider
+	var err error
+	mappings, err = util.GetMappings(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to fetch required mappings: %w", err)
 	}
 
-	var dbChan = new(chan *GetJobsResponse)
-	var dbPath *GetJobsResponse
-	dbOk := new(bool)
+	inputType := pm.Get()
+	if inputType == util.PathInputRecursion && cfg.CheckRemote {
+		rstMap, err = rst.GetRstMap(ctx, cfg.MountPoint, mappings.RstIdToConfig)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to get rst mappings: %w", err)
+		}
+	}
 
-	return util.ProcessPaths(ctx, pm, true, func(path string) (*GetStatusResult, error) {
-		return matchPathAndGetStatus(ctx, cfg, path, mappings, dbChan, &dbPath, dbOk, pm.Get())
-	}, util.RecurseLexicographically(true))
+	pipeline := func(ctx context.Context, pathChan <-chan string, errChan chan<- error) <-chan *GetStatusResult {
+		return statusPipeline(ctx, cfg, inputType, mappings, rstMap, pathChan, errChan)
+	}
+
+	return util.ProcessPathsViaPipeline(ctx, pm, true, pipeline, util.RecurseLexicographically(true))
 }
 
-// matchPathAndGetStatus expects to be called one or more times by util.ProcessPaths(). It adjusts
-// its behavior to optimize performance based on PathInputType:
-//
-// If PathInputType is recurse: GetJobs() is called once treating the first fsPath as a prefix and
-// reusing the gRPC stream for subsequent calls. It expects to receive lexicographically increasing
-// fsPaths, and will handle matching fsPaths with corresponding dbPaths, advancing the dbPath is
-// needed until it finds a match, or determines there is no entry in the Remote database for that
-// fsPath. For this mode to work correctly fsPaths and dbPaths be provided in stable lexicographical
-// order. If an fsPath is received that is "smaller" than the previous fsPath then the database will
-// always return "not found". This should never happen when used from util.ProcessPaths().
-//
-// If PathInputType is stdin or list: GetJobs() is called for each fsPath. This allows paths to be
-// provided in any order, but is not as efficient as the recurse mode when checking large directory
-// trees. It is however more efficient than the recurse mode when checking files in directories that
-// contain deep sub-directories, and only the status of the top-level files is needed.
-//
-// Regardless if a DB match is found, the status of each fsPath is checked using getPathStatus().
-func matchPathAndGetStatus(
-	// The first time checkPathStatus is called it will call GetJobs() with this context to setup
-	// the dbChan. Because it is unknown how many times checkPathStatus will be called it is not
-	// responsible for closing the GetJobs gRPC stream which is instead done by cancelling this
-	// context. It is up to the caller to ensure this context is cancelled once all fsPaths have
-	// been checked, which if the provided context is cmd.Context() will happen automatically.
+func statusPipeline(
 	ctx context.Context,
 	cfg GetStatusCfg,
-	fsPath string,
-	mappings *util.Mappings,
-	// dbChan, dbPath, dbOk, and dbStreaming are used to persist dbChan state when recursively
-	// checking status for multiple paths. If the current fsPath does not match the dbPath they hold
-	// the state of dbChan so that dbPath can be used when checking status for subsequent fsPaths.
-	//
-	// dbChan is a pointer to a channel. While channels are reference types, when passed to a
-	// function by value, a new local copy of the reference is created, however since we want to be
-	// able to assign dbChan to a new channel inside the function it must passed as a pointer. This
-	// must be initially nil to ensure the dbChan can be properly initialized by the first path.
-	dbChan *chan *GetJobsResponse,
-	// dbPath must be a double pointer (**GetJobsResponse) because we need to update the caller’s
-	// pointer reference with the *GetJobsResponse retrieved from the dbChan, not just modify its
-	// contents. If we used a single pointer (`*GetJobsResponse`), the function would only modify a
-	// copy of the pointer and NOT the caller’s original variable.
-	dbPath **GetJobsResponse,
-	// dbOk only needs a single pointer (*bool) because we are modifying a boolean value, which is a
-	// primitive type and does not require reference updates.
-	dbOk *bool,
 	inputType util.PathInputType,
-) (*GetStatusResult, error) {
+	mappings *util.Mappings,
+	rstMap map[uint32]rst.Provider,
+	pathChan <-chan string,
+	errChan chan<- error,
+) <-chan *GetStatusResult {
+	log, _ := config.GetLogger()
 
-	if *dbChan == nil {
-		log, _ := config.GetLogger()
-		// When not recursing, dbChan is always left nil and we just use a temporary channel to get
-		// back at most a single dbPath for each fsPath.
-		if inputType != util.PathInputRecursion {
+	if inputType != util.PathInputRecursion {
+		resultChan := make(chan *GetStatusResult, 1)
+		go func() {
+			defer close(resultChan)
+			fsPath := <-pathChan
 			log.Debug("attempting to retrieve a single path from the remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
 			c := make(chan *GetJobsResponse, 1)
 			if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, exactPath: true}, c); err != nil {
-				return nil, err
+				errChan <- err
+				return
 			}
-			*dbPath, *dbOk = <-c
-			return getPathStatus(ctx, cfg, mappings, fsPath, *dbPath)
+
+			result, err := getPathStatus(ctx, cfg, mappings, rstMap, fsPath, <-c)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			resultChan <- result
+		}()
+		return resultChan
+	}
+
+	workers := 3
+	resultChan := make(chan *GetStatusResult, 1024)
+	statusInfoChan := make(chan generateStatusInfo, 1024)
+	go func() {
+		defer close(resultChan)
+		wg := sync.WaitGroup{}
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				generateStatuses(ctx, cfg, mappings, rstMap, statusInfoChan, resultChan, errChan)
+			}()
 		}
-		// When recursing start streaming back jobs from Remote to a reusable dbChan.
+		wg.Wait()
+	}()
+
+	go func() {
+		defer close(statusInfoChan)
+		fsPath := <-pathChan
 		log.Debug("attempting to stream multiple paths from the Remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
-		*dbChan = make(chan *GetJobsResponse, 1024)
-		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, Recurse: true}, *dbChan); err != nil {
-			return nil, err
-		}
-		*dbPath, *dbOk = <-(*dbChan)
-		if !*dbOk {
-			return nil, fmt.Errorf("directory %s does not appear to contain any synchronized files", fsPath)
-		}
-		log.Debug("streaming multiple paths from the Remote database", zap.Any("firstDBPath", *dbPath), zap.Bool("dbOk", *dbOk))
-	}
-	// When recursing we need to determine the relation of the fsPath and current dbPath and adjust
-	// accordingly before getting the path status.
-	for *dbOk && fsPath > (*dbPath).Path {
-		// dbPath is behind, advance the dbChan until it is ahead or equal.
-		*dbPath, *dbOk = <-(*dbChan)
-	}
 
-	if !*dbOk || fsPath < (*dbPath).Path {
-		// The dbPath is ahead indicating no match in the DB was found for this fsPath. Call
-		// getPathStatus with a nil dbPath to still determine if the fsPath has no RST or has RSTs
-		// but has never been pushed.
-		return getPathStatus(ctx, cfg, mappings, fsPath, nil)
-	}
+		dbChan := make(chan *GetJobsResponse, 1024)
+		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, Recurse: true}, dbChan); err != nil {
+			errChan <- err
+			return
+		}
 
-	// Match found, advance dbChan for the next path and get the result for this path.
-	currentDbPath := *dbPath
-	*dbPath, *dbOk = <-(*dbChan)
-	return getPathStatus(ctx, cfg, mappings, fsPath, currentDbPath)
+		dbPath, dbOk := <-dbChan
+		if !dbOk {
+			errChan <- fmt.Errorf("directory %s does not appear to contain any synchronized files", fsPath)
+			return
+		}
+		log.Debug("streaming multiple paths from the Remote database", zap.Any("firstDBPath", dbPath), zap.Bool("dbOk", dbOk))
+
+		var fsOk bool
+		for {
+
+			// When recursing we need to determine the relation of the fsPath and current dbPath and adjust
+			// accordingly before getting the path status.
+			for dbOk && fsPath > dbPath.Path {
+				// dbPath is behind, advance the dbChan until it is ahead or equal.
+
+				// TODO: These files can be deleted because the current file system path is lexicographically greater
+				// than the current database path. This means that the database entry is for a deleted file.
+				// Probably should push these files to a delete-me channel/goroutine
+
+				dbPath, dbOk = <-dbChan
+			}
+
+			if !dbOk || fsPath < dbPath.Path {
+				// The dbPath is ahead indicating no match in the DB was found for this fsPath. Call
+				// getPathStatus with a nil dbPath to still determine if the fsPath has no RST or has RSTs
+				// but has never been pushed.
+				statusInfoChan <- generateStatusInfo{fsPath: fsPath}
+
+			} else {
+				// Match found, advance dbChan for the next path and get the result for this path.
+				currentDbPath := dbPath
+				dbPath, dbOk = <-dbChan
+				statusInfoChan <- generateStatusInfo{fsPath: fsPath, dbPathInfo: currentDbPath}
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case fsPath, fsOk = <-pathChan:
+				if !fsOk {
+					return
+				}
+			}
+		}
+
+	}()
+
+	return resultChan
+}
+
+type generateStatusInfo struct {
+	fsPath     string
+	dbPathInfo *GetJobsResponse
+}
+
+func generateStatuses(
+	ctx context.Context,
+	cfg GetStatusCfg,
+	mappings *util.Mappings,
+	rstMap map[uint32]rst.Provider,
+	statusInfoChan <-chan generateStatusInfo,
+	resultChan chan<- *GetStatusResult,
+	errChan chan<- error,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case statusInfo, ok := <-statusInfoChan:
+			if !ok {
+				return
+			}
+
+			result, err := getPathStatus(ctx, cfg, mappings, rstMap, statusInfo.fsPath, statusInfo.dbPathInfo)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			resultChan <- result
+		}
+	}
 }
 
 // getPathStatus accepts an fsPath and dbPath and determines the SyncStatus of the path. The
 // dbPath might be nil or contain an error if there was not match in the DB for this fsPath.
-func getPathStatus(ctx context.Context, cfg GetStatusCfg, mappings *util.Mappings, fsPath string, dbPath *GetJobsResponse) (*GetStatusResult, error) {
+func getPathStatus(
+	ctx context.Context,
+	cfg GetStatusCfg,
+	mappings *util.Mappings,
+	rstMap map[uint32]rst.Provider,
+	fsPath string,
+	dbPath *GetJobsResponse,
+) (*GetStatusResult, error) {
 
 	// First stat the file so we can skip directories since they won't have entries in the Remote
 	// DB. For files the stat will be reused later to compare the current mtime.
@@ -311,6 +381,9 @@ func getPathStatus(ctx context.Context, cfg GetStatusCfg, mappings *util.Mapping
 	// Then only consider jobs for remote targets currently configured on the entry, or
 	// explicitly specified by the user.
 	for _, job := range (*dbPath).Results {
+
+		// TODO: If --check-remote==true then get client and verify synchronization with remote resource.
+
 		if _, ok := remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()]; ok {
 			remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()] = job
 		}

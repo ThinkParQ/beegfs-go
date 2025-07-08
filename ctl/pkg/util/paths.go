@@ -341,6 +341,179 @@ func startProcessing[ResultT any](
 	return results
 }
 
+func ProcessPathsViaPipeline[ResultT any](
+	ctx context.Context,
+	method PathInputMethod,
+	singleWorker bool,
+	processEntryPipeline func(context.Context, <-chan string, chan<- error) <-chan ResultT,
+	opts ...ProcessPathOpt,
+) (<-chan ResultT, <-chan error, error) {
+
+	args := &ProcessPathOpts{}
+	for _, opt := range opts {
+		opt(args)
+	}
+
+	var resultChan <-chan ResultT
+	// Largely arbitrary channel size selection. There are multiple writers to this channel, but the
+	// number varies based on GOMAXPROCS.
+	errsChan := make(chan error, 128)
+
+	if method.pathsViaStdin {
+		pathsChan := make(chan string, 1024)
+		go ReadFromStdin(ctx, method.stdinDelimiter, pathsChan, errsChan)
+		resultChan = startProcessingViaPipeline(ctx, pathsChan, errsChan, singleWorker, args.FilterExpr, processEntryPipeline, true)
+	} else if method.pathsViaRecursion != "" {
+		pathsChan, err := walkDir(ctx, method.pathsViaRecursion, errsChan, args.RecurseLexicographically)
+		if err != nil {
+			close(errsChan)
+			return nil, nil, err
+		}
+		resultChan = startProcessingViaPipeline(ctx, pathsChan, errsChan, singleWorker, args.FilterExpr, processEntryPipeline, false)
+	} else {
+		pathsChan := make(chan string, 1024)
+		resultChan = startProcessingViaPipeline(ctx, pathsChan, errsChan, singleWorker, args.FilterExpr, processEntryPipeline, true)
+		go func() {
+			// Writing to the channel needs to happen in a separate Goroutine so entriesChan can be
+			// returned immediately. Otherwise if the number of paths is larger than the entriesChan
+			// the processFunc would eventually be blocked since nothing would be reading from
+			// entriesChan.
+			defer close(pathsChan)
+			for _, e := range method.pathsViaList {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					pathsChan <- e
+				}
+			}
+		}()
+	}
+	return resultChan, errsChan, nil
+
+}
+
+func startProcessingViaPipeline[ResultT any](
+	ctx context.Context,
+	pathChan <-chan string,
+	errChan chan<- error,
+	singleWorker bool,
+	filterExpr string,
+	processEntryPipeline func(context.Context, <-chan string, chan<- error) <-chan ResultT,
+	// Some processing methods do not work when BeeGFS is not mounted. Specifically recursion is not
+	// possible since there is no file system tree mounted to recurse through.
+	allowUnmounted bool,
+) <-chan ResultT {
+
+	var beegfsClient filesystem.Provider
+	var err error
+
+	var filterFunc func(FileInfo) (bool, error)
+	if filterExpr != "" {
+		var err error
+		filterFunc, err = compileFilter(filterExpr)
+		if err != nil {
+			errChan <- fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+			close(errChan)
+			return nil
+		}
+	}
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	searchPathChan := make(chan string, 1024)
+	resultChan := processEntryPipeline(workerCtx, searchPathChan, errChan)
+
+	// Spawn a goroutine that manages one or more workers that handle processing updates to each path.
+	go func() {
+		defer close(errChan)
+		defer close(searchPathChan)
+
+		// Because multiple workers may write to this channel it is closed by the parent goroutine
+		// once all workers return.
+		numWorkers := 1
+		if !singleWorker {
+			numWorkers = viper.GetInt(config.NumWorkersKey)
+			if numWorkers > 1 {
+				// Reserve one core for when there is another Goroutine walking a directory or reading
+				// in paths from stdin. If there is only a single core don't set the numWorkers less
+				// than one.
+				numWorkers = viper.GetInt(config.NumWorkersKey) - 1
+			}
+		}
+		wg := sync.WaitGroup{}
+		// If any of the workers encounter an error, this context is used to signal to the other
+		// workers they should exit early.
+
+		// The run loop for each worker:
+		runWorker := func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case path, ok := <-pathChan:
+					if !ok {
+						return
+					}
+					// Automatically initialize the BeeGFS client with the first path. If this is
+					// ever moved, be aware some processEntry functions depend on having a properly
+					// initialized BeeGFSClient using the absolute path, and may need to be updated.
+					if beegfsClient == nil {
+						beegfsClient, err = config.BeeGFSClient(path)
+						if err != nil && !(errors.Is(err, filesystem.ErrUnmounted) && allowUnmounted) {
+							errChan <- err
+							workerCancel()
+							return
+						}
+					}
+					searchPath, err := beegfsClient.GetRelativePathWithinMount(path)
+					if err != nil {
+						errChan <- err
+						workerCancel()
+						return
+					}
+
+					keep := true
+					if filterFunc != nil {
+						info, err := beegfsClient.Lstat(searchPath)
+						if err != nil {
+							errChan <- err
+							workerCancel()
+							return
+						}
+						statT, ok := info.Sys().(*syscall.Stat_t)
+						if !ok {
+							errChan <- errors.New("unsupported platform…")
+							workerCancel()
+							return
+						}
+						fi := statToFileInfo(path, statT)
+
+						keep, err = filterFunc(fi)
+						if err != nil {
+							errChan <- fmt.Errorf("filter eval %q on %s: %w", filterExpr, path, err)
+							workerCancel()
+							return
+						}
+					}
+
+					if keep {
+						searchPathChan <- searchPath
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		for range numWorkers {
+			wg.Add(1)
+			go runWorker()
+		}
+		wg.Wait()
+	}()
+	return resultChan
+}
+
 // Asynchronously walks a directory from startingPath, immediately returning a channel where the
 // paths will be sent, or an error if anything goes wrong setting up.
 func walkDir(ctx context.Context, startingPath string, errChan chan<- error, lexicographically bool) (<-chan string, error) {
