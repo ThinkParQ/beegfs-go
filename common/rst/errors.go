@@ -19,6 +19,7 @@ var (
 	ErrJobFailedPrecondition        = errors.New("job failed precondition")
 	ErrJobNotAllowed                = errors.New("submitting a new job is not allowed in this state")
 	ErrJobAlreadyExists             = errors.New("no changes to entry detected since the last job")
+	ErrEntryNotFound                = errors.New("entry was not found")
 	ErrFileHasNoRSTs                = errors.New("entry does not have any remote storage target IDs configured")
 	ErrFileHasAmbiguousRSTs         = errors.New("ambiguous remote source! There must only be one rst for downloads")
 	ErrFileOpenForWriting           = errors.New("entry is opened for writing on one or more clients")
@@ -27,6 +28,7 @@ var (
 	ErrFileTypeUnsupported          = errors.New("entry type is not supported")
 	ErrOffloadFileCreate            = errors.New("unable to create offload file")
 	ErrOffloadFileUrlMismatch       = errors.New("offload file url does not match")
+	ErrOffloadFileNotReadable       = errors.New("unable to read stub file")
 	ErrRSTUnavailable               = errors.New("remote target is unavailable")
 )
 

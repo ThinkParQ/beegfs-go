@@ -37,6 +37,12 @@ By default only files that are not currently in sync with their configured or th
 Use the verbose flag to print all entries including ones that are synchronized or do not have remote targets configured.
 Use the debug flag to print additional details such as the last job ID and modification timestamp from the file and last job.
 
+By default, sync statuses are inferred from job history and may not reflect recent changes to the remote target' resources.
+To ensure accuracy, add the --verify-remote flag to verification against your remote targets.
+
+Status processing is parallelized by default to optimize response times, which means results may arrive out of order.
+To enforce sequential processing (and preserve result order), export BEEGFS_NUM_WORKERS=1
+
 Specifying Paths:
 * A single file can be specified, or a directory can be specified with the --recurse flag to check all files in that directory are synchronized.
 * When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
@@ -59,6 +65,7 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
+	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Verify the sync status with the remote storage target(s).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }
@@ -66,14 +73,16 @@ Specifying Paths:
 func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.GetStatusCfg) error {
 
 	log, _ := config.GetLogger()
+	paths := cmd.Flags().Args()
+	ctx := cmd.Context()
 
 	// Setup the method for sending paths to the backend:
-	method, err := util.DeterminePathInputMethod(cmd.Flags().Args(), frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	method, err := util.DeterminePathInputMethod(paths, frontendCfg.recurse, frontendCfg.stdinDelimiter)
 	if err != nil {
 		return err
 	}
 
-	resultChan, errChan, err := rst.GetStatus(cmd.Context(), method, backendCfg)
+	resultChan, errChans, err := rst.GetStatus(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -142,9 +151,23 @@ run:
 				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
 
-		case err, ok := <-errChan:
+		case err, ok := <-errChans.Processor:
 			if ok {
-				// Once an error happens the entriesChan will be closed, however this is a buffered
+				// Once an error happens the resultChan will be closed, however this is a buffered
+				// channel so there may still be valid entries we should finish printing before
+				// returning the error.
+				multiErr.Errors = append(multiErr.Errors, err)
+			}
+		case err, ok := <-errChans.Info:
+			if ok {
+				// Once an error happens the resultChan will be closed, however this is a buffered
+				// channel so there may still be valid entries we should finish printing before
+				// returning the error.
+				multiErr.Errors = append(multiErr.Errors, err)
+			}
+		case err, ok := <-errChans.Worker:
+			if ok {
+				// Once an error happens the resultChan will be closed, however this is a buffered
 				// channel so there may still be valid entries we should finish printing before
 				// returning the error.
 				multiErr.Errors = append(multiErr.Errors, err)

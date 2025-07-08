@@ -31,7 +31,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -246,7 +245,7 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 // a request was able to be built, the error will be specified in the request's GenerationStatus.
 func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
 	keepLock := false
-	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath)
+	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
 
 	defer func() {
 		if !keepLock && writeLockSet {
@@ -410,7 +409,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	}
 
 	remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, cfg)
-	if err != nil {
+	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
@@ -530,7 +529,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		filePreallocated = true
 
 		var info *flex.JobLockedInfo
-		if info, _, _, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path); err != nil {
+		if info, _, _, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path, false); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -560,8 +559,10 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 // the lock fails to be acquired unless lockedRequired==true. cfg is used as a configuration
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
 // unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
-// writeLockSet will be true when the write lock was set.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+// writeLockSet will be true when the write lock was set. skipAccessLock will not change the access
+// lock. ErrOffloadFileNotReadable will be returned when the file is offloaded when client is unable
+// to read the file.
+func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, inMountPath string, skipAccessLock bool) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
@@ -580,14 +581,16 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *fle
 		rstIds = entryInfo.Entry.Remote.RSTIDs
 	}
 
-	if !entryInfo.Entry.FileState.IsReadWriteLocked() {
-		err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
-		if err != nil {
-			return
+	if !skipAccessLock {
+		if !entryInfo.Entry.FileState.IsReadWriteLocked() {
+			err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
+			if err != nil {
+				return
+			}
+			writeLockSet = true
 		}
-		writeLockSet = true
+		lockedInfo.SetReadWriteLocked(true)
 	}
-	lockedInfo.SetReadWriteLocked(true)
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
@@ -599,10 +602,16 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *fle
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
+			if strings.Contains(err.Error(), "resource temporarily unavailable") {
+				return lockedInfo, writeLockSet, rstIds, ErrOffloadFileNotReadable
+
+			}
 			return lockedInfo, writeLockSet, rstIds, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}
 
-		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
+		if !IsValidRstId(cfg.RemoteStorageTarget) {
+			return lockedInfo, writeLockSet, nil, fmt.Errorf("unable to verify stub file's target without a valid remote target")
+		} else if cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
 			return lockedInfo, writeLockSet, nil, fmt.Errorf("supplied --remote-target does not match stub file")
 		}
 		rstIds = []uint32{lockedInfo.StubUrlRstId}
@@ -709,17 +718,17 @@ func GetOffloadedUrlPartsFromFile(beegfs filesystem.Provider, path string) (uint
 	// may be fewer than 1024. The extra 0 bytes on the right will be trimmed.
 	reader, _, err := beegfs.ReadFilePart(path, 0, 1024)
 	if err != nil {
-		return 0, "", errors.New("stub file was not readable")
+		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
 
 	rstUrl, err := io.ReadAll(reader)
 	if err != nil {
-		return 0, "", errors.New("stub file was not readable")
+		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
 	rstUrl = bytes.TrimRight(rstUrl, "\n\x00")
 	urlRstId, urlKey, err := parseRstUrl(rstUrl)
 	if err != nil {
-		return 0, "", errors.New("stub file is malformed")
+		return 0, "", fmt.Errorf("stub file is malformed")
 	}
 	return urlRstId, urlKey, nil
 }
@@ -832,7 +841,7 @@ func GetLastCompletedJobFromRst(ctx context.Context, inMountPath string, rstId u
 	if err != nil {
 		if rpcStatus, ok := status.FromError(err); ok {
 			if rpcStatus.Code() == codes.NotFound {
-				return nil, rst.ErrEntryNotFound
+				return nil, ErrEntryNotFound
 			}
 		}
 		return nil, err
@@ -853,4 +862,19 @@ func GetLastCompletedJobFromRst(ctx context.Context, inMountPath string, rstId u
 	}
 
 	return lastCompletedJob, nil
+}
+
+func GetRstMap(ctx context.Context, mountPoint filesystem.Provider, rstConfigMap map[uint32]*flex.RemoteStorageTarget) (map[uint32]Provider, error) {
+	rstMap := make(map[uint32]Provider)
+	for rstId, rstConfig := range rstConfigMap {
+		if !IsValidRstId(rstId) {
+			continue
+		}
+		rst, err := New(ctx, rstConfig, mountPoint)
+		if err != nil {
+			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
+		}
+		rstMap[rstId] = rst
+	}
+	return rstMap, nil
 }

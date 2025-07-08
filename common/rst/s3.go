@@ -443,7 +443,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	}
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path); err != nil {
+		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
@@ -489,9 +489,9 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 	resp, err := r.client.HeadObject(ctx, headObjectInput)
 	if err != nil {
 		var apiErr smithy.APIError
-		if !keyMustExist && errors.As(err, &apiErr) {
+		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
-				return 0, time.Time{}, nil
+				return 0, time.Time{}, os.ErrNotExist
 			}
 		}
 		return 0, time.Time{}, err
