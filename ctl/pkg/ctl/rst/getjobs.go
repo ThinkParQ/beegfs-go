@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"google.golang.org/grpc/codes"
@@ -95,7 +96,7 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 			} else if err != nil {
 				if rpcStatus, ok := status.FromError(err); ok {
 					if rpcStatus.Code() == codes.NotFound {
-						err = ErrEntryNotFound
+						err = rst.ErrEntryNotFound
 					}
 				}
 				respChan <- &GetJobsResponse{
