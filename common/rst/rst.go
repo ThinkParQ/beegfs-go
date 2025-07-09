@@ -331,8 +331,8 @@ func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.ReadWriteLocked
 }
 
-// FileExistedBeforeJob returns whether the file exists when the job was created.
-func FileExistedBeforeJob(lockedInfo *flex.JobLockedInfo) bool {
+// FileExists returns whether the file exists.
+func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Exists
 }
 
@@ -382,7 +382,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	}
 
 	lockedInfo := cfg.LockedInfo
-	if !IsFileLocked(lockedInfo) && FileExistedBeforeJob(lockedInfo) {
+	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
 		return getRequestWithFailedPrecondition("path lock has not been acquired")
 
 	}
@@ -401,7 +401,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	}
 
 	if cfg.Download && cfg.RemotePath == "" {
-		if !FileExistedBeforeJob(lockedInfo) {
+		if !FileExists(lockedInfo) {
 			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
 		}
 
@@ -468,7 +468,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
-		if (cfg.Download && (cfg.Overwrite || !FileExistedBeforeJob(lockedInfo))) || alreadySynced {
+		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
 			if mappings == nil {
 				mappings, err = util.GetMappings(ctx)
 				if err != nil && !errors.Is(err, util.ErrMappingRSTs) {
@@ -496,11 +496,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			return ErrJobAlreadyOffloaded
 		}
 
-		if cfg.Download && !cfg.Overwrite && FileExistedBeforeJob(lockedInfo) {
+		if cfg.Download && !cfg.Overwrite && FileExists(lockedInfo) {
 			err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
 			return
 		}
-	} else if FileExistedBeforeJob(lockedInfo) {
+	} else if FileExists(lockedInfo) {
 		if alreadySynced {
 			return GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 		}

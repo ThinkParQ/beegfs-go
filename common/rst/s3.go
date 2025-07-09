@@ -425,10 +425,10 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	job.SetStopMtime(timestamppb.New(mtime))
 
 	if abort {
-		// If the file previously existed, it is converted into a stub file. Otherwise, the file is
-		// deleted.
 		lockedInfo := sync.LockedInfo
-		if FileExistedBeforeJob(lockedInfo) {
+		if !FileExists(lockedInfo) {
+			r.mountPoint.Remove(request.Path)
+		} else if IsFileOffloaded(lockedInfo) {
 			mappings, err := util.GetMappings(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to leave stub file: %w", err)
@@ -439,8 +439,6 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 				return fmt.Errorf("failed to leave stub file: %w", err)
 			}
 			job.GetStatus().SetState(beeremote.Job_OFFLOADED)
-		} else {
-			r.mountPoint.Remove(request.Path)
 		}
 	} else {
 		// Skip checking the file was modified if we were told to abort since the mtime may not have
@@ -466,7 +464,6 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 			}
 			entry.SetDataState(ctx, mappings, request.Path, DataStateNone)
 		}
-
 	}
 	return nil
 }
