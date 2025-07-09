@@ -254,7 +254,7 @@ func BuildJobRequests(
 	cfg *flex.JobRequestCfg,
 ) ([]*beeremote.JobRequest, error) {
 	keepLock := false
-	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
+	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath, false)
 
 	defer func() {
 		if !keepLock && writeLockSet {
@@ -551,7 +551,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 
 		var info *flex.JobLockedInfo
-		if info, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
+		if info, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path, false); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -581,8 +581,9 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 // the lock fails to be acquired unless lockedRequired==true. cfg is used as a configuration
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
 // unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
-// writeLockSet will be true when the write lock was set.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+// writeLockSet will be true when the write lock was set. skipAccessLock will no change the file's
+// access lock. ErrOffloadFileNotReadable will be returned when
+func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string, skipAccessLock bool) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
@@ -601,14 +602,16 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 		rstIds = entryInfo.Entry.Remote.RSTIDs
 	}
 
-	if !entryInfo.Entry.FileState.IsReadWriteLocked() {
-		err = entry.SetAccessFlags(ctx, mappings, inMountPath, LockedAccessFlags)
-		if err != nil {
-			return
+	if !skipAccessLock {
+		if !entryInfo.Entry.FileState.IsReadWriteLocked() {
+			err = entry.SetAccessFlags(ctx, mappings, inMountPath, LockedAccessFlags)
+			if err != nil {
+				return
+			}
+			writeLockSet = true
 		}
-		writeLockSet = true
+		lockedInfo.SetReadWriteLocked(true)
 	}
-	lockedInfo.SetReadWriteLocked(true)
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
@@ -620,6 +623,10 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
+			if strings.Contains(err.Error(), "resource temporarily unavailable") {
+				return lockedInfo, writeLockSet, rstIds, ErrOffloadFileNotReadable
+
+			}
 			return lockedInfo, writeLockSet, rstIds, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}
 
@@ -730,17 +737,17 @@ func GetOffloadedUrlPartsFromFile(beegfs filesystem.Provider, path string) (uint
 	// may be fewer than 1024. The extra 0 bytes on the right will be trimmed.
 	reader, _, err := beegfs.ReadFilePart(path, 0, 1024)
 	if err != nil {
-		return 0, "", errors.New("stub file was not readable")
+		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
 
 	rstUrl, err := io.ReadAll(reader)
 	if err != nil {
-		return 0, "", errors.New("stub file was not readable")
+		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
 	rstUrl = bytes.TrimRight(rstUrl, "\n\x00")
 	urlRstId, urlKey, err := parseRstUrl(rstUrl)
 	if err != nil {
-		return 0, "", errors.New("stub file is malformed")
+		return 0, "", fmt.Errorf("stub file is malformed")
 	}
 	return urlRstId, urlKey, nil
 }

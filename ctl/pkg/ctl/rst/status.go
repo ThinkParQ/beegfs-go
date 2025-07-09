@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,9 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type GetStatusCfg struct {
@@ -291,131 +294,195 @@ func getPathStatus(
 	dbPath *GetJobsResponse,
 ) (*GetStatusResult, error) {
 
-	// First stat the file so we can skip directories since they won't have entries in the Remote
-	// DB. For files the stat will be reused later to compare the current mtime.
-	beegfsClient, err := config.BeeGFSClient(fsPath)
-	if err != nil {
-		return nil, err
-	}
-	lStat, err := beegfsClient.Lstat(fsPath)
-	if err != nil {
-		return nil, err
-	}
+	syncReason := strings.Builder{}
+	result := &GetStatusResult{Path: fsPath, SyncStatus: Synchronized}
 
-	if lStat.IsDir() {
-		return &GetStatusResult{
-			Path:       fsPath,
-			SyncStatus: Directory,
-			SyncReason: "Synchronization state must be checked on individual files.",
-		}, nil
-	} else if !lStat.Mode().IsRegular() {
-		return &GetStatusResult{
-			Path:       fsPath,
-			SyncStatus: NotSupported,
-			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(lStat.Mode())),
-		}, nil
-	}
+	if cfg.CheckRemote {
+		lockedInfo, _, rstIds, err := rst.GetLockedInfo(ctx, cfg.MountPoint, mappings, &flex.JobRequestCfg{}, fsPath, true)
+		if err != nil {
+			if errors.Is(err, rst.ErrOffloadFileNotReadable) {
+				// Unable to read file because of the access lock on the file. Clients will not be
+				// able to read the contents of stub files so just return early.
+				result.SyncStatus = Offloaded
+				for _, tgt := range rstIds {
+					syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded. Unable to determine stub file target.\n", tgt))
+				}
+				if syncReason.Len() != 0 {
+					result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
+				}
+				return result, nil
 
-	// Determine what remote targets this path should be synced with. If the user has provided
-	// specific targets each path should be synced with only check those. Otherwise check any remote
-	// targets set via BeeGFS metadata (which requires an expensive GetEntry call).
-	//
-	// This is checked first so we can differentiate between "NoTargets" and "NotAttempted".
-	var remoteTargets = make(map[uint32]*beeremote.JobResult)
-	if len(cfg.RemoteTargets) != 0 {
-		for _, t := range cfg.RemoteTargets {
-			remoteTargets[t] = nil
+			} else {
+				return nil, fmt.Errorf("unable to get file info: %w", err)
+			}
 		}
+
+		fileMode := fs.FileMode(lockedInfo.Mode)
+		if fileMode.IsDir() {
+			return &GetStatusResult{
+				Path:       fsPath,
+				SyncStatus: Directory,
+				SyncReason: "Synchronization state must be checked on individual files.",
+			}, nil
+		} else if !fileMode.IsRegular() {
+			return &GetStatusResult{
+				Path:       fsPath,
+				SyncStatus: NotSupported,
+				SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(fileMode)),
+			}, nil
+		}
+
+		for _, tgt := range rstIds {
+			client, ok := rstMap[tgt]
+			if !ok {
+				return nil, fmt.Errorf("unable to get rst client! rstId: %d. %w", tgt, err)
+			}
+
+			if rst.IsFileOffloaded(lockedInfo) {
+				result.SyncStatus = Offloaded
+				if tgt == lockedInfo.GetStubUrlRstId() {
+					syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
+				} else {
+					syncReason.WriteString(fmt.Sprintf("Target %d: File contents are not offloaded to this target.\n", tgt))
+
+				}
+				continue
+			}
+
+			remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
+			if err != nil {
+				return nil, fmt.Errorf("unable to get remote resource info: %w", err)
+			}
+			lockedInfo.SetRemoteSize(remoteSize)
+			lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+
+			if rst.IsFileAlreadySynced(lockedInfo) {
+				syncReason.WriteString(fmt.Sprintf("Target %d: File is synced based on the remote storage target.\n", tgt))
+			} else {
+				result.SyncStatus = Unsynchronized
+				syncReason.WriteString(fmt.Sprintf("Target %d: File is not synced with remote storage target.\n", tgt))
+			}
+		}
+
 	} else {
-		entry, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, fsPath)
+		// First stat the file so we can skip directories since they won't have entries in the Remote
+		// DB. For files the stat will be reused later to compare the current mtime.
+		beegfsClient, err := config.BeeGFSClient(fsPath)
 		if err != nil {
 			return nil, err
 		}
-		if len(entry.Entry.Remote.RSTIDs) != 0 {
-			for _, t := range entry.Entry.Remote.RSTIDs {
+		lStat, err := beegfsClient.Lstat(fsPath)
+		if err != nil {
+			return nil, err
+		}
+
+		if lStat.IsDir() {
+			return &GetStatusResult{
+				Path:       fsPath,
+				SyncStatus: Directory,
+				SyncReason: "Synchronization state must be checked on individual files.",
+			}, nil
+		} else if !lStat.Mode().IsRegular() {
+			return &GetStatusResult{
+				Path:       fsPath,
+				SyncStatus: NotSupported,
+				SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(lStat.Mode())),
+			}, nil
+		}
+
+		// Determine what remote targets this path should be synced with. If the user has provided
+		// specific targets each path should be synced with only check those. Otherwise check any remote
+		// targets set via BeeGFS metadata (which requires an expensive GetEntry call).
+		//
+		// This is checked first so we can differentiate between "NoTargets" and "NotAttempted".
+		var remoteTargets = make(map[uint32]*beeremote.JobResult)
+		if len(cfg.RemoteTargets) != 0 {
+			for _, t := range cfg.RemoteTargets {
 				remoteTargets[t] = nil
 			}
 		} else {
-			return &GetStatusResult{
-				Path:       fsPath,
-				SyncStatus: NoTargets,
-				SyncReason: "No remote targets were specified or configured on this entry.",
-			}, nil
+			entry, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, fsPath)
+			if err != nil {
+				return nil, err
+			}
+			if len(entry.Entry.Remote.RSTIDs) != 0 {
+				for _, t := range entry.Entry.Remote.RSTIDs {
+					remoteTargets[t] = nil
+				}
+			} else {
+				return &GetStatusResult{
+					Path:       fsPath,
+					SyncStatus: NoTargets,
+					SyncReason: "No remote targets were specified or configured on this entry.",
+				}, nil
+			}
 		}
-	}
 
-	// When recursively checking paths the dbPath will be nil if there was no entry for this fsPath.
-	if dbPath == nil {
-		return &GetStatusResult{
-			Path:       fsPath,
-			SyncStatus: NotAttempted,
-			SyncReason: "Path has not been synchronized with any targets yet.",
-		}, nil
-	} else if dbPath.Err != nil {
-		// Otherwise we should check if there were any errors getting this entry. NotFound is
-		// expected when we are not recursively checking paths and calling GetJobs for each path.
-		if errors.Is(dbPath.Err, rst.ErrEntryNotFound) {
+		// When recursively checking paths the dbPath will be nil if there was no entry for this fsPath.
+		if dbPath == nil {
 			return &GetStatusResult{
 				Path:       fsPath,
 				SyncStatus: NotAttempted,
 				SyncReason: "Path has not been synchronized with any targets yet.",
 			}, nil
-		}
-		// Otherwise an unknown error occurred which should be returned for troubleshooting. Any
-		// error here probably means the connection closed unexpectedly (e.g., Remote shut down).
-		return nil, fmt.Errorf("encountered an error reading from the Remote connection while processing file path %s: %w", fsPath, dbPath.Err)
-	}
-
-	// DB has an entry for this path, check its status. First double check the dbPath is actually
-	// for this fsPath otherwise there is likely a bug in the caller:
-	if dbPath.Path != fsPath {
-		return nil, fmt.Errorf("bug detected: dbPath %s != fsPath %s", dbPath.Path, fsPath)
-	}
-
-	// First sort jobs oldest to newest so when they are added to the remote targets map only
-	// the most recent created job will be added for each remote target.
-	sort.Slice(dbPath.Results, func(i, j int) bool {
-		return dbPath.Results[i].GetJob().GetCreated().GetSeconds() < (*dbPath).Results[j].GetJob().GetCreated().GetSeconds()
-	})
-
-	// Then only consider jobs for remote targets currently configured on the entry, or
-	// explicitly specified by the user.
-	for _, job := range (*dbPath).Results {
-
-		// TODO: If --check-remote==true then get client and verify synchronization with remote resource.
-
-		if _, ok := remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()]; ok {
-			remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()] = job
-		}
-	}
-
-	// Lastly assemble the results for each of the requested targets:
-	result := &GetStatusResult{
-		Path:       fsPath,
-		SyncStatus: Synchronized,
-	}
-
-	syncReason := strings.Builder{}
-	for tgt, job := range remoteTargets {
-		if job.GetJob() == nil {
-			result.SyncStatus = Unsynchronized
-			syncReason.WriteString(fmt.Sprintf("Target %d: Path has no jobs for this target.\n", tgt))
-		} else if job.GetJob().GetStatus().GetState() == beeremote.Job_OFFLOADED {
-			result.SyncStatus = Offloaded
-			syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
-		} else if job.GetJob().GetStatus().GetState() != beeremote.Job_COMPLETED {
-			result.SyncStatus = Unsynchronized
-			if cfg.Debug {
-				syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job %s is not completed (state: %s).\n", tgt, job.GetJob().GetId(), job.GetJob().GetStatus().GetState()))
-			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job is not completed.\n", tgt))
+		} else if dbPath.Err != nil {
+			// Otherwise we should check if there were any errors getting this entry. NotFound is
+			// expected when we are not recursively checking paths and calling GetJobs for each path.
+			if errors.Is(dbPath.Err, rst.ErrEntryNotFound) {
+				return &GetStatusResult{
+					Path:       fsPath,
+					SyncStatus: NotAttempted,
+					SyncReason: "Path has not been synchronized with any targets yet.",
+				}, nil
 			}
-		} else {
-			if !lStat.ModTime().Equal(job.GetJob().GetStopMtime().AsTime()) {
+			// Otherwise an unknown error occurred which should be returned for troubleshooting. Any
+			// error here probably means the connection closed unexpectedly (e.g., Remote shut down).
+			return nil, fmt.Errorf("encountered an error reading from the Remote connection while processing file path %s: %w", fsPath, dbPath.Err)
+		}
+
+		// DB has an entry for this path, check its status. First double check the dbPath is actually
+		// for this fsPath otherwise there is likely a bug in the caller:
+		if dbPath.Path != fsPath {
+			return nil, fmt.Errorf("bug detected: dbPath %s != fsPath %s", dbPath.Path, fsPath)
+		}
+
+		// First sort jobs oldest to newest so when they are added to the remote targets map only
+		// the most recent created job will be added for each remote target.
+		sort.Slice(dbPath.Results, func(i, j int) bool {
+			return dbPath.Results[i].GetJob().GetCreated().GetSeconds() < (*dbPath).Results[j].GetJob().GetCreated().GetSeconds()
+		})
+
+		// Then only consider jobs for remote targets currently configured on the entry, or
+		// explicitly specified by the user.
+		for _, job := range (*dbPath).Results {
+			if _, ok := remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()]; ok {
+				remoteTargets[job.GetJob().GetRequest().GetRemoteStorageTarget()] = job
+			}
+		}
+
+		// Lastly assemble the results for each of the requested targets:
+		for tgt, jobResult := range remoteTargets {
+			job := jobResult.GetJob()
+			state := job.GetStatus().GetState()
+
+			if job == nil {
+				result.SyncStatus = Unsynchronized
+				syncReason.WriteString(fmt.Sprintf("Target %d: Path has no jobs for this target.\n", tgt))
+			} else if state == beeremote.Job_OFFLOADED {
+				result.SyncStatus = Offloaded
+				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
+			} else if state != beeremote.Job_COMPLETED {
+				result.SyncStatus = Unsynchronized
+				if cfg.Debug {
+					syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job %s is not completed (state: %s).\n", tgt, job.GetId(), state))
+				} else {
+					syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job is not completed.\n", tgt))
+				}
+			} else if !lStat.ModTime().Equal(job.GetStopMtime().AsTime()) {
 				result.SyncStatus = Unsynchronized
 				if cfg.Debug {
 					syncReason.WriteString(fmt.Sprintf("Target %d: File has been modified since the most recent job (file mtime %s / job %s mtime %s).\n",
-						tgt, lStat.ModTime().Format(time.RFC3339), job.GetJob().GetId(), job.GetJob().GetStartMtime().AsTime().Format(time.RFC3339)))
+						tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339)))
 				} else {
 					syncReason.WriteString(fmt.Sprintf("Target %d: File has been modified since the most recent job.\n", tgt))
 				}
@@ -424,7 +491,7 @@ func getPathStatus(
 				// targets it is always marked unsynchronized.
 				if cfg.Debug {
 					syncReason.WriteString(fmt.Sprintf("Target %d: File is in sync based on the most recent job (file mtime %s / job %s mtime %s).\n",
-						tgt, lStat.ModTime().Format(time.RFC3339), job.GetJob().GetId(), job.GetJob().GetStartMtime().AsTime().Format(time.RFC3339)))
+						tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339)))
 				} else {
 					syncReason.WriteString(fmt.Sprintf("Target %d: File is in sync based on the most recent job.\n", tgt))
 				}

@@ -468,7 +468,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, mappings *util.Mapping
 	}
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, mappings, cfg, cfg.Path); err != nil {
+		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, mappings, cfg, cfg.Path, false); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}

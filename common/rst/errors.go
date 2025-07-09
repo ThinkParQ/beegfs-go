@@ -28,6 +28,7 @@ var (
 	ErrFileTypeUnsupported          = errors.New("entry type is not supported")
 	ErrOffloadFileCreate            = errors.New("unable to create offload file")
 	ErrOffloadFileUrlMismatch       = errors.New("offload file url does not match")
+	ErrOffloadFileNotReadable       = errors.New("unable to read stub file")
 	ErrRSTUnavailable               = errors.New("remote target is unavailable")
 )
 
