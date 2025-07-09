@@ -214,10 +214,10 @@ func statusPipeline(
 			for dbOk && fsPath > dbPath.Path {
 				// dbPath is behind, advance the dbChan until it is ahead or equal.
 
-				// TODO: These files can be deleted because the current file system path is lexicographically greater
-				// than the current database path. This means that the database entry is for a deleted file.
-				// Probably should push these files to a delete-me channel/goroutine
-
+				// TODO (https://github.com/ThinkParQ/beegfs-go/issues/194): These files can be
+				// deleted because the current file system path is lexicographically greater than
+				// the current database path which means that the database entry is for a deleted
+				// file.
 				dbPath, dbOk = <-dbChan
 			}
 
