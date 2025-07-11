@@ -128,17 +128,15 @@ func (store *NodeStore) GetMetaRootNode() *beegfs.Node {
 // SetMetaRootMirror sets the buddy-mirror node for the root metadata.
 // It resolves the given EntityId to a node UID, verifies it’s a meta node,
 // and stores it in the store.metaRootMirror field.
-func (store *NodeStore) SetMetaRootBuddyGroup(rootMirror beegfs.EntityIdSet) error {
+func (store *NodeStore) SetMetaRootBuddyGroup(rootMirror beegfs.EntityIdSet) {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
 	if rootMirror.Uid == 0 {
 		store.metaRootBuddyGroup = nil
-		return nil
 	}
 
 	store.metaRootBuddyGroup = &rootMirror
-	return nil
 }
 
 // GetMetaRootMirror returns a deep-copy of the buddy-mirror node for the root metadata.
