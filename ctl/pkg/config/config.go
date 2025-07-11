@@ -442,8 +442,15 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		if err != nil {
 			return nil, err
 		}
-	}
 
+		if rootBuddy := nodes.GetMetaRootBuddyGroup(); rootBuddy != nil {
+			rootMirror, err := beegfs.EntityIdSetFromProto(rootBuddy)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing meta root mirror: %w", err)
+			}
+			nodeStore.SetMetaRootBuddyGroup(rootMirror)
+		}
+	}
 	return nodeStore, nil
 }
 
