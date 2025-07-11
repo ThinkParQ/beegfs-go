@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -87,11 +88,14 @@ $ beegfs index ls /mnt/index
 func runPythonLsIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+1)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+2)
 	allArgs = append(allArgs, lsCmd)
 	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
-
+	outputFormat := viper.GetString(config.OutputKey)
+	if outputFormat != "" && outputFormat != config.OutputTable.String() {
+		allArgs = append(allArgs, "-Q", outputFormat)
+	}
 	log.Debug("Running BeeGFS Hive Index ls command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("lsCmd", lsCmd),
