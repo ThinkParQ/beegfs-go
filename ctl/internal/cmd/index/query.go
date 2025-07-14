@@ -65,12 +65,12 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	var outputArg string
 
 	switch outputFormat {
-	case config.OutputJSON.String(), config.OutputJSONPretty.String():
+	case config.OutputJSON.String(), config.OutputJSONPretty.String(), config.OutputNDJSON.String():
 		outputArg = "-Q" + outputFormat
 	case config.OutputTable.String():
 		// No additional output argument needed
 	default:
-		return fmt.Errorf("invalid argument \"%s\" for index query \"--output\" flag (allowed: [table json json-pretty])", outputFormat)
+		return fmt.Errorf("invalid argument \"%s\" for index query \"--output\" flag (allowed: [table json json-pretty ndjson])", outputFormat)
 	}
 	if outputArg != "" {
 		allArgs = append(allArgs, outputArg)
