@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -56,9 +57,24 @@ beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+1)
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, queryCmd)
 	allArgs = append(allArgs, wrappedArgs...)
+
+	outputFormat := viper.GetString(config.OutputKey)
+	var outputArg string
+
+	switch outputFormat {
+	case config.OutputJSON.String(), config.OutputJSONPretty.String(), config.OutputNDJSON.String():
+		outputArg = "-Q" + outputFormat
+	case config.OutputTable.String():
+		// No additional output argument needed
+	default:
+		return fmt.Errorf("invalid argument \"%s\" for index query \"--output\" flag (allowed: [table json json-pretty ndjson])", outputFormat)
+	}
+	if outputArg != "" {
+		allArgs = append(allArgs, outputArg)
+	}
 	log.Debug("Running BeeGFS Hive Index query command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("queryCmd", queryCmd),
