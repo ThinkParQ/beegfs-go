@@ -32,6 +32,7 @@ type GetStatusCfg struct {
 	// BeeGFS metadata. Optionally check the status of each path with specific RemoteTargets and
 	// ignore any remote targets configured via BeeGFS metadata.
 	RemoteTargets []uint32
+	FilterExpr    string
 	// Usually set based on viper.GetBool(config.DebugKey). This is passed in using the GetStatusCfg
 	// to avoid an expensive call to Viper for every path.
 	Debug bool
@@ -131,7 +132,7 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 		return statusPipeline(ctx, cfg, pm.Get(), paths, workerErrChan, statusErrChan)
 	}
 
-	results, processorErrs, err := util.ProcessPathsViaPipeline(ctx, pm, true, pipeline, util.RecurseLexicographically(true))
+	results, processorErrs, err := util.ProcessPathsViaPipeline(ctx, pm, true, pipeline, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
 	if err != nil {
 		return nil, nil, err
 	}
