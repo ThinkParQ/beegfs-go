@@ -23,7 +23,6 @@ import (
 	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -138,7 +137,6 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}
 
-	var mappings *util.Mappings
 	var writeLockSet bool
 	defer func() {
 		if err == nil || errors.Is(err, ErrJobAlreadyOffloaded) {
@@ -146,20 +144,13 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if writeLockSet {
-			if mappings == nil {
-				var mappingsErr error
-				if mappings, mappingsErr = util.GetMappings(ctx); mappingsErr != nil {
-					return
-				}
-			}
-
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, mappings, request.Path, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, LockedAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
 	}()
 
-	if writeLockSet, err = r.prepareJobRequest(ctx, mappings, r.getJobRequestCfg(request), sync); err != nil {
+	if writeLockSet, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
 		return nil, err
 	}
 	job.SetExternalId(sync.LockedInfo.ExternalId)
@@ -400,12 +391,7 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 	}
 
 	if request.StubLocal {
-		mappings, err := util.GetMappings(ctx)
-		if err != nil {
-			return fmt.Errorf("upload successful but failed to create stub file: %w", err)
-		}
-
-		err = CreateOffloadedDataFile(ctx, r.mountPoint, mappings, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
+		err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
 		if err != nil {
 			return fmt.Errorf("upload successful but failed to create stub file: %w", err)
 		}
@@ -442,11 +428,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
-			mappings, err := util.GetMappings(ctx)
-			if err != nil {
-				return err
-			}
-			entry.SetDataState(ctx, mappings, request.Path, DataStateNone)
+			entry.SetFileDataState(ctx, request.Path, DataStateNone)
 		}
 
 	}
@@ -454,21 +436,14 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 }
 
 // prepareJobRequest ensures that sync.LockedInfo is full populated.
-func (r *S3Client) prepareJobRequest(ctx context.Context, mappings *util.Mappings, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, err error) {
+func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, err error) {
 	lockedInfo := sync.LockedInfo
 	if IsFileLocked(lockedInfo) && HasRemotePathInfo(lockedInfo) {
 		return
 	}
 
-	if mappings == nil {
-		if mappings, err = util.GetMappings(ctx); err != nil {
-			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, err.Error())
-			return
-		}
-	}
-
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, mappings, cfg, cfg.Path); err != nil {
+		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
@@ -477,14 +452,14 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, mappings *util.Mapping
 	}
 
 	if !HasRemotePathInfo(lockedInfo) {
-		request := BuildJobRequest(ctx, r, r.mountPoint, mappings, cfg)
+		request := BuildJobRequest(ctx, r, r.mountPoint, cfg)
 		status := request.GetGenerationStatus()
 		if status != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, status.Message)
 			return
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, mappings, cfg); err != nil {
+		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}

@@ -91,8 +91,10 @@ type remoteConfig struct {
 // newEntry is used to assemble an entry from BeeMsgs. If user friendly names of the various IDs
 // should be set, the caller should first initialize the various mappers. If the mappers are not
 // available value types will be set to logical defaults (like <unknown>) and reference types will
-// be nil.
-func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntryInfoResponse) Entry {
+// be nil. If mappings is nil then the cached mappings will be used along with a single attempt to
+// update the cached mappings on a failure to retrieve an expected value.
+func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntryInfoResponse) Entry {
+
 	e := Entry{
 		MetaOwnerNode: ownerNode,
 		ParentEntryID: string(entry.ParentEntryID),
@@ -113,11 +115,33 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 		NumSessionsWrite: entryInfo.NumSessionsWrite,
 		FileState:        entryInfo.FileState,
 	}
+
 	if entry.FeatureFlags.IsBuddyMirrored() {
 		e.MetaBuddyGroup = int(entry.OwnerID)
 	}
 
+	var err error
+	if mappings == nil {
+		mappings, err = util.GetCachedMappings(ctx, false)
+		if err != nil {
+			return e
+		}
+	}
+
+	mappingsUpdated := false
+	updateMappings := func() {
+		if mappingsUpdated {
+			return
+		}
+		mappings, err = util.GetCachedMappings(ctx, true)
+		mappingsUpdated = true
+	}
+
 	pool, err := mappings.StoragePoolToConfig.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
+	if errors.Is(err, util.ErrMapperNotFound) {
+		updateMappings()
+		pool, err = mappings.StoragePoolToConfig.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
+	}
 	if err == nil {
 		e.Pattern.StoragePoolName = pool.Pool.Alias.String()
 	}
@@ -125,6 +149,10 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 {
 		for _, tgt := range entryInfo.Pattern.TargetIDs {
 			node, err := mappings.TargetToNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
+			if errors.Is(err, util.ErrMapperNotFound) {
+				updateMappings()
+				node, err = mappings.TargetToNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
+			}
 			if err != nil {
 				e.Pattern.StorageTargets[beegfs.NumId(tgt)] = nil
 			} else {
@@ -136,6 +164,10 @@ func newEntry(mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Nod
 	if len(entryInfo.RST.RSTIDs) != 0 {
 		for _, id := range entryInfo.RST.RSTIDs {
 			rst, ok := mappings.RstIdToConfig[id]
+			if errors.Is(err, util.ErrMapperNotFound) {
+				updateMappings()
+				rst, ok = mappings.RstIdToConfig[id]
+			}
 			if !ok {
 				e.Remote.Targets[id] = nil
 			} else {
@@ -210,6 +242,8 @@ func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg)
 	return util.ProcessPaths(ctx, pm, true, processEntry)
 }
 
+// GetEntry retrieves GetEntryCombinedInfo based on the provided information. If mappings is nil
+// then GetCachedMappings() will be used.
 func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {
 	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
 	if err != nil {
@@ -234,7 +268,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	var entryWithParent = GetEntryCombinedInfo{
 		Path: path,
 	}
-	entryWithParent.Entry = newEntry(mappings, entry, ownerNode, *resp)
+	entryWithParent.Entry = newEntry(ctx, mappings, entry, ownerNode, *resp)
 	if cfg.IncludeOrigMsg {
 		entryWithParent.Entry.origEntryInfoMsg = &entry
 	}
@@ -253,7 +287,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 					Err: types.MultiError{Errors: []error{err}},
 				}
 			} else {
-				entryWithParent.Parent = newEntry(mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
+				entryWithParent.Parent = newEntry(ctx, mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
 				entryWithParent.Entry.Verbose = newVerbose(resp.Path, entryWithParent.Entry, entryWithParent.Parent)
 				if cfg.IncludeOrigMsg {
 					entryWithParent.Parent.origEntryInfoMsg = &parentEntry
@@ -268,6 +302,8 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	return &entryWithParent, nil
 }
 
+// GetEntryAndOwnerFromPath retrieves entry and owning node information. The mappings will be
+// acquired if needed when mappings is nil.
 func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path string) (msg.EntryInfo, beegfs.Node, error) {
 	// TODO: https://github.com/thinkparq/ctl/issues/54
 	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
@@ -343,11 +379,9 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 		// that to the ID of the current primary metadata node.
 		var metaNodeNumID beegfs.NumId
 		if resp.EntryInfoWithDepth.EntryInfo.FeatureFlags.IsBuddyMirrored() {
-			primaryMetaNode, err := mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID), NodeType: beegfs.Meta})
-			if err != nil {
-				return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", resp.EntryInfoWithDepth.EntryInfo.OwnerID, err)
+			if metaNodeNumID, err = getPrimaryMetaNode(ctx, mappings, resp.EntryInfoWithDepth.EntryInfo.OwnerID); err != nil {
+				return msg.EntryInfo{}, beegfs.Node{}, err
 			}
-			metaNodeNumID = primaryMetaNode.LegacyId.NumId
 		} else {
 			metaNodeNumID = beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID)
 		}
@@ -375,8 +409,31 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("max search steps exceeded for path: %s", searchPath)
 }
 
-func SetFileRstIds(ctx context.Context, mappings *util.Mappings, path string, rstIds []uint32) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func getPrimaryMetaNode(ctx context.Context, mappings *util.Mappings, ownerID uint32) (beegfs.NumId, error) {
+	if mappings == nil {
+		var err error
+		mappings, err = util.GetCachedMappings(ctx, false)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	primaryMetaNode, err := mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(ownerID), NodeType: beegfs.Meta})
+	if errors.Is(err, util.ErrMapperNotFound) {
+		mappings, err = util.GetCachedMappings(ctx, true)
+		if err != nil {
+			return 0, err
+		}
+		primaryMetaNode, err = mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(ownerID), NodeType: beegfs.Meta})
+	}
+	if err != nil {
+		return 0, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", ownerID, err)
+	}
+	return primaryMetaNode.LegacyId.NumId, err
+}
+
+func SetFileRstIds(ctx context.Context, path string, rstIds []uint32) error {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, nil, path)
 	if err != nil {
 		return err
 	}
@@ -388,16 +445,16 @@ func SetFileRstIds(ctx context.Context, mappings *util.Mappings, path string, rs
 	return nil
 }
 
-func GetFileDataState(ctx context.Context, mappings *util.Mappings, path string) (beegfs.DataState, error) {
-	state, err := getFileState(ctx, mappings, path)
+func GetFileDataState(ctx context.Context, path string) (beegfs.DataState, error) {
+	state, err := getFileState(ctx, path)
 	if err != nil {
 		return beegfs.DataStateMask.GetDataState(), fmt.Errorf("failed to get file data state: %w", err)
 	}
 	return state.GetDataState(), nil
 }
 
-func SetDataState(ctx context.Context, mappings *util.Mappings, path string, state beegfs.DataState) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func SetFileDataState(ctx context.Context, path string, state beegfs.DataState) error {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, nil, path)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve entry info: %w", err)
 	}
@@ -425,30 +482,30 @@ func SetDataState(ctx context.Context, mappings *util.Mappings, path string, sta
 	return nil
 }
 
-func GetFileAccessFlags(ctx context.Context, mappings *util.Mappings, path string) (beegfs.AccessFlags, error) {
-	state, err := getFileState(ctx, mappings, path)
+func GetFileAccessFlags(ctx context.Context, path string) (beegfs.AccessFlags, error) {
+	state, err := getFileState(ctx, path)
 	if err != nil {
 		return beegfs.AccessFlagMask.GetAccessFlags(), fmt.Errorf("failed to get file access flags: %w", err)
 	}
 	return state.GetAccessFlags(), nil
 }
 
-func SetAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags) error {
-	if err := setAccessFlags(ctx, mappings, path, flags, false); err != nil {
+func SetAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+	if err := setAccessFlags(ctx, path, flags, false); err != nil {
 		return fmt.Errorf("failed to set file access flags: %w", err)
 	}
 	return nil
 }
 
-func ClearAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags) error {
-	if err := setAccessFlags(ctx, mappings, path, flags, true); err != nil {
+func ClearAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+	if err := setAccessFlags(ctx, path, flags, true); err != nil {
 		return fmt.Errorf("failed to clear file access flags: %w", err)
 	}
 	return nil
 }
 
-func getFileState(ctx context.Context, mappings *util.Mappings, path string) (beegfs.FileState, error) {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func getFileState(ctx context.Context, path string) (beegfs.FileState, error) {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, nil, path)
 	if err != nil {
 		mask := beegfs.NewFileState(beegfs.AccessFlagMask.GetAccessFlags(), beegfs.AccessFlagMask.GetDataState())
 		return mask, err
@@ -471,8 +528,8 @@ func getFileState(ctx context.Context, mappings *util.Mappings, path string) (be
 	return resp.FileState, nil
 }
 
-func setAccessFlags(ctx context.Context, mappings *util.Mappings, path string, flags beegfs.AccessFlags, clearFlags bool) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, clearFlags bool) error {
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, nil, path)
 	if err != nil {
 		return err
 	}
