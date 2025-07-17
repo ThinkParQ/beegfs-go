@@ -1,6 +1,7 @@
 package msg
 
 import (
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
@@ -9,7 +10,7 @@ type StartChunkBalanceMsg struct {
 	TargetID      uint16
 	DestinationID uint16
 	EntryInfo     *EntryInfo
-	RelativePaths  *[]string
+	RelativePaths *[]string
 }
 
 // Serialization of StartChunkBalanceMsg
@@ -37,7 +38,7 @@ func (m *StartChunkBalanceRespMsg) Deserialize(d *beeserde.Deserializer) {
 
 // StartChunkBalanceRespMsg represents a response message for starting chunk balance
 type StartChunkBalanceRespMsg struct {
-	Result int32
+	Result beegfs.OpsErr
 }
 
 // Serialization of StartChunkBalanceRespMsg

@@ -34,6 +34,7 @@ const (
 	MigrateNeeded
 	MigratedFile
 	MigrateUpdatedDir
+	MigrateStarted
 )
 
 func (s MigrateStatus) String() string {
@@ -52,6 +53,8 @@ func (s MigrateStatus) String() string {
 		return "migrated file"
 	case MigrateUpdatedDir:
 		return "updated directory"
+	case MigrateStarted:
+		return "background migration started"
 	default:
 		return "unknown"
 	}
@@ -66,6 +69,7 @@ type MigrateStats struct {
 	MigrationNeeded        int
 	MigratedFiles          int
 	MigrationUpdatedDirs   int
+	MigrationStarted       int
 }
 
 func (s *MigrateStats) Update(status MigrateStatus) {
@@ -84,20 +88,23 @@ func (s *MigrateStats) Update(status MigrateStatus) {
 		s.MigratedFiles++
 	case MigrateUpdatedDir:
 		s.MigrationUpdatedDirs++
+	case MigrateStarted:
+		s.MigrationStarted++
 	default:
 		s.MigrationStatusUnknown++
 	}
 }
 
 type MigrateCfg struct {
-	SrcTargets  []beegfs.EntityId
-	SrcNodes    []beegfs.EntityId
-	SrcPools    []beegfs.EntityId
-	DstPool     beegfs.EntityId
-	SkipMirrors bool
-	UpdateDirs  bool
-	DryRun      bool
-	FilterExpr  string
+	SrcTargets     []beegfs.EntityId
+	SrcNodes       []beegfs.EntityId
+	SrcPools       []beegfs.EntityId
+	DstPool        beegfs.EntityId
+	SkipMirrors    bool
+	UpdateDirs     bool
+	DryRun         bool
+	FilterExpr     string
+	UseRebalancing bool
 }
 
 type MigrateResult struct {
@@ -112,15 +119,23 @@ type MigrateResult struct {
 // migration represents the internal configuration and state of a migration.
 type migration struct {
 	srcTargets map[uint16]struct{}
-	srcMirrors map[uint16]struct{}
-	dstPool    uint16
+	srcGroups  map[uint16]struct{}
+	// dstPool is used for migrating using temp files.
+	dstPool uint16
+	// dstTargets is used for migrating using chunk rebalancing. It should not contain duplicates
+	// but cannot be a map like srcTargets to optimize selecting random unique targets.
+	dstTargets []uint16
+	// dstGroups is used for migrating using chunk rebalancing. It should not contain duplicates
+	// but cannot be a map like srcGroups to optimize selecting random unique buddy groups.
+	dstGroups []uint16
 	// If setDir is nil, updating directories is skipped.
 	setDir *SetEntryCfg
 	dryRun bool
 	store  *beemsg.NodeStore
 	// The temporary files will be owned by the effective user and group of this process.
-	euid uint32
-	egid uint32
+	euid           uint32
+	egid           uint32
+	useRebalancing bool
 }
 
 // MigrateEntries migrates the entries specified by the PathInputMethod based on the provided
@@ -131,6 +146,18 @@ type migration struct {
 // entries are migrated.
 func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
 	log, _ := config.GetLogger()
+
+	if cfg.UseRebalancing {
+		if mgmtdClient, err := config.ManagementClient(); err != nil {
+			return nil, nil, err
+		} else {
+			if detail, err := mgmtdClient.VerifyLicense(ctx, "io.beegfs.rebalancing"); err != nil {
+				return nil, nil, err
+			} else {
+				log.Debug("verified feature io.beegfs.rebalancing is licensed", zap.Any("licenseDetail", detail))
+			}
+		}
+	}
 
 	// Set the umask to 0 ensuring files can be created via ioctl with exact permissions. Without
 	// this the default system umask might impose restrictions that would prevent recreating files
@@ -149,9 +176,10 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 	// by putting targets and mirror IDs into maps.
 	euid := syscall.Geteuid()
 	var migration = migration{
-		dryRun:     cfg.DryRun,
-		srcTargets: make(map[uint16]struct{}),
-		srcMirrors: make(map[uint16]struct{}),
+		dryRun:         cfg.DryRun,
+		useRebalancing: cfg.UseRebalancing,
+		srcTargets:     make(map[uint16]struct{}),
+		srcGroups:      make(map[uint16]struct{}),
 		// Safe because user/group IDs are non-negative integers that should fit in a uint32. These
 		// are what uid/gid will own the temporary files used by the migration.
 		euid: uint32(euid),
@@ -213,7 +241,7 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 					return nil, nil, fmt.Errorf("unexpected error mapping target %d to its buddy group: %w", target, err)
 				}
 			}
-			migration.srcMirrors[uint16(mirror.LegacyId.NumId)] = struct{}{}
+			migration.srcGroups[uint16(mirror.LegacyId.NumId)] = struct{}{}
 		}
 	}
 
@@ -223,6 +251,14 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		return nil, nil, fmt.Errorf("unable to map destination pool %s to an actual pool: %w", cfg.DstPool, err)
 	}
 	migration.dstPool = uint16(dstPool.Pool.LegacyId.NumId)
+	migration.dstTargets = make([]uint16, 0, len(dstPool.Targets))
+	for _, target := range dstPool.Targets {
+		migration.dstTargets = append(migration.dstTargets, uint16(target.LegacyId.NumId))
+	}
+	migration.dstGroups = make([]uint16, 0, len(dstPool.BuddyGroups))
+	for _, group := range dstPool.BuddyGroups {
+		migration.dstGroups = append(migration.dstGroups, uint16(group.LegacyId.NumId))
+	}
 
 	if cfg.UpdateDirs {
 		migration.setDir = &SetEntryCfg{
@@ -235,7 +271,13 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		}
 	}
 
-	log.Debug("migration configuration", zap.Any("srcTargets", migration.srcTargets), zap.Any("srcMirrors", migration.srcMirrors), zap.Any("dstPool", migration.dstPool))
+	log.Debug("migration configuration",
+		zap.Any("srcTargets", migration.srcTargets),
+		zap.Any("srcGroups", migration.srcGroups),
+		zap.Any("dstPool", migration.dstPool),
+		zap.Any("dstTargets", migration.dstTargets),
+		zap.Any("dstGroups", migration.dstGroups),
+	)
 	processEntry := func(path string) (MigrateResult, error) {
 		return migrateEntry(ctx, mappings, migration, path)
 	}
@@ -303,14 +345,32 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 
 	result.StartingIDs = entry.Entry.Pattern.TargetIDs
 
-	// No need to check for an error, the global client is initialized by process.go.
-	client, _ := config.BeeGFSClient(entry.Path)
+	if migration.useRebalancing {
+		migrateNeeded, err := startRebalancingJobs(ctx, entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups, migration.dryRun)
+		if err != nil {
+			result.Status = MigrateError
+			result.Err = err
+			return result, nil
+		} else if !migrateNeeded {
+			result.Status = MigrateNotNeeded
+			return result, nil
+		} else if migration.dryRun {
+			result.Status = MigrateNeeded
+			return result, nil
+		}
+		result.Status = MigrateStarted
+		return result, nil
+	}
 
-	// As much we can check up front before making any changes to determine if the migration is
-	// likely to succeed. This ensures the dry run mode is as accurate as possible.
+	// For legacy migrations using temp files, as much as we can check up front before making any
+	// changes to determine if the migration is likely to succeed. This ensures the dry run mode is
+	// as accurate as possible.
 
 	// A stat of the entry is needed for some checks and to set the original attributes on the
 	// migrated entry.
+
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(entry.Path)
 	stat, err := client.Lstat(entry.Path)
 	if err != nil {
 		result.Status = MigrateError
@@ -323,7 +383,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		result.Err = fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
 		return result, nil
 	}
-	err = migratePossible(linuxStat)
+	err = tmpFileMigrationPossible(linuxStat)
 	if err != nil {
 		result.Status = MigrateError
 		result.Err = err
@@ -341,9 +401,9 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	if entry.Entry.Type == beegfs.EntryRegularFile {
-		err = migrate(ctx, client, stat, linuxStat, entry, migration)
+		err = tmpFileMigrate(ctx, client, stat, linuxStat, entry, migration)
 	} else {
-		err = migrateLink(client, stat, linuxStat, entry, migration)
+		err = tmpFileMigrateLink(client, stat, linuxStat, entry, migration)
 	}
 
 	if err != nil {
@@ -356,7 +416,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	return result, nil
 }
 
-func migratePossible(stat *syscall.Stat_t) error {
+func tmpFileMigrationPossible(stat *syscall.Stat_t) error {
 	if stat.Mode&0o777 == 0 {
 		return fmt.Errorf("refusing to migrate entry with 000 permissions")
 	}
@@ -368,8 +428,8 @@ func migratePossible(stat *syscall.Stat_t) error {
 
 func needsMigration(entry *GetEntryCombinedInfo, req migration) bool {
 	if entry.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
-		for _, mirror := range entry.Entry.Pattern.TargetIDs {
-			if _, ok := req.srcMirrors[mirror]; ok {
+		for _, group := range entry.Entry.Pattern.TargetIDs {
+			if _, ok := req.srcGroups[group]; ok {
 				return true
 			}
 		}
@@ -382,7 +442,7 @@ func needsMigration(entry *GetEntryCombinedInfo, req migration) bool {
 	return false
 }
 
-func migrate(ctx context.Context, client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
+func tmpFileMigrate(ctx context.Context, client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
 
 	// tempFileBase is just the name of the temp file.
 	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
@@ -406,7 +466,7 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 		// if a mask was set (after the ownership was reset on the new file). But in general this is
 		// the safest approach.
 		Umask:       0000,
-		ParentInfo:  *entry.Parent.OrigEntryInfoMsg,
+		ParentInfo:  *entry.Parent.origEntryInfoMsg,
 		NewFileName: []byte(tempFileBase),
 		Pattern:     newPattern,
 		RST:         entry.Entry.Remote.RemoteStorageTarget,
@@ -516,7 +576,7 @@ func didFileChange(a, b *syscall.Stat_t) error {
 	return nil
 }
 
-func migrateLink(client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
+func tmpFileMigrateLink(client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
 	// tempFileBase is just the name of the temp file.
 	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
 	// tempFile is the full absolute path to the temp file.
