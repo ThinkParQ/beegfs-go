@@ -65,7 +65,7 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("size", "", "File's size matches the specified criteria.", "-size", "", bflag.WithEquals()),
 		bflag.Flag("fprint", "", "Output file prefix (Creates file <output>.tid)", "-fprint", false),
 		bflag.Flag("printf", "", "print format on the standard output, "+
-			"similar to GNU find", "-printf", false),
+			"similar to GNU find", "-printf", ""),
 		bflag.Flag("true", "", "Always true.", "-true", false),
 		bflag.Flag("type", "", "File is of type c.", "-type", ""),
 		bflag.Flag("uid", "", "File's numeric user ID is N.", "-uid", ""),
@@ -120,6 +120,7 @@ func runPythonFindIndex(bflagSet *bflag.FlagSet, paths []string) error {
 		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
+	fmt.Println("Running command:", allArgs)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
