@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -64,7 +65,7 @@ func newGenericFindCmd() *cobra.Command {
 		bflag.Flag("size", "", "File's size matches the specified criteria.", "-size", "", bflag.WithEquals()),
 		bflag.Flag("fprint", "", "Output file prefix (Creates file <output>.tid)", "-fprint", false),
 		bflag.Flag("printf", "", "print format on the standard output, "+
-			"similar to GNU find", "-printf", false),
+			"similar to GNU find", "-printf", ""),
 		bflag.Flag("true", "", "Always true.", "-true", false),
 		bflag.Flag("type", "", "File is of type c.", "-type", ""),
 		bflag.Flag("uid", "", "File's numeric user ID is N.", "-uid", ""),
@@ -105,10 +106,14 @@ $ beegfs index find --size +1G
 func runPythonFindIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+1)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+2)
 	allArgs = append(allArgs, findCmd)
 	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
+	outputFormat := viper.GetString(config.OutputKey)
+	if outputFormat != "" && outputFormat != config.OutputTable.String() {
+		allArgs = append(allArgs, "-Q", outputFormat)
+	}
 	log.Debug("Running BeeGFS Hive Index find command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("findCmd", findCmd),

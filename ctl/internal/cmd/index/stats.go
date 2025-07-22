@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -92,9 +93,13 @@ Positional arguments:
 func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+3)
+	allArgs := make([]string, 0, len(wrappedArgs)+4)
 	allArgs = append(allArgs, statsCmd, stat, path)
 	allArgs = append(allArgs, wrappedArgs...)
+	outputFormat := viper.GetString(config.OutputKey)
+	if outputFormat != "" && outputFormat != config.OutputTable.String() {
+		allArgs = append(allArgs, "-Q", outputFormat)
+	}
 	log.Debug("Running BeeGFS Hive Index stats command",
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("statsCmd", statsCmd),
