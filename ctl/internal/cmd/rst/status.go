@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -83,7 +82,7 @@ func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.G
 		return err
 	}
 
-	resultChan, errChans, err := rst.GetStatus(ctx, method, backendCfg)
+	results, wait, err := rst.GetStatus(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -109,14 +108,13 @@ func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.G
 	notSupportedFiles := 0
 	directories := 0
 	printRowByDefault := false
-	var multiErr types.MultiError
 
 run:
 	for {
 		select {
-		case <-cmd.Context().Done():
+		case <-ctx.Done():
 			break run
-		case path, ok := <-resultChan:
+		case path, ok := <-results:
 			if !ok {
 				break run
 			}
@@ -151,28 +149,6 @@ run:
 			if !frontendCfg.summarize && (frontendCfg.verbose || printRowByDefault) {
 				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
-
-		case err, ok := <-errChans.Processor:
-			if ok {
-				// Once an error happens the resultChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
-		case err, ok := <-errChans.Info:
-			if ok {
-				// Once an error happens the resultChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
-		case err, ok := <-errChans.Worker:
-			if ok {
-				// Once an error happens the resultChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
 		}
 	}
 
@@ -194,9 +170,10 @@ run:
 		return fmt.Errorf("the total number of entries does not match the number of entries in various states (this is probably a bug)")
 	}
 
-	if len(multiErr.Errors) != 0 {
-		return &multiErr
-	} else if unsyncedFiles != 0 {
+	if err = wait(); err != nil {
+		return err
+	}
+	if unsyncedFiles != 0 {
 		return iUtil.NewCtlError(errors.New("not all files are synchronized"), iUtil.PartialSuccess)
 	}
 	return nil

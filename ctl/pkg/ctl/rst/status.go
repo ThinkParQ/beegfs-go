@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -21,6 +20,7 @@ import (
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -107,160 +107,135 @@ func (s PathStatus) String() string {
 	}
 }
 
-type StatusErrChans struct {
-	Processor <-chan error // util.ProcessPaths() specific errors
-	Info      <-chan error // errors that occurred while getting required worker information
-	Worker    <-chan error // worker errors
-}
-
 // GetStatus accepts a context, an input method that controls how paths are provided, and a
 // GetStatusCfg that controls how the status is checked. If anything goes wrong during the initial
-// setup an error will be returned, otherwise GetStatus will immediately return channels where
-// results and errors are written asynchronously. The GetStatusResults channel will return the
-// status of each path, and be close once all requested paths have been checked, or after an error.
-// The StatusErrChans returns any errors via task-specific error channels while walking the
-// directory or getting jobs for each path. This approach allows callers to decide when there is an
-// error if they should immediately terminate, or continue writing out the remaining paths before
-// handling the error.
-//
-// Note this is setup more similarly to the entry.GetEntries() function rather than other functions
-// in the rst package.
-func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, *StatusErrChans, error) {
-	workerErrChan := make(chan error, 128)
-	statusErrChan := make(chan error, 128)
-	pipeline := func(ctx context.Context, paths <-chan string) <-chan *GetStatusResult {
-		return statusPipeline(ctx, cfg, pm.Get(), paths, workerErrChan, statusErrChan)
+// setup an error will be returned, otherwise GetStatus returns a receive‑only channel that emits a
+// *GetStatusResult for each path, and a wait function that blocks until all processing finishes and
+// returns any error encountered. Processing respects ctx cancellation, and remote verification is
+// enabled when cfg.VerifyRemote is true.
+func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, func() error, error) {
+	g, gCtx := errgroup.WithContext(ctx)
+
+	paths := make(chan string, 1024)
+	g.Go(func() error {
+		defer close(paths)
+		return util.StreamPaths(gCtx, pm, paths, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
+	})
+
+	// First path is required for setting up statusInfos walk and workers to initiate database
+	// requests and acquire BeeGFS client.
+	initialFsPath, ok := <-paths
+	if !ok {
+		return nil, nil, fmt.Errorf("no paths found")
 	}
 
-	results, processorErrs, err := util.ProcessPathsViaPipeline(ctx, pm, true, pipeline, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
-	if err != nil {
-		return nil, nil, err
-	}
+	statusInfos := make(chan statusInfo, 1024)
+	g.Go(func() error {
+		defer close(statusInfos)
 
-	errChans := &StatusErrChans{Processor: processorErrs, Info: statusErrChan, Worker: workerErrChan}
-	return results, errChans, err
-}
+		inputType := pm.Get()
+		if cfg.VerifyRemote {
+			return statusInfoVerifyRemoteWalk(gCtx, initialFsPath, paths, statusInfos)
+		} else if inputType == util.PathInputRecursion {
+			return statusInfoRecursiveWalk(gCtx, initialFsPath, paths, statusInfos)
+		}
+		return statusInfoIterativeWalk(gCtx, inputType, initialFsPath, paths, statusInfos)
+	})
 
-func statusPipeline(
-	ctx context.Context,
-	cfg GetStatusCfg,
-	inputType util.PathInputType,
-	paths <-chan string,
-	workerErrs chan<- error,
-	statusErrs chan<- error,
-) <-chan *GetStatusResult {
 	results := make(chan *GetStatusResult, 1024)
-	go func() {
-		initialFsPath, fsOk := <-paths
-		if !fsOk {
-			close(results)
-			close(workerErrs)
-			close(statusErrs)
-			return
-		}
-
-		statusInfoChan := startWorkers(ctx, cfg, initialFsPath, results, workerErrs)
-		go func() {
-			defer close(workerErrs)
-			defer close(statusErrs)
-			defer close(statusInfoChan)
-			if cfg.VerifyRemote {
-				getStatusInfoVerifyRemote(ctx, initialFsPath, paths, statusInfoChan, statusErrs)
-			} else if inputType != util.PathInputRecursion {
-				getStatusInfoIterative(ctx, inputType, initialFsPath, paths, statusInfoChan, statusErrs)
-			} else {
-				getStatusInfoRecursive(ctx, initialFsPath, paths, statusInfoChan, statusErrs)
-			}
-		}()
-
-	}()
-	return results
-}
-
-func startWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, results chan<- *GetStatusResult, errs chan<- error) chan<- statusInfo {
-	statusInfoChan := make(chan statusInfo, 1024)
-	mappings, err := util.GetCachedMappings(ctx, false)
-	if err != nil {
-		errs <- fmt.Errorf("unable to fetch required mappings: %w", err)
-		close(results)
-		return statusInfoChan
-	}
-
-	var mountPoint filesystem.Provider
-	var rstMap map[uint32]rst.Provider
-	if cfg.VerifyRemote {
-		mountPoint, err = config.BeeGFSClient(initialFsPath)
-		if err != nil {
-			errs <- err
-			close(results)
-			return statusInfoChan
-		}
-		rstMap, err = rst.GetRstMap(ctx, mountPoint, mappings.RstIdToConfig)
-		if err != nil {
-			errs <- fmt.Errorf("unable to get rst mappings: %w", err)
-			close(results)
-			return statusInfoChan
-		}
-	}
-
-	go func() {
+	g.Go(func() error {
 		defer close(results)
-		numWorkers := viper.GetInt(config.NumWorkersKey)
-		if numWorkers > 1 {
-			numWorkers -= 1
-		}
+		return runWorkers(gCtx, cfg, initialFsPath, statusInfos, results)
+	})
 
-		wg := sync.WaitGroup{}
-		for range numWorkers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				statusWorker(ctx, cfg, mountPoint, rstMap, statusInfoChan, results, errs)
-			}()
-		}
-		wg.Wait()
-	}()
-
-	return statusInfoChan
+	return results, g.Wait, nil
 }
 
-func getStatusInfoIterative(ctx context.Context, inputType util.PathInputType, fsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
-	log, _ := config.GetLogger()
-	log.Debug("attempting to retrieve a single path from the remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
-
-	var fsOk bool
+// statusInfoVerifyRemoteWalk is used when --verify-remote flag is specified.
+//
+// Each fsPath will be passed to the statusWorkers where the remote storage target(s) will be check
+// for current sync status using getPathStatusFromTarget().
+func statusInfoVerifyRemoteWalk(ctx context.Context, fsPath string, paths <-chan string, statusInfos chan<- statusInfo) error {
+	var ok bool
 	for {
-		c := make(chan *GetJobsResponse, 1)
-		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, exactPath: true}, c); err != nil {
-			errs <- err
-			return
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case statusInfos <- statusInfo{fsPath: fsPath}:
 		}
-		dbPathInfo := <-c
-		statusInfoChan <- statusInfo{fsPath: fsPath, dbPathInfo: dbPathInfo}
 
 		select {
 		case <-ctx.Done():
-			return
-		case fsPath, fsOk = <-paths:
-			if !fsOk {
-				return
+			return ctx.Err()
+		case fsPath, ok = <-paths:
+			if !ok {
+				return nil
 			}
 		}
 	}
 }
 
-func getStatusInfoRecursive(ctx context.Context, fsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
+// statusInfoIterativeWalk is used when inputType is either stdin or list.
+//
+// GetJobs() is called for each fsPath. This allows paths to be provided in any order, but is not as
+// efficient as the recurse mode when checking large directory trees. It is however more efficient
+// than the recurse mode when checking files in directories that contain deep sub-directories, and
+// only the status of the top-level files is needed.
+//
+// Regardless if a database match is found, the information is passed to the statusWorkers where
+// the status of each fsPath is checked using getPathStatusFromDatabase().
+func statusInfoIterativeWalk(ctx context.Context, inputType util.PathInputType, fsPath string, paths <-chan string, statusInfos chan<- statusInfo) error {
+	log, _ := config.GetLogger()
+	log.Debug("attempting to retrieve a single path from the remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
+
+	var ok bool
+	for {
+		response := make(chan *GetJobsResponse, 1)
+		if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, exactPath: true}, response); err != nil {
+			return err
+		}
+
+		dbPathInfo := <-response
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case statusInfos <- statusInfo{fsPath: fsPath, jobsResponse: dbPathInfo}:
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case fsPath, ok = <-paths:
+			if !ok {
+				return nil
+			}
+		}
+	}
+}
+
+// statusInfoRecursiveWalk is used when inputType is recurse.
+//
+// GetJobs() is called once treating the first fsPath as a prefix and reusing the gRPC stream for
+// subsequent calls. It expects to receive lexicographically increasing fsPaths, and will handle
+// matching fsPaths with corresponding dbPaths, advancing the dbPath is needed until it finds a
+// match, or determines there is no entry in the Remote database for that fsPath. For this mode to
+// work correctly fsPaths and dbPaths be provided in stable lexicographical order. If an fsPath is
+// received that is "smaller" than the previous fsPath then the database will always return "not
+// found". This should never happen when used from util.ProcessPaths().
+//
+// Regardless if a database match is found, the information is passed to the statusWorkers where the
+// status of each fsPath is checked using getPathStatusFromDatabase().
+func statusInfoRecursiveWalk(ctx context.Context, fsPath string, paths <-chan string, statusInfos chan<- statusInfo) error {
 	log, _ := config.GetLogger()
 
 	dbChan := make(chan *GetJobsResponse, 1024)
 	if err := GetJobs(ctx, GetJobsConfig{Path: fsPath, Recurse: true}, dbChan); err != nil {
-		errs <- err
-		return
+		return err
 	}
 	dbPath, dbOk := <-dbChan
 	if !dbOk {
-		errs <- fmt.Errorf("directory %s does not appear to contain any synchronized files", fsPath)
-		return
+		return fmt.Errorf("directory %s does not appear to contain any synchronized files", fsPath)
+
 	}
 	log.Debug("streaming multiple paths from the Remote database", zap.Any("firstDBPath", dbPath), zap.Bool("dbOk", dbOk))
 
@@ -278,86 +253,116 @@ func getStatusInfoRecursive(ctx context.Context, fsPath string, paths <-chan str
 			dbPath, dbOk = <-dbChan
 		}
 
+		var info statusInfo
 		if !dbOk || fsPath < dbPath.Path {
 			// The dbPath is ahead indicating no match in the DB was found for this fsPath. Call
 			// getPathStatus with a nil dbPath to still determine if the fsPath has no RST or has RSTs
 			// but has never been pushed.
-			statusInfoChan <- statusInfo{fsPath: fsPath}
-
+			info = statusInfo{fsPath: fsPath}
 		} else {
 			// Match found, advance dbChan for the next path and get the result for this path.
 			currentDbPath := dbPath
 			dbPath, dbOk = <-dbChan
-			statusInfoChan <- statusInfo{fsPath: fsPath, dbPathInfo: currentDbPath}
+			info = statusInfo{fsPath: fsPath, jobsResponse: currentDbPath}
 		}
 
 		select {
 		case <-ctx.Done():
-			return
-		case fsPath, fsOk = <-paths:
-			if !fsOk {
-				return
-			}
+			return ctx.Err()
+		case statusInfos <- info:
 		}
-	}
-}
 
-func getStatusInfoVerifyRemote(ctx context.Context, initialFsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
-	var fsOk bool
-	fsPath := initialFsPath
-	for {
-		statusInfoChan <- statusInfo{fsPath: fsPath}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case fsPath, fsOk = <-paths:
 			if !fsOk {
-				return
+				return nil
 			}
 		}
 	}
 }
 
 type statusInfo struct {
-	fsPath     string
-	dbPathInfo *GetJobsResponse
+	fsPath       string
+	jobsResponse *GetJobsResponse
 }
 
-func statusWorker(
+func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, statusInfos <-chan statusInfo, results chan<- *GetStatusResult) error {
+	mappings, err := util.GetMappings(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to fetch required mappings: %w", err)
+	}
+	mountPoint, err := config.BeeGFSClient(initialFsPath)
+	if err != nil {
+		return fmt.Errorf("unable to acquire BeeGFS client: %w", err)
+	}
+
+	var rstMap map[uint32]rst.Provider
+	if cfg.VerifyRemote {
+		rstMap, err = rst.GetRstMap(ctx, mountPoint, mappings.RstIdToConfig)
+		if err != nil {
+			return fmt.Errorf("unable to get rst mappings: %w", err)
+		}
+	}
+
+	numWorkers := viper.GetInt(config.NumWorkersKey)
+	if numWorkers > 1 {
+		// Reduce worker count by one to reserve compute for walking the paths and retrieving job
+		// information from the database.
+		numWorkers -= 1
+	}
+
+	g, gCtx := errgroup.WithContext(ctx)
+	for range numWorkers {
+		g.Go(func() error {
+			return worker(gCtx, cfg, mountPoint, rstMap, statusInfos, results)
+		})
+	}
+	return g.Wait()
+
+}
+
+func worker(
 	ctx context.Context,
 	cfg GetStatusCfg,
 	mountPoint filesystem.Provider,
 	rstMap map[uint32]rst.Provider,
-	statusInfoChan <-chan statusInfo,
+	statusInfos <-chan statusInfo,
 	results chan<- *GetStatusResult,
-	errs chan<- error,
-) {
+) error {
+	var err error
+	var result *GetStatusResult
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case statusInfo, ok := <-statusInfoChan:
+			return ctx.Err()
+		case statusInfo, ok := <-statusInfos:
 			if !ok {
-				return
+				return nil
 			}
 
-			var result *GetStatusResult
-			var err error
 			if cfg.VerifyRemote {
 				result, err = getPathStatusFromTarget(ctx, cfg, mountPoint, rstMap, statusInfo.fsPath)
 			} else {
-				result, err = getPathStatusFromDatabase(ctx, cfg, statusInfo.fsPath, statusInfo.dbPathInfo)
+				result, err = getPathStatusFromDatabase(ctx, cfg, mountPoint, statusInfo.fsPath, statusInfo.jobsResponse)
 			}
 			if err != nil {
-				errs <- err
-				return
+				return err
 			}
 
-			results <- result
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case results <- result:
+			}
 		}
 	}
 }
 
+// getPathStatusFromTarget retrieves the lockedInfo for the path from GetLockedInfo(). The
+// lockedInfo is compared with the remote size and mtime from the remote storage target(s) for sync
+// statuses.
 func getPathStatusFromTarget(
 	ctx context.Context,
 	cfg GetStatusCfg,
@@ -401,6 +406,8 @@ func getPathStatusFromTarget(
 		} else {
 			return nil, fmt.Errorf("unable to get file info: %w", err)
 		}
+	} else if !rst.FileExists(lockedInfo) {
+		return nil, fmt.Errorf("File does not exist. This is a bug")
 	}
 
 	syncReason := strings.Builder{}
@@ -451,19 +458,19 @@ func getPathStatusFromTarget(
 	return result, nil
 }
 
-// getPathStatus accepts an fsPath and dbPath and determines the SyncStatus of the path. The
+// getPathStatusFromDatabase accepts an fsPath and dbPath to determine the sync status of the path. The
 // dbPath might be nil or contain an error if there was not match in the DB for this fsPath.
-func getPathStatusFromDatabase(ctx context.Context, cfg GetStatusCfg, fsPath string, dbPath *GetJobsResponse) (*GetStatusResult, error) {
+func getPathStatusFromDatabase(
+	ctx context.Context,
+	cfg GetStatusCfg,
+	mountPoint filesystem.Provider,
+	fsPath string,
+	dbPath *GetJobsResponse,
+) (*GetStatusResult, error) {
 	syncReason := strings.Builder{}
 	result := &GetStatusResult{Path: fsPath, SyncStatus: Synchronized}
 
-	// First stat the file so we can skip directories since they won't have entries in the Remote
-	// DB. For files the stat will be reused later to compare the current mtime.
-	beegfsClient, err := config.BeeGFSClient(fsPath)
-	if err != nil {
-		return nil, err
-	}
-	lStat, err := beegfsClient.Lstat(fsPath)
+	lStat, err := mountPoint.Lstat(fsPath)
 	if err != nil {
 		return nil, err
 	}

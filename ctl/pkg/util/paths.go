@@ -1,6 +1,7 @@
 package util
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -8,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"golang.org/x/sync/errgroup"
 )
 
 type PathInputType int
@@ -159,7 +160,8 @@ func FilterExpr(f string) ProcessPathOpt {
 //
 // It returns a ResultT channel where the result for each entry will be sent. The ResultT channel
 // will be closed once all entries are processed, or if any error occurs after all valid results are
-// sent to the channel.
+// sent to the channel. On the first non‑nil error from any walker or worker, the shared context is
+// canceled, the error is sent on the returned error channel, and all in‑flight work stops.
 func ProcessPaths[ResultT any](
 	ctx context.Context,
 	method PathInputMethod,
@@ -167,93 +169,65 @@ func ProcessPaths[ResultT any](
 	processEntry func(path string) (ResultT, error),
 	opts ...ProcessPathOpt,
 ) (<-chan ResultT, <-chan error, error) {
-	return processPaths(ctx, method, singleWorker, processEntry, nil, opts...)
+	g, gCtx := errgroup.WithContext(ctx)
+
+	paths := make(chan string, 1024)
+	g.Go(func() error {
+		defer close(paths)
+		return StreamPaths(gCtx, method, paths, opts...)
+	})
+
+	results := make(chan ResultT, 1024)
+	g.Go(func() error {
+		defer close(results)
+		return startProcessing(gCtx, paths, results, processEntry, singleWorker)
+	})
+
+	errs := make(chan error, 1)
+	go func() {
+		defer close(errs)
+		if err := g.Wait(); err != nil {
+			errs <- err
+		}
+	}()
+
+	return results, errs, nil
 }
 
-// ProcessPathsViaPipeline() processes one or more entries based on the PathInputMethod and executes the
-// specified request for each entry by invoking the provided processEntryPipeline() function.
-//
-// It handles any setup needed to read from the specified PathInputMethod (such as reading from
-// stdin) and by default processes entries in parallel based on the global num-workers flag. Because
-// entries are processed in parallel, the order entries are processed and results are returned is
-// not stable. If stable results are desired, for example when recursively walking a directory and
-// printing entry info, use the singleWorker option.
-//
-// It returns a ResultT channel where the result for each entry will be sent. The ResultT channel
-// will be closed once all entries are processed, or if any error occurs after all valid results are
-// sent to the channel.
-func ProcessPathsViaPipeline[ResultT any](
-	ctx context.Context,
-	method PathInputMethod,
-	singleWorker bool,
-	processEntryPipeline func(context.Context, <-chan string) <-chan ResultT,
-	opts ...ProcessPathOpt,
-) (<-chan ResultT, <-chan error, error) {
-	return processPaths(ctx, method, singleWorker, nil, processEntryPipeline, opts...)
-}
-
-type processPathsWalk func(chan error) <-chan string
-
-func processPaths[ResultT any](
-	ctx context.Context,
-	method PathInputMethod,
-	singleWorker bool,
-	processEntryFunction func(path string) (ResultT, error),
-	processEntryPipeline func(context.Context, <-chan string) <-chan ResultT,
-	opts ...ProcessPathOpt,
-) (<-chan ResultT, <-chan error, error) {
-	if processEntryFunction == nil && processEntryPipeline == nil {
-		return nil, nil, fmt.Errorf("unable to start processing without either a function or pipeline! This is a bug")
-	}
-	if processEntryFunction != nil && processEntryPipeline != nil {
-		return nil, nil, fmt.Errorf("unable to start processing by both function and pipeline! This is a bug")
-	}
-
+// StreamPaths reads file paths from the given PathInputMethod—either stdin, directory,
+// or an explicit list—applies an optional filter expression, and streams each matching path to out.
+// It closes the out channel when done, respects ctx cancellation, and returns an error if any
+// step fails.
+func StreamPaths(ctx context.Context, method PathInputMethod, out chan<- string, opts ...ProcessPathOpt) error {
 	args := &ProcessPathOpts{}
 	for _, opt := range opts {
 		opt(args)
 	}
 
-	var results <-chan ResultT
-	var errs <-chan error
-	if method.pathsViaStdin {
-		walk := func(errs chan error) <-chan string {
-			return walkStdin(ctx, errs, method.stdinDelimiter)
-		}
-		results, errs = startProcessing(ctx, walk, processEntryFunction, processEntryPipeline, args.FilterExpr, singleWorker)
-	} else if method.pathsViaRecursion != "" {
-		beegfsClient, err := config.BeeGFSClient(method.pathsViaRecursion)
+	var err error
+	var filter FileInfoFilter
+	if args.FilterExpr != "" {
+		filter, err = compileFilter(args.FilterExpr)
 		if err != nil {
-			return nil, nil, err
+			return fmt.Errorf("invalid filter %q: %w", args.FilterExpr, err)
 		}
-		startPath, err := beegfsClient.GetRelativePathWithinMount(method.pathsViaRecursion)
-		if err != nil {
-			return nil, nil, err
-		}
-		walk := func(errs chan error) <-chan string {
-			return walkDir(ctx, beegfsClient, errs, startPath, args.RecurseLexicographically)
-		}
-		results, errs = startProcessing(ctx, walk, processEntryFunction, processEntryPipeline, args.FilterExpr, singleWorker)
-	} else {
-		walk := func(errs chan error) <-chan string {
-			return walkList(ctx, method.pathsViaList)
-		}
-		results, errs = startProcessing(ctx, walk, processEntryFunction, processEntryPipeline, args.FilterExpr, singleWorker)
 	}
 
-	return results, errs, nil
+	if method.pathsViaStdin {
+		return walkStdin(ctx, method.stdinDelimiter, out, filter)
+	} else if method.pathsViaRecursion != "" {
+		return walkDir(ctx, method.pathsViaRecursion, out, filter, args.RecurseLexicographically)
+	}
+	return walkList(ctx, method.pathsViaList, out, filter)
 }
 
 func startProcessing[ResultT any](
 	ctx context.Context,
-	walk processPathsWalk,
-	processEntryFunction func(path string) (ResultT, error),
-	processEntryPipeline func(context.Context, <-chan string) <-chan ResultT,
-	// Some processing methods do not work when BeeGFS is not mounted. Specifically recursion is not
-	// possible since there is no file system tree mounted to recurse through.
-	filterExpr string,
+	paths <-chan string,
+	results chan<- ResultT,
+	processEntry func(path string) (ResultT, error),
 	singleWorker bool,
-) (<-chan ResultT, <-chan error) {
+) error {
 	numWorkers := 1
 	if !singleWorker {
 		numWorkers = viper.GetInt(config.NumWorkersKey)
@@ -265,132 +239,82 @@ func startProcessing[ResultT any](
 		}
 	}
 
-	if processEntryPipeline != nil {
-		return startProcessingViaPipeline(ctx, walk, processEntryPipeline, filterExpr, numWorkers)
+	g, sgCtx := errgroup.WithContext(ctx)
+	for range numWorkers {
+		g.Go(func() error {
+			for {
+				select {
+				case <-sgCtx.Done():
+					return sgCtx.Err()
+				case path, ok := <-paths:
+					if !ok {
+						return nil
+					}
+					result, err := processEntry(path)
+					if err != nil {
+						return err
+					}
+
+					select {
+					case <-sgCtx.Done():
+						return sgCtx.Err()
+					case results <- result:
+					}
+				}
+			}
+		})
 	}
-	return startProcessingViaFunction(ctx, walk, processEntryFunction, filterExpr, numWorkers)
+
+	return g.Wait()
 }
 
-func startProcessingViaFunction[ResultT any](
-	ctx context.Context,
-	walk processPathsWalk,
-	processEntry func(path string) (ResultT, error),
-	filterExpr string,
-	numWorkers int,
-) (<-chan ResultT, <-chan error) {
-	errs := make(chan error, 128)
-	paths := walk(errs)
-	results := make(chan ResultT, 1024)
-	go func() {
-		defer close(errs)
-		defer close(results)
-
-		workerCtx, workerCancel := context.WithCancel(ctx)
-		defer workerCancel()
-		filteredPaths := filterWalk(workerCtx, workerCancel, filterExpr, paths, errs)
-
-		wg := sync.WaitGroup{}
-		for range numWorkers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-
-				for {
-					select {
-					case <-workerCtx.Done():
-						return
-					case path, ok := <-filteredPaths:
-						if !ok {
-							return
-						}
-						result, err := processEntry(path)
-						if err != nil {
-							errs <- err
-							workerCancel()
-							return
-						}
-						results <- result
-					}
-				}
-			}()
-		}
-		wg.Wait()
-	}()
-
-	return results, errs
-}
-
-func startProcessingViaPipeline[ResultT any](
-	ctx context.Context,
-	walk processPathsWalk,
-	processEntryPipeline func(context.Context, <-chan string) <-chan ResultT,
-	filterExpr string,
-	numWorkers int,
-) (<-chan ResultT, <-chan error) {
-	errs := make(chan error, 128)
-	paths := walk(errs)
-	pipelinePaths := make(chan string, len(paths))
-	results := processEntryPipeline(ctx, pipelinePaths)
-	go func() {
-		defer close(errs)
-		defer close(pipelinePaths)
-
-		workerCtx, workerCancel := context.WithCancel(ctx)
-		defer workerCancel()
-		filteredPaths := filterWalk(workerCtx, workerCancel, filterExpr, paths, errs)
-
-		wg := sync.WaitGroup{}
-		for range numWorkers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case path, ok := <-filteredPaths:
-						if !ok {
-							return
-						}
-						pipelinePaths <- path
-					}
-				}
-			}()
-		}
-		wg.Wait()
-	}()
-
-	return results, errs
-}
-
-func walkStdin(ctx context.Context, errs chan<- error, delimiter byte) <-chan string {
-	paths := make(chan string, 1024)
-	go ReadFromStdin(ctx, delimiter, paths, errs)
-	return paths
-}
-
-func walkList(ctx context.Context, pathList []string) <-chan string {
-	paths := make(chan string, 1024)
-	go func() {
-		defer close(paths)
-		for _, path := range pathList {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				paths <- path
+func walkStdin(ctx context.Context, delimiter byte, paths chan<- string, filter FileInfoFilter) error {
+	scanner := bufio.NewScanner(os.Stdin)
+	splitFunc := func(data []byte, atEOF bool) (int, []byte, error) {
+		for i := 0; i < len(data); i++ {
+			if data[i] == delimiter {
+				return i + 1, data[:i], nil
 			}
 		}
-	}()
-	return paths
-}
+		// When EOF is reached, return what is left
+		if atEOF && len(data) != 0 {
+			return len(data), data, nil
+		}
+		// Otherwise request more data
+		return 0, nil, nil
+	}
+	scanner.Split(splitFunc)
 
-func walkDir(ctx context.Context, beegfsClient filesystem.Provider, errs chan<- error, startingInMountPath string, lexicographically bool) <-chan string {
-	paths := make(chan string, 1024)
-	go func() {
-		defer close(paths)
-		walkDirFunc := func(path string, d os.DirEntry, err error) error {
+	var beegfsClient filesystem.Provider
+	for scanner.Scan() {
+		path := scanner.Text()
+
+		keep := true
+		if filter != nil {
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			statT, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("unsupported platform…")
+
+			}
+			keep, err = filter(statToFileInfo(path, statT))
+			if err != nil {
+				return err
+			}
+		}
+
+		if keep {
+			if beegfsClient == nil {
+				var err error
+				if beegfsClient, err = config.BeeGFSClient(path); err != nil {
+					return err
+				}
+			}
+
+			inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
 			if err != nil {
 				return err
 			}
@@ -398,98 +322,110 @@ func walkDir(ctx context.Context, beegfsClient filesystem.Provider, errs chan<- 
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			default:
-				paths <- path
+			case paths <- inMountPath:
 			}
-			return nil
 		}
-
-		err := beegfsClient.WalkDir(startingInMountPath, walkDirFunc, filesystem.Lexicographically(lexicographically))
-		if err != nil {
-			errs <- err
-		}
-	}()
-	return paths
-}
-
-func filterWalk(ctx context.Context, cancel context.CancelFunc, filterExpr string, in <-chan string, errs chan<- error) <-chan string {
-	cancelWithError := func(err error) {
-		errs <- err
-		cancel()
 	}
 
-	out := make(chan string, len(in))
-	go func() {
-		defer close(out)
+	return scanner.Err()
+}
 
-		var err error
-		var filter func(FileInfo) (bool, error)
-		if filterExpr != "" {
-			filter, err = compileFilter(filterExpr)
+func walkList(ctx context.Context, pathList []string, paths chan<- string, filter FileInfoFilter) error {
+	var beegfsClient filesystem.Provider
+	for _, path := range pathList {
+		keep := true
+		if filter != nil {
+			info, err := os.Lstat(path)
 			if err != nil {
-				cancelWithError(fmt.Errorf("invalid filter %q: %w", filterExpr, err))
-				return
+				return err
 			}
-		}
-
-		var path string
-		var ok bool
-		select {
-		case <-ctx.Done():
-			return
-		case path, ok = <-in:
+			statT, ok := info.Sys().(*syscall.Stat_t)
 			if !ok {
-				return
+				return fmt.Errorf("unsupported platform…")
+
 			}
-		}
-
-		beegfsClient, err := config.BeeGFSClient(path)
-		if err != nil {
-			cancelWithError(err)
-			return
-		}
-
-		for {
-			path, err = beegfsClient.GetRelativePathWithinMount(path)
+			keep, err = filter(statToFileInfo(path, statT))
 			if err != nil {
-				cancelWithError(err)
-				return
+				return err
+			}
+		}
+
+		if keep {
+			if beegfsClient == nil {
+				var err error
+				if beegfsClient, err = config.BeeGFSClient(path); err != nil {
+					return err
+				}
 			}
 
-			keep := true
-			if filter != nil {
-				info, err := beegfsClient.Lstat(path)
-				if err != nil {
-					cancelWithError(err)
-					return
-				}
-				statT, ok := info.Sys().(*syscall.Stat_t)
-				if !ok {
-					cancelWithError(fmt.Errorf("unsupported platform…"))
-					return
-				}
-				keep, err = filter(statToFileInfo(path, statT))
-				if err != nil {
-					cancelWithError(err)
-					return
-				}
-			}
-			if keep {
-				out <- path
+			inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
+			if err != nil {
+				return err
 			}
 
 			select {
 			case <-ctx.Done():
-				return
-			case path, ok = <-in:
-				if !ok {
-					return
-				}
+				return ctx.Err()
+			case paths <- inMountPath:
 			}
 		}
-	}()
+	}
 
-	return out
+	return nil
+}
+
+func walkDir(ctx context.Context, startPath string, paths chan<- string, filter FileInfoFilter, lexicographically bool) error {
+	beegfsClient, err := config.BeeGFSClient(startPath)
+	if err != nil {
+		return err
+	}
+	startingInMountPath, err := beegfsClient.GetRelativePathWithinMount(startPath)
+	if err != nil {
+		return err
+	}
+
+	walkDirFunc := func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		keep := true
+		if filter != nil {
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			statT, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("unsupported platform…")
+
+			}
+			keep, err = filter(statToFileInfo(path, statT))
+			if err != nil {
+				return err
+			}
+		}
+
+		if keep {
+			inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
+			if err != nil {
+				return err
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case paths <- inMountPath:
+			}
+		}
+		return nil
+	}
+
+	err = beegfsClient.WalkDir(startingInMountPath, walkDirFunc, filesystem.Lexicographically(lexicographically))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 const FilterFilesHelp = "Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\""
@@ -497,7 +433,7 @@ const FilterFilesHelp = "Filter files by expression: fields(mtime/atime/ctime du
 type FileInfoFilter func(FileInfo) (bool, error)
 
 // compileFilter turns a DSL expression into a filter function.
-func compileFilter(query string) (func(FileInfo) (bool, error), error) {
+func compileFilter(query string) (FileInfoFilter, error) {
 	// Preprocess DSL (includes octal normalization now)
 	q := preprocessDSL(query)
 
