@@ -107,12 +107,6 @@ func (s PathStatus) String() string {
 	}
 }
 
-type StatusErrChans struct {
-	Processor <-chan error // util.ProcessPaths() specific errors
-	Info      <-chan error // errors that occurred while getting required worker information
-	Worker    <-chan error // worker errors
-}
-
 // GetStatus accepts a context, an input method that controls how paths are provided, and a
 // GetStatusCfg that controls how the status is checked. If anything goes wrong during the initial
 // setup an error will be returned, otherwise GetStatus will immediately return channels where
@@ -125,22 +119,23 @@ type StatusErrChans struct {
 //
 // Note this is setup more similarly to the entry.GetEntries() function rather than other functions
 // in the rst package.
-func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, *StatusErrChans, error) {
+func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, <-chan error, error) {
 	workerErrChan := make(chan error, 128)
 	statusErrChan := make(chan error, 128)
+
 	pipeline := func(ctx context.Context, paths <-chan string) <-chan *GetStatusResult {
 		return statusPipeline(ctx, cfg, pm.Get(), paths, workerErrChan, statusErrChan)
 	}
 
-	results, processorErrs, err := util.ProcessPathsViaPipeline(ctx, pm, true, pipeline, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
+	results, walkErrs, err := util.ProcessPathsViaPipeline(ctx, pm, pipeline, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	errChans := &StatusErrChans{Processor: processorErrs, Info: statusErrChan, Worker: workerErrChan}
-	return results, errChans, err
+	return results, util.CombineErrChans(walkErrs, statusErrChan, workerErrChan), err
 }
 
+// statusPipeline initiates the sync status check by starting statusWorkers and a go-routine to pass
+// statusInfo to them based on the inputType and the --verify-remote flag.
 func statusPipeline(
 	ctx context.Context,
 	cfg GetStatusCfg,
@@ -161,19 +156,18 @@ func statusPipeline(
 
 		statusInfoChan := startWorkers(ctx, cfg, initialFsPath, results, workerErrs)
 		go func() {
-			defer close(workerErrs)
 			defer close(statusErrs)
 			defer close(statusInfoChan)
 			if cfg.VerifyRemote {
-				getStatusInfoVerifyRemote(ctx, initialFsPath, paths, statusInfoChan, statusErrs)
-			} else if inputType != util.PathInputRecursion {
-				getStatusInfoIterative(ctx, inputType, initialFsPath, paths, statusInfoChan, statusErrs)
-			} else {
+				getStatusInfoVerifyRemote(ctx, initialFsPath, paths, statusInfoChan)
+			} else if inputType == util.PathInputRecursion {
 				getStatusInfoRecursive(ctx, initialFsPath, paths, statusInfoChan, statusErrs)
+			} else {
+				getStatusInfoIterative(ctx, inputType, initialFsPath, paths, statusInfoChan, statusErrs)
 			}
 		}()
-
 	}()
+
 	return results
 }
 
@@ -183,6 +177,7 @@ func startWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, r
 	if err != nil {
 		errs <- fmt.Errorf("unable to fetch required mappings: %w", err)
 		close(results)
+		close(errs)
 		return statusInfoChan
 	}
 
@@ -193,18 +188,21 @@ func startWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, r
 		if err != nil {
 			errs <- err
 			close(results)
+			close(errs)
 			return statusInfoChan
 		}
 		rstMap, err = rst.GetRstMap(ctx, mountPoint, mappings.RstIdToConfig)
 		if err != nil {
 			errs <- fmt.Errorf("unable to get rst mappings: %w", err)
 			close(results)
+			close(errs)
 			return statusInfoChan
 		}
 	}
 
 	go func() {
 		defer close(results)
+		defer close(errs)
 		numWorkers := viper.GetInt(config.NumWorkersKey)
 		if numWorkers > 1 {
 			numWorkers -= 1
@@ -224,6 +222,15 @@ func startWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, r
 	return statusInfoChan
 }
 
+// getStatusInfoIterative will be called by statusPipeline() when its inputType is stdin or list.
+//
+// GetJobs() is called for each fsPath. This allows paths to be provided in any order, but is not as
+// efficient as the recurse mode when checking large directory trees. It is however more efficient
+// than the recurse mode when checking files in directories that contain deep sub-directories, and
+// only the status of the top-level files is needed.
+//
+// Regardless if a database match is found, the information is passed to the statusWorkers where
+// the status of each fsPath is checked using getPathStatusFromDatabase().
 func getStatusInfoIterative(ctx context.Context, inputType util.PathInputType, fsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
 	log, _ := config.GetLogger()
 	log.Debug("attempting to retrieve a single path from the remote database", zap.String("fsPath", fsPath), zap.Any("inputType", inputType))
@@ -249,6 +256,18 @@ func getStatusInfoIterative(ctx context.Context, inputType util.PathInputType, f
 	}
 }
 
+// getStatusInfoRecursive will be called by statusPipeline() when its inputType is recurse.
+//
+// GetJobs() is called once treating the first fsPath as a prefix and reusing the gRPC stream for
+// subsequent calls. It expects to receive lexicographically increasing fsPaths, and will handle
+// matching fsPaths with corresponding dbPaths, advancing the dbPath is needed until it finds a
+// match, or determines there is no entry in the Remote database for that fsPath. For this mode to
+// work correctly fsPaths and dbPaths be provided in stable lexicographical order. If an fsPath is
+// received that is "smaller" than the previous fsPath then the database will always return "not
+// found". This should never happen when used from util.ProcessPaths().
+//
+// Regardless if a database match is found, the information is passed to the statusWorkers where the
+// status of each fsPath is checked using getPathStatusFromDatabase().
 func getStatusInfoRecursive(ctx context.Context, fsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
 	log, _ := config.GetLogger()
 
@@ -302,7 +321,10 @@ func getStatusInfoRecursive(ctx context.Context, fsPath string, paths <-chan str
 	}
 }
 
-func getStatusInfoVerifyRemote(ctx context.Context, initialFsPath string, paths <-chan string, statusInfoChan chan<- statusInfo, errs chan<- error) {
+// getStatusInfoVerifyRemote will be called by statusPipeline() when --verify-remote flag is
+// specified. Each fsPath will be passed to the statusWorkers where the remote storage target(s)
+// will be check for current sync status using getPathStatusFromTarget().
+func getStatusInfoVerifyRemote(ctx context.Context, initialFsPath string, paths <-chan string, statusInfoChan chan<- statusInfo) {
 	var fsOk bool
 	fsPath := initialFsPath
 	for {
@@ -359,6 +381,9 @@ func statusWorker(
 	}
 }
 
+// getPathStatusFromTarget retrieves the lockedInfo for the path from GetLockedInfo(). The
+// lockedInfo is compared with the remote size and mtime from the remote storage target(s) for sync
+// statuses.
 func getPathStatusFromTarget(
 	ctx context.Context,
 	cfg GetStatusCfg,
@@ -453,7 +478,7 @@ func getPathStatusFromTarget(
 	return result, nil
 }
 
-// getPathStatus accepts an fsPath and dbPath and determines the SyncStatus of the path. The
+// getPathStatusFromDatabase accepts an fsPath and dbPath to determine the sync status of the path. The
 // dbPath might be nil or contain an error if there was not match in the DB for this fsPath.
 func getPathStatusFromDatabase(ctx context.Context, cfg GetStatusCfg, mappings *util.Mappings, fsPath string, dbPath *GetJobsResponse) (*GetStatusResult, error) {
 	syncReason := strings.Builder{}

@@ -83,7 +83,7 @@ func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.G
 		return err
 	}
 
-	resultChan, errChans, err := rst.GetStatus(ctx, method, backendCfg)
+	resultChan, errChan, err := rst.GetStatus(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -152,27 +152,14 @@ run:
 				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
 
-		case err, ok := <-errChans.Processor:
+		case err, ok := <-errChan:
 			if ok {
 				// Once an error happens the resultChan will be closed, however this is a buffered
 				// channel so there may still be valid entries we should finish printing before
 				// returning the error.
 				multiErr.Errors = append(multiErr.Errors, err)
 			}
-		case err, ok := <-errChans.Info:
-			if ok {
-				// Once an error happens the resultChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
-		case err, ok := <-errChans.Worker:
-			if ok {
-				// Once an error happens the resultChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
+
 		}
 	}
 
