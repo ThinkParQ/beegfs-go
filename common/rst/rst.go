@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	doublestar "github.com/bmatcuk/doublestar/v4"
@@ -556,13 +557,21 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 }
 
 // GetLockedInfo acquires the available information for inMountPath. An error will be returned when
-// the lock fails to be acquired unless lockedRequired==true. cfg is used as a configuration
+// the lock fails to be acquired unless skipAccessLock is true. cfg is used as a configuration
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
-// unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
-// writeLockSet will be true when the write lock was set. skipAccessLock will not change the access
-// lock. ErrOffloadFileNotReadable will be returned when the file is offloaded when client is unable
-// to read the file.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, inMountPath string, skipAccessLock bool) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+// unnecessary cfg clones since the lockedInfo can be used for multiple job requests. writeLockSet
+// will be true when the write lock was set. When skipAccessLock is true the access lock state will
+// not be changed. skipAccessLock is useful when a point in time read-only copy is needed.
+// ErrOffloadFileNotReadable will be returned when the file is offloaded when client is unable to
+// read the file.
+func GetLockedInfo(
+	ctx context.Context,
+	mountPoint filesystem.Provider,
+	cfg *flex.JobRequestCfg,
+	inMountPath string,
+	skipAccessLock bool,
+) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
@@ -602,7 +611,7 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *fle
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
-			if strings.Contains(err.Error(), "resource temporarily unavailable") {
+			if errors.Is(err, syscall.EWOULDBLOCK) {
 				return lockedInfo, writeLockSet, rstIds, ErrOffloadFileNotReadable
 
 			}

@@ -492,6 +492,8 @@ func filterWalk(ctx context.Context, cancel context.CancelFunc, filterExpr strin
 	return out
 }
 
+const FilterFilesHelp = "Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\""
+
 type FileInfoFilter func(FileInfo) (bool, error)
 
 // compileFilter turns a DSL expression into a filter function.
