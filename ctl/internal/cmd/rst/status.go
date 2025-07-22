@@ -37,11 +37,11 @@ By default only files that are not currently in sync with their configured or th
 Use the verbose flag to print all entries including ones that are synchronized or do not have remote targets configured.
 Use the debug flag to print additional details such as the last job ID and modification timestamp from the file and last job.
 
-By default, sync statuses are inferred from job history and may not reflect recent changes to the remote target' resources.
-To ensure accuracy, add the --verify-remote flag to verification against your remote targets.
+By default, sync status is determined by comparing the local BeeGFS file with the most recent job state recorded in the Remote database. 
+This avoids unnecessary API requests to the remote target. Use --verify-remote to instead query each file's status with the remote target.
+This is useful if you suspect changes to the remote file that occurred outside of BeeGFS Remote.
 
-Status processing is parallelized by default to optimize response times, which means results may arrive out of order.
-To enforce sequential processing (and preserve result order), export BEEGFS_NUM_WORKERS=1
+File status checks run in parallel by default. To enforce sequential processing (and preserve output order), set BEEGFS_NUM_WORKERS=1.
 
 Specifying Paths:
 * A single file can be specified, or a directory can be specified with the --recurse flag to check all files in that directory are synchronized.
@@ -65,9 +65,8 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
-	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "",
-		"Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\"")
-	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Verify the sync status with the remote storage target(s).")
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }
