@@ -120,7 +120,6 @@ func runPythonFindIndex(bflagSet *bflag.FlagSet, paths []string) error {
 		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
-	fmt.Println("Running command:", allArgs)
 	cmd := exec.Command(beeBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
