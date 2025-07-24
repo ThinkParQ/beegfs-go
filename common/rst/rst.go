@@ -598,6 +598,12 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 	}
 	lockedInfo.Exists = true
 
+	if cfg.Update {
+		if err = updateRstConfig(ctx, cfg, inMountPath, mappings); err != nil {
+			return
+		}
+	}
+
 	if rstIds == nil {
 		rstIds = entryInfo.Entry.Remote.RSTIDs
 	}

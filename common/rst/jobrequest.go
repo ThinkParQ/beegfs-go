@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -77,11 +78,33 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 	return respChan, nil
 }
 
+// updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.
+func updateRstConfig(ctx context.Context, cfg *flex.JobRequestCfg, path string, mappings *util.Mappings) error {
+	newRstIds := []uint32{cfg.RemoteStorageTarget}
+	err := entry.SetFileRstIds(ctx, mappings, path, newRstIds)
+
+	if err != nil {
+		// If the file doesn't exist (e.g., during a pull), it's not an error.
+		// The update will be attempted again by the worker after the file is created.
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			return nil
+		}
+		// For other errors, we wrap and return them.
+		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
+	}
+
+	return nil
+}
+
 // prepareJobRequests creates all job requests required. If the path does not exist, unknown, glob
 // pattern or a directory then a job-builder request will be returned. Otherwise, the supplied
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+	if cfg.Update && !IsValidRstId(cfg.RemoteStorageTarget) {
+		return nil, fmt.Errorf("--update requires a valid --remote-target to be specified")
+	}
+
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
@@ -141,6 +164,12 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 	rstMap, err := getRstMap(ctx, mountPoint, mappings.RstIdToConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.Update {
+		if err := updateRstConfig(ctx, cfg, pathInfo.Path, mappings); err != nil {
+			return nil, err
+		}
 	}
 
 	if IsValidRstId(cfg.RemoteStorageTarget) {
