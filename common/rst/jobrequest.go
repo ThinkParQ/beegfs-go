@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -77,11 +78,41 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 	return respChan, nil
 }
 
+// updateRstConfig applies the RST configuration from the job request to the file entry.
+func updateRstConfig(ctx context.Context, cfg *flex.JobRequestCfg, path string, mappings *util.Mappings) error {
+	// Get the current entry info to see if an update is even needed.
+	// This avoids an unnecessary write operation if the state is already correct.
+	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, path)
+	if err != nil {
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			return nil
+		}
+		return fmt.Errorf("failed to retrieve entry to update RST config: %w", err)
+	}
+
+	newRstIds := []uint32{cfg.RemoteStorageTarget}
+	currentRstIds := entryInfo.Entry.Remote.RSTIDs
+
+	if len(currentRstIds) == 1 && currentRstIds[0] == newRstIds[0] {
+		return nil
+	}
+
+	if err := entry.SetFileRstIds(ctx, mappings, path, newRstIds); err != nil {
+		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
+	}
+
+	return nil
+}
+
 // prepareJobRequests creates all job requests required. If the path does not exist, unknown, glob
 // pattern or a directory then a job-builder request will be returned. Otherwise, the supplied
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+	if cfg.Update && !IsValidRstId(cfg.RemoteStorageTarget) {
+		return nil, errors.New("--update requires a valid --remote-target to be specified")
+	}
+
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
@@ -141,6 +172,12 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 	rstMap, err := getRstMap(ctx, mountPoint, mappings.RstIdToConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.Update {
+		if err := updateRstConfig(ctx, cfg, pathInfo.Path, mappings); err != nil {
+			return nil, err
+		}
 	}
 
 	if IsValidRstId(cfg.RemoteStorageTarget) {
