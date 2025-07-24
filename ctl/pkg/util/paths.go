@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"golang.org/x/sync/errgroup"
 )
 
 type PathInputType int
@@ -149,9 +149,15 @@ func FilterExpr(f string) ProcessPathOpt {
 	}
 }
 
-type pathsWalk func() (<-chan string, <-chan error)
-
-func GetPathsWalk(ctx context.Context, cancel context.CancelFunc, method PathInputMethod, opts ...ProcessPathOpt) (pathsWalk, error) {
+// GetPathsWalk launches a background task that generates paths according to the given
+// PathInputMethod. Depending on the method it will read paths from stdin, recurse a directory tree,
+// or iterate a static list. Any matching paths are emitted on the returned channel which is closed
+// when the walk completes. Any setup error is returned immediately, and any runtime error during
+// the walk will be captured by the errgroup, canceling the shared context and stopping the walk.
+//
+// GetPathsWalk registers its work with the errgroup but does not itself wait so it is the
+// responsibility of the callers must invoke g.Wait() to observe runtime errors.
+func GetPathsWalk(g *errgroup.Group, ctx context.Context, method PathInputMethod, opts ...ProcessPathOpt) (<-chan string, error) {
 	args := &ProcessPathOpts{}
 	for _, opt := range opts {
 		opt(args)
@@ -166,22 +172,18 @@ func GetPathsWalk(ctx context.Context, cancel context.CancelFunc, method PathInp
 		}
 	}
 
-	var walk pathsWalk
-	if method.pathsViaStdin {
-		walk = func() (<-chan string, <-chan error) {
-			return walkStdin(ctx, cancel, method.stdinDelimiter, filter)
+	paths := make(chan string, 1024)
+	g.Go(func() error {
+		defer close(paths)
+		if method.pathsViaStdin {
+			return walkStdin(ctx, method.stdinDelimiter, paths, filter)
+		} else if method.pathsViaRecursion != "" {
+			return walkDir(ctx, method.pathsViaRecursion, paths, filter, args.RecurseLexicographically)
 		}
-	} else if method.pathsViaRecursion != "" {
-		walk = func() (<-chan string, <-chan error) {
-			return walkDir(ctx, cancel, method.pathsViaRecursion, filter, args.RecurseLexicographically)
-		}
-	} else {
-		walk = func() (<-chan string, <-chan error) {
-			return walkList(ctx, cancel, method.pathsViaList, filter)
-		}
-	}
+		return walkList(ctx, method.pathsViaList, paths, filter)
+	})
 
-	return walk, nil
+	return paths, nil
 }
 
 // ProcessPaths() processes one or more entries based on the PathInputMethod and executes the
@@ -195,7 +197,8 @@ func GetPathsWalk(ctx context.Context, cancel context.CancelFunc, method PathInp
 //
 // It returns a ResultT channel where the result for each entry will be sent. The ResultT channel
 // will be closed once all entries are processed, or if any error occurs after all valid results are
-// sent to the channel.
+// sent to the channel. On the first non‑nil error from any walker or worker, the shared context is
+// canceled, the error is sent on the returned error channel, and all in‑flight work stops.
 func ProcessPaths[ResultT any](
 	ctx context.Context,
 	method PathInputMethod,
@@ -214,76 +217,70 @@ func ProcessPaths[ResultT any](
 		}
 	}
 
-	workerCtx, workerCancel := context.WithCancel(ctx)
-	walk, err := GetPathsWalk(workerCtx, workerCancel, method, opts...)
+	g, gCtx := errgroup.WithContext(ctx)
+	paths, err := GetPathsWalk(g, gCtx, method, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	results, walkErrs, processErrs := startProcessing(workerCtx, workerCancel, walk, processEntry, numWorkers)
-	return results, CombineErrChans(walkErrs, processErrs), nil
+	results := startProcessing(g, gCtx, paths, processEntry, numWorkers)
+
+	gErrs := make(chan error)
+	go func() {
+		defer close(gErrs)
+		if err := g.Wait(); err != nil {
+			gErrs <- err
+		}
+	}()
+
+	return results, gErrs, nil
 }
 
-const (
-	processPathsBufferSize      = 1024
-	processPathsErrorBufferSize = 128
-)
-
 func startProcessing[ResultT any](
+	g *errgroup.Group,
 	ctx context.Context,
-	cancel context.CancelFunc,
-	walk pathsWalk,
+	paths <-chan string,
 	processEntry func(path string) (ResultT, error),
 	numWorkers int,
-) (<-chan ResultT, <-chan error, <-chan error) {
-	paths, walkErrs := walk()
-	results := make(chan ResultT, processPathsBufferSize)
-	processErrs := make(chan error, processPathsErrorBufferSize)
-
-	go func() {
+) <-chan ResultT {
+	results := make(chan ResultT, 1024)
+	g.Go(func() error {
 		defer close(results)
-		defer close(processErrs)
 
-		wg := sync.WaitGroup{}
+		sg, sgCtx := errgroup.WithContext(ctx)
 		for range numWorkers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-
+			sg.Go(func() error {
 				for {
 					select {
-					case <-ctx.Done():
-						return
+					case <-sgCtx.Done():
+						return sgCtx.Err()
 					case path, ok := <-paths:
 						if !ok {
-							return
+							return nil
 						}
 						result, err := processEntry(path)
 						if err != nil {
-							processErrs <- err
-							cancel()
-							return
+							return err
 						}
 						results <- result
 					}
 				}
-			}()
+			})
 		}
-		wg.Wait()
-	}()
 
-	return results, walkErrs, processErrs
+		return sg.Wait()
+	})
+
+	return results
 }
 
-func walkStdin(ctx context.Context, cancel context.CancelFunc, delimiter byte, filter FileInfoFilter) (<-chan string, <-chan error) {
-	paths := make(chan string, processPathsBufferSize)
-	errs := make(chan error, processPathsErrorBufferSize)
-	go func() {
-		defer close(paths)
-		defer close(errs)
-
-		scanner := bufio.NewScanner(os.Stdin)
-		splitFunc := func(data []byte, atEOF bool) (int, []byte, error) {
+func walkStdin(ctx context.Context, delimiter byte, paths chan<- string, filter FileInfoFilter) error {
+	scanner := bufio.NewScanner(os.Stdin)
+	splitFunc := func(data []byte, atEOF bool) (int, []byte, error) {
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		default:
 			for i := 0; i < len(data); i++ {
 				if data[i] == delimiter {
 					return i + 1, data[:i], nil
@@ -296,199 +293,152 @@ func walkStdin(ctx context.Context, cancel context.CancelFunc, delimiter byte, f
 			// Otherwise request more data
 			return 0, nil, nil
 		}
-		scanner.Split(splitFunc)
+	}
+	scanner.Split(splitFunc)
 
-		var beegfsClient filesystem.Provider
-		for scanner.Scan() {
+	var beegfsClient filesystem.Provider
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 			path := scanner.Text()
-			if err := scanner.Err(); err != nil {
-				errs <- err
-				cancel()
-				return
+
+			keep := true
+			if filter != nil {
+				info, err := os.Lstat(path)
+				if err != nil {
+					return err
+				}
+				statT, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("unsupported platform…")
+
+				}
+				keep, err = filter(statToFileInfo(path, statT))
+				if err != nil {
+					return err
+				}
 			}
 
-			select {
-			case <-ctx.Done():
-				errs <- ctx.Err()
-				return
-			default:
-				keep := true
-				if filter != nil {
-					info, err := os.Lstat(path)
-					if err != nil {
-						errs <- err
-						cancel()
-						return
-					}
-					statT, ok := info.Sys().(*syscall.Stat_t)
-					if !ok {
-						errs <- fmt.Errorf("unsupported platform…")
-						cancel()
-						return
-					}
-					keep, err = filter(statToFileInfo(path, statT))
-					if err != nil {
-						errs <- err
-						cancel()
-						return
+			if keep {
+				if beegfsClient == nil {
+					var err error
+					if beegfsClient, err = config.BeeGFSClient(path); err != nil {
+						return err
 					}
 				}
 
-				if keep {
-					if beegfsClient == nil {
-						var err error
-						if beegfsClient, err = config.BeeGFSClient(path); err != nil {
-							errs <- err
-							cancel()
-							return
-						}
-					}
-
-					inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
-					if err != nil {
-						errs <- err
-						cancel()
-						return
-					}
-					paths <- inMountPath
+				inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
+				if err != nil {
+					return err
 				}
+				paths <- inMountPath
 			}
 		}
-	}()
+	}
 
-	return paths, errs
+	return scanner.Err()
 }
 
-func walkList(ctx context.Context, cancel context.CancelFunc, pathList []string, filter FileInfoFilter) (<-chan string, <-chan error) {
-	paths := make(chan string, processPathsBufferSize)
-	errs := make(chan error, processPathsErrorBufferSize)
-	go func() {
-		defer close(paths)
-		defer close(errs)
-
-		var beegfsClient filesystem.Provider
-		for _, path := range pathList {
-			select {
-			case <-ctx.Done():
-				errs <- ctx.Err()
-				return
-			default:
-				keep := true
-				if filter != nil {
-					info, err := os.Lstat(path)
-					if err != nil {
-						errs <- err
-						cancel()
-						return
-					}
-					statT, ok := info.Sys().(*syscall.Stat_t)
-					if !ok {
-						errs <- fmt.Errorf("unsupported platform…")
-						cancel()
-						return
-
-					}
-					keep, err = filter(statToFileInfo(path, statT))
-					if err != nil {
-						errs <- err
-						cancel()
-						return
-
-					}
+func walkList(ctx context.Context, pathList []string, paths chan<- string, filter FileInfoFilter) error {
+	var beegfsClient filesystem.Provider
+	for _, path := range pathList {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			keep := true
+			if filter != nil {
+				info, err := os.Lstat(path)
+				if err != nil {
+					return err
 				}
+				statT, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("unsupported platform…")
 
-				if keep {
-					if beegfsClient == nil {
-						var err error
-						if beegfsClient, err = config.BeeGFSClient(path); err != nil {
-							errs <- err
-							cancel()
-							return
-						}
-					}
-
-					inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
-					if err != nil {
-						errs <- err
-						cancel()
-						return
-					}
-					paths <- inMountPath
+				}
+				keep, err = filter(statToFileInfo(path, statT))
+				if err != nil {
+					return err
 				}
 			}
-		}
-	}()
 
-	return paths, errs
+			if keep {
+				if beegfsClient == nil {
+					var err error
+					if beegfsClient, err = config.BeeGFSClient(path); err != nil {
+						return err
+					}
+				}
+
+				inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
+				if err != nil {
+					return err
+				}
+				paths <- inMountPath
+			}
+		}
+	}
+
+	return nil
 }
 
-func walkDir(ctx context.Context, cancel context.CancelFunc, startPath string, filter FileInfoFilter, lexicographically bool) (<-chan string, <-chan error) {
-	paths := make(chan string, processPathsBufferSize)
-	errs := make(chan error, processPathsErrorBufferSize)
-	go func() {
-		defer close(paths)
-		defer close(errs)
+func walkDir(ctx context.Context, startPath string, paths chan<- string, filter FileInfoFilter, lexicographically bool) error {
+	beegfsClient, err := config.BeeGFSClient(startPath)
+	if err != nil {
+		return err
+	}
+	startingInMountPath, err := beegfsClient.GetRelativePathWithinMount(startPath)
+	if err != nil {
+		return err
+	}
 
-		beegfsClient, err := config.BeeGFSClient(startPath)
+	walkDirFunc := func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			errs <- err
-			cancel()
-			return
-		}
-		startingInMountPath, err := beegfsClient.GetRelativePathWithinMount(startPath)
-		if err != nil {
-			errs <- err
-			cancel()
-			return
+			return err
 		}
 
-		walkDirFunc := func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				keep := true
-				if filter != nil {
-					info, err := os.Lstat(path)
-					if err != nil {
-						return err
-					}
-					statT, ok := info.Sys().(*syscall.Stat_t)
-					if !ok {
-						return fmt.Errorf("unsupported platform…")
-
-					}
-					keep, err = filter(statToFileInfo(path, statT))
-					if err != nil {
-						return err
-
-					}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			keep := true
+			if filter != nil {
+				info, err := os.Lstat(path)
+				if err != nil {
+					return err
 				}
+				statT, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("unsupported platform…")
 
-				if keep {
-					inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
-					if err != nil {
-						return err
-					}
+				}
+				keep, err = filter(statToFileInfo(path, statT))
+				if err != nil {
+					return err
 
-					paths <- inMountPath
 				}
 			}
-			return nil
-		}
 
-		err = beegfsClient.WalkDir(startingInMountPath, walkDirFunc, filesystem.Lexicographically(lexicographically))
-		if err != nil {
-			errs <- err
-			cancel()
-			return
+			if keep {
+				inMountPath, err := beegfsClient.GetRelativePathWithinMount(path)
+				if err != nil {
+					return err
+				}
+
+				paths <- inMountPath
+			}
 		}
-	}()
-	return paths, errs
+		return nil
+	}
+
+	err = beegfsClient.WalkDir(startingInMountPath, walkDirFunc, filesystem.Lexicographically(lexicographically))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 const FilterFilesHelp = "Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\""
