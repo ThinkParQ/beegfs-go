@@ -110,7 +110,7 @@ func updateRstConfig(ctx context.Context, cfg *flex.JobRequestCfg, path string, 
 // requests.
 func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
 	if cfg.Update && !IsValidRstId(cfg.RemoteStorageTarget) {
-		return nil, errors.New("--update requires a valid --remote-target to be specified")
+		return nil, fmt.Errorf("--update requires a valid --remote-target to be specified")
 	}
 
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
