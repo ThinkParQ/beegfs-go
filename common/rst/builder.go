@@ -43,6 +43,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 				Cfg: cfg,
 			},
 		},
+		Update: cfg.Update,
 	}
 }
 

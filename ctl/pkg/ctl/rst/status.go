@@ -412,7 +412,7 @@ func getPathStatusFromTarget(
 ) (*GetStatusResult, error) {
 	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
 	// from GetLockedInfo.
-	lockedInfo, _, rstIds, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{}, fsPath, true)
+	lockedInfo, _, rstIds, _, _, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{}, fsPath, true)
 	if len(cfg.RemoteTargets) != 0 {
 		rstIds = cfg.RemoteTargets
 	}

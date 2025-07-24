@@ -22,7 +22,9 @@ type pushPullCfg struct {
 
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
-	backendCfg := flex.JobRequestCfg{}
+	backendCfg := flex.JobRequestCfg{
+		Update: new(bool),
+	}
 	cmd := &cobra.Command{
 		Use:   "push <path>",
 		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
@@ -42,6 +44,9 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			if len(args) > 1 {
 				return fmt.Errorf("invalid number of arguments. Be sure to quote file glob pattern")
 			}
+			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
+				return errors.New("--update requires a valid --remote-target to be specified")
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,6 +60,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
+	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
 	return cmd
 }
 
@@ -62,6 +68,7 @@ func newPullCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
 		Download: true,
+		Update: new(bool),
 	}
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
@@ -69,6 +76,9 @@ func newPullCmd() *cobra.Command {
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument")
+			}
+			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
+				return errors.New("--update requires a valid --remote-target to be specified")
 			}
 			return nil
 		},
@@ -86,6 +96,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
 	return cmd
 }
 

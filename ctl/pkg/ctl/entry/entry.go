@@ -97,6 +97,10 @@ type remoteConfig struct {
 	Targets map[uint32]*flex.RemoteStorageTarget
 }
 
+func (entryInfo *GetEntryCombinedInfo) GetOrigEntryInfo() *msg.EntryInfo {
+	return entryInfo.Entry.origEntryInfoMsg
+}
+
 // newEntry is used to assemble an entry from BeeMsgs. If user friendly names of the various IDs
 // should be set, the caller should first initialize the various mappers. If the mappers are not
 // available value types will be set to logical defaults (like <unknown>) and reference types will
@@ -615,19 +619,6 @@ func getPrimaryMetaNode(ctx context.Context, mappings *util.Mappings, entryInfo 
 	return primaryMetaNode.LegacyId.NumId, err
 }
 
-func SetFileRstIds(ctx context.Context, path string, rstIds []uint32) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, nil, path)
-	if err != nil {
-		return err
-	}
-	if entry.EntryType != beegfs.EntryRegularFile {
-		return errors.ErrUnsupported
-	}
-
-	setFileRstIds(ctx, entry, ownerNode, path, rstIds)
-	return nil
-}
-
 func GetFileDataState(ctx context.Context, path string) (beegfs.DataState, error) {
 	state, err := getFileState(ctx, path)
 	if err != nil {
@@ -800,7 +791,7 @@ func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, 
 	return nil
 }
 
-func setFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.Node, path string, rstIds []uint32) error {
+func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.Node, path string, rstIds []uint32) error {
 	if rstIds == nil {
 		return nil
 	}

@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	doublestar "github.com/bmatcuk/doublestar/v4"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 
@@ -100,6 +102,7 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 				LockedInfo: cfg.LockedInfo,
 			},
 		},
+		Update: cfg.Update,
 	}
 }
 
@@ -115,6 +118,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Flatten:             sync.Flatten,
 		Force:               request.Force,
 		LockedInfo:          sync.LockedInfo,
+		Update:              request.Update,
 	}
 }
 
@@ -442,11 +446,16 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		return
 	}
 
+	var entryInfoMsg msg.EntryInfo
+	var ownerNode beegfs.Node
+	var getLockedInfoCalled bool
+
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
+		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
+		getLockedInfoCalled = true
 		cfg.SetLockedInfo(lockedInfo)
 		sync.SetLockedInfo(lockedInfo)
 	}
@@ -459,7 +468,14 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 			return
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, cfg); err != nil {
+		if !getLockedInfoCalled {
+			if entryInfoMsg, ownerNode, err = entry.GetEntryAndOwnerFromPath(ctx, nil, cfg.Path); err != nil {
+				err = fmt.Errorf("failed to get entry info: %w", err)
+				return
+			}
+		}
+
+		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}
@@ -469,6 +485,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		sync.SetFlatten(cfg.Flatten)
 		sync.SetOverwrite(cfg.Overwrite)
 	}
+
 	return
 }
 
