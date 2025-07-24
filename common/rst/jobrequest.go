@@ -78,26 +78,18 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 	return respChan, nil
 }
 
-// updateRstConfig applies the RST configuration from the job request to the file entry.
+// updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.
 func updateRstConfig(ctx context.Context, cfg *flex.JobRequestCfg, path string, mappings *util.Mappings) error {
-	// Get the current entry info to see if an update is even needed.
-	// This avoids an unnecessary write operation if the state is already correct.
-	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, path)
+	newRstIds := []uint32{cfg.RemoteStorageTarget}
+	err := entry.SetFileRstIds(ctx, mappings, path, newRstIds)
+
 	if err != nil {
+		// If the file doesn't exist (e.g., during a pull), it's not an error.
+		// The update will be attempted again by the worker after the file is created.
 		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
 			return nil
 		}
-		return fmt.Errorf("failed to retrieve entry to update RST config: %w", err)
-	}
-
-	newRstIds := []uint32{cfg.RemoteStorageTarget}
-	currentRstIds := entryInfo.Entry.Remote.RSTIDs
-
-	if len(currentRstIds) == 1 && currentRstIds[0] == newRstIds[0] {
-		return nil
-	}
-
-	if err := entry.SetFileRstIds(ctx, mappings, path, newRstIds); err != nil {
+		// For other errors, we wrap and return them.
 		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
 	}
 
