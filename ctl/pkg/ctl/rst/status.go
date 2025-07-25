@@ -113,38 +113,34 @@ func (s PathStatus) String() string {
 // results and errors are written asynchronously. The GetStatusResults channel will return the
 // status of each path, and be close once all requested paths have been checked, or after an error.
 func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, <-chan error, error) {
-	g, gCtx := errgroup.WithContext(ctx)
+	cancelCtx, cancel := context.WithCancel(ctx)
+	g, gCtx := errgroup.WithContext(cancelCtx)
 
-	cancel := func(err error) {
-		g.Go(func() error { return err })
-	}
-
-	errs := make(chan error)
-	defer func() {
-		go func() {
-			defer close(errs)
-			if err := g.Wait(); err != nil {
-				errs <- err
-			}
-		}()
+	errs := make(chan error, 1)
+	go func() {
+		defer cancel()
+		defer close(errs)
+		if err := g.Wait(); err != nil {
+			errs <- err
+		}
 	}()
 
 	paths, err := util.GetPathsWalk(g, gCtx, pm, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
 	if err != nil {
-		cancel(err)
-		return nil, nil, err
+		cancel()
+		return nil, errs, err
 	}
 
 	statusInfos, initialFsPath, err := getStatusInfoWalk(g, gCtx, pm.Get(), paths, cfg.VerifyRemote)
 	if err != nil {
-		cancel(err)
-		return nil, nil, err
+		cancel()
+		return nil, errs, err
 	}
 
 	results, err := startWorkers(g, gCtx, cfg, initialFsPath, statusInfos)
 	if err != nil {
-		cancel(err)
-		return nil, nil, err
+		cancel()
+		return nil, errs, err
 	}
 
 	return results, errs, nil

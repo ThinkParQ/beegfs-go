@@ -418,7 +418,6 @@ func walkDir(ctx context.Context, startPath string, paths chan<- string, filter 
 				keep, err = filter(statToFileInfo(path, statT))
 				if err != nil {
 					return err
-
 				}
 			}
 
