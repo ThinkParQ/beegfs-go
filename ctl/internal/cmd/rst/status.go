@@ -37,6 +37,12 @@ By default only files that are not currently in sync with their configured or th
 Use the verbose flag to print all entries including ones that are synchronized or do not have remote targets configured.
 Use the debug flag to print additional details such as the last job ID and modification timestamp from the file and last job.
 
+By default, sync status is determined by comparing the local BeeGFS file with the most recent job state recorded in the Remote database. 
+This avoids unnecessary API requests to the remote target. Use --verify-remote to instead query each file's status with the remote target.
+This is useful if you suspect changes to the remote file that occurred outside of BeeGFS Remote.
+
+File status checks run in parallel by default. To enforce sequential processing (and preserve output order), set BEEGFS_NUM_WORKERS=1.
+
 Specifying Paths:
 * A single file can be specified, or a directory can be specified with the --recurse flag to check all files in that directory are synchronized.
 * When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to return info about multiple entries.
@@ -59,6 +65,8 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }
@@ -66,14 +74,16 @@ Specifying Paths:
 func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.GetStatusCfg) error {
 
 	log, _ := config.GetLogger()
+	paths := cmd.Flags().Args()
+	ctx := cmd.Context()
 
 	// Setup the method for sending paths to the backend:
-	method, err := util.DeterminePathInputMethod(cmd.Flags().Args(), frontendCfg.recurse, frontendCfg.stdinDelimiter)
+	method, err := util.DeterminePathInputMethod(paths, frontendCfg.recurse, frontendCfg.stdinDelimiter)
 	if err != nil {
 		return err
 	}
 
-	resultChan, errChan, err := rst.GetStatus(cmd.Context(), method, backendCfg)
+	resultChan, errChan, err := rst.GetStatus(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -144,11 +154,12 @@ run:
 
 		case err, ok := <-errChan:
 			if ok {
-				// Once an error happens the entriesChan will be closed, however this is a buffered
+				// Once an error happens the resultChan will be closed, however this is a buffered
 				// channel so there may still be valid entries we should finish printing before
 				// returning the error.
 				multiErr.Errors = append(multiErr.Errors, err)
 			}
+
 		}
 	}
 
