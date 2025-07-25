@@ -1160,6 +1160,10 @@ func (m *Manager) GetRSTConfig() ([]*flex.RemoteStorageTarget, error) {
 	return rstConfigs, nil
 }
 
+func (m *Manager) GetStubContents(path string) (uint32, string, error) {
+	return m.workerManager.GetStubContents(m.ctx, path)
+}
+
 func (m *Manager) Stop() {
 
 	m.readyMu.Lock()
