@@ -370,10 +370,15 @@ func getPathStatusFromTarget(
 	rstMap map[uint32]rst.Provider,
 	fsPath string,
 ) (*GetStatusResult, error) {
-	// If lockedInfo.Mode is non-zero then it is valid to check the file type and is safe to do so
-	// before checking the GetLockedInfo error. GetLockedInfo returns any certain information with
-	// the defaults when otherwise.
+	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
+	// from GetLockedInfo.
 	lockedInfo, _, rstIds, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{}, fsPath, true)
+	if len(cfg.RemoteTargets) != 0 {
+		rstIds = cfg.RemoteTargets
+	}
+	// GetLockedInfo returns any known information along with the defaults. So, if lockedInfo.Mode
+	// is non-zero then it is valid to check the file type and is safe to do so before checking the
+	// GetLockedInfo error.
 	fileMode := fs.FileMode(lockedInfo.Mode)
 	if fileMode.IsDir() {
 		return &GetStatusResult{
@@ -387,23 +392,30 @@ func getPathStatusFromTarget(
 			SyncStatus: NotSupported,
 			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(fileMode)),
 		}, nil
+	} else if !rst.FileExists(lockedInfo) {
+		return nil, fmt.Errorf("File does not exist. This is a bug")
 	} else if err != nil {
-		if errors.Is(err, rst.ErrOffloadFileNotReadable) {
+		if len(rstIds) == 0 {
 			return &GetStatusResult{
 				Path:       fsPath,
-				SyncStatus: Offloaded,
-				SyncReason: "File contents are offloaded.",
+				SyncStatus: NoTargets,
+				SyncReason: "No remote targets were specified or configured on this entry.",
 			}, nil
-		} else if errors.Is(err, rst.ErrFileHasNoRSTs) {
-			if len(cfg.RemoteTargets) == 0 {
-				return &GetStatusResult{
-					Path:       fsPath,
-					SyncStatus: NoTargets,
-					SyncReason: "No remote targets were specified or configured on this entry.",
-				}, nil
+		} else if errors.Is(err, rst.ErrOffloadFileNotReadable) {
+			// File is offloaded and clients cannot read stub files so request its contents
+			// from remote and update lockedInfo.
+			inMountPath, err := mountPoint.GetRelativePathWithinMount(fsPath)
+			if err != nil {
+				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
 			}
-			rstIds = cfg.RemoteTargets
-		} else {
+			resp, err := GetStubContents(ctx, inMountPath)
+			if err != nil {
+				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
+			}
+			lockedInfo.SetStubUrlRstId(resp.RstId)
+			lockedInfo.SetStubUrlPath(resp.Url)
+		} else if !errors.Is(err, rst.ErrFileHasNoRSTs) {
+			// Ignore ErrFileHasNoRSTs since rstIds has already been checked
 			return nil, fmt.Errorf("unable to get file info: %w", err)
 		}
 	} else if !rst.FileExists(lockedInfo) {
@@ -418,15 +430,12 @@ func getPathStatusFromTarget(
 			return nil, fmt.Errorf("unable to get rst client! rstId: %d. %w", tgt, err)
 		}
 
-		// This is unlikely that a client will have access to this offload target since they
-		// normally cannot read stub files.
 		if rst.IsFileOffloaded(lockedInfo) {
 			result.SyncStatus = Offloaded
 			if tgt == lockedInfo.GetStubUrlRstId() {
 				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
 			} else {
 				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are not offloaded to this target.\n", tgt))
-
 			}
 			continue
 		}
@@ -508,17 +517,15 @@ func getPathStatusFromDatabase(
 			for _, tgt := range entry.Entry.Remote.RSTIDs {
 				remoteTargets[tgt] = nil
 			}
-		} else if entry.Entry.FileState.GetDataState() == rst.DataStateOffloaded {
-			return &GetStatusResult{
-				Path:       fsPath,
-				SyncStatus: Offloaded,
-				SyncReason: "File contents are offloaded.",
-			}, nil
 		} else {
+			syncReason := "No remote targets were specified or configured on this entry."
+			if entry.Entry.FileState.GetDataState() == rst.DataStateOffloaded {
+				syncReason = "No remote targets were specified or configured on this entry. The contents are offloaded."
+			}
 			return &GetStatusResult{
 				Path:       fsPath,
 				SyncStatus: NoTargets,
-				SyncReason: "No remote targets were specified or configured on this entry.",
+				SyncReason: syncReason,
 			}, nil
 		}
 	}
