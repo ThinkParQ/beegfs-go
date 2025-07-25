@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
-	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
@@ -40,7 +40,13 @@ const (
 	ConnTimeoutKey = "conn-timeout"
 	// Disable BeeMsg and gRPC client to server authentication
 	AuthDisableKey = "auth-disable"
-	// File containing the authentication secret (formerly known as "connAuthFile").
+	// File containing the authentication secret (formerly known as "connAuthFile"). Generally
+	// callers should not open and initialize the secret directly, but instead use
+	// ManagementClient() then use getter methods on that client so the secret can be automatically
+	// initialized from any client mounts if the default auth file path does not exist and a user
+	// defined path was not provided. Other consumers of the auth secret such as the NodeStore and
+	// Remote client also use the mgmtd client to automatically determine the correct auth secret.
+	// Note if the auth path is automatically determined the path will be updated in Viper.
 	AuthFileKey = "auth-file"
 	// Disable TLS transport security for gRPC communication.
 	TlsDisableKey = "tls-disable"
@@ -79,8 +85,9 @@ const (
 
 // Viper values for certain configuration values.
 const (
-	BeeGFSMountPointNone = "none"
-	BeeGFSMgmtdAddrAuto  = "auto"
+	BeeGFSMountPointNone  = "none"
+	BeeGFSMgmtdAddrAuto   = "auto"
+	BeeGFSAuthDefaultPath = "/etc/beegfs/conn.auth"
 )
 
 // BeeGFS procfs configuration keys.
@@ -180,7 +187,9 @@ var globalMount filesystem.Provider
 
 var mgmtClient *beegrpc.Mgmtd
 
-// Try to establish a connection to the managements gRPC service
+// Try to establish a connection to the managements gRPC service. This also handles any automatic
+// configuration such as determining the mgmtd address and authentication secret if those were not
+// explicitly configured.
 func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtClient != nil {
 		return mgmtClient, nil
@@ -198,12 +207,9 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 	}
 
 	var authSecret []byte
-	if !viper.GetBool(AuthDisableKey) {
-		authSecret, err = os.ReadFile(viper.GetString(AuthFileKey))
-		if err != nil {
-			return nil, fmt.Errorf("couldn't read auth file: %w", err)
-		}
-	}
+	// authFileFromAutoClient is used to auto configure the conn auth file when the management
+	// address is auto configured from a client mount and the default auth file does not exist.
+	var authFileFromAutoClient string
 
 	mgmtdAddr := viper.GetString(ManagementAddrKey)
 	if mgmtdAddr == BeeGFSMgmtdAddrAuto {
@@ -243,10 +249,35 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 					return nil, fmt.Errorf("unable to auto-configure the management address: multiple client mount points with different %s:%s configurations were found, manually specify --%s for the file system to manage", procfsMgmtdHost, procfsMgmtdGrpc, ManagementAddrKey)
 				}
 			}
+			if connAuthFile, ok := c.Config["connAuthFile"]; ok {
+				authFileFromAutoClient = connAuthFile
+			}
 		}
 		log.Debug("attempting to use auto configured management address", zap.String("mgmtdAddr", mgmtdAddr))
 	} else {
 		log.Debug("attempting to use user defined management address", zap.String("mgmtdAddr", mgmtdAddr))
+	}
+
+	if !viper.GetBool(AuthDisableKey) {
+		authFilePath := viper.GetString(AuthFileKey)
+		if authSecret, err = os.ReadFile(authFilePath); err != nil {
+			if authFilePath != BeeGFSAuthDefaultPath {
+				return nil, fmt.Errorf("couldn't read auth file at %q (non-default path): %w", authFilePath, err)
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("couldn't read default auth file at %q: %w", authFilePath, err)
+			}
+			if authFileFromAutoClient == "" {
+				return nil, fmt.Errorf("couldn't read default auth file at %q: %w, and no auto-configured client auth file was found", authFilePath, err)
+			}
+			log.Debug("default auth file path does not exist but the management address was auto-configured, attempting to also auto-configure the auth file", zap.String("authFileFromAutoClient", authFileFromAutoClient))
+			var autoErr error
+			if authSecret, autoErr = os.ReadFile(authFileFromAutoClient); autoErr != nil {
+				return nil, fmt.Errorf("default auth file does not exist and falling back to auto-configuring the auth file from the client failed due to an error reading the client's auth file at %q: %w",
+					authFileFromAutoClient, autoErr)
+			}
+			viper.Set(AuthFileKey, authFileFromAutoClient)
+		}
 	}
 
 	mgmtClient, err = beegrpc.NewMgmtd(
@@ -276,12 +307,13 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 		}
 	}
 
-	var authSecret []byte
-	if !viper.GetBool(AuthDisableKey) {
-		authSecret, err = os.ReadFile(viper.GetString(AuthFileKey))
-		if err != nil {
-			return nil, fmt.Errorf("couldn't read auth file: %w", err)
-		}
+	// Get the mgmtd client first so the auth secret can be automatically initialized if BeeGFS is
+	// mounted and the default auth file does not exist. This does mean the mgmtd service must be
+	// accessible to make any request to the Remote service, even if the request would not otherwise
+	// require mgmtd (for example simply listing configure RSTs or getting local DB entries).
+	mgmtd, err := ManagementClient()
+	if err != nil {
+		return nil, err
 	}
 
 	conn, err := beegrpc.NewClientConn(
@@ -289,7 +321,7 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
 		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
 		beegrpc.WithTLSCaCert(cert),
-		beegrpc.WithAuthSecret(authSecret),
+		beegrpc.WithAuthSecret(mgmtd.GetAuthSecretBytes()),
 	)
 
 	beeRemoteClient = beeremote.NewBeeRemoteClient(conn)
@@ -372,28 +404,19 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 	nodeStoreMu.Lock()
 	defer nodeStoreMu.Unlock()
 
-	authSecret := uint64(0)
-	// Setup BeeMsg authentication from the given file
-	if !viper.GetBool(AuthDisableKey) {
-		key, err := os.ReadFile(viper.GetString(AuthFileKey))
-		if err != nil {
-			return nil, fmt.Errorf("couldn't read auth file: %w", err)
-		} else {
-			authSecret = util.GenerateAuthSecret(key)
-		}
-	}
-
-	// Create a node store using the current settings. These are copied, so later changes to
-	// globalConfig don't affect them!
-	nodeStore = beemsg.NewNodeStore(viper.GetDuration(ConnTimeoutKey), authSecret)
-
-	c, err := ManagementClient()
+	// Configure the management first as this also handles any automatic configuration such as the
+	// mgmtd address and conn auth file.
+	mgmtd, err := ManagementClient()
 	if err != nil {
 		return nil, err
 	}
 
+	// Create a node store using the current settings. These are copied, so later changes to
+	// globalConfig don't affect them!
+	nodeStore = beemsg.NewNodeStore(viper.GetDuration(ConnTimeoutKey), mgmtd.GetAuthSecret())
+
 	// Fetch the node list from management
-	nodes, err := c.GetNodes(ctx, &pm.GetNodesRequest{
+	nodes, err := mgmtd.GetNodes(ctx, &pm.GetNodesRequest{
 		IncludeNics: true,
 	})
 	if err != nil {

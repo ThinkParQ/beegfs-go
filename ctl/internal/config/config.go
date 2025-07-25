@@ -31,10 +31,10 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String(config.BeeGFSMountPointKey, "auto", fmt.Sprintf(`Generally the path where BeeGFS is mounted is determined automatically from the provided path(s).
 	Both absolute and relative paths inside BeeGFS are supported (e.g., "./myfile" if the cwd is somewhere in BeeGFS or "/mnt/beegfs/myfile").
 	Optionally specify the absolute path where BeeGFS is mounted to also be able to use paths relative to the BeeGFS root directory.
-	Alternatively set this option to '%s' if BeeGFS is not mounted locally or you want to interact with BeeGFS directly.
+	Alternatively set this option to %q if BeeGFS is not mounted locally or you want to interact with BeeGFS directly.
 	This will skip all local path resolution logic and require paths to be specified relative to the BeeGFS root directory.
-	Not all modes (such as migrate) and functionality (such as path recursion) is available using option 'none'.
-	Some modes require specifying '%s', for example to interact with paths that no longer exist in BeeGFS.`, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
+	Not all modes (such as migrate) and functionality (such as path recursion) is available using option %q.
+	Some modes require specifying %q, for example to interact with paths that no longer exist in BeeGFS.`, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
 
 	cmd.PersistentFlags().Bool(config.DisableEmojisKey, false, "If emojis should be omitted throughout various output.")
 
@@ -43,19 +43,20 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool(config.TlsDisableKey, false, fmt.Sprintf("Disable TLS for gRPC communication (ignores %s).", config.TlsCertFile))
 
 	cmd.PersistentFlags().String(config.TlsCertFile, "/etc/beegfs/cert.pem", `Use the specified certificate to verify and encrypt gRPC traffic. Leave empty to use the system's default certificate pool.
-	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.`)
+	To allow use by non-root users, ensure the file is owned by group "beegfs" and has group read permissions.`)
 
 	cmd.PersistentFlags().Bool(config.TlsDisableVerificationKey, false, "Disable TLS server verification")
 
 	cmd.PersistentFlags().Bool(config.AuthDisableKey, false, fmt.Sprintf("Disable authentication (ignores %s).", config.AuthFileKey))
-	cmd.PersistentFlags().String(config.AuthFileKey, "/etc/beegfs/conn.auth", `The file containing the authentication secret. 
-	To allow use by non-root users, ensure the file is owned by group 'beegfs' and has group read permissions.`)
+	cmd.PersistentFlags().String(config.AuthFileKey, config.BeeGFSAuthDefaultPath, fmt.Sprintf(`The file containing the authentication secret.
+	If the default file path does not exist, and the %s is set to %q then the %s path will be auto determined from the client configuration.
+	To allow use by non-root users, ensure the file is owned by the "beegfs" group and has group read permissions.`, config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, config.AuthFileKey))
 
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time to attempt establishing non-gRPC connections.")
 
 	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, fmt.Sprintf(`By default all logging is disabled example for fatal errors. 
 	Optionally additional logging to stderr can be enabled to assist with debugging (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).
-	When enabling logging you may wish to set --%s=0 to ensure output and log messages are synchronized.`, config.PageSizeKey))
+	When enabling logging you may wish to set %s to "0" to ensure output and log messages are synchronized.`, config.PageSizeKey))
 
 	cmd.PersistentFlags().Bool(config.LogDeveloperKey, false, "Enable logging at DebugLevel and above and print stack traces at WarnLevel and above.")
 	cmd.PersistentFlags().MarkHidden(config.LogDeveloperKey)
@@ -63,7 +64,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String(config.PprofAddress, "", "Start the pprof HTTP server at this address:port for performance debugging (e.g., localhost:6060 or :9999).")
 	cmd.PersistentFlags().MarkHidden(config.PprofAddress)
 
-	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, `When printing structured data, the columns/fields to include (use 'all' to include everything).
+	cmd.PersistentFlags().StringSlice(config.ColumnsKey, []string{}, `When printing structured data, the columns/fields to include (use "all" to include everything).
 	Currently does not automatically set potential flags required to actually fetch the data for some non-default fields.
 	Refer to the help for each command to see what additional flags may be needed.`)
 	cmd.PersistentFlags().Uint(config.PageSizeKey, 100, `The number of rows/elements to print before output is flushed to stdout.
