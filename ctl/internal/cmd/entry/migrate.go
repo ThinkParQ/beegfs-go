@@ -33,7 +33,30 @@ func newMigrateCmd() *cobra.Command {
 		Short: "Migrate files and directories to the specified storage pool",
 		Long: `Migrate files and directories to the specified storage pool.
 Files are only migrated if they have chunks on one or more of the specified targets.
-Migration occurs by creating a temporary file with new targets from the specified storage pool.
+
+There are two available migration modes:
+
+(1) Migrate using background data rebalancing (requires an enterprise license).
+
+This mode was introduced in BeeGFS 8.2 and handles migrating data from the specified target(s) to new 
+target(s) by starting background tasks on the metadata and storage nodes that handle syncing data directly 
+between the source/destination storage nodes and updating the stripe pattern on the metadata node. Because
+data is rebalanced in the background, the migrate command may complete before files are fully migrated.
+Files are locked and inaccessible to clients until they are rebalanced. Attempting to access files while 
+background rebalancing is in progress will return an "in use" error.
+
+This mode is generally more efficient, especially when data only needs to be migrated from some of the
+targets assigned to a file. This mode also supports migrating hard links as it does not require the
+inode be recreated, as is the case when migrating using a temporary file.
+
+Note: When the number of targets/buddy groups in the destination pool are greater than the number of
+targets/buddy groups a particular entry is migrated away from, the destination targets/buddy groups
+will be randomly picked for each entry to more evenly redistribute file data.
+
+(2) Migrate using a temporary file (default).
+
+This is the legacy approach to migrating data between storage pools/targets in BeeGFS.
+With this mode, a temporary file is created with new targets from the specified storage pool.
 Then the contents of the original file are copied to the new file, and the temporary file atomically 
 renamed overwriting the original. This mode handles migrating extended attributes, user/group ownership 
 and permissions, and will set the new file to have the same access/modification timestamps as the original.
@@ -71,7 +94,7 @@ actually redirect and return information from the linked file (i.e., stat, open,
 	}
 
 	// Frontend / display configuration options:
-	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, `When  <path> is a single directory recursively migrate all entries beneath the path.
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, `When <path> is a single directory recursively migrate all entries beneath the path.
 CAUTION: this may migrate many entries, for example if the BeeGFS root is the provided path.`)
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\\n", `Change the string delimiter used to determine individual paths when read from stdin.
 For example use --stdin-delimiter=\"\\x00\" for NULL.`)
@@ -88,6 +111,7 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "",
 		"Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\"")
+	cmd.Flags().BoolVar(&backendCfg.UseRebalancing, "rebalance", false, "Use background data rebalancing instead of temporary files to migrate data between targets.")
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")
 	cmd.MarkFlagRequired("pool")
 	return cmd
