@@ -146,7 +146,7 @@ run:
 				return fmt.Errorf("unknown sync status %d for path %s", path.SyncStatus, path.Path)
 			}
 
-			if !frontendCfg.summarize && (frontendCfg.verbose || printRowByDefault) {
+			if !frontendCfg.summarize && (frontendCfg.verbose || printRowByDefault || path.Warning) {
 				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
 		}

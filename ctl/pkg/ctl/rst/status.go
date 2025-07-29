@@ -21,6 +21,8 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -42,6 +44,7 @@ type GetStatusResult struct {
 	Path       string
 	SyncStatus PathStatus
 	SyncReason string
+	Warning    bool
 }
 
 type PathStatus int
@@ -392,8 +395,6 @@ func getPathStatusFromTarget(
 			SyncStatus: NotSupported,
 			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(fileMode)),
 		}, nil
-	} else if !rst.FileExists(lockedInfo) {
-		return nil, fmt.Errorf("File does not exist. This is a bug")
 	} else if err != nil {
 		if len(rstIds) == 0 {
 			return &GetStatusResult{
@@ -410,16 +411,29 @@ func getPathStatusFromTarget(
 			}
 			resp, err := GetStubContents(ctx, inMountPath)
 			if err != nil {
+				if st, ok := status.FromError(err); ok {
+					switch st.Code() {
+					case codes.Unimplemented:
+						result := &GetStatusResult{Path: fsPath, SyncStatus: Offloaded, Warning: true}
+						syncReason := strings.Builder{}
+						for _, tgt := range rstIds {
+							syncReason.WriteString(fmt.Sprintf("Target %d: unable to verify the file is correctly offloaded as the remote service is missing a required rpc (please update your remote service to at least the same version as ctl)\n", tgt))
+						}
+						result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
+						return result, nil
+					}
+				}
 				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
 			}
-			lockedInfo.SetStubUrlRstId(resp.RstId)
-			lockedInfo.SetStubUrlPath(resp.Url)
+			lockedInfo.SetStubUrlRstId(*resp.RstId)
+			lockedInfo.SetStubUrlPath(*resp.Url)
 		} else if !errors.Is(err, rst.ErrFileHasNoRSTs) {
-			// Ignore ErrFileHasNoRSTs since rstIds has already been checked
+			// Ignore ErrFileHasNoRSTs since rstIds has already been checked. The rstIds returned
+			// from GetLockedInfo does not account for cfg.RemoteTargets.
 			return nil, fmt.Errorf("unable to get file info: %w", err)
 		}
 	} else if !rst.FileExists(lockedInfo) {
-		return nil, fmt.Errorf("File does not exist. This is a bug")
+		return nil, fmt.Errorf("file does not exist (probably a bug)")
 	}
 
 	syncReason := strings.Builder{}

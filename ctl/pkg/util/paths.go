@@ -239,13 +239,13 @@ func startProcessing[ResultT any](
 		}
 	}
 
-	g, sgCtx := errgroup.WithContext(ctx)
+	g, gCtx := errgroup.WithContext(ctx)
 	for range numWorkers {
 		g.Go(func() error {
 			for {
 				select {
-				case <-sgCtx.Done():
-					return sgCtx.Err()
+				case <-gCtx.Done():
+					return gCtx.Err()
 				case path, ok := <-paths:
 					if !ok {
 						return nil
@@ -256,8 +256,8 @@ func startProcessing[ResultT any](
 					}
 
 					select {
-					case <-sgCtx.Done():
-						return sgCtx.Err()
+					case <-gCtx.Done():
+						return gCtx.Err()
 					case results <- result:
 					}
 				}
