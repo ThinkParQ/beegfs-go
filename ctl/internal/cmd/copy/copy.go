@@ -215,7 +215,12 @@ func copyRunner(bflagSet *bflag.FlagSet, paths []string, dest string) error {
 	if err := c.Start(); err != nil {
 		return fmt.Errorf("unable to start copy: %w", err)
 	}
-	if err := c.Wait(); err != nil {
+	err := c.Wait()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			log.Debug("beegfs-copy exited with non-zero status, propagating exit code", zap.Error(err))
+			os.Exit(exitErr.ExitCode())
+		}
 		return fmt.Errorf("error waiting for copy to complete: %w", err)
 	}
 	return nil
