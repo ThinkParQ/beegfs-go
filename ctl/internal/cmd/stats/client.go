@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os/user"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
@@ -225,30 +227,29 @@ func printOps(tbl *cmdfmt.Printomatic, cs []stats.ClientOps, cfg *clientStats_Co
 	}
 }
 
-func userIDToString(id uint64, name bool) string {
-	// servers return ~0 when userid can't be detected. Printing -1 instead
-	if uint32(id) == ^uint32(0) {
+func userIDToString(id msg.Uint128, name bool) string {
+	// servers return ~uint32(0) when userid can't be detected. Printing -1 instead
+	if uint32(id.Low) == ^uint32(0) {
 		return "-1"
 	}
 
 	if name {
-		userName, err := user.LookupId(strconv.Itoa(int(id)))
+		userName, err := user.LookupId(strconv.Itoa(int(id.Low)))
 		if err == nil {
 			return userName.Username
 		}
 	}
 
-	return fmt.Sprintf("%d", id)
+	return fmt.Sprintf("%d", id.Low)
 }
 
-func clientIPToString(ip uint64, name bool) string {
-	// servers return ~0 when userid can't be detected. Printing -1 instead
-	if uint32(ip) == ^uint32(0) {
-		return "-1"
-	}
+func clientIPToString(id msg.Uint128, name bool) string {
+	ipBytes := make([]byte, 16)
 
-	oct1, oct2, oct3, oct4 := byte(ip), byte(ip>>8), byte(ip>>16), byte(ip>>24)
-	stringIP := fmt.Sprintf("%d.%d.%d.%d", oct1, oct2, oct3, oct4)
+	binary.NativeEndian.PutUint64(ipBytes[0:8], id.High)
+	binary.NativeEndian.PutUint64(ipBytes[8:16], id.Low)
+
+	stringIP := net.IP(ipBytes).String()
 
 	if name {
 		hostname, err := net.LookupAddr(stringIP)
