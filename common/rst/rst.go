@@ -598,7 +598,7 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 	}
 	lockedInfo.Exists = true
 
-	if cfg.Update {
+	if cfg.GetUpdate() {
 		if err = updateRstConfig(ctx, cfg, inMountPath, mappings); err != nil {
 			return
 		}

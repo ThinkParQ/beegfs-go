@@ -101,7 +101,7 @@ func updateRstConfig(ctx context.Context, cfg *flex.JobRequestCfg, path string, 
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	if cfg.Update && !IsValidRstId(cfg.RemoteStorageTarget) {
+	if cfg.GetUpdate() && !IsValidRstId(cfg.RemoteStorageTarget) {
 		return nil, fmt.Errorf("--update requires a valid --remote-target to be specified")
 	}
 
@@ -166,7 +166,7 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 		return nil, err
 	}
 
-	if cfg.Update {
+	if cfg.GetUpdate() {
 		if err := updateRstConfig(ctx, cfg, pathInfo.Path, mappings); err != nil {
 			return nil, err
 		}
