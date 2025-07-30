@@ -27,7 +27,7 @@ func (m *GetHighResStatsResp) MsgId() uint16 {
 }
 
 func (m *GetHighResStatsResp) Deserialize(d *beeserde.Deserializer) {
-	beeserde.DeserializeSeq[HighResolutionStats](d, &m.Stats, false, func(inner *HighResolutionStats) {
+	beeserde.DeserializeSeq(d, &m.Stats, false, func(inner *HighResolutionStats) {
 		inner.Deserialize(d)
 	})
 }
@@ -85,4 +85,99 @@ func (m *GetClientStatsResp) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeSeq[uint64](d, &m.Stats, true, func(inner *uint64) {
 		beeserde.DeserializeInt(d, inner)
 	})
+}
+
+// Only to be used by GetClientStatsV2
+type Uint128 struct {
+	High uint64
+	Low  uint64
+}
+
+// Requests client stats v2
+type GetClientStatsV2 struct {
+	CookieID Uint128
+	PerUser  bool
+}
+
+func (m *GetClientStatsV2) MsgId() uint16 {
+	return 1033
+}
+
+func (m *GetClientStatsV2) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.CookieID.Low)
+	beeserde.SerializeInt(s, m.CookieID.High)
+
+	if m.PerUser {
+		s.MsgFeatureFlags = 1
+	}
+}
+
+// Client stats response v2
+type GetClientStatsV2Resp struct {
+	Stats []Uint128
+}
+
+func (m *GetClientStatsV2Resp) MsgId() uint16 {
+	return 1034
+}
+
+func (m *GetClientStatsV2Resp) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeSeq(d, &m.Stats, true, func(inner *Uint128) {
+		beeserde.DeserializeInt(d, &inner.Low)
+		beeserde.DeserializeInt(d, &inner.High)
+	})
+}
+
+// The below Request*Data messages are only used to determine which message version for requesting
+// client stats shall be used (by using a header flag). We don't actually process them, so the
+// responses are dummies that only take care of the header flag.
+
+type RequestMetaData struct {
+	LastStatsTime int64
+}
+
+func (m *RequestMetaData) MsgId() uint16 {
+	return 6003
+}
+
+func (m *RequestMetaData) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.LastStatsTime)
+}
+
+type RequestMetaDataRespDummy struct {
+	UseClientStatsV2 bool
+}
+
+func (m *RequestMetaDataRespDummy) MsgId() uint16 {
+	return 6005
+}
+
+func (m *RequestMetaDataRespDummy) Deserialize(d *beeserde.Deserializer) {
+	m.UseClientStatsV2 = (d.MsgFeatureFlags & 1) == 1
+	d.Buf.Reset()
+}
+
+type RequestStorageData struct {
+	LastStatsTime int64
+}
+
+func (m *RequestStorageData) MsgId() uint16 {
+	return 6004
+}
+
+func (m *RequestStorageData) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.LastStatsTime)
+}
+
+type RequestStorageDataRespDummy struct {
+	UseClientStatsV2 bool
+}
+
+func (m *RequestStorageDataRespDummy) MsgId() uint16 {
+	return 6006
+}
+
+func (m *RequestStorageDataRespDummy) Deserialize(d *beeserde.Deserializer) {
+	m.UseClientStatsV2 = (d.MsgFeatureFlags & 1) == 1
+	d.Buf.Reset()
 }

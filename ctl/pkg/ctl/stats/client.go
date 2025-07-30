@@ -28,8 +28,8 @@ var (
 
 // Contains details of client/user and a list of number of operations done by them
 type ClientOps struct {
-	Id  uint64   // Id can be Client IP in client stats and user ID in user stats
-	Ops []uint64 // number of operations performed by client/user. The index corresponds to the name of operations from MetaOpNames and StorageOpNames.
+	Id  msg.Uint128 // Id can be Client IP in client stats and user ID in user stats
+	Ops []uint64    // number of operations performed by client/user. The index corresponds to the name of operations from MetaOpNames and StorageOpNames.
 }
 
 // Substracting corresponding index values of b from a.
@@ -70,7 +70,7 @@ func Diff(latest []ClientOps, old []ClientOps) []ClientOps {
 
 // Aggregates operations from multiple servers based on client IP/user ID.
 func sumEachOpFromAllServers(list [][]ClientOps) []ClientOps {
-	aggregated := make(map[uint64]ClientOps)
+	aggregated := make(map[msg.Uint128]ClientOps)
 
 	for _, stats := range list {
 		for _, client := range stats {
@@ -175,8 +175,30 @@ func getClientStats(ctx context.Context, n beegfs.Node, userStats bool) <-chan g
 			ch <- getClientStatsResult{err: err}
 		}
 
+		// Check if GetClientStatsV2 must be used for this node or not
+		var useClientStatsV2 bool
+		if n.Id.NodeType == beegfs.Meta {
+			req := msg.RequestMetaData{}
+			resp := msg.RequestMetaDataRespDummy{}
+			err = store.RequestTCP(ctx, n.Id, &req, &resp)
+			if err != nil {
+				ch <- getClientStatsResult{err: err}
+				return
+			}
+			useClientStatsV2 = resp.UseClientStatsV2
+		} else {
+			req := msg.RequestStorageData{}
+			resp := msg.RequestStorageDataRespDummy{}
+			err = store.RequestTCP(ctx, n.Id, &req, &resp)
+			if err != nil {
+				ch <- getClientStatsResult{err: err}
+				return
+			}
+			useClientStatsV2 = resp.UseClientStatsV2
+		}
+
 		//  Set MSB to let server know it is the first request
-		cookieIP := ^uint64(0)
+		cookieID := msg.Uint128{Low: ^uint64(0), High: ^uint64(0)}
 
 		// Server sets moreData bit when complete stats are not sent in one request
 		moreData := 1
@@ -184,29 +206,47 @@ func getClientStats(ctx context.Context, n beegfs.Node, userStats bool) <-chan g
 		clientOpsList := make([]ClientOps, 0)
 
 		for moreData == 1 {
-			request := msg.GetClientStats{CookieIP: cookieIP}
-			if userStats {
-				request.PerUser = true
-			}
+			stats := []msg.Uint128{}
+			if useClientStatsV2 {
+				request := msg.GetClientStatsV2{CookieID: cookieID, PerUser: userStats}
 
-			var resp = msg.GetClientStatsResp{}
-			err = store.RequestTCP(ctx, n.Id, &request, &resp)
-			if err != nil {
-				ch <- getClientStatsResult{err: err}
-				return
-			} else if len(resp.Stats) < minRespStatsSize {
-				ch <- getClientStatsResult{err: fmt.Errorf("response size was smaller than expected (probably this is a bug elsewhere)")}
-				return
+				var resp = msg.GetClientStatsV2Resp{}
+				err = store.RequestTCP(ctx, n.Id, &request, &resp)
+				if err != nil {
+					ch <- getClientStatsResult{err: err}
+					return
+				} else if len(resp.Stats) < minRespStatsSize {
+					ch <- getClientStatsResult{err: fmt.Errorf("response size was smaller than expected (probably this is a bug elsewhere)")}
+					return
+				}
+
+				stats = resp.Stats
+			} else {
+				request := msg.GetClientStats{CookieIP: cookieID.Low, PerUser: userStats}
+
+				var resp = msg.GetClientStatsResp{}
+				err = store.RequestTCP(ctx, n.Id, &request, &resp)
+				if err != nil {
+					ch <- getClientStatsResult{err: err}
+					return
+				} else if len(resp.Stats) < minRespStatsSize {
+					ch <- getClientStatsResult{err: fmt.Errorf("response size was smaller than expected (probably this is a bug elsewhere)")}
+					return
+				}
+
+				for _, s := range resp.Stats {
+					stats = append(stats, msg.Uint128{High: 0, Low: s})
+				}
 			}
 
 			// The 0th index of response contains the number of operation for each client id/user id
-			numOps := resp.Stats[0]
+			numOps := stats[0].Low
 
 			// Server sets this bit when it is unable to send all the id operations in one response
-			moreData = int(resp.Stats[1])
+			moreData = int(stats[1].Low)
 
 			// check version of client stats beemsg api
-			if resp.Stats[2] != 1 {
+			if stats[2].Low != 1 {
 				ch <- getClientStatsResult{err: fmt.Errorf("protocol version mismatch in received Message from %s", n.Alias)}
 			}
 
@@ -214,30 +254,63 @@ func getClientStats(ctx context.Context, n beegfs.Node, userStats bool) <-chan g
 			// After first 8 position Every next slice of length [1 + numOps] contains 0th index as ip/userid and other are operation stats.
 			// Validate if the returned response are in the above format
 			subArrLen := int(numOps) + 1
-			if len(resp.Stats[minRespStatsSize:])%subArrLen != 0 {
+			if len(stats[minRespStatsSize:])%subArrLen != 0 {
 				ch <- getClientStatsResult{err: fmt.Errorf("reported length of ClientStats from %s OpsList doesn't match the actual length", n.Alias)}
 			}
 
-			opsSlice := resp.Stats[minRespStatsSize:]
+			opsSlice := stats[minRespStatsSize:]
 
 			// Iterate over subarray of length [1 + numOps]
-			for f, l := 0, subArrLen; l < len(resp.Stats); f, l = f+subArrLen, l+subArrLen {
+			for f, l := 0, subArrLen; l < len(stats); f, l = f+subArrLen, l+subArrLen {
+				id := opsSlice[f]
+
+				if !userStats {
+					if useClientStatsV2 {
+						// If the id is an ip address, it comes in big endian order, so we need to swap
+						// low and high part to be interpreted correctly by net.IP() later.
+						// A user id on the other hand is just sent as a normal integer, so we don't need
+						// to do anything there.
+						t := id.Low
+						id.Low = id.High
+						id.High = t
+					} else {
+						// If these are old style ipv4 adresses, coming as uint32s in big endian: To
+						// make them compatible we need to convert them to a correct uint64 in big
+						// endian and add the bytes to make them an ipv4 mapped ipv6 address.
+						id.Low <<= 32
+
+						// if they are 0, we just leave them as that to not have separate entries
+						// for ipv4 (0.0.0.0) and ipv6 (::) zero addresses
+						if id.Low != 0 {
+							id.Low |= 0xffff0000
+						}
+					}
+				}
+
 				ops := ClientOps{
-					Id:  opsSlice[f],
-					Ops: opsSlice[f+1 : l],
+					Id:  id,
+					Ops: make([]uint64, 0),
+				}
+
+				for i := f + 1; i < l; i++ {
+					ops.Ops = append(ops.Ops, opsSlice[i].Low)
 				}
 
 				clientOpsList = append(clientOpsList, ops)
 
 				// Set cookieIP to the last ip/userid to get stats for the remaining ips.
 				// This will only be used when server has set the moredata bit
-				cookieIP = opsSlice[f]
+				cookieID = opsSlice[f]
 			}
 		}
 
 		// Sort client ip/user id in ascending order
 		sort.Slice(clientOpsList, func(i, j int) bool {
-			return clientOpsList[i].Id < clientOpsList[j].Id
+			if clientOpsList[i].Id.High == clientOpsList[j].Id.High {
+				return clientOpsList[i].Id.Low < clientOpsList[j].Id.Low
+			} else {
+				return clientOpsList[i].Id.High < clientOpsList[j].Id.High
+			}
 		})
 
 		result := getClientStatsResult{
