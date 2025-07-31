@@ -257,7 +257,7 @@ func BuildJobRequests(
 	cfg *flex.JobRequestCfg,
 ) ([]*beeremote.JobRequest, error) {
 	keepLock := false
-	lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
+	lockedInfo, writeLockSet, rstIds, _, _, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
 
 	defer func() {
 		if !keepLock && writeLockSet {
@@ -323,12 +323,6 @@ func BuildJobRequests(
 		}
 
 		requests = append(requests, request)
-	}
-
-	if cfg.Update {
-		if updateErr := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfoMsg, ownerNode); err != nil {
-			errs = append(errs, fmt.Errorf("failed to update RST config: %w", updateErr))
-		}
 	}
 
 	return requests, errors.Join(errs...)
@@ -584,7 +578,9 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 
 		var info *flex.JobLockedInfo
-		if info, _, _, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
+		var entryInfoMsg msg.EntryInfo
+		var ownerNode beegfs.Node
+		if info, _, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -593,6 +589,13 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)
+
+		if cfg.Update {
+			if err = updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfoMsg, ownerNode); err != nil {
+				err = fmt.Errorf("failed to update RST config: %w", err)
+				return
+			}
+		}
 	} else {
 		err = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
 		return
