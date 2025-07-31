@@ -6,6 +6,7 @@ package ioctl
 // their own dedicated file to organize related types.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 // GetConfigFile returns the path to the client configuration file for the provided active BeeGFS mount
@@ -43,60 +45,72 @@ func GetConfigFile(mountPoint string) (string, error) {
 	return string(path[:cStringLen(path)]), nil
 }
 
-// The BeeGFS entry info for an entry inside of BeeGFS.
-type EntryInfo struct {
-	// The owning metadata node/group of the entry.
-	OwnerID       int
-	ParentEntryID string
-	EntryID       string
-	EntryType     beegfs.EntryType
-	FeatureFlags  EntryInfoFeatureFlags
+type getEntryInfoCfg struct {
+	trimNullBytes bool
 }
 
-// Go representations of the feature flags defined in:
-//   - client_module/source/common/storage/EntryInfo.h
-//   - common/source/common/storage/EntryInfo.h
-//
-// Flags are set to either 0 for false or 1 for true. We don't just use a boolean type here because
-// some ioctls (such as create file) expect an int32, and Go doesn't allow you to directly cast a
-// bool to an int (we'd have to have a helper function for each flag).
-type EntryInfoFeatureFlags struct {
-	// Indicates an inlined inode, might be outdated.
-	Inlined int32
-	// Indicates the file/directory metadata is buddy mirrored.
-	BuddyMirrored int32
-}
+type getEntryInfoOpt (func(*getEntryInfoCfg))
 
-// GetEntryInfo returns the BeeGFS entry info for the provided path inside of an active BeeGFS mount
-// point. The path can be any valid entry inside BeeGFS (i.e., file, directory, etc.)
-func GetEntryInfo(path string) (EntryInfo, error) {
-
-	entry, err := os.Open(path)
-	if err != nil {
-		return EntryInfo{}, err
+func TrimEntryInfoNullBytes() getEntryInfoOpt {
+	return func(cfg *getEntryInfoCfg) {
+		cfg.trimNullBytes = true
 	}
-	defer entry.Close()
+}
 
+// GetEntryInfo returns the BeeGFS entry info for the provided file descriptor inside of an active
+// BeeGFS mount point. The path can be any valid entry inside BeeGFS (i.e., file, directory, etc.).
+// This returns the same EntryInfo type as used by BeeMsg RPCs for compatibility.
+//
+// USAGE NOTES:
+//
+//   - This function DOES NOT set the FileName in EntryInfo consistent with the the behavior
+//     of the equivalent IoctlTk::getEntryInfo() in the C++ implementation.
+//   - When using EntryInfo from the ioctl as input to BeeMsg network serializers you typically want to
+//     set the TrimEntryInfoNullBytes() option. Otherwise you may see errors like unknown or invalid
+//     entry, notably when using a LookupIntentRequest with the root directory and the EntryID is root.
+//     This option should not typically be used when the EntryInfo is used as input to other ioctls.
+func GetEntryInfo(fd uintptr, opts ...getEntryInfoOpt) (msg.EntryInfo, error) {
+	cfg := &getEntryInfoCfg{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 	var arg = &getEntryInfoArg{}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(entry.Fd()), uintptr(iocGetEntryInfo), uintptr(unsafe.Pointer(arg)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(iocGetEntryInfo), uintptr(unsafe.Pointer(arg)))
 	if errno != 0 {
 		err := syscall.Errno(errno)
-		return EntryInfo{}, fmt.Errorf("error getting getting entry info for path '%s': %w (errno: %d)", path, err, errno)
+		return msg.EntryInfo{}, fmt.Errorf("unable to get entry info for fd %d via ioctl: %w (errno: %d)", fd, err, errno)
 	}
 
-	// Use a bitwise AND operation to check if a flag is set then convert the result to a binary
-	// integer by right shifting the result based on the position of the flag:
-	featureFlags := EntryInfoFeatureFlags{
-		Inlined:       arg.FeatureFlags & 1 >> 0, // "1" comes from ENTRYINFO_FEATURE_INLINED in BeeGFS.
-		BuddyMirrored: arg.FeatureFlags & 2 >> 1, // "2" comes from ENTRYINFO_FEATURE_BUDDYMIRRORED in BeeGFS.
+	// Use bitwise AND operations to check if feature flags are set:
+	var featFlags beegfs.EntryFeatureFlags
+	// "1" comes from ENTRYINFO_FEATURE_INLINED in BeeGFS.
+	if arg.FeatureFlags&1>>0 == 1 {
+		featFlags.SetInlined()
+	}
+	// "2" comes from ENTRYINFO_FEATURE_BUDDYMIRRORED in BeeGFS.
+	if arg.FeatureFlags&2>>1 == 1 {
+		featFlags.SetBuddyMirrored()
 	}
 
-	return EntryInfo{
-		OwnerID:       int(arg.OwnerID),
-		ParentEntryID: string(arg.ParentEntryID[:]),
-		EntryID:       string(arg.EntryID[:]),
-		EntryType:     beegfs.EntryType(arg.EntryType),
-		FeatureFlags:  featureFlags,
+	if cfg.trimNullBytes {
+		return msg.EntryInfo{
+			OwnerID:       arg.OwnerID,
+			ParentEntryID: bytes.TrimRight(arg.ParentEntryID[:], "\x00"),
+			EntryID:       bytes.TrimRight(arg.EntryID[:], "\x00"),
+			// The equivalent IoctlTk::getEntryInfo() in the C++ does not set the FileName.
+			FileName:     []byte{},
+			EntryType:    beegfs.EntryType(arg.EntryType),
+			FeatureFlags: featFlags,
+		}, nil
+	}
+	return msg.EntryInfo{
+		OwnerID:       arg.OwnerID,
+		ParentEntryID: arg.ParentEntryID[:],
+		EntryID:       arg.EntryID[:],
+		// The equivalent IoctlTk::getEntryInfo() in the C++ does not set the FileName.
+		FileName:     []byte{},
+		EntryType:    beegfs.EntryType(arg.EntryType),
+		FeatureFlags: featFlags,
 	}, nil
 }
 

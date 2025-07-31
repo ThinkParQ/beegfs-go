@@ -4,6 +4,7 @@ package ioctl
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,15 +56,21 @@ func TestGetEntryInfo(t *testing.T) {
 	require.NoError(t, err, "error during test setup")
 	defer cleanup(t)
 
+	testDirFD, err := os.Open(filepath.Dir(testDir))
+	require.NoError(t, err)
+	defer testDirFD.Close()
+
 	// Test with a directory:
-	dirEntryInfo, err := GetEntryInfo(testDir)
+	dirEntryInfo, err := GetEntryInfo(testDirFD.Fd())
 	require.NoError(t, err)
 	assert.Equal(t, beegfs.EntryDirectory, dirEntryInfo.EntryType)
 
 	// Test with a regular file:
 	testPath := testDir + "file1"
-	os.Create(testPath)
-	fileEntryInfo, err := GetEntryInfo(testPath)
+	testRegFD, err := os.Create(testPath)
+	require.NoError(t, err)
+	defer testRegFD.Close()
+	fileEntryInfo, err := GetEntryInfo(testRegFD.Fd())
 	require.NoError(t, err)
 	assert.Equal(t, beegfs.EntryRegularFile, fileEntryInfo.EntryType)
 }

@@ -15,13 +15,16 @@ func TestIsFile(t *testing.T) {
 func TestFeatureFlags(t *testing.T) {
 	var flag EntryFeatureFlags
 	assert.False(t, flag.IsBuddyMirrored())
+	assert.Equal(t, int32(0), flag.IsBuddyMirroredI32())
 	assert.False(t, flag.IsInlined())
 
 	flag.SetBuddyMirrored()
 	assert.True(t, flag.IsBuddyMirrored())
+	assert.Equal(t, int32(1), flag.IsBuddyMirroredI32())
 	assert.False(t, flag.IsInlined())
 
 	flag.SetInlined()
 	assert.True(t, flag.IsBuddyMirrored())
+	assert.Equal(t, int32(1), flag.IsBuddyMirroredI32())
 	assert.True(t, flag.IsInlined())
 }

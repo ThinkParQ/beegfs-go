@@ -3,6 +3,7 @@ package msg
 import (
 	"encoding/binary"
 	"fmt"
+	"structs"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
@@ -175,7 +176,12 @@ func (m *FindOwnerResponse) Deserialize(d *beeserde.Deserializer) {
 	m.EntryInfoWithDepth.Deserialize(d)
 }
 
+// EntryInfo is also used by the ioctl code. The argument structure defined here is used directly in
+// syscall invocations and designed to match the memory layout of the C counterparts in the BeeGFS
+// client API. DO NOT add, remove, or change the type or ordering of fields as they are defined here
+// without updating both the beemsg and ioctl (de)serialization logic.
 type EntryInfo struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
 	// The equivalent of OwnerNodeID in C++. This is either the ID of the metadata node that owns
 	// this entry or the ID of the buddy mirror group if the metadata for this entry is mirrored.
 	// The field name was changed here to avoid confusion/misuse.

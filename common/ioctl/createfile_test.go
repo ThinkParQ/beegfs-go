@@ -5,6 +5,7 @@ package ioctl
 import (
 	"io/fs"
 	"os"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,6 +22,11 @@ import (
 // These are harder to test because they require the test to run as root, and the BeeGFS under test
 // to be setup with multiple targets and storage pools.
 func TestCreateFile(t *testing.T) {
+	// Temporarily set the umask to 0 ensuring files can be created via ioctl with exact
+	// permissions. Without this the default system umask might impose restrictions that would
+	// prevent setting certain permissions (like 0o0777).
+	oldMask := syscall.Umask(0)
+	defer syscall.Umask(oldMask)
 
 	testDir, cleanup, err := getTempBeeGFSPathForTesting()
 	require.NoError(t, err, "error during test setup")

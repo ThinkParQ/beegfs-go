@@ -153,7 +153,7 @@ func CreateFile(path string, opts ...createFileOption) error {
 	}
 	defer parentDirectory.Close()
 
-	parentEntryInfo, err := GetEntryInfo(filepath.Dir(path))
+	parentEntryInfo, err := GetEntryInfo(parentDirectory.Fd())
 	if err != nil {
 		return err
 	}
@@ -181,11 +181,11 @@ func CreateFile(path string, opts ...createFileOption) error {
 
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(parentDirectory.Fd()), uintptr(iocCreateFileV3), uintptr(unsafe.Pointer(&mkFileV3Arg{
 		OwnerNodeID:            uint32(parentEntryInfo.OwnerID),
-		ParentParentEntryID:    uintptr(unsafe.Pointer(&[]byte(parentEntryInfo.ParentEntryID + "\x00")[0])),
-		ParentParentEntryIDLen: int32(len(parentEntryInfo.ParentEntryID + "\x00")),
-		ParentEntryID:          uintptr(unsafe.Pointer(&[]byte(parentEntryInfo.EntryID + "\x00")[0])),
-		ParentEntryIDLen:       int32(len(parentEntryInfo.EntryID + "\x00")),
-		ParentIsBuddyMirrored:  parentEntryInfo.FeatureFlags.BuddyMirrored,
+		ParentParentEntryID:    uintptr(unsafe.Pointer(&[]byte(parentEntryInfo.ParentEntryID)[0])),
+		ParentParentEntryIDLen: int32(len(parentEntryInfo.ParentEntryID)),
+		ParentEntryID:          uintptr(unsafe.Pointer(&[]byte(parentEntryInfo.EntryID)[0])),
+		ParentEntryIDLen:       int32(len(parentEntryInfo.EntryID)),
+		ParentIsBuddyMirrored:  parentEntryInfo.FeatureFlags.IsBuddyMirroredI32(),
 		ParentName:             uintptr(unsafe.Pointer(&[]byte("\x00")[0])),
 		ParentNameLen:          int32(len("\x00")),
 		EntryName:              uintptr(unsafe.Pointer(&[]byte(filepath.Base(path) + "\x00")[0])),
