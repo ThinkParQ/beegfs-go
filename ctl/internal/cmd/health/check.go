@@ -154,11 +154,13 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		return err
 	}
 	metaBusy := checkForBusyNodes(metaNodes)
-	fmt.Printf("\n%s Busy Metadata Nodes %s", metaBusy, hint(fmt.Sprintf("-> Does the number of queued requests exceed the degraded (%d) or critical (%d) thresholds?", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 	if metaBusy != Healthy {
+		fmt.Printf("\n%s Busy Metadata Nodes %s", metaBusy, hint(fmt.Sprintf("-> Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 		failedCheck = true
 		fmt.Print("\n\n")
 		printBusyNodes(metaNodes)
+	} else {
+		fmt.Printf("\n%s Busy Metadata Nodes %s", metaBusy, hint(fmt.Sprintf("-> Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 	}
 	log.Debug("collecting storage stats")
 	storageNodes, err := stats.MultiServerNodes(ctx, beegfs.Storage)
@@ -166,11 +168,13 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		return err
 	}
 	storBusy := checkForBusyNodes(storageNodes)
-	fmt.Printf("\n%s Busy Storage Nodes %s", storBusy, hint(fmt.Sprintf("-> Does the number of queued requests exceed the degraded (%d) or critical (%d) thresholds?", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 	if storBusy != Healthy {
+		fmt.Printf("\n%s Busy Storage Nodes %s", storBusy, hint(fmt.Sprintf("-> Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 		failedCheck = true
 		fmt.Print("\n\n")
 		printBusyNodes(storageNodes)
+	} else {
+		fmt.Printf("\n%s Busy Storage Nodes %s", storBusy, hint(fmt.Sprintf("-> Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
 	}
 	if metaBusy != Healthy || storBusy != Healthy {
 		fmt.Print(hint("\n\nHINT: Investigate further with 'beegfs stats server'"))
@@ -185,9 +189,23 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	}
 	reachabilityStatus, consistencyStatus, capacityStatus := checkTargets(targets)
 
-	fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> Are all targets responding?"))
-	fmt.Printf("%s Consistency %s\n", consistencyStatus, hint("-> Are all mirrors synchronized?"))
-	fmt.Printf("%s Available Capacity %s\n\n", capacityStatus, hint("-> Are any targets low on free space based on the thresholds defined by the management service?"))
+	if reachabilityStatus != Healthy {
+		fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> Not all targets are responding."))
+	} else {
+		fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> All targets are responding."))
+	}
+
+	if consistencyStatus != Healthy {
+		fmt.Printf("%s Consistency %s\n", consistencyStatus, hint("-> Not all mirrors are synchronized."))
+	} else {
+		fmt.Printf("%s Consistency %s\n", consistencyStatus, hint("-> All mirrors are synchronized."))
+	}
+
+	if capacityStatus != Healthy {
+		fmt.Printf("%s Available Capacity %s\n\n", capacityStatus, hint("-> Not all targets have sufficient free space based on the thresholds defined by the management service's configuration."))
+	} else {
+		fmt.Printf("%s Available Capacity %s\n\n", capacityStatus, hint("-> All targets have sufficient free space based on the thresholds defined by the management service's configuration."))
+	}
 
 	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy
 	if unhealthyTargets || frontendCfg.printDF {
@@ -228,7 +246,11 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	for _, c := range clients {
 		printClientHeader(c, "=")
 		netStatus := checkForFallbacks(c)
-		fmt.Printf("\n%s Fallbacks %s\n", netStatus, hint("-> Are any connections using secondary NICs or protocols (such as Ethernet/TCP when RDMA is preferred)?"))
+		if netStatus != Healthy {
+			fmt.Printf("\n%s Fallbacks %s\n", netStatus, hint("-> Not all connections are using preferred NICs or protocols (such as Ethernet/TCP when RDMA is preferred)."))
+		} else {
+			fmt.Printf("\n%s Fallbacks %s\n", netStatus, hint("-> All connections are using preferred NICs and protocols."))
+		}
 		if netStatus != Healthy {
 			failedCheck = true
 			fmt.Println()
