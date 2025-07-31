@@ -44,6 +44,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 				Cfg: cfg,
 			},
 		},
+		Update: cfg.Update,
 	}
 }
 
@@ -131,7 +132,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 	if err != nil {
 		return err
 	}
-
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
@@ -188,7 +188,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 						remotePath = inMountPath
 					}
 				}
-
 				jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, mappings, inMountPath, remotePath, cfg)
 				if err != nil {
 					// Errors that occur in BuildJobRequests must not be fatal; otherwise, pushing a

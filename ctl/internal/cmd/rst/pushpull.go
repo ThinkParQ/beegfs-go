@@ -23,6 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{}
+	// var updateVal bool
+	// backendCfg.Update = &updateVal
 	cmd := &cobra.Command{
 		Use:   "push <path>",
 		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
@@ -55,7 +57,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
-	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Force update the file's persistent RST configuration. Must be used with --remote-target.")
+	cmd.Flags().BoolVar(&backendCfg.Update, "update", false, "Force update the file's persistent RST configuration. Must be used with --remote-target.")
 	return cmd
 }
 
@@ -64,6 +66,8 @@ func newPullCmd() *cobra.Command {
 	backendCfg := flex.JobRequestCfg{
 		Download: true,
 	}
+	// var updateVal bool
+	// backendCfg.Update = &updateVal
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
@@ -87,7 +91,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
-	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Force update the file's persistent RST configuration. Must be used with --remote-target.")
+	cmd.Flags().BoolVar(&backendCfg.Update, "update", false, "Force update the file's persistent RST configuration. Must be used with --remote-target.")
 	return cmd
 }
 

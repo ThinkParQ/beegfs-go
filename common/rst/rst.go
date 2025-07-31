@@ -28,6 +28,7 @@ import (
 
 	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -192,6 +193,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
+			Update:              request.GetUpdate(),
 		}
 
 		switch request.WhichType() {
@@ -255,7 +257,7 @@ func BuildJobRequests(
 	cfg *flex.JobRequestCfg,
 ) ([]*beeremote.JobRequest, error) {
 	keepLock := false
-	lockedInfo, writeLockSet, rstIds, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
+	lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, mappings, cfg, inMountPath)
 
 	defer func() {
 		if !keepLock && writeLockSet {
@@ -321,6 +323,12 @@ func BuildJobRequests(
 		}
 
 		requests = append(requests, request)
+	}
+
+	if cfg.Update {
+		if updateErr := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfoMsg, ownerNode); err != nil {
+			errs = append(errs, fmt.Errorf("failed to update RST config: %w", updateErr))
+		}
 	}
 
 	return requests, errors.Join(errs...)
@@ -426,6 +434,30 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
 
 	return client.GetJobRequest(cfg)
+}
+
+// updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.
+func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo msg.EntryInfo, ownerNode beegfs.Node) error {
+	var rstIds []uint32
+	if IsValidRstId(rstID) {
+		rstIds = []uint32{rstID}
+	} else {
+		return fmt.Errorf("--update requires a valid --remote-target to be specified")
+	}
+
+	err := entry.SetFileRstIds(ctx, entryInfo, ownerNode, path, rstIds)
+
+	if err != nil {
+		// If the file doesn't exist (e.g., during a pull), it's not an error.
+		// The update will be attempted again by the worker after the file is created.
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			return nil
+		}
+		// For other errors, we wrap and return them.
+		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
+	}
+
+	return nil
 }
 
 // PrepareFileStateForWorkRequests handles preflight checks and common tasks based on collected
@@ -552,7 +584,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 
 		var info *flex.JobLockedInfo
-		if info, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
+		if info, _, _, _, _, err = GetLockedInfo(ctx, mountPoint, mappings, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -583,26 +615,23 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
 // unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
 // writeLockSet will be true when the write lock was set.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, err error) {
+func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings *util.Mappings, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
 	}
 
-	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, inMountPath)
+	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{
+		Verbose:        false,
+		IncludeOrigMsg: true,
+	}, inMountPath)
 	if err != nil {
 		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
-			return lockedInfo, writeLockSet, rstIds, nil
+			return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, nil
 		}
 		return
 	}
 	lockedInfo.Exists = true
-
-	if cfg.GetUpdate() {
-		if err = updateRstConfig(ctx, cfg, inMountPath, mappings); err != nil {
-			return
-		}
-	}
 
 	if rstIds == nil {
 		rstIds = entryInfo.Entry.Remote.RSTIDs
@@ -627,17 +656,25 @@ func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, mappings
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
-			return lockedInfo, writeLockSet, rstIds, fmt.Errorf("unable to retrieve stub file info: %w", err)
+			return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}
 
 		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return lockedInfo, writeLockSet, nil, fmt.Errorf("supplied --remote-target does not match stub file")
+			return lockedInfo, writeLockSet, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --remote-target does not match stub file")
 		}
 		rstIds = []uint32{lockedInfo.StubUrlRstId}
 	}
 
+	origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
+	if origEntryInfoPtr != nil {
+		entryInfoMsg = *origEntryInfoPtr
+	} else {
+		entryInfoMsg = msg.EntryInfo{}
+	}
+	ownerNode = entryInfo.Entry.MetaOwnerNode
+
 	if rstIds == nil {
-		return lockedInfo, writeLockSet, rstIds, ErrFileHasNoRSTs
+		return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, ErrFileHasNoRSTs
 	}
 	return
 }

@@ -158,6 +158,10 @@ type Verbose struct {
 	HashPath   string
 }
 
+func (entryInfo *GetEntryCombinedInfo) GetOrigEntryInfo() *msg.EntryInfo {
+	return entryInfo.Entry.origEntryInfoMsg
+}
+
 func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 
 	var getEntryVerbose Verbose
@@ -375,19 +379,6 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("max search steps exceeded for path: %s", searchPath)
 }
 
-func SetFileRstIds(ctx context.Context, mappings *util.Mappings, path string, rstIds []uint32) error {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
-	if err != nil {
-		return err
-	}
-	if entry.EntryType != beegfs.EntryRegularFile {
-		return errors.ErrUnsupported
-	}
-
-	setFileRstIds(ctx, entry, ownerNode, path, rstIds)
-	return nil
-}
-
 func GetFileDataState(ctx context.Context, mappings *util.Mappings, path string) (beegfs.DataState, error) {
 	state, err := getFileState(ctx, mappings, path)
 	if err != nil {
@@ -506,7 +497,7 @@ func setAccessFlags(ctx context.Context, mappings *util.Mappings, path string, f
 	return nil
 }
 
-func setFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.Node, path string, rstIds []uint32) error {
+func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.Node, path string, rstIds []uint32) error {
 	if rstIds == nil {
 		return nil
 	}

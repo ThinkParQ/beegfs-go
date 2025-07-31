@@ -284,6 +284,7 @@ func (w *worker) processWork(work workAssignment) {
 		builderErrCh := make(chan error, 1)
 		jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 		go func() {
+			log.Debug(request.WorkRequest.String())
 			builderErrCh <- client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 			close(jobSubmissionChan)
 		}()
