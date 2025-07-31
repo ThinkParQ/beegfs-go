@@ -44,7 +44,7 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 	go func() {
 		defer close(respChan)
 
-		requests, err := prepareJobRequests(ctx, cfg)
+		requests, err := prepareJobRequests(ctx, remote, cfg)
 		if err != nil {
 			respChan <- &JobResponse{Path: cfg.Path, Err: err}
 		}
@@ -81,7 +81,7 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 // pattern or a directory then a job-builder request will be returned. Otherwise, the supplied
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
-func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
@@ -159,12 +159,15 @@ func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beerem
 	entry := entryInfo.Entry
 
 	if entry.FileState.GetDataState() == DataStateOffloaded {
-		// Use the file's rstId if set; otherwise, use a job builder to complete the operation.
-		if len(entry.Remote.RSTIDs) == 1 {
-			cfg.SetRemoteStorageTarget(entry.Remote.RSTIDs[0])
+		// Attempt to retrieve the stub file content from remote and use the rstId to create the job
+		// requests. Otherwise, send the request to job-builder to complete.
+		resp, err := remote.GetStubContents(ctx, &beeremote.GetStubContentsRequest{Path: pathInfo.Path})
+		if err == nil {
+			cfg.SetRemoteStorageTarget(*resp.RstId)
 			request := rstMap[cfg.RemoteStorageTarget].GetJobRequest(cfg)
 			return []*beeremote.JobRequest{request}, nil
 		}
+
 		client := NewJobBuilderClient(ctx, nil, nil)
 		request := client.GetJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil

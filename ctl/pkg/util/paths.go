@@ -161,8 +161,8 @@ func FilterExpr(f string) ProcessPathOpt {
 //
 // It returns a ResultT channel where the result for each entry will be sent. The ResultT channel
 // will be closed once all entries are processed, or if any error occurs after all valid results are
-// sent to the channel. On the first non‑nil error from any walker or worker, the shared context is
-// canceled, the error is sent on the returned error channel, and all in‑flight work stops.
+// sent to the channel. When any walker or worker returns an error, the shared context is cancelled;
+// in-flight calls to processEntry are allowed to finish, but no new work is started.
 func ProcessPaths[ResultT any](
 	ctx context.Context,
 	method PathInputMethod,

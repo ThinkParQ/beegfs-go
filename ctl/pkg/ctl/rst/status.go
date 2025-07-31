@@ -507,9 +507,6 @@ func getPathStatusFromDatabase(
 	fsPath string,
 	dbPath *GetJobsResponse,
 ) (*GetStatusResult, error) {
-	syncReason := strings.Builder{}
-	result := &GetStatusResult{Path: fsPath, SyncStatus: Synchronized}
-
 	lStat, err := mountPoint.Lstat(fsPath)
 	if err != nil {
 		return nil, err
@@ -597,6 +594,8 @@ func getPathStatusFromDatabase(
 	}
 
 	// Lastly assemble the results for each of the requested targets:
+	syncReason := strings.Builder{}
+	result := &GetStatusResult{Path: fsPath, SyncStatus: Synchronized}
 	for tgt, jobResult := range remoteTargets {
 		job := jobResult.GetJob()
 		state := job.GetStatus().GetState()
