@@ -129,7 +129,7 @@ type migration struct {
 // WARNING: For MigrateEntries to work correctly it sets the umask to zero because it needs to be
 // able to create files with any permissions. If needed, the caller should reset the umask once all
 // entries are migrated.
-func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, <-chan error, error) {
+func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, func() error, error) {
 	log, _ := config.GetLogger()
 
 	// Set the umask to 0 ensuring files can be created via ioctl with exact permissions. Without

@@ -117,12 +117,15 @@ func (s PathStatus) String() string {
 // returns any error encountered. Processing respects ctx cancellation, and remote verification is
 // enabled when cfg.VerifyRemote is true.
 func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (<-chan *GetStatusResult, func() error, error) {
-	g, gCtx := errgroup.WithContext(ctx)
+	// Reserve one core for another Goroutine walking the paths and retrieving job information from
+	// the database. If there is only a single core don't set the numWorkers less than one.
+	numWorkers := max(viper.GetInt(config.NumWorkersKey)-1, 1)
 
-	paths := make(chan string, 1024)
-	g.Go(func() error {
+	pathGroup, pathGroupCtx := errgroup.WithContext(ctx)
+	paths := make(chan string, numWorkers*4)
+	pathGroup.Go(func() error {
 		defer close(paths)
-		return util.StreamPaths(gCtx, pm, paths, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
+		return util.StreamPaths(pathGroupCtx, pm, paths, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
 	})
 
 	// First path is required for setting up statusInfos walk and workers to initiate database
@@ -132,26 +135,47 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 		return nil, nil, fmt.Errorf("no paths found")
 	}
 
-	statusInfos := make(chan statusInfo, 1024)
-	g.Go(func() error {
+	statusInfosGroup, statusInfosGroupCtx := errgroup.WithContext(ctx)
+	statusInfos := make(chan statusInfo, numWorkers*4)
+	statusInfosGroup.Go(func() (err error) {
 		defer close(statusInfos)
+		defer func() {
+			pathsErr := pathGroup.Wait()
+			if pathsErr != nil && err != nil {
+				err = fmt.Errorf("%s, %s", pathsErr, err)
+			} else if pathsErr != nil {
+				err = pathsErr
+			}
+		}()
 
 		inputType := pm.Get()
 		if cfg.VerifyRemote {
-			return statusInfoVerifyRemoteWalk(gCtx, initialFsPath, paths, statusInfos)
+			return statusInfoVerifyRemoteWalk(statusInfosGroupCtx, initialFsPath, paths, statusInfos)
 		} else if inputType == util.PathInputRecursion {
-			return statusInfoRecursiveWalk(gCtx, initialFsPath, paths, statusInfos)
+			return statusInfoRecursiveWalk(statusInfosGroupCtx, initialFsPath, paths, statusInfos)
 		}
-		return statusInfoIterativeWalk(gCtx, inputType, initialFsPath, paths, statusInfos)
+		err = statusInfoIterativeWalk(statusInfosGroupCtx, inputType, initialFsPath, paths, statusInfos)
+		return err
 	})
 
-	results := make(chan *GetStatusResult, 1024)
-	g.Go(func() error {
+	workerGroup, workerGroupCtx := errgroup.WithContext(ctx)
+	results := make(chan *GetStatusResult, numWorkers*4)
+	workerGroup.Go(func() (err error) {
 		defer close(results)
-		return runWorkers(gCtx, cfg, initialFsPath, statusInfos, results)
+		defer func() {
+			pathsErr := statusInfosGroup.Wait()
+			if pathsErr != nil && err != nil {
+				err = fmt.Errorf("walk error: %s; process error: %s", pathsErr, err)
+			} else if pathsErr != nil {
+				err = pathsErr
+			}
+		}()
+
+		err = runWorkers(workerGroupCtx, cfg, initialFsPath, statusInfos, results, numWorkers)
+		return err
 	})
 
-	return results, g.Wait, nil
+	return results, workerGroup.Wait, nil
 }
 
 // statusInfoVerifyRemoteWalk is used when --verify-remote flag is specified.
@@ -291,8 +315,8 @@ type statusInfo struct {
 	jobsResponse *GetJobsResponse
 }
 
-func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, statusInfos <-chan statusInfo, results chan<- *GetStatusResult) error {
-	mappings, err := util.GetMappings(ctx)
+func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, statusInfos <-chan statusInfo, results chan<- *GetStatusResult, numWorkers int) error {
+	mappings, err := util.GetCachedMappings(ctx, false)
 	if err != nil {
 		return fmt.Errorf("unable to fetch required mappings: %w", err)
 	}
@@ -307,13 +331,6 @@ func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, sta
 		if err != nil {
 			return fmt.Errorf("unable to get rst mappings: %w", err)
 		}
-	}
-
-	numWorkers := viper.GetInt(config.NumWorkersKey)
-	if numWorkers > 1 {
-		// Reduce worker count by one to reserve compute for walking the paths and retrieving job
-		// information from the database.
-		numWorkers -= 1
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)

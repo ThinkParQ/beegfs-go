@@ -2,6 +2,7 @@ package util
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -168,30 +169,39 @@ func ProcessPaths[ResultT any](
 	singleWorker bool,
 	processEntry func(path string) (ResultT, error),
 	opts ...ProcessPathOpt,
-) (<-chan ResultT, <-chan error, error) {
-	g, gCtx := errgroup.WithContext(ctx)
+) (<-chan ResultT, func() error, error) {
 
-	paths := make(chan string, 1024)
-	g.Go(func() error {
+	numWorkers := 1
+	if !singleWorker {
+		// Reserve one core for another Goroutine walking paths. If there is only a single core
+		// don't set the numWorkers less than one.
+		numWorkers = max(viper.GetInt(config.NumWorkersKey)-1, 1)
+	}
+
+	pathsGroup, pathsGroupCtx := errgroup.WithContext(ctx)
+	paths := make(chan string, numWorkers*4)
+	pathsGroup.Go(func() error {
 		defer close(paths)
-		return StreamPaths(gCtx, method, paths, opts...)
+		return StreamPaths(pathsGroupCtx, method, paths, opts...)
 	})
 
-	results := make(chan ResultT, 1024)
-	g.Go(func() error {
+	processGroup, processGroupCtx := errgroup.WithContext(ctx)
+	results := make(chan ResultT, numWorkers*4)
+	processGroup.Go(func() (err error) {
 		defer close(results)
-		return startProcessing(gCtx, paths, results, processEntry, singleWorker)
+		defer func() {
+			pathsErr := pathsGroup.Wait()
+			if pathsErr != nil && err != nil {
+				err = fmt.Errorf("walk error: %s; process error: %s", pathsErr, err)
+			} else if pathsErr != nil {
+				err = pathsErr
+			}
+		}()
+		err = startProcessing(processGroupCtx, paths, results, processEntry, numWorkers)
+		return err
 	})
 
-	errs := make(chan error, 1)
-	go func() {
-		defer close(errs)
-		if err := g.Wait(); err != nil {
-			errs <- err
-		}
-	}()
-
-	return results, errs, nil
+	return results, processGroup.Wait, nil
 }
 
 // StreamPaths reads file paths from the given PathInputMethod—either stdin, directory,
@@ -226,18 +236,8 @@ func startProcessing[ResultT any](
 	paths <-chan string,
 	results chan<- ResultT,
 	processEntry func(path string) (ResultT, error),
-	singleWorker bool,
+	numWorkers int,
 ) error {
-	numWorkers := 1
-	if !singleWorker {
-		numWorkers = viper.GetInt(config.NumWorkersKey)
-		if numWorkers > 1 {
-			// Reserve one core for when there is another Goroutine walking a directory or reading
-			// in paths from stdin. If there is only a single core don't set the numWorkers less
-			// than one.
-			numWorkers -= 1
-		}
-	}
 
 	g, gCtx := errgroup.WithContext(ctx)
 	for range numWorkers {
@@ -271,10 +271,8 @@ func startProcessing[ResultT any](
 func walkStdin(ctx context.Context, delimiter byte, paths chan<- string, filter FileInfoFilter) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	splitFunc := func(data []byte, atEOF bool) (int, []byte, error) {
-		for i := 0; i < len(data); i++ {
-			if data[i] == delimiter {
-				return i + 1, data[:i], nil
-			}
+		if i := bytes.IndexByte(data, delimiter); i >= 0 {
+			return i + 1, data[:i], nil
 		}
 		// When EOF is reached, return what is left
 		if atEOF && len(data) != 0 {
@@ -391,7 +389,7 @@ func walkDir(ctx context.Context, startPath string, paths chan<- string, filter 
 
 		keep := true
 		if filter != nil {
-			info, err := os.Lstat(path)
+			info, err := d.Info()
 			if err != nil {
 				return err
 			}

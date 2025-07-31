@@ -80,7 +80,7 @@ type SetEntryResult struct {
 	Updates SetEntryCfg
 }
 
-func SetEntries(ctx context.Context, pm util.PathInputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, <-chan error, error) {
+func SetEntries(ctx context.Context, pm util.PathInputMethod, cfg SetEntryCfg) (<-chan SetEntryResult, func() error, error) {
 	log, _ := config.GetLogger()
 
 	// Validate new configuration once:
