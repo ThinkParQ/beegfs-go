@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	pl "github.com/thinkparq/protobuf/go/license"
 	pm "github.com/thinkparq/protobuf/go/management"
 	"go.uber.org/zap"
@@ -16,8 +17,9 @@ import (
 // non-GRPC specific functionality such as verifying feature licensing.
 type Mgmtd struct {
 	pm.ManagementClient
-	conn    *grpc.ClientConn
-	address string
+	conn       *grpc.ClientConn
+	address    string
+	authSecret []byte
 }
 
 func NewMgmtd(address string, connOpts ...connOpt) (*Mgmtd, error) {
@@ -29,8 +31,25 @@ func NewMgmtd(address string, connOpts ...connOpt) (*Mgmtd, error) {
 		ManagementClient: pm.NewManagementClient(c),
 		conn:             c,
 		address:          address,
+		authSecret:       applyConnOpts(connOpts...).AuthSecret,
 	}, nil
 
+}
+
+func (m *Mgmtd) GetAuthSecret() uint64 {
+	if m.authSecret != nil {
+		return util.GenerateAuthSecret(m.authSecret)
+	}
+	return uint64(0)
+}
+
+func (m *Mgmtd) GetAuthSecretBytes() []byte {
+	if m.authSecret != nil {
+		b := make([]byte, len(m.authSecret))
+		copy(b, m.authSecret)
+		return b
+	}
+	return nil
 }
 
 // VerifyLicense is a wrapper for GetLicenseRequest() that verifies the requested feature is defined

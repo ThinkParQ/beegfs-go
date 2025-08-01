@@ -22,6 +22,22 @@ type connOpts struct {
 	AuthSecret []byte
 }
 
+// applyConnOpts is a common constructor for connOpts. It exists because originally only
+// NewClientConn() needed the connOpts, but later it was determined NewMgmtd() needs the auth
+// secret and changing the signature of NewClientConn to return connOpts was not ideal.
+func applyConnOpts(cOpts ...connOpt) *connOpts {
+	opts := &connOpts{
+		TLSDisableVerification: false,
+		TLSDisable:             false,
+		TLSCaCert:              nil,
+		AuthSecret:             nil,
+	}
+	for _, opt := range cOpts {
+		opt(opts)
+	}
+	return opts
+}
+
 type connOpt func(*connOpts)
 
 func WithTLSDisableVerification(disable bool) connOpt {
@@ -52,15 +68,7 @@ func WithAuthSecret(secret []byte) connOpt {
 // when setting up a gRPC client connection for use with a BeeGFS gRPC client.
 func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 
-	config := &connOpts{
-		TLSDisableVerification: false,
-		TLSDisable:             false,
-		TLSCaCert:              nil,
-		AuthSecret:             nil,
-	}
-	for _, opt := range cOpts {
-		opt(config)
-	}
+	config := applyConnOpts(cOpts...)
 
 	var opts []grpc.DialOption
 	// The mgmtd expects the conn auth secret to be included in the metadata with each request. We
