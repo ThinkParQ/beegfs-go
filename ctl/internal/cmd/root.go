@@ -265,7 +265,10 @@ Flags:
 {{end}}
 {{wrapFlagUsages .LocalFlags | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
 {{if (eq .Name "beegfs")}}
-Global flags apply to all commands and can be persisted using the environment:
+Global flags apply to all commands and can all be set persistently using environment variables.
+To specify configuration using environment variables specify BEEGFS_KEY=VALUE where KEY is the 
+flag name you want to specify in all capitals replacing hyphens (-) with an underscore (_).
+For example to set the --mgmtd-addr persistently for this shell session run: 
 
   export BEEGFS_MGMTD_ADDR=hostname:port
 
