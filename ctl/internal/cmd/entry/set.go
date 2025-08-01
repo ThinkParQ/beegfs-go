@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -134,7 +133,7 @@ func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg,
 		return err
 	}
 
-	entriesChan, errChan, err := entry.SetEntries(ctx, method, backendCfg)
+	entriesChan, errWait, err := entry.SetEntries(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -144,7 +143,6 @@ func runEntrySetCmd(ctx context.Context, args []string, frontendCfg entrySetCfg,
 	// used to print other output adjust how/where tbl.PrintRemaining() is called as needed.
 	allColumns := []string{"path", "status", "configuration_updates"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
-	var multiErr types.MultiError
 	count := 0
 
 run:
@@ -152,6 +150,8 @@ run:
 		// Count is always one more than the number of entries actually processed.
 		count++
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case result, ok := <-entriesChan:
 			if !ok {
 				break run
@@ -163,13 +163,6 @@ run:
 				}
 				tbl.AddItem(result.Path, result.Status, configUpdates)
 			}
-		case err, ok := <-errChan:
-			if ok {
-				// Once an error happens the entriesChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
 		}
 	}
 
@@ -177,9 +170,9 @@ run:
 		tbl.PrintRemaining()
 	}
 	cmdfmt.Printf("Summary: processed %d entries | configuration updates: %s\n", count-1, sprintfNewEntryConfig(backendCfg))
-	// We may have still processed some entries so wait to print an error until the end.
-	if len(multiErr.Errors) != 0 {
-		return &multiErr
+
+	if err = errWait(); err != nil {
+		return err
 	}
 	return nil
 }

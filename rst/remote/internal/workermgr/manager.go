@@ -42,6 +42,7 @@ type Manager struct {
 	// because we'll have to add locking and figure out how to handle when there
 	// are existing jobs for a changed/removed RST.
 	RemoteStorageTargets map[uint32]rst.Provider
+	mountPoint           filesystem.Provider
 }
 
 // JobSubmission is used to submit a Job and its associated work requests to be
@@ -123,6 +124,7 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 		nodePools:            nodePools,
 		config:               managerConfig,
 		RemoteStorageTargets: rstMap,
+		mountPoint:           mountPoint,
 	}
 
 	return workerManager, nil
@@ -325,6 +327,14 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 		newResults[reqID] = workResult
 	}
 	return newResults, allUpdated
+}
+
+func (m *Manager) GetStubContents(ctx context.Context, path string) (uint32, string, error) {
+	id, url, err := rst.GetOffloadedUrlPartsFromFile(m.mountPoint, path)
+	if err != nil {
+		return 0, "", err
+	}
+	return id, url, nil
 }
 
 func (m *Manager) Stop() {

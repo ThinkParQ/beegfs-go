@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -56,12 +55,12 @@ func runRefreshEntryInfoCmd(cmd *cobra.Command, paths []string, cfg frontendCfg)
 		return err
 	}
 
-	resultsChan, errChan, err := entry.RefreshEntriesInfo(cmd.Context(), method)
+	ctx := cmd.Context()
+	resultsChan, errWait, err := entry.RefreshEntriesInfo(ctx, method)
 	if err != nil {
 		return err
 	}
 
-	var multiErr types.MultiError
 	columns := []string{"path", "status", "entry_id"}
 	tbl := cmdfmt.NewPrintomatic(columns, columns)
 	anyErrors := false
@@ -69,6 +68,8 @@ func runRefreshEntryInfoCmd(cmd *cobra.Command, paths []string, cfg frontendCfg)
 run:
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case r, ok := <-resultsChan:
 			if !ok {
 				break run
@@ -77,22 +78,16 @@ run:
 				anyErrors = true
 			}
 			tbl.AddItem(r.Path, r.Status, r.EntryID)
-		case err, ok := <-errChan:
-			if !ok {
-				break run
-			}
-			multiErr.Errors = append(multiErr.Errors, err)
 		}
 
 	}
 	tbl.PrintRemaining()
 
-	if anyErrors {
-		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("unable to refresh one or more entries (see individual results for details)"))
+	if err = errWait(); err != nil {
+		return err
 	}
-
-	if len(multiErr.Errors) != 0 {
-		return error(&multiErr)
+	if anyErrors {
+		return fmt.Errorf("unable to refresh one or more entries (see individual results for details)")
 	}
 	return nil
 }

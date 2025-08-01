@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	fUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -86,8 +85,7 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().BoolVar(&backendCfg.UpdateDirs, "update-directories", false, "Update directories to use the specified storage pool.")
 	cmd.Flags().BoolVar(&backendCfg.SkipMirrors, "skip-mirrors", false, "Migrate only files that are not buddy mirrored.")
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
-	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "",
-		"Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\"")
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")
 	cmd.MarkFlagRequired("pool")
 	return cmd
@@ -106,14 +104,13 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 		return err
 	}
 
-	results, errs, err := entry.MigrateEntries(ctx, method, backendCfg)
+	results, errWait, err := entry.MigrateEntries(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
 
 	allColumns := []string{"path", "status", "original_ids", "errors"}
 	tbl := cmdfmt.NewPrintomatic(allColumns, allColumns)
-	var multiErr types.MultiError
 	var migrateStats = &entry.MigrateStats{}
 
 	migrateErr := false
@@ -121,6 +118,8 @@ func migrateRunner(ctx context.Context, args []string, frontendCfg migrateCfg, b
 run:
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case result, ok := <-results:
 			if !ok {
 				break run
@@ -132,20 +131,15 @@ run:
 				tbl.AddItem(result.Path, result.Status, result.StartingIDs, "none")
 			}
 			migrateStats.Update(result.Status)
-
-		case err, ok := <-errs:
-			if ok {
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
 		}
 	}
 	if migrateErr || printVerbosely {
 		tbl.PrintRemaining()
 	}
 	cmdfmt.Printf("Summary: %+v\n", *migrateStats)
-	// We may have still processed some entries so wait to print an error until the end.
-	if len(multiErr.Errors) != 0 {
-		return &multiErr
+
+	if err = errWait(); err != nil {
+		return err
 	}
 	if migrateErr {
 		return fUtil.NewCtlError(fmt.Errorf("some entries could not be migrated"), fUtil.PartialSuccess)

@@ -220,3 +220,11 @@ func (s *BeeRemoteServer) UpdateWork(ctx context.Context, request *beeremote.Upd
 	defer s.wg.Done()
 	return &beeremote.UpdateWorkResponse{}, s.jobMgr.UpdateWork(request.GetWork())
 }
+
+func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremote.GetStubContentsRequest) (*beeremote.GetStubContentsResponse, error) {
+	id, url, err := s.jobMgr.GetStubContents(request.Path)
+	if err != nil {
+		return &beeremote.GetStubContentsResponse{}, err
+	}
+	return &beeremote.GetStubContentsResponse{RstId: &id, Url: &url}, nil
+}

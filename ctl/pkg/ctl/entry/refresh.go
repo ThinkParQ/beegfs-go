@@ -19,7 +19,7 @@ type RefreshEntryResult struct {
 	EntryID string
 }
 
-func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan *RefreshEntryResult, <-chan error, error) {
+func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan *RefreshEntryResult, func() error, error) {
 	log, _ := config.GetLogger()
 	store, err := config.NodeStore(ctx)
 	if err != nil {

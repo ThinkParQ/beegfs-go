@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -74,7 +73,8 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 		return err
 	}
 
-	entriesChan, errChan, err := entry.GetEntries(cmd.Context(), method, backendCfg)
+	ctx := cmd.Context()
+	entriesChan, errWait, err := entry.GetEntries(ctx, method, backendCfg)
 	if err != nil {
 		return err
 	}
@@ -94,11 +94,11 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	}
 	defer tbl.PrintRemaining()
 
-	var multiErr types.MultiError
-
 run:
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case info, ok := <-entriesChan:
 			if !ok {
 				break run
@@ -117,18 +117,11 @@ run:
 				}
 				tbl.AddItem(row...)
 			}
-		case err, ok := <-errChan:
-			if ok {
-				// Once an error happens the entriesChan will be closed, however this is a buffered
-				// channel so there may still be valid entries we should finish printing before
-				// returning the error.
-				multiErr.Errors = append(multiErr.Errors, err)
-			}
 		}
 	}
 
-	if len(multiErr.Errors) != 0 {
-		return &multiErr
+	if err = errWait(); err != nil {
+		return err
 	}
 	return nil
 }
