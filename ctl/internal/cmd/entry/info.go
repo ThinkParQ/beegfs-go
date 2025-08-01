@@ -62,6 +62,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	cmd.Flags().BoolVar(&frontendCfg.retroPaths, "retro-print-paths", false, "Print paths at the top of each entry in the retro output.")
 	cmd.Flags().MarkHidden("retro-print-paths")
 	cmd.Flags().BoolVar(&backendCfg.NoIoctl, "no-ioctl", false, "Do not use an ioctl to get entry info, even if BeeGFS is mounted; instead, always use direct RPCs (requires root). This may improve performance on systems with high syscall overhead.")
+	cmd.Flags().BoolVar(&backendCfg.Parallel, "parallel", false, "By default results are returned in lexicographical order. Set parallel to return results in any order and allow multiple workers to fetch entry info in parallel, improving performance.")
 	return cmd
 }
 
