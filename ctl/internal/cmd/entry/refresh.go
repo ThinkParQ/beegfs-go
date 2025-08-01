@@ -61,7 +61,6 @@ func runRefreshEntryInfoCmd(cmd *cobra.Command, paths []string, cfg frontendCfg)
 		return err
 	}
 
-	// var multiErr types.MultiError
 	columns := []string{"path", "status", "entry_id"}
 	tbl := cmdfmt.NewPrintomatic(columns, columns)
 	anyErrors := false

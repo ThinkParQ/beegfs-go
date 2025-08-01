@@ -610,7 +610,6 @@ func GetLockedInfo(
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				return lockedInfo, writeLockSet, rstIds, ErrOffloadFileNotReadable
-
 			}
 			return lockedInfo, writeLockSet, rstIds, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}

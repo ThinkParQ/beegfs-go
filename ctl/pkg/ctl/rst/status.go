@@ -140,11 +140,11 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 	statusInfosGroup.Go(func() (err error) {
 		defer close(statusInfos)
 		defer func() {
-			pathsErr := pathGroup.Wait()
-			if pathsErr != nil && err != nil {
-				err = fmt.Errorf("%s, %s", pathsErr, err)
-			} else if pathsErr != nil {
-				err = pathsErr
+			previousErr := pathGroup.Wait()
+			if previousErr != nil && err != nil {
+				err = errors.Join(previousErr, err)
+			} else if previousErr != nil {
+				err = previousErr
 			}
 		}()
 
@@ -163,11 +163,11 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 	workerGroup.Go(func() (err error) {
 		defer close(results)
 		defer func() {
-			pathsErr := statusInfosGroup.Wait()
-			if pathsErr != nil && err != nil {
-				err = fmt.Errorf("walk error: %s; process error: %s", pathsErr, err)
-			} else if pathsErr != nil {
-				err = pathsErr
+			previousErr := statusInfosGroup.Wait()
+			if previousErr != nil && err != nil {
+				err = errors.Join(previousErr, err)
+			} else if previousErr != nil {
+				err = previousErr
 			}
 		}()
 
