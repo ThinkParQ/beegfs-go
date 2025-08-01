@@ -61,6 +61,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\n", "Change the string delimiter used to determine individual paths when read from stdin (e.g., --stdin-delimiter=\"\\x00\" for NULL).")
 	cmd.Flags().BoolVar(&frontendCfg.retroPaths, "retro-print-paths", false, "Print paths at the top of each entry in the retro output.")
 	cmd.Flags().MarkHidden("retro-print-paths")
+	cmd.Flags().BoolVar(&backendCfg.NoIoctl, "no-ioctl", false, "Do not use an ioctl to get entry info, even if BeeGFS is mounted; instead, always use direct RPCs (requires root). This may improve performance on systems with high syscall overhead.")
 	return cmd
 }
 

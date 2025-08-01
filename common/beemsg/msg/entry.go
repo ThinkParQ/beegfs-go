@@ -602,3 +602,49 @@ func (r *RefreshEntryInfoResponse) MsgId() uint16 {
 func (r *RefreshEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &r.Result)
 }
+
+// LookupIntentRequest currently only supports a basic lookup. Other lookup intents (i.e., when
+// intentFlags != 0) should be implemented as needed.
+type LookupIntentRequest struct {
+	// intentFlags is a combination of LOOKUPINTENTMSG_FLAG(s) defined in the C/C++ code. Currently
+	// only a basic lookup (0) is supported.
+	intentFlags int32
+	ParentInfo  EntryInfo
+	EntryName   []byte
+}
+
+func (r *LookupIntentRequest) MsgId() uint16 {
+	return 2059
+}
+
+func (r *LookupIntentRequest) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, r.intentFlags)
+	r.ParentInfo.Serialize(s)
+	beeserde.SerializeCStr(s, r.EntryName, 4)
+	// Implement other fields if ever needed.
+}
+
+// LookupIntentResponse currently only supports returning the response for a basic lookup. Other
+// lookup intents (i.e., when intentFlags != 0) should be implemented as needed.
+type LookupIntentResponse struct {
+	// responseFlags is a combination of LOOKUPINTENTRESPMSG_FLAG(s) defined in the C/C++ code.
+	responseFlags int32
+	LookupResult  beegfs.OpsErr
+	// Implement other fields if ever needed.
+	EntryInfo EntryInfo
+}
+
+func (r *LookupIntentResponse) MsgId() uint16 {
+	return 2060
+}
+
+func (r *LookupIntentResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &r.responseFlags)
+	if r.responseFlags != 0 {
+		d.Fail(fmt.Errorf("received a lookup intent response with flags %d but only support for basic lookups (0) has been implemented", r.responseFlags))
+	}
+	beeserde.DeserializeInt(d, &r.LookupResult)
+	if r.LookupResult == beegfs.OpsErr_SUCCESS {
+		r.EntryInfo.Deserialize(d)
+	}
+}
