@@ -6,19 +6,27 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/common/types"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 type GetEntriesCfg struct {
 	Verbose        bool
 	IncludeOrigMsg bool
+	NoIoctl        bool
+	// Parallel allows results to be returned in any order (instead of lexicographical order). This
+	// allows multiple goroutines to be used to fetch entry info, typically improving performance.
+	Parallel bool
 }
 
 // GetEntryCombinedInfo returns all information needed to print details about an entry in BeeGFS.
@@ -237,13 +245,13 @@ func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg)
 		return GetEntry(ctx, mappings, cfg, path)
 	}
 
-	return util.ProcessPaths(ctx, pm, true, processEntry)
+	return util.ProcessPaths(ctx, pm, !cfg.Parallel, processEntry)
 }
 
 // GetEntry retrieves GetEntryCombinedInfo based on the provided information. If mappings is nil
 // then GetCachedMappings() will be used.
 func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {
-	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+	entry, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path, setGetEntryNoIoctl(cfg.NoIoctl))
 	if err != nil {
 		return nil, err
 	}
@@ -300,18 +308,187 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	return &entryWithParent, nil
 }
 
-// GetEntryAndOwnerFromPath retrieves entry and owning node information. The mappings will be
-// acquired if needed when mappings is nil.
-func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path string) (msg.EntryInfo, beegfs.Node, error) {
-	// TODO: https://github.com/thinkparq/ctl/issues/54
-	// Add the ability to get the entry via ioctl. Note, here we don't need to get RST info from the
-	// ioctl path. The old CTL can use an ioctl or RPC to get the entry but the actual info is
-	// always retrieved using the RPC.
+type getEntryCfg struct {
+	noIoctl bool
+}
+
+type getEntryOpt func(*getEntryCfg)
+
+func setGetEntryNoIoctl(noIoctl bool) getEntryOpt {
+	return func(cfg *getEntryCfg) {
+		cfg.noIoctl = noIoctl
+	}
+}
+
+// GetEntryAndOwnerFromPath retrieves entry and owning node information for the provided relative
+// path inside BeeGFS. The mappings will be acquired if needed when mappings is nil. It requires the
+// relative path inside BeeGFS for which entry info should be collected.
+//
+// If BeeGFS is mounted this function will fetch entry info using an ioctl, otherwise it will
+// fallback to the (more inefficient) RPC path. For the automatic detection to work, the global
+// BeeGFS client accessed via config.BeeGFSClient() must have already been initialized for either a
+// valid BeeGFS mount point (to use the ioctl path) or an unmounted client (to fallback to an RPC).
+// This function cannot initialize config.BeeGFSClient() itself since it works on a relative path.
+func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path string, opts ...getEntryOpt) (msg.EntryInfo, beegfs.Node, error) {
+	cfg := &getEntryCfg{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if !cfg.noIoctl {
+		beegfsClient, err := config.BeeGFSClient(path)
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to get a valid BeeGFS client (this is likely a bug): %w", err)
+		}
+		// Default to using an ioctl to get entry info if BeeGFS is mounted.
+		if beegfsClient.GetMountPath() != "" {
+			entry, ownerNode, err := getEntryAndOwnerFromPathViaIoctl(ctx, mappings, beegfsClient, path)
+			if err != nil {
+				return msg.EntryInfo{}, beegfs.Node{}, err
+			}
+			return entry, ownerNode, nil
+		}
+	}
+
+	if syscall.Geteuid() != 0 {
+		return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("only root can get entry info without using an ioctl")
+	}
 	entry, ownerNode, err := getEntryAndOwnerFromPathViaRPC(ctx, mappings, path)
 	if err != nil {
 		return msg.EntryInfo{}, beegfs.Node{}, err
 	}
 	return entry, ownerNode, nil
+}
+
+// getEntryAndOwnerFromPathViaIoctl is the equivalent of the useMountedPath code path from the C++
+// getEntryAndOwnerFromPath() implementation.
+func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappings, beegfsClient filesystem.Provider, searchPath string) (msg.EntryInfo, beegfs.Node, error) {
+	store, err := config.NodeStore(ctx)
+	if err != nil {
+		return msg.EntryInfo{}, beegfs.Node{}, err
+	}
+
+	// This mode is highly optimized and doesn't always use the beegfsClient wrapper functions.
+	absPath := filepath.Clean(beegfsClient.GetMountPath() + "/" + searchPath)
+
+	// Entry types other than regular files and directories require special handling. This behavior
+	// was recreated based on the v7 CTL implementation. The reason is because special file types
+	// cannot always be opened directly and used with the GetEntryInfo ioctl.
+	lookupSpecialFileType := false
+
+	// Most entries in BeeGFS are regular files or directories and this code is optimized for that.
+	// If this is a special entry type we might get an error trying to open it with these flags. For
+	// example ELOOP likely indicates a symlink and ENXIO is common if this is a char/block device.
+	// Rather than try and handle all possible error types, this falls back to using Lstat to verify
+	// if we're working with a special file type then using LookupIntentRequest with the parent.
+	fd, err := unix.Open(absPath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		log, _ := config.GetLogger()
+		log.Debug("unable to open entry, checking on fallback options", zap.String("searchPath", searchPath), zap.Error(err))
+
+		// Bail out immediately on any permissions errors.
+		if errors.Is(err, syscall.EPERM) {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to open entry %q: %w", searchPath, err)
+		}
+
+		// Stat the file so we can check its type and if the user has permissions:
+		stat, statErr := beegfsClient.Lstat(searchPath)
+		if statErr != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to lstat entry %q: %w", searchPath, statErr)
+		}
+
+		// If this is a regular file and the open failed due to EWOULDBLOCK/EAGAIN, probably the
+		// BeeGFS file access flags blocked the open. Try to fetch entry info using the RPC instead.
+		if stat.Mode().IsRegular() && errors.Is(err, syscall.EWOULDBLOCK) {
+			log.Debug("entry is temporarily unavailable, possibly the contents are locked, trying to fetch entry info via rpc", zap.String("searchPath", searchPath))
+			return getEntryAndOwnerFromPathViaRPC(ctx, mappings, searchPath)
+		}
+
+		// Otherwise if we could stat but this is not a regular file or directory we know this is
+		// likely a special file type.
+		if !(stat.Mode().IsRegular() || stat.Mode().IsDir()) {
+			lookupSpecialFileType = true
+		} else {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to open entry %q: %w", searchPath, err)
+		}
+	} else {
+		// Always check the entry type. Notably opening pipes and device entries may succeed but the
+		// resulting file descriptors will work with ioctl syscalls.
+		stat := &unix.Stat_t{}
+		// Testing shows unix.Fstat with an existing fd is faster than calling lstat() then open().
+		if err := unix.Fstat(fd, stat); err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to fstat entry %q: %w", searchPath, err)
+		}
+		fileType := stat.Mode & unix.S_IFMT
+		lookupSpecialFileType = !(fileType == unix.S_IFREG || fileType == unix.S_IFDIR)
+	}
+
+	if lookupSpecialFileType {
+		if err == nil {
+			// If the original open succeeded but we ended up with an fd for a special file type,
+			// close it before replacing it with the parent fd.
+			unix.Close(fd)
+		}
+		fd, err = unix.Open(filepath.Dir(absPath), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to open parent directory %q: %w", filepath.Dir(absPath), err)
+		}
+		log, _ := config.GetLogger()
+		log.Debug("encountered an entry that is not a regular file or directory, using the parent to get entry info", zap.String("searchPath", searchPath))
+	}
+
+	// Now we know its safe to defer closing the fd.
+	defer unix.Close(fd)
+
+	entryInfo, err := ioctl.GetEntryInfo(uintptr(fd), ioctl.TrimEntryInfoNullBytes())
+	if err != nil {
+		return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to get entry info for %q: %w", searchPath, err)
+	}
+
+	metaNodeNumID, err := getPrimaryMetaNode(ctx, mappings, entryInfo)
+	if err != nil {
+		return msg.EntryInfo{}, beegfs.Node{}, err
+	}
+
+	currentNode, err := store.GetNode(beegfs.LegacyId{
+		NumId:    metaNodeNumID,
+		NodeType: beegfs.Meta,
+	})
+	if err != nil {
+		return msg.EntryInfo{}, beegfs.Node{}, err
+	}
+
+	// If this is a special file type use a LookupIntent to get the entryInfo of the actual entry.
+	if lookupSpecialFileType {
+		request := &msg.LookupIntentRequest{
+			ParentInfo: entryInfo,
+			EntryName:  []byte(filepath.Base(searchPath)),
+		}
+		resp := &msg.LookupIntentResponse{}
+		if err = store.RequestTCP(ctx, currentNode.Uid, request, resp); err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, err
+		}
+
+		if resp.LookupResult != beegfs.OpsErr_SUCCESS {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unexpected lookup result for %q: %w", filepath.Base(searchPath), resp.LookupResult)
+		}
+
+		// Return the entryInfo from the LookupIntentResponse.
+		entryInfo = resp.EntryInfo
+		metaNodeNumID, err = getPrimaryMetaNode(ctx, mappings, entryInfo)
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, err
+		}
+
+		currentNode, err = store.GetNode(beegfs.LegacyId{
+			NumId:    metaNodeNumID,
+			NodeType: beegfs.Meta,
+		})
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, err
+		}
+	}
+
+	return entryInfo, currentNode, nil
 }
 
 // getEntryAndOwnerFromPathViaRPC() is the Go equivalent of the use unmounted code path from the C++
@@ -370,18 +547,12 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 		if err != nil {
 			return msg.EntryInfo{}, beegfs.Node{}, err
 		} else if resp.Result != 0 {
-			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unexpected search result for '%s': %w", searchPath, resp.Result)
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unexpected search result for %q: %w", filepath.Base(searchPath), resp.Result)
 		}
 
-		// If the directory is buddy mirrored, the owner ID will be a buddy group ID. We have to map
-		// that to the ID of the current primary metadata node.
-		var metaNodeNumID beegfs.NumId
-		if resp.EntryInfoWithDepth.EntryInfo.FeatureFlags.IsBuddyMirrored() {
-			if metaNodeNumID, err = getPrimaryMetaNode(ctx, mappings, resp.EntryInfoWithDepth.EntryInfo.OwnerID); err != nil {
-				return msg.EntryInfo{}, beegfs.Node{}, err
-			}
-		} else {
-			metaNodeNumID = beegfs.NumId(resp.EntryInfoWithDepth.EntryInfo.OwnerID)
+		metaNodeNumID, err := getPrimaryMetaNode(ctx, mappings, resp.EntryInfoWithDepth.EntryInfo)
+		if err != nil {
+			return msg.EntryInfo{}, beegfs.Node{}, err
 		}
 
 		currentNode, err = store.GetNode(beegfs.LegacyId{
@@ -407,7 +578,14 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("max search steps exceeded for path: %s", searchPath)
 }
 
-func getPrimaryMetaNode(ctx context.Context, mappings *util.Mappings, ownerID uint32) (beegfs.NumId, error) {
+// getPrimaryMetaNode is a helper function used to determine the metadata node that owns the
+// specified entry. If the entry is buddy mirrored this handles converting the OwnerID in the entry
+// info to the NumID of the current primary node. Otherwise it just directly returns the OwnerID. If
+// mappings are not provided it will use cached mappings.
+func getPrimaryMetaNode(ctx context.Context, mappings *util.Mappings, entryInfo msg.EntryInfo) (beegfs.NumId, error) {
+	if !entryInfo.FeatureFlags.IsBuddyMirrored() {
+		return beegfs.NumId(entryInfo.OwnerID), nil
+	}
 	fetchedMappings := false
 	if mappings == nil {
 		var err error
@@ -418,16 +596,16 @@ func getPrimaryMetaNode(ctx context.Context, mappings *util.Mappings, ownerID ui
 		fetchedMappings = true
 	}
 
-	primaryMetaNode, err := mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(ownerID), NodeType: beegfs.Meta})
+	primaryMetaNode, err := mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.OwnerID), NodeType: beegfs.Meta})
 	if fetchedMappings && errors.Is(err, util.ErrMapperNotFound) {
 		mappings, err = util.GetCachedMappings(ctx, true)
 		if err != nil {
 			return 0, err
 		}
-		primaryMetaNode, err = mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(ownerID), NodeType: beegfs.Meta})
+		primaryMetaNode, err = mappings.MetaBuddyGroupToPrimaryNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.OwnerID), NodeType: beegfs.Meta})
 	}
 	if err != nil {
-		return 0, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", ownerID, err)
+		return 0, fmt.Errorf("unable to determine primary metadata node from buddy mirror ID %d: %w", entryInfo.OwnerID, err)
 	}
 	return primaryMetaNode.LegacyId.NumId, err
 }

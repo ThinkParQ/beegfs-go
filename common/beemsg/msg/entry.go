@@ -3,6 +3,7 @@ package msg
 import (
 	"encoding/binary"
 	"fmt"
+	"structs"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
@@ -175,7 +176,12 @@ func (m *FindOwnerResponse) Deserialize(d *beeserde.Deserializer) {
 	m.EntryInfoWithDepth.Deserialize(d)
 }
 
+// EntryInfo is also used by the ioctl code. The argument structure defined here is used directly in
+// syscall invocations and designed to match the memory layout of the C counterparts in the BeeGFS
+// client API. DO NOT add, remove, or change the type or ordering of fields as they are defined here
+// without updating both the beemsg and ioctl (de)serialization logic.
 type EntryInfo struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
 	// The equivalent of OwnerNodeID in C++. This is either the ID of the metadata node that owns
 	// this entry or the ID of the buddy mirror group if the metadata for this entry is mirrored.
 	// The field name was changed here to avoid confusion/misuse.
@@ -595,4 +601,50 @@ func (r *RefreshEntryInfoResponse) MsgId() uint16 {
 
 func (r *RefreshEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &r.Result)
+}
+
+// LookupIntentRequest currently only supports a basic lookup. Other lookup intents (i.e., when
+// intentFlags != 0) should be implemented as needed.
+type LookupIntentRequest struct {
+	// intentFlags is a combination of LOOKUPINTENTMSG_FLAG(s) defined in the C/C++ code. Currently
+	// only a basic lookup (0) is supported.
+	intentFlags int32
+	ParentInfo  EntryInfo
+	EntryName   []byte
+}
+
+func (r *LookupIntentRequest) MsgId() uint16 {
+	return 2059
+}
+
+func (r *LookupIntentRequest) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, r.intentFlags)
+	r.ParentInfo.Serialize(s)
+	beeserde.SerializeCStr(s, r.EntryName, 4)
+	// Implement other fields if ever needed.
+}
+
+// LookupIntentResponse currently only supports returning the response for a basic lookup. Other
+// lookup intents (i.e., when intentFlags != 0) should be implemented as needed.
+type LookupIntentResponse struct {
+	// responseFlags is a combination of LOOKUPINTENTRESPMSG_FLAG(s) defined in the C/C++ code.
+	responseFlags int32
+	LookupResult  beegfs.OpsErr
+	// Implement other fields if ever needed.
+	EntryInfo EntryInfo
+}
+
+func (r *LookupIntentResponse) MsgId() uint16 {
+	return 2060
+}
+
+func (r *LookupIntentResponse) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &r.responseFlags)
+	if r.responseFlags != 0 {
+		d.Fail(fmt.Errorf("received a lookup intent response with flags %d but only support for basic lookups (0) has been implemented", r.responseFlags))
+	}
+	beeserde.DeserializeInt(d, &r.LookupResult)
+	if r.LookupResult == beegfs.OpsErr_SUCCESS {
+		r.EntryInfo.Deserialize(d)
+	}
 }

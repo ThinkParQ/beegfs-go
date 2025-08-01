@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -329,6 +330,12 @@ func BeeGFSClient(path string) (filesystem.Provider, error) {
 		if viper.IsSet(BeeGFSMountPointKey) {
 			mp := viper.GetString(BeeGFSMountPointKey)
 			if mp == BeeGFSMountPointNone {
+				euid := syscall.Geteuid()
+				// This is is also checked by the CTL CLI frontend (in root.go), but we should check
+				// again here in case CTL is used as a library.
+				if euid != 0 {
+					return nil, fmt.Errorf("only root can interact with an unmounted file system")
+				}
 				globalMount = filesystem.UnmountedFS{}
 				return globalMount, filesystem.ErrUnmounted
 			}

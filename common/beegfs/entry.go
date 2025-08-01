@@ -90,6 +90,14 @@ func (f EntryFeatureFlags) IsBuddyMirrored() bool {
 	return f&entryFeatureFlagBuddyMirrored != 0
 }
 
+// IsBuddyMirroredI32() is needed for use with C++ code that expects 0 for false and 1 for true.
+func (f EntryFeatureFlags) IsBuddyMirroredI32() int32 {
+	if f&entryFeatureFlagBuddyMirrored != 0 {
+		return 1
+	}
+	return 0
+}
+
 func (f *EntryFeatureFlags) SetBuddyMirrored() {
 	*f |= entryFeatureFlagBuddyMirrored
 }

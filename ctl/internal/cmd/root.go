@@ -187,11 +187,18 @@ func attachPersistentPreRunE(cmd *cobra.Command) {
 	// would only use the globalPersistentPreRunE, not their parents wrapped PersistentPreRunE func.
 }
 
+// pprofStarted ensures pprof only starts once as globalPersistentPreRunE is executed for all
+// defined commands (not just the one that is executed).
+var pprofStarted bool
+
 // globalPersistentPreRunE() implements any functionality that should run before all commands after
 // all configuration is known and the only thing remaining is to execute the command.
 func globalPersistentPreRunE(cmd *cobra.Command) error {
 	// Enable performance profiling via pprof if requested:
-	if viper.GetString(config.PprofAddress) != "" {
+	if viper.GetString(config.PprofAddress) != "" && !pprofStarted {
+		pprofStarted = true
+		log, _ := config.GetLogger()
+		log.Debug("starting pprof")
 		go func() {
 			err := http.ListenAndServe(viper.GetString(config.PprofAddress), nil)
 			if err != nil {

@@ -117,7 +117,6 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().Var(newDataStateFlag(&backendCfg.DataState), "data-state", "Set the data state for regular files (numeric values: 0-7). Specify 'none' to reset the state.")
 	cmd.Flags().MarkHidden("data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
-	// IMPORTANT: When adding new flags or updating flag names update the help function below.
 	return cmd
 }
 
