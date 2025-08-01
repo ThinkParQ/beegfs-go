@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	doublestar "github.com/bmatcuk/doublestar/v4"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 
@@ -100,6 +102,7 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 				LockedInfo: cfg.LockedInfo,
 			},
 		},
+		Update: cfg.Update,
 	}
 }
 
@@ -115,6 +118,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Flatten:             sync.Flatten,
 		Force:               request.Force,
 		LockedInfo:          sync.LockedInfo,
+		Update:              request.Update,
 	}
 }
 
@@ -442,8 +446,11 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		return
 	}
 
+	var entryInfoMsg msg.EntryInfo
+	var ownerNode beegfs.Node
+
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path); err != nil {
+		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
@@ -469,6 +476,13 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		sync.SetFlatten(cfg.Flatten)
 		sync.SetOverwrite(cfg.Overwrite)
 	}
+
+	if cfg.GetUpdate() {
+		if err = updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfoMsg, ownerNode); err != nil {
+			return
+		}
+	}
+
 	return
 }
 

@@ -23,6 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{}
+	var updateVal bool
+	backendCfg.Update = &updateVal
 	cmd := &cobra.Command{
 		Use:   "push <path>",
 		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
@@ -64,6 +66,8 @@ func newPullCmd() *cobra.Command {
 	backendCfg := flex.JobRequestCfg{
 		Download: true,
 	}
+	var updateVal bool
+	backendCfg.Update = &updateVal
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
