@@ -1,30 +1,54 @@
 package msg
 
 import (
+	"fmt"
+
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
 // StartChunkBalanceMsg represents a message for chunk balancing
 type StartChunkBalanceMsg struct {
-	TargetID      uint16
-	DestinationID uint16
-	EntryInfo     *EntryInfo
-	RelativePaths *[]string
+	IdType         RebalanceIDType
+	RelativePath   []byte
+	TargetIDs      []uint16
+	DestinationIDs []uint16
+	EntryInfo      *EntryInfo
+}
+
+type RebalanceIDType uint8
+
+const (
+	RebalanceIDTypeInvalid = iota
+	RebalanceIDTypeTarget
+	RebalanceIDTypeGroup
+	RebalanceIDTypePool
+)
+
+func (t RebalanceIDType) String() string {
+	switch t {
+	case RebalanceIDTypeTarget:
+		return "target"
+	case RebalanceIDTypeGroup:
+		return "group"
+	case RebalanceIDTypePool:
+		return "pool"
+	default:
+		return fmt.Sprintf("unknown (%d)", t)
+	}
 }
 
 // Serialization of StartChunkBalanceMsg
 func (m *StartChunkBalanceMsg) Serialize(s *beeserde.Serializer) {
-	beeserde.SerializeInt(s, m.TargetID)
-	beeserde.SerializeInt(s, m.DestinationID)
+	beeserde.SerializeInt(s, m.IdType)
+	beeserde.SerializeCStr(s, m.RelativePath, 0)
+	beeserde.SerializeSeq(s, m.TargetIDs, true, func(out uint16) {
+		beeserde.SerializeInt(s, out)
+	})
+	beeserde.SerializeSeq(s, m.DestinationIDs, true, func(out uint16) {
+		beeserde.SerializeInt(s, out)
+	})
 	m.EntryInfo.Serialize(s)
-	if m.RelativePaths != nil {
-		byteSlices := make([][]byte, len(*m.RelativePaths))
-		for i, str := range *m.RelativePaths {
-			byteSlices[i] = []byte(str)
-		}
-		beeserde.SerializeStringSeq(s, byteSlices)
-	}
 }
 
 // MsgId returns the message ID for StartChunkBalanceMsg

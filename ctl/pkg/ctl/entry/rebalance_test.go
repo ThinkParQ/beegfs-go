@@ -108,7 +108,7 @@ func TestStartRebalancingJobs(t *testing.T) {
 			srcGroups:     map[uint16]struct{}{5: {}, 6: {}},
 			dstGroups:     []uint16{7, 8},
 			wantStarted:   true,
-			wantCallCount: 2,
+			wantCallCount: 1,
 		},
 		{
 			name:   "BuddyMirror Rebalance Needed (dry run only)",
@@ -166,12 +166,17 @@ func TestStartRebalancingJobs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
+			// Currently called should always be 0 or 1. If a function is called more than 1 time
+			// its likely a bug.
 			called := 0
 			seenDestIDs := make(map[uint16]struct{})
-			chunkRebalanceFunc = func(ctx context.Context, entry *GetEntryCombinedInfo, srcID, destID uint16) error {
+			chunkRebalanceFunc = func(ctx context.Context, entry *GetEntryCombinedInfo, rebalanceIDType msg.RebalanceIDType, srcIDs, destIDs []uint16) error {
 				// Verify startRebalancingJobs is making the correct calls to the rebalance func.
-				require.NotContains(t, seenDestIDs, destID, "destination ID was already used")
-				seenDestIDs[destID] = struct{}{}
+				assert.Len(t, srcIDs, len(destIDs), "srcIDs and destIDs should be the same length")
+				for _, destID := range destIDs {
+					require.NotContains(t, seenDestIDs, destID, "destination ID was already used")
+					seenDestIDs[destID] = struct{}{}
+				}
 				called++
 				return nil
 			}

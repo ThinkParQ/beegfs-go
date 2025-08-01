@@ -65,53 +65,66 @@ func startRebalancingJobs(
 		return 0, fmt.Errorf("list of destination IDs does not contain enough unique IDs not already in use for this entry (most likely there is overlap between the source and destination IDs)")
 	}
 
-	rebalanceStarted := false
+	// Initialize with a capacity of 4 since this is the default number of targets.
+	srcIDs := make([]uint16, 0, 4)
+	destIDs := make([]uint16, 0, 4)
+	var rebalanceIDType msg.RebalanceIDType = msg.RebalanceIDTypeInvalid
 	if entry.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
+		rebalanceIDType = msg.RebalanceIDTypeGroup
 		if len(entry.Entry.Pattern.TargetIDs) > len(dstGroups) {
-			return rebalanceStarted, fmt.Errorf("insufficient buddy groups in the destination pool to rebalance entry (entry has %d groups / destination pool has %d groups)", len(entry.Entry.Pattern.TargetIDs), len(dstGroups))
+			return false, fmt.Errorf("insufficient buddy groups in the destination pool to rebalance entry (entry has %d groups / destination pool has %d groups)", len(entry.Entry.Pattern.TargetIDs), len(dstGroups))
 		}
 		for _, group := range entry.Entry.Pattern.TargetIDs {
 			if _, ok := srcGroups[group]; ok {
 				if dryRun {
-					return true, nil
+					return true, nil // True because this is a dry-run and a rebalance is needed.
 				}
 				randomID, err := getRandomID(dstGroups, entry.Entry.Pattern.TargetIDs)
 				if err != nil {
-					return rebalanceStarted, err
+					return false, err
 				}
-				if err := chunkRebalanceFunc(ctx, entry, group, randomID); err != nil {
-					return rebalanceStarted, err
-				}
-				rebalanceStarted = true
+				srcIDs = append(srcIDs, group)
+				destIDs = append(destIDs, randomID)
 			}
 		}
-		return rebalanceStarted, nil
+	} else if entry.Entry.Pattern.Type == beegfs.StripePatternRaid0 {
+		rebalanceIDType = msg.RebalanceIDTypeTarget
+		if len(entry.Entry.Pattern.TargetIDs) > len(dstTargets) {
+			return false, fmt.Errorf("insufficient targets in the destination pool to rebalance entry (entry has %d targets / destination pool has %d targets)", len(entry.Entry.Pattern.TargetIDs), len(dstTargets))
+		}
+		for _, target := range entry.Entry.Pattern.TargetIDs {
+			if _, ok := srcTargets[target]; ok {
+				if dryRun {
+					return true, nil // True because this is a dry-run and a rebalance is needed.
+				}
+				randomID, err := getRandomID(dstTargets, entry.Entry.Pattern.TargetIDs)
+				if err != nil {
+					return false, err
+				}
+				srcIDs = append(srcIDs, target)
+				destIDs = append(destIDs, randomID)
+			}
+		}
+	} else {
+		return false, fmt.Errorf("unsupported pattern type: %s", entry.Entry.Pattern.Type)
 	}
 
-	if len(entry.Entry.Pattern.TargetIDs) > len(dstTargets) {
-		return rebalanceStarted, fmt.Errorf("insufficient targets in the destination pool to rebalance entry (entry has %d targets / destination pool has %d targets)", len(entry.Entry.Pattern.TargetIDs), len(dstTargets))
-	}
-	for _, target := range entry.Entry.Pattern.TargetIDs {
-		if _, ok := srcTargets[target]; ok {
-			if dryRun {
-				return true, nil
-			}
-			randomID, err := getRandomID(dstTargets, entry.Entry.Pattern.TargetIDs)
-			if err != nil {
-				return rebalanceStarted, err
-			}
-			if err := chunkRebalanceFunc(ctx, entry, target, randomID); err != nil {
-				return rebalanceStarted, err
-			}
-			rebalanceStarted = true
+	if len(srcIDs) > 0 {
+		if err := chunkRebalanceFunc(ctx, entry, rebalanceIDType, srcIDs, destIDs); err != nil {
+			return false, err
 		}
+		return true, nil
 	}
-	return rebalanceStarted, nil
+	return false, nil
 }
 
-func chunkRebalance(ctx context.Context, entry *GetEntryCombinedInfo, srcID uint16, destID uint16) error {
+func chunkRebalance(ctx context.Context, entry *GetEntryCombinedInfo, idType msg.RebalanceIDType, srcIDs []uint16, destIDs []uint16) error {
 	log, _ := config.GetLogger()
-	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.Any("srcID", srcID), zap.Any("destID", destID))
+	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.String("idType", idType.String()), zap.Any("srcIDs", srcIDs), zap.Any("destIDs", destIDs))
+
+	if len(srcIDs) != len(destIDs) {
+		return fmt.Errorf("unable to start rebalance, the number of source %v and destination IDs %v is not equal", srcIDs, destIDs)
+	}
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
@@ -119,10 +132,11 @@ func chunkRebalance(ctx context.Context, entry *GetEntryCombinedInfo, srcID uint
 	}
 
 	req := &msg.StartChunkBalanceMsg{
-		TargetID:      srcID,
-		DestinationID: destID,
-		EntryInfo:     entry.Entry.origEntryInfoMsg,
-		RelativePaths: &[]string{entry.Entry.Verbose.ChunkPath},
+		IdType:         idType,
+		TargetIDs:      srcIDs,
+		DestinationIDs: destIDs,
+		EntryInfo:      entry.Entry.origEntryInfoMsg,
+		RelativePath:   []byte(entry.Entry.Verbose.ChunkPath),
 	}
 	resp := &msg.StartChunkBalanceRespMsg{}
 
