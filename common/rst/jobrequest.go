@@ -82,10 +82,6 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	if cfg.GetUpdate() && !IsValidRstId(cfg.RemoteStorageTarget) {
-		return nil, fmt.Errorf("--update requires a valid --remote-target to be specified")
-	}
-
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)

@@ -595,7 +595,12 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 // reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
 // unnecessary cfg clones since the lockedInfo can be used for multiple job requests. The
 // writeLockSet will be true when the write lock was set.
-func GetLockedInfo(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, inMountPath string) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
+func GetLockedInfo(
+	ctx context.Context,
+	mountPoint filesystem.Provider,
+	cfg *flex.JobRequestCfg,
+	inMountPath string,
+) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
 	lockedInfo = &flex.JobLockedInfo{}
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		rstIds = []uint32{cfg.RemoteStorageTarget}
