@@ -153,7 +153,7 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 						log.Debug("Can not ping node of this type:", zap.Any("node", n))
 						errs <- &PingError{
 							NodeID: n.Id,
-							Inner:  fmt.Errorf("client may not be reachable from other clients. Skipping"),
+							Inner:  fmt.Errorf("cannot ping this node type: %s (ignoring)", n.Id.NodeType),
 						}
 						continue
 					}
