@@ -1,0 +1,45 @@
+name: Prevent Merging TODO or WIP Commits
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for TODO/WIP commits
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commits = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number
+            });
+
+            const firstLines = commits.data.map(c => ({
+              sha: c.sha,
+              message: c.commit.message,
+              firstLine: c.commit.message.split('\n')[0]
+            }));
+
+            const todoCommits = firstLines.filter(c => /\bTODO\b/i.test(c.firstLine));
+            const wipCommits = firstLines.filter(c => /\bWIP\b/i.test(c.firstLine));
+
+            if (todoCommits.length || wipCommits.length) {
+              let msg = '';
+              if (todoCommits.length) {
+                msg += `❌ Found TODO commits:\n${todoCommits.map(c => `- ${c.firstLine}`).join('\n')}\n\n`;
+              }
+
+              if (wipCommits.length) {
+                msg += `❌ Found WIP commits:\n${wipCommits.map(c => `- ${c.firstLine}`).join('\n')}\n`;
+              }
+
+              core.setFailed(msg.trim());
+            } else {
+              console.log("✅ No TODO or WIP commits found.");
+            }
