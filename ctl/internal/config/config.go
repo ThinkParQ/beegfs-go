@@ -79,6 +79,8 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	When printing using a table, the header will be repeated after printing %s rows (set to 0 to omit printing table headers).
 	When printing JSON or pretty JSON, if the number of elements to print is greater than %s, prints multiple JSON lists separated by newlines.
 	When printing an unknown or large number of elements it is recommended to use NDJSON (Newline-Delimited JSON).`, config.OutputOptions, config.PageSizeKey, config.PageSizeKey))
+	cmd.PersistentFlags().Bool(config.UseProxyKey, false, "Use the proxy that is configured globally or in the environment when making gRPC connections.")
+	cmd.PersistentFlags().MarkHidden(config.UseProxyKey)
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")
 	// Environment variables cannot use "-", replace with "_"

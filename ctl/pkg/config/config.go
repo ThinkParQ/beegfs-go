@@ -81,6 +81,9 @@ const (
 	// the go-pretty table printer and just print columns separated by spaces).
 	PageSizeKey = "page-size"
 	OutputKey   = "output"
+	// Whether to use a proxy configured globally or via environment variables when making gRPC
+	// connections to either mgmtd or remote.
+	UseProxyKey = "use-http-proxy"
 )
 
 // Viper values for certain configuration values.
@@ -134,6 +137,7 @@ type GlobalConfig struct {
 	MgmtdTLSCertFile            string
 	MgmtdTLSDisableVerification bool
 	MgmtdTLSDisable             bool
+	MgmtdUseProxy               bool
 	AuthFile                    string
 	AuthDisable                 bool
 	RemoteAddress               string
@@ -166,6 +170,7 @@ func InitViperFromExternal(cfg GlobalConfig) {
 	globalFlagSet.String(TlsCertFile, cfg.MgmtdTLSCertFile, "")
 	globalFlagSet.Bool(TlsDisableKey, cfg.MgmtdTLSDisable, "")
 	globalFlagSet.Bool(TlsDisableVerificationKey, cfg.MgmtdTLSDisableVerification, "")
+	globalFlagSet.Bool(UseProxyKey, cfg.MgmtdUseProxy, "")
 	globalFlagSet.String(AuthFileKey, cfg.AuthFile, "")
 	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
 	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
@@ -286,6 +291,7 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithAuthSecret(authSecret),
+		beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
 	)
 
 	return mgmtClient, err
@@ -322,6 +328,7 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithAuthSecret(mgmtd.GetAuthSecretBytes()),
+		beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
 	)
 
 	beeRemoteClient = beeremote.NewBeeRemoteClient(conn)
