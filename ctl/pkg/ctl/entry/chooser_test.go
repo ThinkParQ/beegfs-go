@@ -40,6 +40,41 @@ func TestStartRebalancingJobs(t *testing.T) {
 			wantUnmodifiedIDs: []uint16{},
 		},
 		{
+			name: "Raid0 Rebalance Needed (out-of-order targets)",
+			entry: &GetEntryCombinedInfo{
+				Entry: Entry{
+					Pattern: patternConfig{
+						StripePattern: msg.StripePattern{
+							Type:      beegfs.StripePatternRaid0,
+							TargetIDs: []uint16{101, 103, 104, 102},
+						},
+					},
+				},
+			},
+			srcTargets:        map[uint16]struct{}{103: {}, 104: {}, 203: {}, 204: {}},
+			dstTargets:        []uint16{102, 202, 500},
+			wantRebalanceType: msg.RebalanceIDTypeTarget,
+			wantUnmodifiedIDs: []uint16{101, 102},
+		},
+		{
+			name: "Raid0 Rebalance Needed (out-of-order targets / insufficient dstTargets)",
+			entry: &GetEntryCombinedInfo{
+				Entry: Entry{
+					Pattern: patternConfig{
+						StripePattern: msg.StripePattern{
+							Type:      beegfs.StripePatternRaid0,
+							TargetIDs: []uint16{101, 103, 104, 102},
+						},
+					},
+				},
+			},
+			srcTargets:        map[uint16]struct{}{103: {}, 104: {}, 203: {}, 204: {}},
+			dstTargets:        []uint16{102, 202},
+			wantErr:           true,
+			wantRebalanceType: msg.RebalanceIDTypeInvalid,
+			wantUnmodifiedIDs: []uint16{},
+		},
+		{
 			name: "Raid0 Rebalance Needed (insufficient dstTargets)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{

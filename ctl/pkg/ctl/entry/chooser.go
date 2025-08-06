@@ -12,6 +12,7 @@ import (
 func getRandomIDChooser() func(fromDstIDs []uint16, idsAlreadyInStripePattern []uint16) (uint16, error) {
 	var shuffledIDs []uint16
 	var shuffledIdx int
+	var inUseIDs map[uint16]struct{}
 	// getRandomID lazily initializes a shuffled slice of IDs from the destination IDs upon first
 	// use. Each call returns a random destination ID that is not already in the provided pattern.
 	return func(fromDstIDs []uint16, idsAlreadyInStripePattern []uint16) (uint16, error) {
@@ -22,16 +23,18 @@ func getRandomIDChooser() func(fromDstIDs []uint16, idsAlreadyInStripePattern []
 				shuffledIDs[i], shuffledIDs[j] = shuffledIDs[j], shuffledIDs[i]
 			})
 		}
-		// Alternatively we could allocate a map for inUseIDs to speed up lookup, but for small sets
-		// (e.g., 4 targets in the default stripe pattern), a nested loop is likely faster and
-		// avoids allocation. Also, in the common case where none of the shuffled IDs are already in
-		// use, this runs in O(N).
+		// This uses a map instead of nested loops (which would probably be slightly more efficient)
+		// since idsAlreadyInStripe pattern may not be sorted.
+		if inUseIDs == nil {
+			inUseIDs = make(map[uint16]struct{})
+			for _, inUseID := range idsAlreadyInStripePattern {
+				inUseIDs[inUseID] = struct{}{}
+			}
+		}
 	nextCandidate:
 		for ; shuffledIdx < len(shuffledIDs); shuffledIdx++ {
-			for _, inUseID := range idsAlreadyInStripePattern {
-				if shuffledIDs[shuffledIdx] == inUseID {
-					continue nextCandidate
-				}
+			if _, ok := inUseIDs[shuffledIDs[shuffledIdx]]; ok {
+				continue nextCandidate
 			}
 			candidateID := shuffledIDs[shuffledIdx]
 			// The loop won't increment the shuffledIdx with the early return. Do that manually
