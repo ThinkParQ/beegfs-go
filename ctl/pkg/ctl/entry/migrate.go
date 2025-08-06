@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
@@ -698,9 +700,19 @@ func tmpFileMigrateLink(migration tmpFileMigration) error {
 	return nil
 }
 
+const (
+	maxRetries        = 10
+	initialBackoff    = 1 * time.Second
+	maxBackoff        = 60 * time.Second
+	backoffMultiplier = 2
+)
+
+// chunkRebalanceMigrate will attempt to rebalance the specified entry's srcIDs to destIDs. It
+// respects when the metadata server returns an beegfs.OpsErr_AGAIN and will retry the request with
+// an exponential backoff up to the maxBackoff time until it reaches the maxRetries.
 func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idType msg.RebalanceIDType, srcIDs []uint16, destIDs []uint16) error {
 	log, _ := config.GetLogger()
-	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.String("idType", idType.String()), zap.Any("srcIDs", srcIDs), zap.Any("destIDs", destIDs))
+	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.String("entryID", entry.Entry.EntryID), zap.String("idType", idType.String()), zap.Any("srcIDs", srcIDs), zap.Any("destIDs", destIDs))
 
 	if len(srcIDs) != len(destIDs) {
 		return fmt.Errorf("unable to start rebalance, the number of source %v and destination IDs %v is not equal", srcIDs, destIDs)
@@ -720,13 +732,34 @@ func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idT
 	}
 	resp := &msg.StartChunkBalanceRespMsg{}
 
-	if err = store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, req, resp); err != nil {
-		return err
+	backoff := initialBackoff
+	for i := 0; i < maxRetries; i++ {
+		if err = store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, req, resp); err != nil {
+			return err
+		}
+
+		if resp.Result == beegfs.OpsErr_SUCCESS {
+			return nil
+		}
+		if resp.Result != beegfs.OpsErr_AGAIN {
+			return resp.Result
+		}
+
+		// Always wait at least `backoff` duration, with up to 1s of jitter to avoid synchronized
+		// retries. This protects against retry storms while keeping behavior predictable.
+		retryIn := backoff + time.Duration(rand.Intn(1000))*time.Millisecond
+		log.Debug("chunk balancing queue appears to be full, backing off and retrying", zap.Any("path", entry.Path), zap.String("entryID", entry.Entry.EntryID), zap.Int("attempt", i+1), zap.Int("remainingAttempts", maxRetries-(i+1)), zap.Duration("retryIn", retryIn))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryIn):
+		}
+
+		backoff = backoff * backoffMultiplier
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
 	}
 
-	if resp.Result != beegfs.OpsErr_SUCCESS {
-		return resp.Result
-	}
-
-	return nil
+	return fmt.Errorf("chunk balancing queue appears to be full (automatic retries exhausted): %w", beegfs.OpsErr_AGAIN)
 }
