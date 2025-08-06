@@ -49,7 +49,7 @@ If you really want to initialize mirroring for the root directory, please add th
 	}
 
 	cmdfmt.Printf(`Successfully initialized mirroring for the root directory.
-NOTE: To complete activating mirroring, please remount any clients and restart all metadata services now.
+NOTE: To complete activating mirroring, please remount any clients and restart all metadata, storage, remote, and sync services now.
 `)
 
 	return nil

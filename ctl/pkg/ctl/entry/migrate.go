@@ -10,9 +10,7 @@ import (
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
@@ -34,6 +32,7 @@ const (
 	MigrateNeeded
 	MigratedFile
 	MigrateUpdatedDir
+	MigrateStarted
 )
 
 func (s MigrateStatus) String() string {
@@ -52,6 +51,8 @@ func (s MigrateStatus) String() string {
 		return "migrated file"
 	case MigrateUpdatedDir:
 		return "updated directory"
+	case MigrateStarted:
+		return "background migration started"
 	default:
 		return "unknown"
 	}
@@ -66,6 +67,7 @@ type MigrateStats struct {
 	MigrationNeeded        int
 	MigratedFiles          int
 	MigrationUpdatedDirs   int
+	MigrationStarted       int
 }
 
 func (s *MigrateStats) Update(status MigrateStatus) {
@@ -84,20 +86,25 @@ func (s *MigrateStats) Update(status MigrateStatus) {
 		s.MigratedFiles++
 	case MigrateUpdatedDir:
 		s.MigrationUpdatedDirs++
+	case MigrateStarted:
+		s.MigrationStarted++
 	default:
 		s.MigrationStatusUnknown++
 	}
 }
 
 type MigrateCfg struct {
-	SrcTargets  []beegfs.EntityId
-	SrcNodes    []beegfs.EntityId
-	SrcPools    []beegfs.EntityId
-	DstPool     beegfs.EntityId
-	SkipMirrors bool
-	UpdateDirs  bool
-	DryRun      bool
-	FilterExpr  string
+	SrcTargets     []beegfs.EntityId
+	SrcNodes       []beegfs.EntityId
+	SrcPools       []beegfs.EntityId
+	DstPool        beegfs.EntityId
+	DstTargets     []beegfs.EntityId
+	DstGroups      []beegfs.EntityId
+	SkipMirrors    bool
+	UpdateDirs     bool
+	DryRun         bool
+	FilterExpr     string
+	UseRebalancing bool
 }
 
 type MigrateResult struct {
@@ -112,15 +119,26 @@ type MigrateResult struct {
 // migration represents the internal configuration and state of a migration.
 type migration struct {
 	srcTargets map[uint16]struct{}
-	srcMirrors map[uint16]struct{}
-	dstPool    uint16
+	srcGroups  map[uint16]struct{}
+	// dstPool is only used for migrating using temp files. It is not used for chunk rebalancing
+	// which does not currently support rebalancing based on pool IDs. If dstPool is specified then
+	// the temp file migrate functions will ignore dstTargets/dstGroups and use this pool instead.
+	// The chunk rebalance function will always ignore the dstPool and use the dstTargets/dstGroups
+	// (which may have been partially/fully populated based on the dstPool).
+	dstPool uint16
+	// dstTargets is used for migrating using chunk rebalancing or temp files. It should not contain
+	// duplicates but cannot be a map like srcTargets to optimize selecting random unique targets.
+	dstTargets []uint16
+	// dstGroups is used for migrating using chunk rebalancing or temp files. It should not contain
+	// duplicates but cannot be a map like srcGroups to optimize selecting random unique groups.
+	dstGroups []uint16
 	// If setDir is nil, updating directories is skipped.
 	setDir *SetEntryCfg
 	dryRun bool
-	store  *beemsg.NodeStore
 	// The temporary files will be owned by the effective user and group of this process.
-	euid uint32
-	egid uint32
+	euid           uint32
+	egid           uint32
+	useRebalancing bool
 }
 
 // MigrateEntries migrates the entries specified by the PathInputMethod based on the provided
@@ -131,6 +149,18 @@ type migration struct {
 // entries are migrated.
 func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg) (<-chan MigrateResult, func() error, error) {
 	log, _ := config.GetLogger()
+
+	if cfg.UseRebalancing {
+		if mgmtdClient, err := config.ManagementClient(); err != nil {
+			return nil, nil, err
+		} else {
+			if detail, err := mgmtdClient.VerifyLicense(ctx, "io.beegfs.rebalancing"); err != nil {
+				return nil, nil, err
+			} else {
+				log.Debug("verified feature io.beegfs.rebalancing is licensed", zap.Any("licenseDetail", detail))
+			}
+		}
+	}
 
 	// Set the umask to 0 ensuring files can be created via ioctl with exact permissions. Without
 	// this the default system umask might impose restrictions that would prevent recreating files
@@ -149,18 +179,14 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 	// by putting targets and mirror IDs into maps.
 	euid := syscall.Geteuid()
 	var migration = migration{
-		dryRun:     cfg.DryRun,
-		srcTargets: make(map[uint16]struct{}),
-		srcMirrors: make(map[uint16]struct{}),
+		dryRun:         cfg.DryRun,
+		useRebalancing: cfg.UseRebalancing,
+		srcTargets:     make(map[uint16]struct{}),
+		srcGroups:      make(map[uint16]struct{}),
 		// Safe because user/group IDs are non-negative integers that should fit in a uint32. These
 		// are what uid/gid will own the temporary files used by the migration.
 		euid: uint32(euid),
 		egid: uint32(syscall.Getegid()),
-	}
-
-	migration.store, err = config.NodeStore(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unable to proceed without a working node store: %w", err)
 	}
 
 	// Include explicitly specified targets:
@@ -212,19 +238,51 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 				if !errors.Is(err, util.ErrMapperNotFound) {
 					return nil, nil, fmt.Errorf("unexpected error mapping target %d to its buddy group: %w", target, err)
 				}
+				continue
 			}
-			migration.srcMirrors[uint16(mirror.LegacyId.NumId)] = struct{}{}
+			migration.srcGroups[uint16(mirror.LegacyId.NumId)] = struct{}{}
 		}
 	}
 
 	// Finally, where the files should be migrated to:
-	dstPool, err := mappings.StoragePoolToConfig.Get(cfg.DstPool)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unable to map destination pool %s to an actual pool: %w", cfg.DstPool, err)
+	migration.dstTargets = []uint16{}
+	migration.dstGroups = []uint16{}
+
+	// An InvalidEntityId means the user did not specify a pool,
+	if _, ok := cfg.DstPool.(beegfs.InvalidEntityId); !ok {
+		dstPool, err := mappings.StoragePoolToConfig.Get(cfg.DstPool)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to map destination pool %s to an actual pool: %w", cfg.DstPool, err)
+		}
+		migration.dstPool = uint16(dstPool.Pool.LegacyId.NumId)
+		for _, target := range dstPool.Targets {
+			migration.dstTargets = append(migration.dstTargets, uint16(target.LegacyId.NumId))
+		}
+		for _, group := range dstPool.BuddyGroups {
+			migration.dstGroups = append(migration.dstGroups, uint16(group.LegacyId.NumId))
+		}
 	}
-	migration.dstPool = uint16(dstPool.Pool.LegacyId.NumId)
+
+	for _, t := range cfg.DstTargets {
+		target, err := mappings.TargetToEntityIdSet.Get(t)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to map destination target %s to an actual target: %w", t, err)
+		}
+		migration.dstTargets = append(migration.dstTargets, uint16(target.LegacyId.NumId))
+	}
+
+	for _, b := range cfg.DstGroups {
+		group, err := mappings.StorageBuddyToEntityIdSet.Get(b)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to map destination group %s to an actual group: %w", b, err)
+		}
+		migration.dstGroups = append(migration.dstGroups, uint16(group.LegacyId.NumId))
+	}
 
 	if cfg.UpdateDirs {
+		if cfg.DstPool == nil {
+			return nil, nil, fmt.Errorf("unable to update directories: no pool specified")
+		}
 		migration.setDir = &SetEntryCfg{
 			Pool: &cfg.DstPool,
 		}
@@ -235,7 +293,13 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		}
 	}
 
-	log.Debug("migration configuration", zap.Any("srcTargets", migration.srcTargets), zap.Any("srcMirrors", migration.srcMirrors), zap.Any("dstPool", migration.dstPool))
+	log.Debug("migration configuration",
+		zap.Any("srcTargets", migration.srcTargets),
+		zap.Any("srcGroups", migration.srcGroups),
+		zap.Any("dstPool", migration.dstPool),
+		zap.Any("dstTargets", migration.dstTargets),
+		zap.Any("dstGroups", migration.dstGroups),
+	)
 	processEntry := func(path string) (MigrateResult, error) {
 		return migrateEntry(ctx, mappings, migration, path)
 	}
@@ -303,14 +367,39 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 
 	result.StartingIDs = entry.Entry.Pattern.TargetIDs
 
-	// No need to check for an error, the global client is initialized by process.go.
-	client, _ := config.BeeGFSClient(entry.Path)
+	// Determine if the entry needs migration and if so, if there are enough targets/groups:
+	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(ctx, entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
+	if err != nil {
+		result.Status = MigrateError
+		result.Err = err
+		return result, nil
+	} else if len(srcIDs) == 0 {
+		result.Status = MigrateNotNeeded
+		return result, nil
+	} else if migration.dryRun {
+		result.Status = MigrateNeeded
+		return result, nil
+	}
 
-	// As much we can check up front before making any changes to determine if the migration is
-	// likely to succeed. This ensures the dry run mode is as accurate as possible.
+	if migration.useRebalancing {
+		if err = chunkRebalanceMigrate(ctx, entry, rebalanceType, srcIDs, destIDs); err != nil {
+			result.Status = MigrateError
+			result.Err = err
+			return result, nil
+		}
+		result.Status = MigrateStarted
+		return result, nil
+	}
+
+	// For legacy migrations using temp files, as much as we can check up front before making any
+	// changes to determine if the migration is likely to succeed. This ensures the dry run mode is
+	// as accurate as possible.
 
 	// A stat of the entry is needed for some checks and to set the original attributes on the
 	// migrated entry.
+
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(entry.Path)
 	stat, err := client.Lstat(entry.Path)
 	if err != nil {
 		result.Status = MigrateError
@@ -323,27 +412,28 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		result.Err = fmt.Errorf("unexpected error casting stat to syscall.Stat_t: %w", err)
 		return result, nil
 	}
-	err = migratePossible(linuxStat)
+	err = tmpFileMigrationPossible(linuxStat)
 	if err != nil {
 		result.Status = MigrateError
 		result.Err = err
 		return result, nil
 	}
 
-	if !needsMigration(entry, migration) {
-		result.Status = MigrateNotNeeded
-		return result, nil
-	}
-
-	if migration.dryRun {
-		result.Status = MigrateNeeded
-		return result, nil
+	tmpMigration := tmpFileMigration{
+		storagePool:   migration.dstPool,
+		dstIDs:        destIDs,
+		unmodifiedIDs: unmodifiedIDs,
+		entry:         entry,
+		originalStat:  stat,
+		origLinuxStat: linuxStat,
+		euid:          migration.euid,
+		egid:          migration.egid,
 	}
 
 	if entry.Entry.Type == beegfs.EntryRegularFile {
-		err = migrate(ctx, client, stat, linuxStat, entry, migration)
+		err = tmpFileMigrate(ctx, tmpMigration)
 	} else {
-		err = migrateLink(client, stat, linuxStat, entry, migration)
+		err = tmpFileMigrateLink(tmpMigration)
 	}
 
 	if err != nil {
@@ -356,7 +446,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	return result, nil
 }
 
-func migratePossible(stat *syscall.Stat_t) error {
+func tmpFileMigrationPossible(stat *syscall.Stat_t) error {
 	if stat.Mode&0o777 == 0 {
 		return fmt.Errorf("refusing to migrate entry with 000 permissions")
 	}
@@ -366,39 +456,52 @@ func migratePossible(stat *syscall.Stat_t) error {
 	return nil
 }
 
-func needsMigration(entry *GetEntryCombinedInfo, req migration) bool {
-	if entry.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
-		for _, mirror := range entry.Entry.Pattern.TargetIDs {
-			if _, ok := req.srcMirrors[mirror]; ok {
-				return true
-			}
-		}
-	}
-	for _, target := range entry.Entry.Pattern.TargetIDs {
-		if _, ok := req.srcTargets[target]; ok {
-			return true
-		}
-	}
-	return false
+type tmpFileMigration struct {
+	dstIDs        []uint16
+	storagePool   uint16
+	unmodifiedIDs []uint16
+	entry         *GetEntryCombinedInfo
+	originalStat  os.FileInfo
+	origLinuxStat *syscall.Stat_t
+	euid          uint32
+	egid          uint32
 }
 
-func migrate(ctx context.Context, client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
+func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
+
+	store, err := config.NodeStore(ctx)
+	if err != nil {
+		return err
+	}
 
 	// tempFileBase is just the name of the temp file.
-	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
+	tempFileBase := tempFilePrefix + filepath.Base(migration.entry.Path)
 	// tempFile is the full absolute path to the temp file.
-	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
+	tempFile := filepath.Join(filepath.Dir(migration.entry.Path), tempFileBase)
 
-	// Clear the target IDs from the original stripe pattern and update the storage pool ID to the
-	// one being migrated to. This will cause the metadata server to automatically handle picking
-	// new targets or buddy mirror groups from the specified pool.
-	newPattern := entry.Entry.Pattern.StripePattern
-	newPattern.TargetIDs = []uint16{}
-	newPattern.StoragePoolID = req.dstPool
+	newPattern := migration.entry.Entry.Pattern.StripePattern
+	if migration.storagePool != 0 {
+		// Clear the target IDs from the original stripe pattern and update the storage pool ID to
+		// the one being migrated to. This will cause the metadata server to automatically handle
+		// picking new targets or buddy mirror groups from the specified pool.
+		newPattern.StoragePoolID = migration.storagePool
+		newPattern.TargetIDs = []uint16{}
+	} else {
+		newPattern.TargetIDs = migration.unmodifiedIDs
+		newPattern.TargetIDs = append(newPattern.TargetIDs, migration.dstIDs...)
+		if len(newPattern.TargetIDs) != len(migration.entry.Entry.Pattern.StripePattern.TargetIDs) {
+			// With temp files we could technically change the stripe width, but we shouldn't
+			// implicitly do so until we add explicit support for migrating between different
+			// numbers of targets with https://github.com/ThinkParQ/beegfs-go/issues/76. WARNING:
+			// Whenever we do so, ensure to set the newPattern.Length correctly, its is not just the
+			// number of TargetIDs.
+			return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newPattern.TargetIDs, migration.entry.Entry.Pattern.StripePattern.TargetIDs)
+		}
+	}
 
 	request := &msg.MakeFileWithPatternRequest{
-		UserID:  req.euid,
-		GroupID: req.egid,
+		UserID:  migration.euid,
+		GroupID: migration.egid,
 		// The mode must contain the "file" flag (otherwise you will get a vague internal error).
 		Mode: 0600 | syscall.S_IFREG,
 		// We might want to optimize this and set the actual mode on the temp file and mask out
@@ -406,17 +509,20 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 		// if a mask was set (after the ownership was reset on the new file). But in general this is
 		// the safest approach.
 		Umask:       0000,
-		ParentInfo:  *entry.Parent.OrigEntryInfoMsg,
+		ParentInfo:  *migration.entry.Parent.origEntryInfoMsg,
 		NewFileName: []byte(tempFileBase),
 		Pattern:     newPattern,
-		RST:         entry.Entry.Remote.RemoteStorageTarget,
+		RST:         migration.entry.Entry.Remote.RemoteStorageTarget,
 	}
 
 	var resp = &msg.MakeFileWithPatternResponse{}
-	err := req.store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+	err = store.RequestTCP(ctx, migration.entry.Entry.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
 		return err
 	}
+
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(migration.entry.Path)
 
 	// A temp file could exist from a previous migration where something went wrong part way
 	// through. Remove it and try again.
@@ -425,7 +531,7 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 		if err != nil {
 			return fmt.Errorf("unable to cleanup temporary migration file from previous migration at %s: %w", tempFile, err)
 		}
-		err = req.store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
+		err = store.RequestTCP(ctx, migration.entry.Entry.MetaOwnerNode.Uid, request, resp)
 		if err != nil {
 			return err
 		}
@@ -446,24 +552,24 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 
 	// If xattrs aren't enabled no error is returned. If an error is returned something went wrong
 	// copying xattrs and we should return an error and not continue with the migration.
-	err = client.CopyXAttrsToFile(entry.Path, tempFile)
+	err = client.CopyXAttrsToFile(migration.entry.Path, tempFile)
 	if err != nil {
 		return err
 	}
 
-	err = client.CopyContentsToFile(entry.Path, tempFile)
+	err = client.CopyContentsToFile(migration.entry.Path, tempFile)
 	if err != nil {
 		return err
 	}
 
-	err = client.CopyOwnerAndMode(originalStat, tempFile)
+	err = client.CopyOwnerAndMode(migration.originalStat, tempFile)
 	if err != nil {
 		return err
 	}
 
 	// Just before the rename to keep the possible window for any races as short as possible, do a
 	// sanity check if the original file was modified while being migrated.
-	updatedStat, err := client.Lstat(entry.Path)
+	updatedStat, err := client.Lstat(migration.entry.Path)
 	if err != nil {
 		return err
 	}
@@ -473,15 +579,15 @@ func migrate(ctx context.Context, client filesystem.Provider, originalStat os.Fi
 		return fmt.Errorf("unable to cast FileInfo to syscall.Stat_t (is the underlying OS Linux?)")
 	}
 
-	if err = didFileChange(origLinuxStat, updatedLinuxStat); err != nil {
+	if err = didFileChange(migration.origLinuxStat, updatedLinuxStat); err != nil {
 		return err
 	}
 
-	if err = client.OverwriteFile(tempFile, entry.Path); err != nil {
+	if err = client.OverwriteFile(tempFile, migration.entry.Path); err != nil {
 		return err
 	}
 
-	if err = client.CopyTimestamps(originalStat, entry.Path); err != nil {
+	if err = client.CopyTimestamps(migration.originalStat, migration.entry.Path); err != nil {
 		return fmt.Errorf("file is migrated but original timestamps could not be applied: %w", err)
 	}
 
@@ -516,13 +622,15 @@ func didFileChange(a, b *syscall.Stat_t) error {
 	return nil
 }
 
-func migrateLink(client filesystem.Provider, originalStat os.FileInfo, origLinuxStat *syscall.Stat_t, entry *GetEntryCombinedInfo, req migration) error {
+func tmpFileMigrateLink(migration tmpFileMigration) error {
 	// tempFileBase is just the name of the temp file.
-	tempFileBase := tempFilePrefix + filepath.Base(entry.Path)
+	tempFileBase := tempFilePrefix + filepath.Base(migration.entry.Path)
 	// tempFile is the full absolute path to the temp file.
-	tempFile := filepath.Join(filepath.Dir(entry.Path), tempFileBase)
+	tempFile := filepath.Join(filepath.Dir(migration.entry.Path), tempFileBase)
 
-	linkTarget, err := client.Readlink(entry.Path)
+	// No need to check for an error, the global client is initialized by process.go.
+	client, _ := config.BeeGFSClient(migration.entry.Path)
+	linkTarget, err := client.Readlink(migration.entry.Path)
 	if err != nil {
 		return err
 	}
@@ -530,26 +638,94 @@ func migrateLink(client filesystem.Provider, originalStat os.FileInfo, origLinux
 	// Create the symlink with the correct owner, permissions, etc. Because symlinks contain minimal
 	// data it doesn't matter if it briefly is double counted against the user/group quotas and it
 	// complicates matters if we need to update these after the link is created.
-	if err = ioctl.CreateFile(
-		client.GetMountPath()+tempFile,
-		ioctl.SetSymlinkTo(linkTarget),
-		ioctl.SetType(ioctl.S_SYMBOLIC),
-		ioctl.SetPermissions(int32(originalStat.Mode().Perm())),
-		ioctl.SetUID(origLinuxStat.Uid),
-		ioctl.SetGID(origLinuxStat.Gid),
-		// Testing shows when creating the symlink it will not actually be assigned to this storage
-		// pool but target/buddy group selection will take the specified pool into account.
-		ioctl.SetStoragePool(req.dstPool),
-	); err != nil {
+
+	if migration.storagePool != 0 {
+		err = ioctl.CreateFile(
+			client.GetMountPath()+tempFile,
+			ioctl.SetSymlinkTo(linkTarget),
+			ioctl.SetType(ioctl.S_SYMBOLIC),
+			ioctl.SetPermissions(int32(migration.originalStat.Mode().Perm())),
+			ioctl.SetUID(migration.origLinuxStat.Uid),
+			ioctl.SetGID(migration.origLinuxStat.Gid),
+			// Testing shows when creating the symlink it will not actually be assigned to this storage
+			// pool but target/buddy group selection will take the specified pool into account.
+			ioctl.SetStoragePool(migration.storagePool),
+		)
+	} else {
+		// TODO (https://github.com/ThinkParQ/beegfs-go/issues/232): Testing shows
+		// SetPreferredTargets does not appear to have any effect when creating regular files or
+		// symbolic links using an ioctl. Until that bug is resolved do not allow migrating symlinks
+		// to specific targets / groups and require a pool be specified instead.
+		return fmt.Errorf("migrating symbolic links to specific targets / buddy groups is not currently supported (specify a pool instead)")
+
+		// newTargets := migration.unmodifiedIDs
+		// newTargets = append(newTargets, migration.dstIDs...)
+		// if len(newTargets) != len(migration.entry.Entry.Pattern.StripePattern.TargetIDs) {
+		// 	// With temp files we could technically change the stripe width, but we shouldn't
+		// 	// implicitly do so until we add explicit support for migrating between different
+		// 	// numbers of targets with https://github.com/ThinkParQ/beegfs-go/issues/76. WARNING:
+		// 	// Whenever we do so, ensure to set the newPattern.Length correctly, its is not just the
+		// 	// number of TargetIDs.
+		// 	return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newTargets, migration.entry.Entry.Pattern.StripePattern.TargetIDs)
+		// }
+		// err = ioctl.CreateFile(
+		// 	client.GetMountPath()+tempFile,
+		// 	ioctl.SetSymlinkTo(linkTarget),
+		// 	ioctl.SetType(ioctl.S_SYMBOLIC),
+		// 	ioctl.SetPermissions(int32(migration.originalStat.Mode().Perm())),
+		// 	ioctl.SetUID(migration.origLinuxStat.Uid),
+		// 	ioctl.SetGID(migration.origLinuxStat.Gid),
+
+		// 	ioctl.SetPreferredTargets(newTargets),
+		// )
+
+		// log, _ := config.GetLogger()
+		// log.Debug("migrating using preferred targets", zap.Any("newTargets", newTargets), zap.Any("oldTargets", migration.entry.Entry.Pattern.StripePattern.TargetIDs))
+	}
+
+	if err != nil {
 		return fmt.Errorf("unable to create symlink via ioctl: %w", err)
 	}
 
-	if err = client.OverwriteFile(tempFile, entry.Path); err != nil {
+	if err = client.OverwriteFile(tempFile, migration.entry.Path); err != nil {
 		return fmt.Errorf("unable to swap symlink with temp symlink: %w", err)
 	}
 
-	if err = client.CopyTimestamps(originalStat, entry.Path); err != nil {
+	if err = client.CopyTimestamps(migration.originalStat, migration.entry.Path); err != nil {
 		return fmt.Errorf("symlink is migrated but original timestamps could not be applied: %w", err)
+	}
+
+	return nil
+}
+
+func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idType msg.RebalanceIDType, srcIDs []uint16, destIDs []uint16) error {
+	log, _ := config.GetLogger()
+	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.String("idType", idType.String()), zap.Any("srcIDs", srcIDs), zap.Any("destIDs", destIDs))
+
+	if len(srcIDs) != len(destIDs) {
+		return fmt.Errorf("unable to start rebalance, the number of source %v and destination IDs %v is not equal", srcIDs, destIDs)
+	}
+
+	store, err := config.NodeStore(ctx)
+	if err != nil {
+		return err
+	}
+
+	req := &msg.StartChunkBalanceMsg{
+		IdType:         idType,
+		TargetIDs:      srcIDs,
+		DestinationIDs: destIDs,
+		EntryInfo:      entry.Entry.origEntryInfoMsg,
+		RelativePath:   []byte(entry.Entry.Verbose.ChunkPath),
+	}
+	resp := &msg.StartChunkBalanceRespMsg{}
+
+	if err = store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, req, resp); err != nil {
+		return err
+	}
+
+	if resp.Result != beegfs.OpsErr_SUCCESS {
+		return resp.Result
 	}
 
 	return nil
