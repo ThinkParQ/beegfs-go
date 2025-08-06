@@ -16,6 +16,7 @@ import (
 type connOpts struct {
 	TLSDisableVerification bool
 	TLSDisable             bool
+	UseProxy               bool
 	// TLSCaCert is the contents of a certificate file or nil if no extra certs should be applied.
 	TLSCaCert []byte
 	// AuthSecret is the contents of an auth file or nil if authentication should be disabled.
@@ -48,6 +49,12 @@ func WithAuthSecret(secret []byte) connOpt {
 	}
 }
 
+func WithProxy(enable bool) connOpt {
+	return func(co *connOpts) {
+		co.UseProxy = enable
+	}
+}
+
 // NewClientConn provides a standard method to configure TLS and BeeGFS connection authentication
 // when setting up a gRPC client connection for use with a BeeGFS gRPC client.
 func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
@@ -55,6 +62,7 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	config := &connOpts{
 		TLSDisableVerification: false,
 		TLSDisable:             false,
+		UseProxy:               false,
 		TLSCaCert:              nil,
 		AuthSecret:             nil,
 	}
@@ -63,6 +71,11 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	}
 
 	var opts []grpc.DialOption
+	// NOTE: grpc.WithNoProxy() is marked as experimental, but has been for a long time. In the
+	// unlikely case it gets removed, we can easily replace it with a custome DialOption generator
+	if !config.UseProxy {
+		opts = append(opts, grpc.WithNoProxy())
+	}
 	// The mgmtd expects the conn auth secret to be included in the metadata with each request. We
 	// use an interceptor to inject this automatically when authentication is enabled. References:
 	// https://github.com/grpc/grpc-go/tree/master/examples/features/metadata_interceptor and
