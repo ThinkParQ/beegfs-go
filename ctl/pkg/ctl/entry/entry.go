@@ -398,8 +398,10 @@ func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappin
 		}
 
 		// If this is a regular file and the open failed due to EWOULDBLOCK/EAGAIN, probably the
-		// BeeGFS file access flags blocked the open. Try to fetch entry info using the RPC instead.
-		if stat.Mode().IsRegular() && errors.Is(err, syscall.EWOULDBLOCK) {
+		// BeeGFS file access flags blocked the open. If this is a regular file and the open failed
+		// for EBUSY, the file may be in the inode lock store (e.g., if it is being rebalanced).
+		// Attempt to fetch entry info using the RPC instead.
+		if stat.Mode().IsRegular() && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EBUSY)) {
 			log.Debug("entry is temporarily unavailable, possibly the contents are locked, trying to fetch entry info via rpc", zap.String("searchPath", searchPath))
 			return getEntryAndOwnerFromPathViaRPC(ctx, mappings, searchPath)
 		}
