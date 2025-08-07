@@ -129,6 +129,9 @@ poll-frequency = 1
 # tls-disable: Set to disable TLS encryption and send all gRPC messages in clear text over the
 # network. Discouraged for production as it exposes data to potential interception and tampering.
 
+# use-http-proxy: Set to automatically use any proxy configured globally or via environment
+# variables for gRPC communication to the Management node.
+
 # auth-file: The file containing the shared secret for BeeGFS connection authentication.
 
 # auth-disable: Disable BeeGFS connection authentication (not recommended).
@@ -244,3 +247,6 @@ poll-frequency = 1
 
 # grpc-tls-disable: Set to disable TLS encryption and send all gRPC messages in clear text over the
 # network. Discouraged for production as it exposes data to potential interception and tampering.
+
+# grpc-use-http-proxy: Set to automatically use any proxy configured globally or via environment
+# variables for gRPC communication to the subscriber.
