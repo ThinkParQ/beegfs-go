@@ -25,6 +25,7 @@ type GrpcConfig struct {
 	TLSCertFile            string `mapstructure:"grpc-tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"grpc-tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"grpc-tls-disable"`
+	UseProxy               bool   `mapstructure:"grpc-use-http-proxy"`
 	DisconnectTimeout      int    `mapstructure:"grpc-disconnect-timeout"`
 }
 

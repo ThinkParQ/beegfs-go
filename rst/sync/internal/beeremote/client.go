@@ -19,6 +19,7 @@ type Config struct {
 	TlsCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"tls-disable"`
+	UseProxy               bool   `mapstructure:"use-http-proxy"`
 }
 
 // Client is setup so the provider can be swapped out after the client is initialized.

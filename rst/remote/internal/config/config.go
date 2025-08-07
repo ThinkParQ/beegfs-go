@@ -41,6 +41,7 @@ type MgmtdConfig struct {
 	TLSCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TLSDisable             bool   `mapstructure:"tls-disable"`
+	UseProxy               bool   `mapstructure:"use-http-proxy"`
 	AuthFile               string `mapstructure:"auth-file"`
 	AuthDisable            bool   `mapstructure:"auth-disable"`
 }

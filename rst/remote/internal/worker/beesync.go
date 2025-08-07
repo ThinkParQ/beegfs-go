@@ -43,6 +43,7 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithTLSDisableVerification(n.config.TLSDisableVerification),
 		beegrpc.WithTLSDisable(n.config.TlsDisable),
+		beegrpc.WithProxy(n.config.UseProxy),
 	)
 	if err != nil {
 		return false, err

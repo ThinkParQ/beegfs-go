@@ -31,6 +31,7 @@ type Config struct {
 	TlsCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"tls-disable"`
+	UseProxy               bool   `mapstructure:"use-http-proxy"`
 	MaxReconnectBackOff    int    `mapstructure:"max-reconnect-back-off"`
 	DisconnectTimeout      int    `mapstructure:"disconnect-timeout"`
 	SendRetries            int    `mapstructure:"send-retries"`
