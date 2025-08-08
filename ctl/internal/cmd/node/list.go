@@ -2,8 +2,8 @@ package node
 
 import (
 	"fmt"
+	"net"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -101,10 +101,11 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	defer tbl.PrintRemaining()
 	hasUnreachableNode := false
 
-	// This shouldn't happen since a valid management address in the format <ip>:<port> is required.
+	// Extract the port from the management address. Supports IPv4 (a.b.c.d:port) and IPv6
+	// ([v6]:port). We do not fail hard here because this port is only used for display.
 	grpcPort := "invalid"
-	if grpcAddr := strings.Split(mgmtd.GetAddress(), ":"); len(grpcAddr) == 2 {
-		grpcPort = grpcAddr[1]
+	if _, p, err := net.SplitHostPort(mgmtd.GetAddress()); err == nil {
+		grpcPort = p
 	}
 
 	// Print and process node list
