@@ -576,7 +576,7 @@ func GetLockedInfo(
 
 	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, inMountPath)
 	if err != nil {
-		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+		if errors.Is(err, os.ErrNotExist) {
 			return lockedInfo, writeLockSet, rstIds, nil
 		}
 		return
