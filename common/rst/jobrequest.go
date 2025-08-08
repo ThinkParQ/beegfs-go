@@ -179,8 +179,12 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 
 	var requests []*beeremote.JobRequest
 	for _, rstId := range entry.Remote.RSTIDs {
+		client, ok := rstMap[rstId]
+		if !ok {
+			return nil, fmt.Errorf("remote storage target ID %q from file metadata does not exist in the configuration: %w", rstId, ErrFileHasNoRSTs)
+		}
 		cfg.SetRemoteStorageTarget(rstId)
-		requests = append(requests, rstMap[rstId].GetJobRequest(cfg))
+		requests = append(requests, client.GetJobRequest(cfg))
 	}
 	return requests, nil
 }
