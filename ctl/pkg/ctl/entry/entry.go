@@ -390,6 +390,10 @@ func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappin
 		if errors.Is(err, syscall.EPERM) {
 			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to open entry %q: %w", searchPath, err)
 		}
+		// If the entry doesn't exist there is no reason to call lstat(), return immediately.
+		if errors.Is(err, syscall.ENOENT) {
+			return msg.EntryInfo{}, beegfs.Node{}, fmt.Errorf("unable to open entry %q: %w", searchPath, err)
+		}
 
 		// Stat the file so we can check its type and if the user has permissions:
 		stat, statErr := beegfsClient.Lstat(searchPath)

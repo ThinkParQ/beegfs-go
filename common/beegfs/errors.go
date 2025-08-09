@@ -1,8 +1,16 @@
 package beegfs
 
-import "fmt"
+import (
+	"fmt"
+	"syscall"
+)
 
-// OpsErr is a custom type for error codes based on an int.
+// OpsErr is a custom type for BeeGFS specific error codes based on an int.
+//
+// Many BeeGFS errors map back to standard Linux error numbers. At call sites that might return a
+// Linux error or a BeeGFS specific error (e.g., GetEntry), prefer the standard sentinels (e.g.,
+// fs.ErrNotExist) so checks work for syscall, os, and BeeGFS errors. Refer to the opsToSys map
+// below for the full list of mappings.
 type OpsErr int32
 
 // Enumeration of all error codes as per the provided C++ enumeration.
@@ -115,7 +123,61 @@ func (e OpsErr) String() string {
 		return "Operation not supported"
 	case OpsErr_UNKNOWNPOOL:
 		return "Unknown storage pool"
+	case OpsErr_METAVERSIONMISMATCH:
+		return "Metadata version mismatch"
+	case OpsErr_INODELOCKED:
+		return "Inode is locked"
+	case OpsErr_FILEACCESS_DENIED:
+		return "File access denied by state restrictions"
 	default:
 		return fmt.Sprintf("Unknown error (%d)", int(e))
 	}
+}
+
+// Unwrap exposes the corresponding syscall.Errno (when available), enabling errors.Is(err,
+// fs.ErrNotExist) and friends to succeed when err is an OpsErr. Note: errors.Is is not symmetric;
+// the reverse (errors.Is(os.ErrNotExist, OpsErr_PATHNOTEXISTS)) will not match unless an OpsErr is
+// actually in the chain.
+func (e OpsErr) Unwrap() error {
+	if errno, ok := opsToSys[e]; ok {
+		return errno
+	}
+	return nil
+}
+
+// opsToSys maps BeeGFS specific errors to corresponding syscall errors. The mappings are based on
+// StorageErrors.c and StorageErrors.h.
+var opsToSys = map[OpsErr]syscall.Errno{
+	OpsErr_INTERNAL:               syscall.EREMOTEIO,
+	OpsErr_INTERRUPTED:            syscall.EINTR,
+	OpsErr_COMMUNICATION:          syscall.ECOMM,
+	OpsErr_COMMTIMEDOUT:           syscall.ETIMEDOUT,
+	OpsErr_UNKNOWNNODE:            syscall.EREMOTEIO,
+	OpsErr_NOTOWNER:               syscall.EREMOTEIO,
+	OpsErr_EXISTS:                 syscall.EEXIST,
+	OpsErr_PATHNOTEXISTS:          syscall.ENOENT,
+	OpsErr_INUSE:                  syscall.EBUSY,
+	OpsErr_DYNAMICATTRIBSOUTDATED: syscall.EREMOTEIO,
+	OpsErr_NOTADIR:                syscall.ENOTDIR,
+	OpsErr_NOTEMPTY:               syscall.ENOTEMPTY,
+	OpsErr_NOSPACE:                syscall.ENOSPC,
+	OpsErr_UNKNOWNTARGET:          syscall.EREMOTEIO,
+	OpsErr_WOULDBLOCK:             syscall.EWOULDBLOCK, // same value as EAGAIN on Linux
+	OpsErr_INODENOTINLINED:        syscall.EREMOTEIO,
+	OpsErr_SAVEERROR:              syscall.EREMOTEIO,
+	OpsErr_TOOBIG:                 syscall.EFBIG, // NOTE: EFBIG (not E2BIG)
+	OpsErr_INVAL:                  syscall.EINVAL,
+	OpsErr_ADDRESSFAULT:           syscall.EFAULT,
+	OpsErr_AGAIN:                  syscall.EAGAIN,
+	OpsErr_STORAGE_SRV_CRASHED:    syscall.EREMOTEIO,
+	OpsErr_PERM:                   syscall.EPERM,
+	OpsErr_DQUOT:                  syscall.EDQUOT,
+	OpsErr_OUTOFMEM:               syscall.ENOMEM,
+	OpsErr_RANGE:                  syscall.ERANGE,
+	OpsErr_NODATA:                 syscall.ENODATA,
+	OpsErr_NOTSUPP:                syscall.EOPNOTSUPP,
+	OpsErr_UNKNOWNPOOL:            syscall.EINVAL,
+	OpsErr_METAVERSIONMISMATCH:    syscall.ESTALE,
+	OpsErr_INODELOCKED:            syscall.EBUSY,
+	OpsErr_FILEACCESS_DENIED:      syscall.EWOULDBLOCK,
 }
