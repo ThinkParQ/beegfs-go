@@ -70,6 +70,7 @@ func (s *GRPCSubscriber) Connect() (retry bool, err error) {
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithTLSDisableVerification(s.TLSDisableVerification),
 		beegrpc.WithTLSDisable(s.TlsDisable),
+		beegrpc.WithProxy(s.UseProxy),
 	)
 	if err != nil {
 		return true, fmt.Errorf("unable to connect to the subscriber: %w", err)

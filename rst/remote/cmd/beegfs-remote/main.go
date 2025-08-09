@@ -70,6 +70,8 @@ func main() {
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
 	pflag.Int("job.max-job-entries-per-rst", 4, "Once this threshold is exceeded, older jobs will be deleted (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.")
 	// Hidden flags:
+	pflag.Bool("management.use-http-proxy", false, "Use proxy configured globally or in the environment for gRPC communication to the Management node.")
+	pflag.CommandLine.MarkHidden("management.use-http-proxy")
 	pflag.Int("developer.perf-profiling-port", 0, "Specify a port where performance profiles will be made available on the localhost via pprof (0 disables performance profiling).")
 	pflag.CommandLine.MarkHidden("developer.perf-profiling-port")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
@@ -135,6 +137,7 @@ Using environment variables:
 			MgmtdTLSCertFile:            initialCfg.Management.TLSCertFile,
 			MgmtdTLSDisableVerification: initialCfg.Management.TLSDisableVerification,
 			MgmtdTLSDisable:             initialCfg.Management.TLSDisable,
+			MgmtdUseProxy:               initialCfg.Management.UseProxy,
 			AuthFile:                    initialCfg.Management.AuthFile,
 			AuthDisable:                 initialCfg.Management.AuthDisable,
 			RemoteAddress:               initialCfg.Server.Address,
@@ -199,6 +202,7 @@ Using environment variables:
 		beegrpc.WithTLSDisableVerification(initialCfg.Management.TLSDisableVerification),
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithAuthSecret(authSecret),
+		beegrpc.WithProxy(initialCfg.Management.UseProxy),
 	); err != nil {
 		// If the mgmtd is actually offline, usually we'll never get to this point. Startup will
 		// hang earlier trying to determine the BeeGFS mount point. This is why we don't do any
@@ -226,6 +230,7 @@ Using environment variables:
 		MgmtdTlsCert:                cert,
 		MgmtdTlsDisableVerification: initialCfg.Management.TLSDisableVerification,
 		MgmtdTlsDisable:             initialCfg.Management.TLSDisable,
+		MgmtdUseProxy:               initialCfg.Management.UseProxy,
 		AuthSecret:                  authSecret,
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()

@@ -41,6 +41,7 @@ func (c *grpcProvider) init(cfg Config) error {
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithTLSDisableVerification(cfg.TLSDisableVerification),
 		beegrpc.WithTLSDisable(cfg.TlsDisable),
+		beegrpc.WithProxy(cfg.UseProxy),
 	)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUnableToConnect, err)
@@ -67,6 +68,7 @@ func (c *grpcProvider) init(cfg Config) error {
 			MgmtdTLSCertFile:            syncMgmtdTLSCertFile,
 			MgmtdTLSDisableVerification: cfg.dynamic.MgmtdTlsDisableVerification,
 			MgmtdTLSDisable:             cfg.dynamic.MgmtdTlsDisable,
+			MgmtdUseProxy:               cfg.dynamic.MgmtdUseProxy,
 			AuthFile:                    syncAuthFile,
 			AuthDisable:                 cfg.dynamic.AuthDisable,
 			RemoteAddress:               cfg.dynamic.Address,

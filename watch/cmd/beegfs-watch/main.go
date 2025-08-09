@@ -61,6 +61,8 @@ func main() {
 	pflag.Int("handler.max-wait-for-response-after-connect", 2, "When a subscriber connects/reconnects wait this long for the subscriber to acknowledge the sequence ID of the last event it received successfully. This prevents sending duplicate events if the connection was disrupted unexpectedly.")
 	pflag.Int("handler.poll-frequency", 1, "How often subscribers should poll the metadata buffer for new events (causes more CPU utilization when idle).")
 	// Hidden flags:
+	pflag.Bool("management.use-http-proxy", false, "Use proxy configured globally or in the environment for gRPC communication to the Management node.")
+	pflag.CommandLine.MarkHidden("management.use-http-proxy")
 	pflag.Int("developer.perf-profiling-port", 0, "Specify a port where performance profiles will be made available on the localhost via pprof (0 disables performance profiling).")
 	pflag.CommandLine.MarkHidden("developer.perf-profiling-port")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
@@ -165,6 +167,7 @@ Using environment variables:
 		beegrpc.WithTLSDisableVerification(initialCfg.Management.TLSDisableVerification),
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithAuthSecret(authSecret),
+		beegrpc.WithProxy(initialCfg.Management.UseProxy),
 	); err != nil {
 		// If the mgmtd is actually offline, usually we'll never get to this point. Startup will
 		// hang earlier trying to determine the BeeGFS mount point. This is why we don't do any

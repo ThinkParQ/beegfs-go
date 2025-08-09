@@ -55,6 +55,8 @@ func main() {
 	pflag.Bool("remote.tls-disable-verification", false, "If TLS verification should be disabled when connecting to BeeGFS Remote (not recommended).")
 	pflag.Bool("remote.tls-disable", false, "Disable TLS entirely for gRPC communication to the Remote node.")
 	// Hidden flags:
+	pflag.Bool("remote.use-http-proxy", false, "Use proxy configured globally or in the environment for gRPC communication to the Remote node.")
+	pflag.CommandLine.MarkHidden("remote.use-http-proxy")
 	pflag.Int("developer.perf-profiling-port", 0, "Specify a port where performance profiles will be made available on the localhost via pprof (0 disables performance profiling).")
 	pflag.CommandLine.MarkHidden("developer.perf-profiling-port")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
