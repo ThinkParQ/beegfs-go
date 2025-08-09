@@ -361,10 +361,10 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 			}
 			result.Status = MigrateSkippedDir
 			return result, nil
+		} else if !migration.useRebalancing {
+			result.Status = MigrateNotSupported
+			return result, nil
 		}
-
-		result.Status = MigrateNotSupported
-		return result, nil
 	}
 
 	result.StartingIDs = entry.Entry.Pattern.TargetIDs
