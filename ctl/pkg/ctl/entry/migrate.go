@@ -107,6 +107,7 @@ type MigrateCfg struct {
 	DryRun         bool
 	FilterExpr     string
 	UseRebalancing bool
+	Retries        int
 }
 
 type MigrateResult struct {
@@ -141,6 +142,7 @@ type migration struct {
 	euid           uint32
 	egid           uint32
 	useRebalancing bool
+	retries        int
 }
 
 // MigrateEntries migrates the entries specified by the PathInputMethod based on the provided
@@ -183,6 +185,7 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 	var migration = migration{
 		dryRun:         cfg.DryRun,
 		useRebalancing: cfg.UseRebalancing,
+		retries:        cfg.Retries,
 		srcTargets:     make(map[uint16]struct{}),
 		srcGroups:      make(map[uint16]struct{}),
 		// Safe because user/group IDs are non-negative integers that should fit in a uint32. These
@@ -384,7 +387,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	if migration.useRebalancing {
-		if err = chunkRebalanceMigrate(ctx, entry, rebalanceType, srcIDs, destIDs); err != nil {
+		if err = chunkRebalanceMigrate(ctx, entry, rebalanceType, srcIDs, destIDs, migration.retries); err != nil {
 			result.Status = MigrateError
 			result.Err = err
 			return result, nil
@@ -701,16 +704,18 @@ func tmpFileMigrateLink(migration tmpFileMigration) error {
 }
 
 const (
-	maxRetries        = 10
 	initialBackoff    = 1 * time.Second
 	maxBackoff        = 60 * time.Second
 	backoffMultiplier = 2
 )
 
-// chunkRebalanceMigrate will attempt to rebalance the specified entry's srcIDs to destIDs. It
-// respects when the metadata server returns an beegfs.OpsErr_AGAIN and will retry the request with
-// an exponential backoff up to the maxBackoff time until it reaches the maxRetries.
-func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idType msg.RebalanceIDType, srcIDs []uint16, destIDs []uint16) error {
+// chunkRebalanceMigrate attempts to rebalance the specified entry's srcIDs to destIDs. When the
+// metadata server returns beegfs.OpsErr_AGAIN (queue full), it retries with exponential backoff
+// (capped by maxBackoff). The `retries` parameter controls how many retries are allowed:
+//   - retries < 0  => retry indefinitely (until ctx is canceled or a non-AGAIN error)
+//   - retries == 0 => no retries (only the initial attempt)
+//   - retries > 0  => retry up to `retries` times after the initial attempt
+func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idType msg.RebalanceIDType, srcIDs []uint16, destIDs []uint16, retries int) error {
 	log, _ := config.GetLogger()
 	log.Debug("starting chunk rebalance", zap.String("path", entry.Path), zap.String("entryID", entry.Entry.EntryID), zap.String("idType", idType.String()), zap.Any("srcIDs", srcIDs), zap.Any("destIDs", destIDs))
 
@@ -733,7 +738,9 @@ func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idT
 	resp := &msg.StartChunkBalanceRespMsg{}
 
 	backoff := initialBackoff
-	for i := 0; i < maxRetries; i++ {
+	// attempt is the number of retries consumed so far.
+	attempt := 0
+	for {
 		if err = store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, req, resp); err != nil {
 			return err
 		}
@@ -745,21 +752,42 @@ func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idT
 			return resp.Result
 		}
 
+		if retries >= 0 && attempt >= retries {
+			return fmt.Errorf("chunk balancing queue full; exhausted %d/%d retries: %w", attempt, retries, beegfs.OpsErr_AGAIN)
+		}
+
 		// Always wait at least `backoff` duration, with up to 1s of jitter to avoid synchronized
 		// retries. This protects against retry storms while keeping behavior predictable.
 		retryIn := backoff + time.Duration(rand.Intn(1000))*time.Millisecond
-		log.Debug("chunk balancing queue appears to be full, backing off and retrying", zap.Any("path", entry.Path), zap.String("entryID", entry.Entry.EntryID), zap.Int("attempt", i+1), zap.Int("remainingAttempts", maxRetries-(i+1)), zap.Duration("retryIn", retryIn))
+		// attemptedRequests is the total requests sent so far (including initial attempt).
+		attemptedRequests := attempt + 1
+		if retries >= 0 {
+			// remainingAttempts is how many more requests will be attempted before giving up.
+			remainingAttempts := retries - attempt
+			log.Debug("chunk balancing queue appears to be full, backing off and retrying",
+				zap.Any("path", entry.Path),
+				zap.String("entryID", entry.Entry.EntryID),
+				zap.Int("attemptedRequests", attemptedRequests),
+				zap.Int("remainingAttempts", remainingAttempts),
+				zap.Duration("retryIn", retryIn),
+			)
+		} else {
+			log.Debug("chunk balancing queue appears to be full, backing off and retrying",
+				zap.Any("path", entry.Path),
+				zap.String("entryID", entry.Entry.EntryID),
+				zap.Int("attemptedRequests", attemptedRequests),
+				zap.String("remainingAttempts", "infinite"),
+				zap.Duration("retryIn", retryIn),
+			)
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(retryIn):
 		}
 
-		backoff = backoff * backoffMultiplier
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = min(backoff*backoffMultiplier, maxBackoff)
+		attempt++
 	}
-
-	return fmt.Errorf("chunk balancing queue appears to be full (automatic retries exhausted): %w", beegfs.OpsErr_AGAIN)
 }
