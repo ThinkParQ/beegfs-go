@@ -29,10 +29,39 @@ func newMigrateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Migrate files and directories to the specified storage pool",
-		Long: `Migrate files and directories to the specified storage pool.
-Files are only migrated if they have chunks on one or more of the specified targets.
-Migration occurs by creating a temporary file with new targets from the specified storage pool.
+		Short: "Migrate files and directories to the specified storage pool, targets, or groups",
+		Long: `Migrate files and directories to the specified storage pool, targets, or groups.
+Files are only migrated if they have chunks on one or more of the specified targets. Destination 
+targets and buddy groups can be directly specified, or a pool can be specified and all targets and groups 
+in that pool are are potential candidates to migrate each file. Files cannot be migrated if the number of 
+remaining targets/groups in the stripe pattern and destination targets/groups is less than the current 
+stripe width. When the number of destination targets/groups is greater than the number of targets/groups 
+needed to migrate a particular file, the destination IDs will be selected randomly to balance migrated files 
+across the destination targets/groups. Note files cannot be assigned to the same target/group multiple times.
+
+There are two available migration modes:
+
+(1) Migrate using background data rebalancing (requires an enterprise license).
+
+This mode was introduced in BeeGFS 8.2 and handles migrating data from the specified target(s) to new 
+target(s) by starting background tasks on the metadata and storage nodes that handle syncing data directly 
+between the source/destination storage nodes and updating the stripe pattern on the metadata node. Because
+data is rebalanced in the background, the migrate command may complete before files are fully migrated.
+Files are locked and inaccessible to clients until they are rebalanced. Attempting to access files while 
+background rebalancing is in progress will return an "in use" error.
+
+This mode is generally more efficient, especially when data only needs to be migrated from some of the
+targets assigned to a file. This mode also supports migrating hard links as it does not require the
+inode be recreated, as is the case when migrating using a temporary file.
+
+Note: When the number of targets/buddy groups in the destination pool are greater than the number of
+targets/buddy groups a particular entry is migrated away from, the destination targets/buddy groups
+will be randomly picked for each entry to more evenly redistribute file data.
+
+(2) Migrate using a temporary file (default).
+
+This is the legacy approach to migrating data between storage pools/targets in BeeGFS.
+With this mode, a temporary file is created with new targets from the specified storage pool.
 Then the contents of the original file are copied to the new file, and the temporary file atomically 
 renamed overwriting the original. This mode handles migrating extended attributes, user/group ownership 
 and permissions, and will set the new file to have the same access/modification timestamps as the original.
@@ -47,6 +76,7 @@ can use the migrate mode to update the storage pool for all directories it encou
 
 Symlinks are supported but the migrated links will look slightly different than regular files:
 
+* A destination pool must always be specified. Specifying individual targets and buddy groups is not supported.
 * The original number of targets is not preserved and instead inherited from the parent directory. This is not 
   important as the contents of a symlink in BeeGFS are simply the path the link is pointing at, which will only 
   ever be stored on a single target as the max path length is 4096 and the minimum chunk size in BeeGFS is 64KiB. 
@@ -70,7 +100,7 @@ actually redirect and return information from the linked file (i.e., stat, open,
 	}
 
 	// Frontend / display configuration options:
-	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, `When  <path> is a single directory recursively migrate all entries beneath the path.
+	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, `When <path> is a single directory recursively migrate all entries beneath the path.
 CAUTION: this may migrate many entries, for example if the BeeGFS root is the provided path.`)
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\\n", `Change the string delimiter used to determine individual paths when read from stdin.
 For example use --stdin-delimiter=\"\\x00\" for NULL.`)
@@ -82,12 +112,26 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.SrcNodes, 16, beegfs.Storage), "from-nodes", "Migrate files from the specified storage nodes.")
 	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.SrcPools, 16, beegfs.Storage), "from-pools", "Migrate files from the specified storage pools.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&backendCfg.DstPool, 16, beegfs.Storage), "pool", "Migrate files to the targets and buddy groups in this storage pool.")
+	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.DstTargets, 16, beegfs.Storage), "targets", "Migrate files to the specified targets.")
+	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.DstGroups, 16, beegfs.Storage), "groups", "Migrate files to the specified buddy groups.")
 	cmd.Flags().BoolVar(&backendCfg.UpdateDirs, "update-directories", false, "Update directories to use the specified storage pool.")
 	cmd.Flags().BoolVar(&backendCfg.SkipMirrors, "skip-mirrors", false, "Migrate only files that are not buddy mirrored.")
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().BoolVar(&backendCfg.UseRebalancing, "rebalance", false, "Use background data rebalancing instead of temporary files to migrate data between targets.")
+	cmd.Flags().IntVar(&backendCfg.Retries, "retries", 10, "When using background data rebalancing, the number of times a request is retried if the metadata chunk balance queue is full (-1 = infinite, 0 = no retries).")
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")
-	cmd.MarkFlagRequired("pool")
+	cmd.MarkFlagsOneRequired("pool", "targets", "groups")
+	// On the backend all the entity IDs are collected into slices of destination targets and
+	// groups, either implicitly from the specified pool or explicitly based on the target and
+	// groups specified by the user. This means it would be possible to allow users to specify
+	// candidate entity IDs using any mix of these three methods, then choose the entity ID at
+	// random. We don't do this to maintain the legacy behavior of temp file migrations where
+	// specifying a pool results in the meta choosing the destination target/group IDs, which also
+	// allows it to respect the tuneTargetChooser settings. This also leaves us a path to update the
+	// rebalancing mode to have the meta choose target/groups when a pool is specified.
+	cmd.MarkFlagsMutuallyExclusive("pool", "targets")
+	cmd.MarkFlagsMutuallyExclusive("pool", "groups")
 	return cmd
 }
 
