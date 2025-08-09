@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -67,7 +68,8 @@ This tool allows you to inspect, configure, and monitor BeeGFS.
 BeeGFS is crafted with 💛 by contributors worldwide.
 Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		`, longHelpHeader, strings.Repeat("=", len(longHelpHeader))),
-		SilenceUsage: true,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		// This is inherited by ALL commands even if they also define there own PersistentPreRunE.
 		// See attachPersistentPreRunE() for more details.
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
@@ -126,6 +128,12 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	// Parse the given parameters and execute the selected command
 	err := cmd.ExecuteContext(ctx)
 	if err != nil {
+		// SilenceErrors is set on the root command so we can add custom context to errors.
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "Error: command execution was interrupted: %s\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		}
 		// If the command returned a util.CtlError with an included exit code, use this to exit the
 		// program
 		ctlError, ok := err.(util.CtlError)
