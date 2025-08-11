@@ -20,7 +20,7 @@ require (
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.10.0
-	github.com/thinkparq/protobuf v0.8.2-0.20250729105248-8a100c64c52e
+	github.com/thinkparq/protobuf v0.8.2-0.20250811215042-0d2b80d34a1a
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.15.0
 	golang.org/x/sys v0.33.0
