@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -236,7 +237,7 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 			if !ok {
 				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s <hostname|ip>:<grpc-port>for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
 			}
-			foundMgmtdAddr := fmt.Sprintf("%s:%s", sysMgmtdHost, connMgmtdGrpcPort)
+			foundMgmtdAddr := net.JoinHostPort(sysMgmtdHost, connMgmtdGrpcPort)
 			log.Debug("found client mount point", zap.String("mgmtdAddr", foundMgmtdAddr), zap.String("mountPoint", c.Mount.Path), zap.String("procfsDir", c.ProcDir))
 			if mgmtdAddr == BeeGFSMgmtdAddrAuto {
 				mgmtdAddr = foundMgmtdAddr
