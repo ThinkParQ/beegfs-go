@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -292,35 +293,43 @@ func walkList(ctx context.Context, pathList []string, paths chan<- string, filte
 func walkDir(ctx context.Context, startPath string, paths chan<- string, filter FileInfoFilter, lexicographically bool) error {
 	beegfsClient, err := config.BeeGFSClient(startPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to recursively walk directory: %w", err)
 	}
 	startingInMountPath, err := beegfsClient.GetRelativePathWithinMount(startPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to recursively walk directory: %w", err)
 	}
 
 	walkDirFunc := func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to recursively walk directory: %w", err)
 		}
 		if _, err := pushFilterInMountPath(ctx, path, filter, beegfsClient, paths); err != nil {
-			return err
+			return fmt.Errorf("unable to recursively walk directory: %w", err)
 		}
 		return nil
 	}
 
 	err = beegfsClient.WalkDir(startingInMountPath, walkDirFunc, filesystem.Lexicographically(lexicographically))
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to recursively walk directory: %w", err)
 	}
 	return nil
 }
 
 func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilter, client filesystem.Provider, paths chan<- string) (filesystem.Provider, error) {
+	if client == nil {
+		var err error
+		if client, err = config.BeeGFSClient(path); err != nil {
+			if !errors.Is(err, filesystem.ErrUnmounted) {
+				return nil, err
+			}
+		}
+	}
 	if filter != nil {
-		info, err := os.Lstat(path)
+		info, err := client.Lstat(path)
 		if err != nil {
-			return client, err
+			return client, fmt.Errorf("unable to filter files: %w", err)
 		}
 		statT, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
@@ -328,17 +337,10 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 		}
 		keep, err := filter(statToFileInfo(path, statT))
 		if err != nil {
-			return client, err
+			return client, fmt.Errorf("unable to apply filter: %w", err)
 		}
 		if !keep {
 			return client, nil
-		}
-	}
-
-	if client == nil {
-		var err error
-		if client, err = config.BeeGFSClient(path); err != nil {
-			return nil, err
 		}
 	}
 
