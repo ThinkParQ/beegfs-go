@@ -784,7 +784,7 @@ func tmpFileMigrateLink(migration tmpFileMigration) error {
 }
 
 const (
-	initialBackoff    = 1 * time.Second
+	initialBackoff    = 2 * time.Second
 	maxBackoff        = 60 * time.Second
 	backoffMultiplier = 2
 )
@@ -833,7 +833,7 @@ func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idT
 		}
 
 		if retries >= 0 && attempt >= retries {
-			return fmt.Errorf("chunk balancing queue full; exhausted %d/%d retries: %w", attempt, retries, beegfs.OpsErr_AGAIN)
+			return fmt.Errorf("metadata chunk balancing queue full; exhausted %d/%d retries: %w (consider increasing the server queue limit)", attempt, retries, beegfs.OpsErr_AGAIN)
 		}
 
 		// Always wait at least `backoff` duration, with up to 1s of jitter to avoid synchronized
