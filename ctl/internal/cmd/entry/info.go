@@ -189,16 +189,17 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 			}
 		} else {
 			fmt.Fprintf(entryToPrint, "+ Storage targets:\n")
-			for tgt, node := range info.Entry.Pattern.StorageTargets {
-				// Here we differ slightly from the old CTL. The old CTL method of getting target mappings
-				// first determined the node ID, then used this to determine the alias. It was possible
-				// to get the node ID but not the alias, then it would print out <unknown(nodeNumID)>.
-				// The new target mapper works differently, looking up both the node ID and alias at once,
-				// so if anything goes wrong we can't even print the node ID.
-				if node == nil {
-					fmt.Fprintf(entryToPrint, "+ %d @ <unknown>\n", tgt)
-				} else {
+			for _, tgt := range info.Entry.Pattern.TargetIDs {
+				// This differs slightly from the v7 CTL. The v7 method of getting target mappings
+				// first determined the node ID, then used this to determine the alias. It was
+				// possible to get the node ID but not the alias which printed <unknown(nodeNumID)>.
+				// The new target mapper works differently, looking up the node ID and alias at
+				// once, so if anything goes wrong we can't even print the node ID.
+				node, ok := info.Entry.Pattern.StorageTargets[beegfs.NumId(tgt)]
+				if ok && node != nil {
 					fmt.Fprintf(entryToPrint, "+ %d @ %s [ID: %d]\n", tgt, node.Alias, node.LegacyId.NumId)
+				} else {
+					fmt.Fprintf(entryToPrint, "+ %d @ <unknown>\n", tgt)
 				}
 
 			}
