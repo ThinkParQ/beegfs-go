@@ -2,11 +2,19 @@ package entry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+)
+
+var (
+	// This can happen in a system with hard links where a rebalance is started for the first link
+	// and we encounter additional links to the same inode. Testing shows target IDs will be empty
+	// when this happens.
+	ErrEntryHasNoTargets = errors.New("stripe pattern is currently empty")
 )
 
 func getRandomIDChooser() func(fromDstIDs []uint16, idsAlreadyInStripePattern []uint16) (uint16, error) {
@@ -63,6 +71,10 @@ func getMigrationForEntry(
 	dstTargets []uint16,
 	dstGroups []uint16,
 ) (rebalanceType msg.RebalanceIDType, srcIDs []uint16, dstIDs []uint16, unmodifiedIDs []uint16, err error) {
+
+	if len(entry.Entry.Pattern.TargetIDs) == 0 {
+		return 0, nil, nil, nil, ErrEntryHasNoTargets
+	}
 
 	targetChooser := getRandomIDChooser()
 

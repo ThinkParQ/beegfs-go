@@ -147,10 +147,11 @@ type migration struct {
 	setDir *SetEntryCfg
 	dryRun bool
 	// The temporary files will be owned by the effective user and group of this process.
-	euid           uint32
-	egid           uint32
-	useRebalancing bool
-	retries        int
+	euid            uint32
+	egid            uint32
+	useRebalancing  bool
+	retries         int
+	recentHardLinks *packedEntryMap
 }
 
 // MigrateEntries migrates the entries specified by the PathInputMethod based on the provided
@@ -198,8 +199,9 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		srcGroups:      make(map[uint16]struct{}),
 		// Safe because user/group IDs are non-negative integers that should fit in a uint32. These
 		// are what uid/gid will own the temporary files used by the migration.
-		euid: uint32(euid),
-		egid: uint32(syscall.Getegid()),
+		euid:            uint32(euid),
+		egid:            uint32(syscall.Getegid()),
+		recentHardLinks: newPackedEntryMap(100000),
 	}
 
 	// Include explicitly specified targets:
@@ -385,12 +387,65 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	result.StartingIDs = fmt.Sprintf("%v", entry.Entry.Pattern.TargetIDs)
+	// Non-directory entries that are not inlined (into a dentry) may have have multiple links
+	// (i.e., hard links). This means the migration might encounter the same entry multiple times
+	// through different paths. When this happens one of three scenarios is possible:
+	//
+	// (1) The entry is still being rebalanced and is in the inode lock store. When this happens
+	// entry.Entry.Pattern.TargetIDs is empty so getMigrationForEntry returns ErrEntryHasNoTargets
+	// which is caught below and the result for the entry is MigrateNotNeeded.
+	//
+	// (2) The entry has already been rebalanced so none of the srcTargets/Groups will be in
+	// entry.Entry.Pattern.TargetIDs causing getMigrationForEntry() to return an empty srcIDs slice,
+	// and the result for the entry is MigrateNotNeeded.
+	//
+	// (3) The entry still needs to be rebalanced but is not in the inode lock store by the time the
+	// second request is submitted. This only happens if requests for the same entry+destination
+	// ID(s) are submitted in quick succession. If a second request slips through it will eventually
+	// fail on the meta/storage servers for "Failed to open Chunk" because the chunk file(s) would
+	// have already been migrated away from the srcID(s). This failure scenario will also result in
+	// the entry being stuck in the inode lock store until tuneChunkBalanceLockingTimeLimit elapses.
+	// While this does not result in data loss or inconsistencies, the resulting UX is non-optimal.
+	//
+	// To avoid scenario (3) we keep track of a limited number of recent hard links encountered by
+	// the migration. We cannot keep track of all hard links that might exist in a system because it
+	// ties the memory requirement for a migration to the number of hard links in a system. The
+	// number of recent hard links that are tracked is based on newPackedEntryMap(capacity). If
+	// there are more hard links in the system than capacity in the recentHardLinks map, it starts
+	// evicting FIFO. This allows us to cap memory usage while making it highly unlikely a migrate
+	// will ever submit duplicate requests for the same entry ID + srcID(s).
+	//
+	// This handling also means scenarios (1) and (2) will not happen unless the migration is run
+	// against a directory that contains more hard links than fit in the recentHardLinks map. This
+	// lets us provide more intuitive output in most scenarios.
+	if !entry.Entry.FeatureFlags.IsInlined() {
+		added, err := migration.recentHardLinks.Add(entry.Entry.EntryID)
+		if err != nil {
+			// Should never happen unless the entry ID format changes or this is an invalid entry.
+			result.Status = MigrateError
+			result.Message = err.Error()
+			return result, nil
+		}
+		// If the entry is already in the map a migration was recently started for it.
+		if !added {
+			result.Status = MigrateNotNeeded
+			result.Message = fmt.Sprintf("entry already processed through a different path")
+			return result, nil
+		}
+		// If we haven't recently encountered this entry, check if migration is required.
+	}
 
 	// Determine if the entry needs migration and if so, if there are enough targets/groups:
 	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(ctx, entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
 	if err != nil {
-		result.Status = MigrateError
-		result.Message = err.Error()
+		if errors.Is(err, ErrEntryHasNoTargets) {
+			result.StartingIDs = fmt.Sprintf("(unavailable)")
+			result.Status = MigrateNotNeeded
+			result.Message = fmt.Sprintf("a migration appears to already be in progress: %s", err)
+		} else {
+			result.Status = MigrateError
+			result.Message = err.Error()
+		}
 		return result, nil
 	} else if len(srcIDs) == 0 {
 		result.Status = MigrateNotNeeded
@@ -481,7 +536,7 @@ func tmpFileMigrationPossible(stat *syscall.Stat_t) error {
 		return fmt.Errorf("refusing to migrate entry with 000 permissions")
 	}
 	if stat.Nlink > 1 {
-		return fmt.Errorf("cannot migrate entries with hard links yet (number of links: %d)", stat.Nlink)
+		return fmt.Errorf("cannot migrate entries with hard links using temporary files, use the rebalance mode instead (number of links: %d)", stat.Nlink)
 	}
 	return nil
 }
