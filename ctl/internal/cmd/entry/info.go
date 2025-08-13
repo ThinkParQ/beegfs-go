@@ -287,6 +287,9 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 
 	fmtTgtIDsFunc := func(targetIDs []uint16) string {
 		var targetsBuilder strings.Builder
+		if len(targetIDs) == 0 {
+			targetsBuilder.WriteString("(unavailable)")
+		}
 		for i, tgt := range targetIDs {
 			id := beegfs.LegacyId{
 				NumId:    beegfs.NumId(tgt),
