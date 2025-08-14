@@ -420,15 +420,6 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	return client.GetJobRequest(cfg)
 }
 
-func handleUpdateAndReturn(ctx context.Context, cfg *flex.JobRequestCfg, entryInfo msg.EntryInfo, ownerNode beegfs.Node, err error) error {
-	if cfg.GetUpdate() {
-		if updateErr := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfo, ownerNode); updateErr != nil {
-			return updateErr
-		}
-	}
-	return err
-}
-
 // updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.
 func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo msg.EntryInfo, ownerNode beegfs.Node) error {
 	var rstIds []uint32
@@ -492,36 +483,48 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 	}()
 
+	updateRstCfg := func(sentinel error) error {
+		if cfg.GetUpdate() {
+			if err := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfo, ownerNode); err != nil {
+				if sentinel != nil {
+					return fmt.Errorf("%s but unable to update rst configuration: %w", sentinel.Error(), err)
+				}
+				return err
+			}
+		}
+		return sentinel
+	}
+
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
 		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
 			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
 				err = fmt.Errorf("failed to create stub file: %w", err)
-				return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, err)
+				return
 			}
 			err = entry.SetAccessFlags(ctx, cfg.Path, LockedAccessFlags)
 			if err != nil {
-				return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, err)
+				return
 			}
 			lockedInfo.SetReadWriteLocked(true)
 
-			return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, ErrJobAlreadyOffloaded)
+			return updateRstCfg(ErrJobAlreadyOffloaded)
 		}
 		if IsFileOffloaded(lockedInfo) {
 			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
 				err = ErrOffloadFileUrlMismatch
 				return
 			}
-			return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, ErrJobAlreadyOffloaded)
+			return updateRstCfg(ErrJobAlreadyOffloaded)
 		}
 
 		if cfg.Download && !cfg.Overwrite && FileExists(lockedInfo) {
 			err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
-			handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, err)
+			return
 		}
 	} else if FileExists(lockedInfo) {
 		if alreadySynced {
-			return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime()))
+			return updateRstCfg(GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime()))
 		}
 
 		if cfg.Download {
@@ -578,16 +581,20 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		return
 	}
 
+	if err = updateRstCfg(nil); err != nil {
+		return err
+	}
+
 	// Generating the externalId must be the last possible error to avoid situations where, once
 	// the externalId is generated, it is lost because of a subsequent preconditional failure.
 	var externalId string
 	if externalId, err = client.GenerateExternalId(ctx, cfg); err != nil {
-		return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, fmt.Errorf("failed to generate external id: %s", err.Error()))
+		return fmt.Errorf("failed to generate external id: %s", err.Error())
 	} else {
 		lockedInfo.SetExternalId(externalId)
 	}
 
-	return handleUpdateAndReturn(ctx, cfg, entryInfo, ownerNode, nil)
+	return nil
 }
 
 // GetLockedInfo acquires the available information for inMountPath. An error will be returned when
