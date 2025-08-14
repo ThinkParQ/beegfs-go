@@ -466,7 +466,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 			return
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, cfg); err != nil {
+		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}
@@ -475,12 +475,6 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		sync.SetRemotePath(cfg.RemotePath)
 		sync.SetFlatten(cfg.Flatten)
 		sync.SetOverwrite(cfg.Overwrite)
-	}
-
-	if cfg.GetUpdate() {
-		if err = updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfoMsg, ownerNode); err != nil {
-			return
-		}
 	}
 
 	return
