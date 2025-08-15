@@ -88,6 +88,11 @@ type patternConfig struct {
 	// target. Only populated if StripePatternType is StripePatternRaid0. If this entry is buddy
 	// mirrored look at TargetIDs instead. In the future we could consider adding a field to map
 	// buddy groups to targets then to nodes, but this did not exist in the old CTL.
+	//
+	// WARNING: Maps are unordered in Go. This should not be used anywhere that needs to know the
+	// order of the storage targets in a stripe pattern, for example to calculate file offsets to a
+	// particular storage target. For those use cases rely on msg.StripePattern.TargetIDs and if
+	// needed lookup each target in StorageTargets to map back to a particular storage node.
 	StorageTargets map[beegfs.NumId]*beegfs.EntityIdSet
 }
 
@@ -402,8 +407,10 @@ func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappin
 		}
 
 		// If this is a regular file and the open failed due to EWOULDBLOCK/EAGAIN, probably the
-		// BeeGFS file access flags blocked the open. Try to fetch entry info using the RPC instead.
-		if stat.Mode().IsRegular() && errors.Is(err, syscall.EWOULDBLOCK) {
+		// BeeGFS file access flags blocked the open. If this is a regular file and the open failed
+		// for EBUSY, the file may be in the inode lock store (e.g., if it is being rebalanced).
+		// Attempt to fetch entry info using the RPC instead.
+		if stat.Mode().IsRegular() && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EBUSY)) {
 			log.Debug("entry is temporarily unavailable, possibly the contents are locked, trying to fetch entry info via rpc", zap.String("searchPath", searchPath))
 			return getEntryAndOwnerFromPathViaRPC(ctx, mappings, searchPath)
 		}

@@ -52,6 +52,13 @@ func (m *Mgmtd) GetAuthSecretBytes() []byte {
 	return nil
 }
 
+// grandfatheredFeatures is used to handle when we introduce new licensed features that should be
+// available by default in all licenses certificates but won't appear explicitly in license
+// certificates generated before a certain point in time.
+var grandfatheredFeatures map[string]time.Time = map[string]time.Time{
+	"io.beegfs.rebalancing": time.Date(2025, 10, 1, 00, 00, 00, 00, time.UTC),
+}
+
 // VerifyLicense is a wrapper for GetLicenseRequest() that verifies the requested feature is defined
 // in a valid license file installed to this mgmtd service. It returns simplified license details
 // similar to runLicenseCmd() but in a format suitable for logging. If the license is not valid or
@@ -91,6 +98,13 @@ func (m *Mgmtd) VerifyLicense(ctx context.Context, requestedFeature string) ([]z
 		}
 	}
 	if !featureLicensed {
+		if featureIntroduced, ok := grandfatheredFeatures[requestedFeature]; ok {
+			if license.Data.ValidFrom.AsTime().Before(featureIntroduced) {
+				licenseDetail = append(licenseDetail, zap.Any("grandfatheredFeature", requestedFeature))
+				os.Setenv("BEEGFS_LICENSED_FEATURE", requestedFeature)
+				return licenseDetail, nil
+			}
+		}
 		return licenseDetail, fmt.Errorf("the provided license does not include %s (licensed features: %+v)", requestedFeature, license.Data.DnsNames)
 	}
 	return licenseDetail, nil
