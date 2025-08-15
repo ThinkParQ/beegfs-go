@@ -814,6 +814,9 @@ func chunkRebalanceMigrate(ctx context.Context, entry *GetEntryCombinedInfo, idT
 		DestinationIDs: destIDs,
 		EntryInfo:      entry.Entry.origEntryInfoMsg,
 		RelativePath:   []byte(entry.Entry.Verbose.ChunkPath),
+		FileEvent: &msg.FileEvent{
+			Path: []byte(entry.Path),
+		},
 	}
 	resp := &msg.StartChunkBalanceRespMsg{}
 
