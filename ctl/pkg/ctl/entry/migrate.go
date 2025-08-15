@@ -429,7 +429,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		// If the entry is already in the map a migration was recently started for it.
 		if !added {
 			result.Status = MigrateNotNeeded
-			result.Message = fmt.Sprintf("entry already processed through a different path")
+			result.Message = "entry already processed through a different path"
 			return result, nil
 		}
 		// If we haven't recently encountered this entry, check if migration is required.
@@ -439,7 +439,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(ctx, entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
 	if err != nil {
 		if errors.Is(err, ErrEntryHasNoTargets) {
-			result.StartingIDs = fmt.Sprintf("(unavailable)")
+			result.StartingIDs = "(unavailable)"
 			result.Status = MigrateNotNeeded
 			result.Message = fmt.Sprintf("a migration appears to already be in progress: %s", err)
 		} else {
