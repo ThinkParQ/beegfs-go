@@ -448,12 +448,14 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 
 	var entryInfoMsg msg.EntryInfo
 	var ownerNode beegfs.Node
+	var getLockedInfoCalled bool
 
 	if !IsFileLocked(lockedInfo) {
 		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
+		getLockedInfoCalled = true
 		cfg.SetLockedInfo(lockedInfo)
 		sync.SetLockedInfo(lockedInfo)
 	}
@@ -464,6 +466,13 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		if status != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, status.Message)
 			return
+		}
+
+		if !getLockedInfoCalled {
+			if entryInfoMsg, ownerNode, err = entry.GetEntryAndOwnerFromPath(ctx, nil, cfg.Path); err != nil {
+				err = fmt.Errorf("failed to get entry info: %w", err)
+				return
+			}
 		}
 
 		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {

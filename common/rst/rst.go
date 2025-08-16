@@ -432,12 +432,6 @@ func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo m
 	err := entry.SetFileRstIds(ctx, entryInfo, ownerNode, path, rstIds)
 
 	if err != nil {
-		// If the file doesn't exist (e.g., during a pull), it's not an error.
-		// The update will be attempted again by the worker after the file is created.
-		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
-			return nil
-		}
-		// For other errors, we wrap and return them.
 		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
 	}
 
