@@ -458,9 +458,6 @@ func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo m
 //
 // It is the responsibility of the caller to ensure lockedInfo is populated when the file exists. If
 // the file does not exist, it will be created and cfg.LockedInfo will be updated.
-//
-// The store and mappings can be nil but if they're needed they will be retrieved.
-// func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (err error) {
 func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (err error) {
 	lockedInfo := cfg.LockedInfo
 
