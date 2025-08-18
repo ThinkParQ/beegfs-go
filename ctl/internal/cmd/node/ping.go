@@ -17,10 +17,10 @@ import (
 
 // Creates new "ping" command
 func newPingCmd() *cobra.Command {
-	cfg := node.PingConfig{NodeType: beegfs.InvalidNodeType, NodeIDs: []beegfs.EntityId{}}
+	cfg := node.PingConfig{NodeIDs: []beegfs.EntityId{}}
 
 	cmd := &cobra.Command{
-		Use:   "ping [nodeType | [node [node ...]]]",
+		Use:   "ping [(node|nodeType) ...]",
 		Short: "Ping BeeGFS nodes through the client module",
 		Long: fmt.Sprintf(`Ping uses a mounted BeeGFS client to ping nodes that are part of the BeeGFS
 instance managed by the configured mgmtd.
@@ -28,10 +28,10 @@ instance managed by the configured mgmtd.
 If no mount point is supplied, the first mount point for the configured BeeGFS
 instance is used automatically.
 
-Accepted positional arguments are either a single node type (all nodes of that
-type are pinged) or one or multiple individual node aliases or IDs (only nodes
-that match are pinged). If no positional arguments are passe, all nodes known
-to the configured mgmtd will be pinged.
+Accepted positional arguments can be a mix of individual node aliases/IDs or
+node types. If no positional arguments are passed, all nodes known to the
+configured mgmtd will be pinged. Only nodes that match will be pinged and any
+duplicates will be ignored.
 
 Optionally, the ping count (-c/--count) for each node and the interval
 (-i/--interval) between individual pings can be supplied. In most cases
@@ -64,21 +64,33 @@ func runPingCmd(cmd *cobra.Command, cfg node.PingConfig) error {
 	}
 
 	if cmd.Flags().NArg() > 0 {
-		nodeType := beegfs.NodeTypeFromString(cmd.Flags().Arg(0))
-		if cmd.Flags().NArg() > 1 || nodeType == beegfs.InvalidNodeType {
-			// Multiple arguments were provided or nodeType was not valid so assume nodes.
+		var nodeNames []string
+		addedNodes := make(map[string]struct{}, cmd.Flags().NArg())
+		for _, node := range cmd.Flags().Args() {
+			if _, exists := addedNodes[node]; !exists {
+				nodeType := beegfs.NodeTypeFromString(node)
+				if nodeType != beegfs.InvalidNodeType {
+					cfg.NodeTypes = append(cfg.NodeTypes, nodeType)
+				} else {
+					nodeNames = append(nodeNames, node)
+				}
+				addedNodes[node] = struct{}{}
+			}
+		}
+
+		if len(nodeNames) > 0 {
 			idParser := beegfs.NewEntityIdSliceParser(16, beegfs.Management, beegfs.Meta, beegfs.Storage)
+
 			var err error
-			cfg.NodeIDs, err = idParser.Parse(strings.Join(cmd.Flags().Args(), ","))
-			if err != nil {
+			if cfg.NodeIDs, err = idParser.Parse(strings.Join(nodeNames, ",")); err != nil {
 				return fmt.Errorf("unable to parse args: %w", err)
 			}
+
 			log.Debug("Parsed nodeIDs:", zap.Any("nodeIDs", cfg.NodeIDs))
-			if len(cfg.NodeIDs) == 0 {
-				return fmt.Errorf("node list empty after parsing")
+			if len(cfg.NodeIDs) != len(nodeNames) {
+				return fmt.Errorf("invalid node or node type! Check node list and try again")
 			}
-		} else {
-			cfg.NodeType = nodeType
+
 		}
 	}
 
