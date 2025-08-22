@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/benchmark"
@@ -105,6 +106,11 @@ func newStatusCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchCo
 		Short: "Print the status and results from a benchmark.",
 		Long:  `Print the status and results from the current/last benchmark for the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(backendCfg.TargetIDs) == 0 && len(backendCfg.StorageNodes) == 0 {
+				cmdfmt.Printf("WARNING: Without --targets or --nodes this command shows the most recent result for each storage target.\n" +
+					"Results will be aggregated even if they come from benchmarks run at different times, which can skew averages and totals.\n" +
+					"Use --nodes or --targets to filter results from a specific benchmark run if needed.\n\n")
+			}
 			backendCfg.Action = beegfs.BenchStatus
 			return storageBenchDispatcher(cmd.Context(), frontendCfg, backendCfg)
 		},
