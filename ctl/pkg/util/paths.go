@@ -327,7 +327,11 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 		}
 	}
 	if filter != nil {
-		info, err := client.Lstat(path)
+		inMountPath, err := client.GetRelativePathWithinMount(path)
+		if err != nil {
+			return nil, fmt.Errorf("unable to filter files: %w", err)
+		}
+		info, err := client.Lstat(inMountPath)
 		if err != nil {
 			return client, fmt.Errorf("unable to filter files: %w", err)
 		}
