@@ -47,6 +47,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
 				return errors.New("--update requires a valid --remote-target to be specified")
 			}
+			if backendCfg.Priority < 1 || backendCfg.Priority > 5 {
+				return fmt.Errorf("invalid priority! Priority must be between 1 and 5")
+			}
+			backendCfg.Priority--
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,6 +59,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 		},
 	}
 	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Int32Var(&backendCfg.Priority, "priority", 3, "Job priority level (1-5; 1=lowest, 5=highest)")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
@@ -68,7 +73,7 @@ func newPullCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
 		Download: true,
-		Update: new(bool),
+		Update:   new(bool),
 	}
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
@@ -80,6 +85,10 @@ func newPullCmd() *cobra.Command {
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
 				return errors.New("--update requires a valid --remote-target to be specified")
 			}
+			if backendCfg.Priority < 1 || backendCfg.Priority > 5 {
+				return fmt.Errorf("invalid priority! Priority must be between 1 and 5")
+			}
+			backendCfg.Priority--
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -93,6 +102,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")
 	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
+	cmd.Flags().Int32Var(&backendCfg.Priority, "priority", 3, "Job priority level (1-5; 1=lowest, 5=highest)")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")

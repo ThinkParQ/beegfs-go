@@ -201,12 +201,17 @@ func NewMapStore[T any](opts badger.Options, msOpts ...mapStoreOpt) (*MapStore[T
 	}, closeFunc, nil
 }
 
-func (s *MapStore[T]) generateNextPK() (string, error) {
+// GenerateNextPK returns a unique, monotonically increasing primary key (PK) is automatically generated. These generated
+// keys are guaranteed to be unique and sorted in byte-wise lexicographical order. While gaps in the key sequence may
+// occur due to crashes (depending on the WithPKBandwidth settings), the uniqueness and ordering of keys are preserved.
+//
+// Be aware that GenerateNextPK() is used by CreateAndLockEntry() when no key is provided.
+func (s *MapStore[T]) GenerateNextPK() (string, error) {
 	seq, err := s.pkSeqGenerator.Next()
 	if err != nil {
 		return "", fmt.Errorf("unable to generate next PK sequence: %w", err)
 	}
-	return fmt.Sprintf("%0*s", s.config.pkSeqWidth, strconv.FormatInt(int64(seq), s.config.pkSeqBase)), nil
+	return fmt.Sprintf("%0*s", s.config.pkSeqWidth, strconv.FormatUint(seq, s.config.pkSeqBase)), nil
 }
 
 type createAndLockEntryConfig struct {
@@ -253,7 +258,7 @@ func (s *MapStore[T]) CreateAndLockEntry(key string, opts ...createAndLockEntryO
 	}
 
 	if key == "" {
-		generatedKey, err := s.generateNextPK()
+		generatedKey, err := s.GenerateNextPK()
 		if err != nil {
 			return key, nil, nil, err
 		}
@@ -356,6 +361,7 @@ func (s *MapStore[T]) DeleteEntry(key string) error {
 type getEntriesConfig struct {
 	keyPrefix    string
 	startFromKey string
+	stopKey      string
 	prefetchSize int
 }
 type getEntriesOpt func(*getEntriesConfig)
@@ -374,6 +380,15 @@ func WithKeyPrefix(s string) getEntriesOpt {
 func WithStartingKey(s string) getEntriesOpt {
 	return func(cfg *getEntriesConfig) {
 		cfg.startFromKey = s
+	}
+}
+
+// Including the WithStopKey option forces GetEntries to stop at this key. Otherwise, it continues
+// until there are no more keys available. This is useful for defining ranges for different purposes
+// such as priorities and/or queues.
+func WithStopKey(s string) getEntriesOpt {
+	return func(cfg *getEntriesConfig) {
+		cfg.stopKey = s
 	}
 }
 
@@ -415,6 +430,7 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 	cfg := &getEntriesConfig{
 		keyPrefix:    "",
 		startFromKey: "",
+		stopKey:      "",
 		prefetchSize: 100,
 	}
 
@@ -478,14 +494,18 @@ func (s *MapStore[T]) GetEntries(opts ...getEntriesOpt) (func() (*BadgerItem[T],
 			}
 		}
 
+		item := it.Item()
+		entryKey := string(item.Key())
+		if cfg.stopKey != "" && entryKey >= cfg.stopKey {
+			return nil, nil
+		}
+
 		nextResult := &BadgerItem[T]{
-			Key:   "",
+			Key:   entryKey,
 			Entry: &badgerEntry[T]{},
 		}
 
-		item := it.Item()
 		err := item.Value(func(encodedEntry []byte) error {
-			nextResult.Key = string(item.Key())
 			if err := nextResult.Entry.updateWithEncodedEntry(encodedEntry); err != nil {
 				return fmt.Errorf("error decoding entry: %w", err)
 			}
