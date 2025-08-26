@@ -11,7 +11,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.8.1
 	github.com/dgraph-io/badger/v4 v4.7.0
 	github.com/dsnet/golib/unitconv v1.0.2
-	github.com/go-viper/mapstructure/v2 v2.3.0
+	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
 	github.com/jedib0t/go-pretty/v6 v6.6.7
 	github.com/mitchellh/go-wordwrap v1.0.1
