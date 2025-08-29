@@ -220,11 +220,7 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 			return nil, nil, fmt.Errorf("unable to map source node %s to an actual node: %w", node, err)
 		}
 		for _, tgt := range targets {
-			t, err := mappings.TargetToEntityIdSet.Get(tgt)
-			if err != nil {
-				return nil, nil, fmt.Errorf("unable to map source target %s from node %s to an actual target: %w", tgt, node, err)
-			}
-			migration.srcTargets[uint16(t.LegacyId.NumId)] = struct{}{}
+			migration.srcTargets[uint16(tgt.LegacyId.NumId)] = struct{}{}
 		}
 	}
 

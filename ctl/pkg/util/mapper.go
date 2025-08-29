@@ -240,6 +240,26 @@ func (m *Mapper[T]) Get(id beegfs.EntityId) (t T, err error) {
 		if !ok {
 			return t, fmt.Errorf("%w: %s", ErrMapperNotFound, v.String())
 		}
+	case beegfs.EntityIdSet:
+		if v.Uid != 0 {
+			t, ok = m.byUID[v.Uid]
+			if !ok {
+				return t, fmt.Errorf("%w: %s", ErrMapperNotFound, v.String())
+			}
+		} else if v.LegacyId.NumId != 0 && v.LegacyId.NodeType != beegfs.InvalidNodeType {
+			t, ok = m.byLegacyID[v.LegacyId]
+			if !ok {
+				return t, fmt.Errorf("%w: %s", ErrMapperNotFound, v.String())
+			}
+		} else if v.Alias != "" {
+			t, ok = m.byAlias[v.Alias]
+			if !ok {
+				return t, fmt.Errorf("%w: %s", ErrMapperNotFound, v.String())
+			}
+		} else {
+			return t, fmt.Errorf("invalid entity ID")
+		}
+		return t, nil
 	default:
 		return t, fmt.Errorf("invalid entity ID")
 	}

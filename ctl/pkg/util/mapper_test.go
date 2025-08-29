@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 )
 
 func TestMapperLen(t *testing.T) {
@@ -136,4 +137,109 @@ func TestUpdateCachedMappingsInBackground_NoUpdateWhenAlreadyActive(t *testing.T
 
 	// Verify GetMappings is never called though cachedMappingsUpdateDelaySec has been exceeded
 	GetCachedMappings(context.Background(), false)
+}
+
+func TestGetMappingsForEntityIDSet(t *testing.T) {
+
+	storage01 := beegfs.EntityIdSet{
+		Uid: 1,
+		LegacyId: beegfs.LegacyId{
+			NumId:    1,
+			NodeType: beegfs.Storage,
+		},
+		Alias: "storage_1",
+	}
+	meta01 := beegfs.EntityIdSet{
+		Uid: 2,
+		LegacyId: beegfs.LegacyId{
+			NumId:    1,
+			NodeType: beegfs.Meta,
+		},
+		Alias: "meta_1",
+	}
+	sTarget101 := beegfs.EntityIdSet{
+		Uid: 1001,
+		LegacyId: beegfs.LegacyId{
+			NumId:    101,
+			NodeType: beegfs.Storage,
+		},
+		Alias: "target_storage_101",
+	}
+
+	sTarget102 := beegfs.EntityIdSet{
+		Uid: 1002,
+		LegacyId: beegfs.LegacyId{
+			NumId:    102,
+			NodeType: beegfs.Storage,
+		},
+		Alias: "target_storage_102",
+	}
+
+	mTarget101 := beegfs.EntityIdSet{
+		Uid: 1003,
+		LegacyId: beegfs.LegacyId{
+			NumId:    101,
+			NodeType: beegfs.Meta,
+		},
+		Alias: "target_meta_101",
+	}
+
+	mappings := &Mappings{
+		TargetToNode: MapTargetToNode([]target.GetTargets_Result{
+			{
+				Node:   storage01,
+				Target: sTarget101,
+			},
+			{
+				Node:   storage01,
+				Target: sTarget102,
+			},
+			{
+				Node:   meta01,
+				Target: mTarget101,
+			},
+		}),
+	}
+
+	tests := []struct {
+		name      string
+		forTarget beegfs.EntityIdSet
+		wantNode  beegfs.EntityIdSet
+	}{
+		{
+			name: "fetch storage by uid",
+			forTarget: beegfs.EntityIdSet{
+				Uid: beegfs.Uid(1001),
+			},
+			wantNode: storage01,
+		},
+		{
+			name: "fetch meta02 by legacy ID",
+			forTarget: beegfs.EntityIdSet{
+				LegacyId: beegfs.LegacyId{
+					NodeType: beegfs.Meta,
+					NumId:    101,
+				},
+			},
+			wantNode: meta01,
+		},
+		{
+			name: "fetch storage02 by alias",
+			forTarget: beegfs.EntityIdSet{
+				Alias: "target_storage_102",
+			},
+			wantNode: storage01,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			n, err := mappings.TargetToNode.Get(test.forTarget)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantNode, n)
+		})
+	}
+
+	_, err := mappings.TargetToNode.Get(beegfs.EntityIdSet{})
+	assert.Error(t, err)
 }

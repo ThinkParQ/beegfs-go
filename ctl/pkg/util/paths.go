@@ -326,11 +326,13 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 			}
 		}
 	}
+
+	inMountPath, err := client.GetRelativePathWithinMount(path)
+	if err != nil {
+		return client, err
+	}
+
 	if filter != nil {
-		inMountPath, err := client.GetRelativePathWithinMount(path)
-		if err != nil {
-			return nil, fmt.Errorf("unable to filter files: %w", err)
-		}
 		info, err := client.Lstat(inMountPath)
 		if err != nil {
 			return client, fmt.Errorf("unable to filter files: %w", err)
@@ -339,18 +341,13 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 		if !ok {
 			return client, fmt.Errorf("unable to retrieve stat information: unsupported platform")
 		}
-		keep, err := filter(statToFileInfo(path, statT))
+		keep, err := filter(statToFileInfo(inMountPath, statT))
 		if err != nil {
 			return client, fmt.Errorf("unable to apply filter: %w", err)
 		}
 		if !keep {
 			return client, nil
 		}
-	}
-
-	inMountPath, err := client.GetRelativePathWithinMount(path)
-	if err != nil {
-		return client, err
 	}
 
 	select {
