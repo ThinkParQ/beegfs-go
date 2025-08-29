@@ -363,7 +363,7 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 		if abort {
 			// When aborting there is no reason to check the mtime below and it may not have
 			// been set correctly anyway given the error check is skipped above.
-			return r.abortUpload(ctx, job.ExternalId, request.Path)
+			return r.abortUpload(ctx, job.ExternalId, sync.RemotePath)
 		} else {
 			// TODO: https://github.com/thinkparq/gobee/issues/29
 			// There could be lots of parts. Look for ways to optimize this. Like if we could
@@ -378,7 +378,7 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 			}
 			// If there was an error finishing the upload we should return that and not worry
 			// about checking if the file was modified.
-			if err := r.finishUpload(ctx, job.ExternalId, request.Path, partsToFinish); err != nil {
+			if err := r.finishUpload(ctx, job.ExternalId, sync.RemotePath, partsToFinish); err != nil {
 				return err
 			}
 		}
@@ -527,11 +527,11 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 	return *resp.ContentLength, mtime, nil
 }
 
-func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time) (uploadID string, err error) {
+func (r *S3Client) createUpload(ctx context.Context, remotePath string, mtime time.Time) (uploadID string, err error) {
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(r.config.GetS3().Bucket),
-		Key:      aws.String(path),
+		Key:      aws.String(remotePath),
 		Metadata: map[string]string{"beegfs-mtime": mtime.Format(time.RFC3339)},
 	}
 
@@ -542,11 +542,11 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	return *result.UploadId, nil
 }
 
-func (r *S3Client) abortUpload(ctx context.Context, uploadID string, path string) error {
+func (r *S3Client) abortUpload(ctx context.Context, uploadID string, remotePath string) error {
 	abortMultipartUploadInput := &s3.AbortMultipartUploadInput{
 		UploadId: aws.String(uploadID),
 		Bucket:   aws.String(r.config.GetS3().Bucket),
-		Key:      aws.String(path),
+		Key:      aws.String(remotePath),
 	}
 
 	_, err := r.client.AbortMultipartUpload(ctx, abortMultipartUploadInput)
@@ -554,7 +554,7 @@ func (r *S3Client) abortUpload(ctx context.Context, uploadID string, path string
 }
 
 // finishUpload will automatically sort parts by number if they are not already in order.
-func (r *S3Client) finishUpload(ctx context.Context, uploadID string, path string, parts []*flex.Work_Part) error {
+func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath string, parts []*flex.Work_Part) error {
 
 	completedParts := make([]types.CompletedPart, len(parts))
 	for i, part := range parts {
@@ -571,7 +571,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, path strin
 
 	completeMultipartUploadInput := &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(r.config.GetS3().Bucket),
-		Key:      aws.String(path),
+		Key:      aws.String(remotePath),
 		UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{
 			Parts: completedParts,

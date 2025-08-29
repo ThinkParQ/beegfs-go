@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -152,6 +153,9 @@ func InitLoggerFromExternal(logUsing *zap.Logger) error {
 // GlobalConfig is used with InitViperFromExternal when the CTL backend is consumed as a library.
 // While not all global configuration is applicable in this mode, it and InitViperFromExternal()
 // should be kept in sync with any global configuration needed to use CTL as a library.
+//
+// If this evolves to include slices/maps/pointers where order/identity matters the method to
+// determine if the config has changed (reflect.DeepEqual) in InitViperFromExternal must be updated.
 type GlobalConfig struct {
 	Mount                       string
 	MgmtdAddress                string
@@ -167,6 +171,7 @@ type GlobalConfig struct {
 }
 
 var alreadyInitViperFromExt bool
+var globalCfg GlobalConfig
 var ErrViperAlreadyInit = errors.New("reinitializing ctl config is not currently supported")
 
 // InitViperFromExternal is used when the CTL backend is consumed as a library by applications other
@@ -184,7 +189,10 @@ var ErrViperAlreadyInit = errors.New("reinitializing ctl config is not currently
 // logging is configured at app startup and the rest of CTL config is set dynamically later on.
 func InitViperFromExternal(cfg GlobalConfig) error {
 	if alreadyInitViperFromExt {
-		return ErrViperAlreadyInit
+		if !reflect.DeepEqual(cfg, globalCfg) {
+			return ErrViperAlreadyInit
+		}
+		return nil
 	}
 	if cfg.NumWorkers < 1 {
 		cfg.NumWorkers = runtime.GOMAXPROCS(0)
@@ -216,6 +224,7 @@ func InitViperFromExternal(cfg GlobalConfig) error {
 		viper.BindPFlag(flag.Name, flag)
 	})
 	alreadyInitViperFromExt = true
+	globalCfg = cfg
 	return nil
 }
 
