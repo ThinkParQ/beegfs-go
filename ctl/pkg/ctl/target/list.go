@@ -12,7 +12,7 @@ import (
 type GetTargets_Result struct {
 	Target            beegfs.EntityIdSet
 	NodeType          beegfs.NodeType
-	Node              beegfs.EntityIdSet
+	Node              *beegfs.EntityIdSet
 	StoragePool       *beegfs.EntityIdSet
 	ReachabilityState string
 	ConsistencyState  string
@@ -89,9 +89,13 @@ func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
 			return nil, err
 		}
 
-		node, err := beegfs.EntityIdSetFromProto(t.Node)
-		if err != nil {
-			return nil, err
+		var node *beegfs.EntityIdSet = nil
+		if t.HasNode() {
+			n, err := beegfs.EntityIdSetFromProto(t.Node)
+			if err != nil {
+				return nil, err
+			}
+			node = &n
 		}
 
 		r := GetTargets_Result{
