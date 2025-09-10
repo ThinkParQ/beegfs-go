@@ -105,9 +105,12 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 			}
 		} // Otherwise nil (aka don't filter by pool).
 
-		node := t.Node.LegacyId.String()
-		if viper.GetBool(config.DebugKey) {
-			node = t.Node.String()
+		node := "<unmapped>"
+		if t.Node != nil {
+			node = t.Node.LegacyId.String()
+			if viper.GetBool(config.DebugKey) {
+				node = t.Node.String()
+			}
 		}
 
 		pool := "(n/a)"

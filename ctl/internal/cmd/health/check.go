@@ -187,7 +187,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	if err != nil {
 		return err
 	}
-	reachabilityStatus, consistencyStatus, capacityStatus := checkTargets(targets)
+	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
 
 	if reachabilityStatus != Healthy {
 		fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> Not all targets are responding."))
@@ -202,12 +202,18 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	}
 
 	if capacityStatus != Healthy {
-		fmt.Printf("%s Available Capacity %s\n\n", capacityStatus, hint("-> Not all targets have sufficient free space based on the thresholds defined by the management service's configuration."))
+		fmt.Printf("%s Available Capacity %s\n", capacityStatus, hint("-> Not all targets have sufficient free space based on the thresholds defined by the management service's configuration."))
 	} else {
-		fmt.Printf("%s Available Capacity %s\n\n", capacityStatus, hint("-> All targets have sufficient free space based on the thresholds defined by the management service's configuration."))
+		fmt.Printf("%s Available Capacity %s\n", capacityStatus, hint("-> All targets have sufficient free space based on the thresholds defined by the management service's configuration."))
 	}
 
-	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy
+	if mappingStatus != Healthy {
+		fmt.Printf("%s Mapping Status %s\n\n", mappingStatus, hint("-> Not all targets are mapped to a storage node."))
+	} else {
+		fmt.Printf("%s Mapping Status %s\n\n", mappingStatus, hint("-> All targets are mapped to a storage node."))
+	}
+
+	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy
 	if unhealthyTargets || frontendCfg.printDF {
 		if unhealthyTargets {
 			failedCheck = true
@@ -289,8 +295,8 @@ func checkForFallbacks(client procfs.Client) Status {
 
 // checkTargets() returns the overall reachability, consistency, capacity of all targets and returns
 // each status based on the target in the worst condition.
-func checkTargets(targets []tgtBackend.GetTargets_Result) (Status, Status, Status) {
-	reachability, consistency, capacity := Healthy, Healthy, Healthy
+func checkTargets(targets []tgtBackend.GetTargets_Result) (Status, Status, Status, Status) {
+	reachability, consistency, capacity, mapping := Healthy, Healthy, Healthy, Healthy
 	for _, t := range targets {
 		switch t.ReachabilityState {
 		case tgtBackend.ReachabilityOnline:
@@ -318,8 +324,12 @@ func checkTargets(targets []tgtBackend.GetTargets_Result) (Status, Status, Statu
 		case tgtBackend.CapacityEmergency:
 			capacity.updateStatusIfWorse(Critical)
 		}
+
+		if t.Node == nil {
+			mapping = Degraded
+		}
 	}
-	return reachability, consistency, capacity
+	return reachability, consistency, capacity, mapping
 }
 
 // checkForBusyNodes() checks if any nodes are busy and returns the overall status based on the node
