@@ -25,6 +25,9 @@ func newPushCmd() *cobra.Command {
 	backendCfg := flex.JobRequestCfg{
 		Update: new(bool),
 	}
+
+	var metadata map[string]string
+	var tagging map[string]string
 	cmd := &cobra.Command{
 		Use:   "push <path>",
 		Short: "Upload a file or directory in BeeGFS to a Remote Storage Target",
@@ -47,6 +50,18 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
 				return errors.New("--update requires a valid --remote-target to be specified")
 			}
+
+			if len(tagging) != 0 {
+				for key, value := range tagging {
+					if backendCfg.Tagging == nil {
+						backendCfg.Tagging = new(string)
+						*backendCfg.Tagging = key + "=" + value
+					} else {
+						*backendCfg.Tagging += "&" + key + "=" + value
+					}
+				}
+			}
+			backendCfg.Metadata = metadata
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -61,6 +76,11 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
+	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
+	cmd.Flags().MarkHidden("metadata")
+	cmd.Flags().MarkHidden("tagging")
+
 	return cmd
 }
 
@@ -68,7 +88,7 @@ func newPullCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
 		Download: true,
-		Update: new(bool),
+		Update:   new(bool),
 	}
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",

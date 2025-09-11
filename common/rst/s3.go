@@ -100,6 +100,8 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 				RemotePath: cfg.RemotePath,
 				Flatten:    cfg.Flatten,
 				LockedInfo: cfg.LockedInfo,
+				Metadata:   cfg.Metadata,
+				Tagging:    cfg.Tagging,
 			},
 		},
 		Update: cfg.Update,
@@ -119,6 +121,8 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Force:               request.Force,
 		LockedInfo:          sync.LockedInfo,
 		Update:              request.Update,
+		Metadata:            sync.Metadata,
+		Tagging:             sync.Tagging,
 	}
 }
 
@@ -184,7 +188,7 @@ func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.Wor
 	var err error
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime())
+		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging)
 	case flex.SyncJob_DOWNLOAD:
 		err = r.download(ctx, request.Path, sync.RemotePath, part)
 	}
@@ -300,7 +304,7 @@ func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestC
 	if !cfg.Download {
 		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime())
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging)
 		}
 	}
 	return "", nil
@@ -424,7 +428,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 				start.Format(time.RFC3339), stop.Format(time.RFC3339))
 		}
 
-		// Update the downloaded file's access and modification times so they accurately reflect the beegfs_mtime.
+		// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
 		absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
 		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
 			return fmt.Errorf("failed to update download's mtime: %w", err)
@@ -434,8 +438,8 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
 			entry.SetFileDataState(ctx, request.Path, DataStateNone)
 		}
-
 	}
+
 	return nil
 }
 
@@ -527,12 +531,21 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 	return *resp.ContentLength, mtime, nil
 }
 
-func (r *S3Client) createUpload(ctx context.Context, remotePath string, mtime time.Time) (uploadID string, err error) {
+func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string) (uploadID string, err error) {
+	beegfsMtime := mtime.Format(time.RFC3339)
+	if metadata == nil {
+		metadata = map[string]string{"beegfs-mtime": beegfsMtime}
+	} else if _, ok := metadata["beegfs-mtime"]; ok {
+		return "", fmt.Errorf("'beegfs-mtime' is a reserved metadata key")
+	} else {
+		metadata["beegfs-mtime"] = beegfsMtime
+	}
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(r.config.GetS3().Bucket),
-		Key:      aws.String(remotePath),
-		Metadata: map[string]string{"beegfs-mtime": mtime.Format(time.RFC3339)},
+		Key:      aws.String(path),
+		Metadata: metadata,
+		Tagging:  tagging,
 	}
 
 	result, err := r.client.CreateMultipartUpload(ctx, createMultipartUploadInput)
@@ -589,7 +602,16 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 // honors the provided offset start/stop range and does not check to verify this range covers the
 // entirety of the specified file. If the upload is successful the part will be updated directly
 // with the results (such as the etag), otherwise an error will be returned.
-func (r *S3Client) upload(ctx context.Context, path string, remotePath string, uploadID string, part *flex.Work_Part, mtime time.Time) error {
+func (r *S3Client) upload(
+	ctx context.Context,
+	path string,
+	remotePath string,
+	uploadID string,
+	part *flex.Work_Part,
+	mtime time.Time,
+	metadata map[string]string,
+	tagging *string,
+) error {
 
 	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
 
@@ -611,6 +633,15 @@ func (r *S3Client) upload(ctx context.Context, path string, remotePath string, u
 			return fmt.Errorf("only multi-part uploads can have a part number other than 1 (did you intend to create a multi-part upload first?)")
 		}
 
+		beegfsMtime := mtime.Format(time.RFC3339)
+		if metadata == nil {
+			metadata = map[string]string{"beegfs-mtime": beegfsMtime}
+		} else if _, ok := metadata["beegfs-mtime"]; ok {
+			return fmt.Errorf("'beegfs-mtime' is a reserved metadata key")
+		} else {
+			metadata["beegfs-mtime"] = beegfsMtime
+		}
+
 		resp, err := r.client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:         aws.String(r.config.GetS3().Bucket),
 			Key:            aws.String(remotePath),
@@ -618,7 +649,8 @@ func (r *S3Client) upload(ctx context.Context, path string, remotePath string, u
 			ChecksumSHA256: aws.String(part.ChecksumSha256),
 			// Could a local mtime match and allow for a continue/resume feature...
 			//	- If there was a previous failure and the mtime still match then continue from the last byte write
-			Metadata: map[string]string{"beegfs-mtime": mtime.Format(time.RFC3339)},
+			Metadata: metadata,
+			Tagging:  tagging,
 		})
 
 		if err != nil {
