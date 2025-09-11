@@ -598,7 +598,7 @@ func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
 	}
 
 	var resp = &msg.MakeFileWithPatternResponse{}
-	err = store.RequestTCP(ctx, migration.entry.Entry.MetaOwnerNode.Uid, request, resp)
+	err = store.RequestTCP(ctx, migration.entry.Parent.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
 		return err
 	}
@@ -613,7 +613,7 @@ func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
 		if err != nil {
 			return fmt.Errorf("unable to cleanup temporary migration file from previous migration at %s: %w", tempFile, err)
 		}
-		err = store.RequestTCP(ctx, migration.entry.Entry.MetaOwnerNode.Uid, request, resp)
+		err = store.RequestTCP(ctx, migration.entry.Parent.MetaOwnerNode.Uid, request, resp)
 		if err != nil {
 			return err
 		}
