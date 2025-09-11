@@ -107,7 +107,7 @@ type Provider interface {
 	// It is important for providers to maintain beegfs-mtime which is the file's last modification
 	// time of the prior upload operation. Beegfs-mtime is used in conjunction with the file's size
 	// to determine whether the file is sync.
-	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, err error)
+	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, remoteUserXattr map[string]string, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
 }
@@ -344,7 +344,45 @@ func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 
 // IsFileAlreadySynced returns whether the file is already synced with remote storage target
 func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
+	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime()) && IsFileUserXattrsSynced(lockedInfo)
+}
+
+func IsFileContentSynced(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
+}
+
+// IsFileUserXattrsSynced returns whether the file's user extended attributes match remote's metadata.
+func IsFileUserXattrsSynced(lockedInfo *flex.JobLockedInfo) bool {
+	userXattrsIsEmpty := lockedInfo.UserXattrs == nil || len(lockedInfo.UserXattrs) == 0
+	remoteUserXattrsIsEmpty := lockedInfo.RemoteUserXattrs == nil || len(lockedInfo.RemoteUserXattrs) == 0
+	if userXattrsIsEmpty && remoteUserXattrsIsEmpty {
+		return true
+	}
+	if userXattrsIsEmpty != remoteUserXattrsIsEmpty {
+		return false
+	}
+	if len(lockedInfo.UserXattrs) != len(lockedInfo.RemoteUserXattrs) {
+		return false
+	}
+
+	for key, value := range lockedInfo.UserXattrs {
+		key_found := false
+		for remote_key, remote_value := range lockedInfo.RemoteUserXattrs {
+			if key == remote_key {
+				key_found = true
+				if value != remote_value {
+					return false
+				}
+				break
+			}
+		}
+
+		if !key_found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // IsFileSizeMatched returns whether the lockedInfo local and remote file sizes match. It is the
@@ -424,12 +462,13 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		}
 	}
 
-	remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, cfg)
+	remoteSize, remoteMtime, remoteUserXattrs, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+	lockedInfo.SetRemoteUserXattrs(remoteUserXattrs)
 
 	return client.GetJobRequest(cfg)
 }
@@ -464,6 +503,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	fileDataStateCleared := false
 	filePreallocated := false
 	fileCreated := false
+	fileUserXattrChanged := false
 	defer func() {
 		if err != nil {
 			if IsFileOffloaded(lockedInfo) {
@@ -477,6 +517,12 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 					rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath)
 					if restoreErr := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, true); restoreErr != nil {
 						err = fmt.Errorf("%w: unable to restore stub file rst url: %s", err, restoreErr.Error())
+					}
+				}
+				if fileUserXattrChanged {
+					// Attempt to roll back the changed user extended attributes.
+					if restoreErr := mountPoint.SetUserXattrs(cfg.Path, lockedInfo.UserXattrs); restoreErr != nil {
+						err = fmt.Errorf("%w: unable to restore user's extended attributes: %s", err, restoreErr.Error())
 					}
 				}
 			} else if fileCreated {
@@ -511,6 +557,13 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			if err != nil {
 				return
 			}
+
+			if cfg.EnableXattr != nil && *cfg.EnableXattr {
+				if err = mountPoint.SetUserXattrs(cfg.Path, lockedInfo.RemoteUserXattrs); err != nil {
+					return
+				}
+			}
+
 			lockedInfo.SetReadWriteLocked(true)
 
 			return updateRstCfg(ErrJobAlreadyOffloaded)
@@ -559,6 +612,14 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 				}
 				filePreallocated = true
 			}
+
+			if cfg.EnableXattr != nil && *cfg.EnableXattr && !IsFileUserXattrsSynced(cfg.LockedInfo) {
+				if err = mountPoint.SetUserXattrs(cfg.Path, lockedInfo.RemoteUserXattrs); err != nil {
+					return
+				}
+				fileUserXattrChanged = true
+			}
+
 		} else if IsFileOffloaded(lockedInfo) {
 			err = fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
 			return
@@ -570,6 +631,13 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		}
 		fileCreated = true
 		filePreallocated = true
+
+		if cfg.EnableXattr != nil && *cfg.EnableXattr {
+			if err = mountPoint.SetUserXattrs(cfg.Path, lockedInfo.RemoteUserXattrs); err != nil {
+				return
+			}
+		}
+		fileUserXattrChanged = true
 
 		var info *flex.JobLockedInfo
 		if info, _, _, entryInfo, ownerNode, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path, false); err != nil {
@@ -658,6 +726,15 @@ func GetLockedInfo(
 	lockedInfo.Size = stat.Size()
 	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	lockedInfo.Mode = uint32(stat.Mode())
+
+	if cfg.EnableXattr != nil && *cfg.EnableXattr {
+		var xattrs map[string]string
+		xattrs, err = mountPoint.GetUserXattrs(inMountPath)
+		if err != nil {
+			return
+		}
+		lockedInfo.SetUserXattrs(xattrs)
+	}
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {

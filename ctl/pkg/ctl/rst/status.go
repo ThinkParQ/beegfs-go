@@ -38,6 +38,8 @@ type GetStatusCfg struct {
 	// Usually set based on viper.GetBool(config.DebugKey). This is passed in using the GetStatusCfg
 	// to avoid an expensive call to Viper for every path.
 	Debug bool
+	// Verify user extended attributes
+	EnableXattr bool
 }
 
 type GetStatusResult struct {
@@ -412,7 +414,7 @@ func getPathStatusFromTarget(
 ) (*GetStatusResult, error) {
 	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
 	// from GetLockedInfo.
-	lockedInfo, _, rstIds, _, _, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{}, fsPath, true)
+	lockedInfo, _, rstIds, _, _, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{EnableXattr: &cfg.EnableXattr}, fsPath, true)
 	if len(cfg.RemoteTargets) != 0 {
 		rstIds = cfg.RemoteTargets
 	}
@@ -491,7 +493,11 @@ func getPathStatusFromTarget(
 			continue
 		}
 
-		remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
+		remoteSize, remoteMtime, remoteUserXattrs, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{
+			Path:       fsPath,
+			RemotePath: client.SanitizeRemotePath(fsPath),
+		})
+
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				result.SyncStatus = NotAttempted
@@ -502,12 +508,19 @@ func getPathStatusFromTarget(
 		}
 		lockedInfo.SetRemoteSize(remoteSize)
 		lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+		lockedInfo.SetRemoteUserXattrs(remoteUserXattrs)
 
-		if rst.IsFileAlreadySynced(lockedInfo) {
+		contentSynced := rst.IsFileContentSynced(lockedInfo)
+		userXattrsSynced := rst.IsFileUserXattrsSynced(lockedInfo)
+		if contentSynced && userXattrsSynced {
 			syncReason.WriteString(fmt.Sprintf("Target %d: File is synced based on the remote storage target.\n", tgt))
 		} else {
 			result.SyncStatus = Unsynchronized
-			syncReason.WriteString(fmt.Sprintf("Target %d: File is not synced with remote storage target.\n", tgt))
+			if contentSynced && !userXattrsSynced {
+				syncReason.WriteString(fmt.Sprintf("Target %d: File user extended attributes are not synced with remote storage target.\n", tgt))
+			} else {
+				syncReason.WriteString(fmt.Sprintf("Target %d: File is not synced with remote storage target.\n", tgt))
+			}
 		}
 	}
 

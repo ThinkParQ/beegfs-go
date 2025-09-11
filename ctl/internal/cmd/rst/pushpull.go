@@ -23,7 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
-		Update: new(bool),
+		Update:      new(bool),
+		EnableXattr: new(bool),
 	}
 
 	var metadata map[string]string
@@ -78,8 +79,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
+	cmd.Flags().BoolVar(backendCfg.EnableXattr, "with-xattr", false, "Push user defined extended attributes as tags.")
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
+	cmd.Flags().MarkHidden("xattr")
 
 	return cmd
 }
@@ -87,8 +90,9 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 func newPullCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
-		Download: true,
-		Update:   new(bool),
+		Download:    true,
+		Update:      new(bool),
+		EnableXattr: new(bool),
 	}
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
@@ -117,6 +121,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().BoolVar(backendCfg.EnableXattr, "with-xattr", false, "Pull user defined tags as extended attributes.")
 	return cmd
 }
 

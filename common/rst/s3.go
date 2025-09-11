@@ -26,6 +26,8 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 
+	"maps"
+
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -104,7 +106,8 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 				Tagging:    cfg.Tagging,
 			},
 		},
-		Update: cfg.Update,
+		Update:      cfg.Update,
+		EnableXattr: cfg.EnableXattr,
 	}
 }
 
@@ -123,6 +126,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Update:              request.Update,
 		Metadata:            sync.Metadata,
 		Tagging:             sync.Tagging,
+		EnableXattr:         request.EnableXattr,
 	}
 }
 
@@ -188,7 +192,7 @@ func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.Wor
 	var err error
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging)
+		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.LockedInfo.UserXattrs)
 	case flex.SyncJob_DOWNLOAD:
 		err = r.download(ctx, request.Path, sync.RemotePath, part)
 	}
@@ -296,7 +300,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	return walkChan, nil
 }
 
-func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, map[string]string, error) {
 	return r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
 }
 
@@ -304,7 +308,7 @@ func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestC
 	if !cfg.Download {
 		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging)
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.LockedInfo.UserXattrs)
 		}
 	}
 	return "", nil
@@ -412,7 +416,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 
-	_, mtime, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
+	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
 		return fmt.Errorf("unable to verify the remote object has not changed: %w", err)
 	}
@@ -494,12 +498,12 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 }
 
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
-func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, error) {
+func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, map[string]string, error) {
 	if key == "" {
 		if keyMustExist {
-			return 0, time.Time{}, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
+			return 0, time.Time{}, nil, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
 		}
-		return 0, time.Time{}, nil
+		return 0, time.Time{}, nil, nil
 	}
 
 	headObjectInput := &s3.HeadObjectInput{
@@ -512,26 +516,36 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
-				return 0, time.Time{}, os.ErrNotExist
+				return 0, time.Time{}, nil, os.ErrNotExist
 			}
 		}
-		return 0, time.Time{}, err
+		return 0, time.Time{}, nil, err
 	}
 
-	beegfsMtime, ok := resp.Metadata["beegfs-mtime"]
+	xattrs := map[string]string{}
+	var beegfsMtime string
+	var ok bool
+	for key, value := range resp.Metadata {
+		if !ok && key == "beegfs-mtime" {
+			beegfsMtime = value
+			ok = true
+		} else if strings.HasPrefix(key, "user.") {
+			xattrs[key] = value
+		}
+	}
 	if !ok {
-		return *resp.ContentLength, *resp.LastModified, nil
+		return *resp.ContentLength, *resp.LastModified, xattrs, nil
 	}
 
 	mtime, err := time.Parse(time.RFC3339, beegfsMtime)
 	if err != nil {
-		return *resp.ContentLength, *resp.LastModified, fmt.Errorf("unable to parse remote object's beegfs-mtime")
+		return *resp.ContentLength, *resp.LastModified, xattrs, fmt.Errorf("unable to parse remote object's beegfs-mtime")
 	}
 
-	return *resp.ContentLength, mtime, nil
+	return *resp.ContentLength, mtime, xattrs, nil
 }
 
-func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string) (uploadID string, err error) {
+func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string, userXattrs map[string]string) (uploadID string, err error) {
 	beegfsMtime := mtime.Format(time.RFC3339)
 	if metadata == nil {
 		metadata = map[string]string{"beegfs-mtime": beegfsMtime}
@@ -540,6 +554,7 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	} else {
 		metadata["beegfs-mtime"] = beegfsMtime
 	}
+	maps.Copy(metadata, userXattrs)
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(r.config.GetS3().Bucket),
@@ -611,6 +626,7 @@ func (r *S3Client) upload(
 	mtime time.Time,
 	metadata map[string]string,
 	tagging *string,
+	userXattrs map[string]string,
 ) error {
 
 	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
@@ -641,6 +657,7 @@ func (r *S3Client) upload(
 		} else {
 			metadata["beegfs-mtime"] = beegfsMtime
 		}
+		maps.Copy(metadata, userXattrs)
 
 		resp, err := r.client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:         aws.String(r.config.GetS3().Bucket),
