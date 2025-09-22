@@ -130,24 +130,24 @@ func (t *jobsTable) Row(result *beeremote.JobResult) {
 			"",
 		)
 	} else {
-	t.tbl.AddItem(
-		convertJobStateToEmoji(status.GetState()),
-		request.GetPath(),
-		request.GetRemoteStorageTarget(),
-		job.GetCreated().AsTime().Format(time.RFC3339),
-		status.GetUpdated().AsTime().Format(time.RFC3339),
-		job.GetStartMtime().AsTime().Format(time.RFC3339),
-		job.GetStopMtime().AsTime().Format(time.RFC3339),
-		job.GetId(),
-		operation,
-		status.GetState(),
-		wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
-		t.getWorkRequestsForCell(result.GetWorkRequests()),
-		t.getWorkResultsForCell(result.GetWorkResults()),
-		"",
-		// When making updates, also update MinimalRow().
-	)
-}
+		t.tbl.AddItem(
+			convertJobStateToEmoji(status.GetState()),
+			request.GetPath(),
+			request.GetRemoteStorageTarget(),
+			job.GetCreated().AsTime().Format(time.RFC3339),
+			status.GetUpdated().AsTime().Format(time.RFC3339),
+			job.GetStartMtime().AsTime().Format(time.RFC3339),
+			job.GetStopMtime().AsTime().Format(time.RFC3339),
+			job.GetId(),
+			operation,
+			status.GetState(),
+			wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
+			t.getWorkRequestsForCell(result.GetWorkRequests()),
+			t.getWorkResultsForCell(result.GetWorkResults()),
+			"",
+			// When making updates, also update MinimalRow().
+		)
+	}
 }
 
 // MinimalRow() adds a row for a job that could not be created for some reason. This is helpful when
@@ -207,7 +207,7 @@ func (t *jobsTable) getWorkResultsForCell(workResults []*beeremote.JobResult_Wor
 		))
 		if parts := t.getPartsForCell(work.Parts); parts != "" {
 			sb.WriteString(fmt.Sprintf("* part list:%s\n", parts))
-	}
+		}
 	}
 
 	return sb.String()
