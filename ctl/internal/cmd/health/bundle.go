@@ -45,7 +45,7 @@ var supportBundleContents = []supportFile{
 			},
 			{
 				sectionName: "Licensing",
-				command:     []string{"license", "show"},
+				command:     []string{"license"},
 			},
 		},
 	}, {
@@ -60,16 +60,20 @@ var supportBundleContents = []supportFile{
 		name: "nodes.txt",
 		contents: []supportCommand{
 			{
+				sectionName: "Management Nodes",
+				command:     []string{"node", "list", "--reachability-check", "--node-type=mgmtd"},
+			},
+			{
 				sectionName: "Metadata Nodes",
-				command:     []string{"node", "list", "--with-nics", "--reachability-check", "--node-type=meta"},
+				command:     []string{"node", "list", "--reachability-check", "--node-type=meta"},
 			},
 			{
 				sectionName: "Storage Nodes",
-				command:     []string{"node", "list", "--with-nics", "--reachability-check", "--node-type=storage"},
+				command:     []string{"node", "list", "--reachability-check", "--node-type=storage"},
 			},
 			{
 				sectionName: "Clients",
-				command:     []string{"node", "list", "--with-nics", "--reachability-check", "--node-type=storage"},
+				command:     []string{"node", "list", "--reachability-check", "--node-type=client"},
 			},
 		},
 	}, {
