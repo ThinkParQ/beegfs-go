@@ -219,6 +219,10 @@ Jobs for each path are grouped together and sorted by remote target then by when
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().BoolVar(&backendCfg.Recurse, "recurse", false, "Treat the provided path as a prefix and return jobs for all matching paths.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 30, "Set the maximum width of some columns before they overflow.")
+	cmd.Flags().BoolVar(&backendCfg.SearchRemotePath, "search-remote-path", false, "Treat the provide path as a the remote path. Use")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().MarkHidden("search-remote-path")
+	cmd.Flags().MarkHidden("remote-target")
 	return cmd
 }
 

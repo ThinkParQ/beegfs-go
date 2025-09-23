@@ -58,7 +58,7 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 		// types of errors are not put in the status column because (a) that is technically
 		// inaccurate and (b) it would require always displaying the status message column, which
 		// often has overflow and means table rows will span multiple lines more often than needed.
-		defaultJobColumns: []string{"ok", "path", "target", "job updated", "request type", ""},
+		defaultJobColumns: []string{"ok", "path", "remote path", "target", "job updated", "request type", ""},
 		columnWidth:       35,
 		jobDetails:        false,
 	}
@@ -70,10 +70,10 @@ func newJobsTable(opts ...jobTableOpt) jobsTable {
 	// anywhere that has overridden the default columns with withDefaultColumns.
 	//
 	// The full set of fields related to a particular job, not including work requests and results.
-	allJobColumns := []string{"ok", "path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", ""}
+	allJobColumns := []string{"ok", "path", "remote path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", ""}
 	// All fields for this job and its work requests and results. Information for a particular job
 	// will generally need to be printed using multiple rows.
-	allJobAndWorkColumns := []string{"ok", "path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", "work_requests", "work_results", ""}
+	allJobAndWorkColumns := []string{"ok", "path", "remote path", "target", "job_created", "job_updated", "start_file_mtime", "end_file_mtime", "job_id", "request_type", "state", "status_message", "work_requests", "work_results", ""}
 
 	if viper.GetBool(config.DebugKey) {
 		cfg.defaultJobColumns = allJobAndWorkColumns
@@ -97,25 +97,13 @@ func (t *jobsTable) Row(result *beeremote.JobResult) {
 	request := job.GetRequest()
 	status := job.GetStatus()
 
-	var operation string
-	// Must be updated when new job types are supported:
-	if request.HasSync() {
-		syncJob := request.GetSync()
-		operation = syncJob.Operation.String()
-		if syncJob.Operation == flex.SyncJob_UPLOAD && job.Request.StubLocal {
-			operation = "OFFLOAD"
-		}
-	} else if request.HasBuilder() {
-		operation = "JOB BUILDER"
-	} else {
-		// Fallback and print the raw representation for unknown types:
-		operation = fmt.Sprintf("%v", request.GetType())
-	}
-
 	if request.HasBuilder() {
+		builderJob := request.GetBuilder()
+		operation := "JOB BUILDER"
 		t.tbl.AddItem(
 			convertJobStateToEmoji(status.GetState()),
 			request.GetPath(),
+			builderJob.Cfg.GetRemotePath(),
 			"-",
 			job.GetCreated().AsTime().Format(time.RFC3339),
 			status.GetUpdated().AsTime().Format(time.RFC3339),
@@ -128,26 +116,53 @@ func (t *jobsTable) Row(result *beeremote.JobResult) {
 			"-",
 			t.getWorkResultsForCell(result.GetWorkResults()),
 			"",
+			// When making updates, also update MinimalRow().
+		)
+	} else if request.HasSync() {
+		syncJob := request.GetSync()
+		operation := syncJob.Operation.String()
+		if syncJob.Operation == flex.SyncJob_UPLOAD && job.Request.StubLocal {
+			operation = "OFFLOAD"
+		}
+		t.tbl.AddItem(
+			convertJobStateToEmoji(status.GetState()),
+			request.GetPath(),
+			syncJob.GetRemotePath(),
+			request.GetRemoteStorageTarget(),
+			job.GetCreated().AsTime().Format(time.RFC3339),
+			status.GetUpdated().AsTime().Format(time.RFC3339),
+			job.GetStartMtime().AsTime().Format(time.RFC3339),
+			job.GetStopMtime().AsTime().Format(time.RFC3339),
+			job.GetId(),
+			operation,
+			status.GetState(),
+			wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
+			t.getWorkRequestsForCell(result.GetWorkRequests()),
+			t.getWorkResultsForCell(result.GetWorkResults()),
+			"",
+			// When making updates, also update MinimalRow().
 		)
 	} else {
-	t.tbl.AddItem(
-		convertJobStateToEmoji(status.GetState()),
-		request.GetPath(),
-		request.GetRemoteStorageTarget(),
-		job.GetCreated().AsTime().Format(time.RFC3339),
-		status.GetUpdated().AsTime().Format(time.RFC3339),
-		job.GetStartMtime().AsTime().Format(time.RFC3339),
-		job.GetStopMtime().AsTime().Format(time.RFC3339),
-		job.GetId(),
-		operation,
-		status.GetState(),
-		wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
-		t.getWorkRequestsForCell(result.GetWorkRequests()),
-		t.getWorkResultsForCell(result.GetWorkResults()),
-		"",
-		// When making updates, also update MinimalRow().
-	)
-}
+		operation := fmt.Sprintf("%v", request.GetType())
+		t.tbl.AddItem(
+			convertJobStateToEmoji(status.GetState()),
+			request.GetPath(),
+			"",
+			request.GetRemoteStorageTarget(),
+			job.GetCreated().AsTime().Format(time.RFC3339),
+			status.GetUpdated().AsTime().Format(time.RFC3339),
+			job.GetStartMtime().AsTime().Format(time.RFC3339),
+			job.GetStopMtime().AsTime().Format(time.RFC3339),
+			job.GetId(),
+			operation,
+			status.GetState(),
+			wrapTextAtWidth(status.GetMessage(), t.wrappingWidth),
+			t.getWorkRequestsForCell(result.GetWorkRequests()),
+			t.getWorkResultsForCell(result.GetWorkResults()),
+			"",
+			// When making updates, also update MinimalRow().
+		)
+	}
 }
 
 // MinimalRow() adds a row for a job that could not be created for some reason. This is helpful when
@@ -157,6 +172,7 @@ func (t *jobsTable) MinimalRow(path string, explanation string) {
 	t.tbl.AddItem(
 		convertJobStateToEmoji(beeremote.Job_UNKNOWN),
 		path,
+		"-",
 		"-",
 		"-",
 		"-",
@@ -207,7 +223,7 @@ func (t *jobsTable) getWorkResultsForCell(workResults []*beeremote.JobResult_Wor
 		))
 		if parts := t.getPartsForCell(work.Parts); parts != "" {
 			sb.WriteString(fmt.Sprintf("* part list:%s\n", parts))
-	}
+		}
 	}
 
 	return sb.String()

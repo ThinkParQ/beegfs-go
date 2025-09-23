@@ -3,6 +3,7 @@ package rst
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/spf13/viper"
@@ -17,11 +18,13 @@ import (
 // GetJobsConfig contains all user facing flags needed to generate a
 // beeremote.GetJobsRequest.
 type GetJobsConfig struct {
-	JobID            string
-	Path             string
-	Recurse          bool
-	WithWorkRequests bool
-	WithWorkResults  bool
+	JobID               string
+	Path                string
+	Recurse             bool
+	RemoteStorageTarget uint32
+	SearchRemotePath    bool
+	WithWorkRequests    bool
+	WithWorkResults     bool
 	// Currently exactPath is not exported to only allow this mode to be used from within the rst
 	// package, notably for GetStatus. This is because it might be confusing when a user had a
 	// directory containing files that were uploaded, but then later deleted or renamed the
@@ -70,6 +73,15 @@ func GetJobs(ctx context.Context, cfg GetJobsConfig, respChan chan<- *GetJobsRes
 				JobId: cfg.JobID,
 				Path:  pathInMount,
 			},
+		}
+	case cfg.SearchRemotePath:
+		// TODO: Add grpc and implement beeremote GetJobsRequest ByRemoteExactPath and ByRemotePathPrefix.
+		if cfg.exactPath {
+			return fmt.Errorf("search by exact remote path is currently not implemented")
+		} else if cfg.Recurse {
+			return fmt.Errorf("search recursively by remote path is currently not implemented")
+		} else {
+			return fmt.Errorf("search by exact remote path is currently not implemented")
 		}
 	case cfg.exactPath:
 		request.Query = &beeremote.GetJobsRequest_ByExactPath{ByExactPath: cfg.Path}
