@@ -99,8 +99,9 @@ check-gofmt:
 	@echo "Checking 'go fmt' has been run..."
 	@if [ -n "$$(gofmt -l ./ | grep -v vendor)" ]; then \
 		echo "The following files have not been formatted using gofmt:"; \
+		gofmt -l ./ ;\
 		echo -e "\nFix individual files with: \ngofmt -w <file> \n"\
-		"\nOr fix all files with:\nfind . -type d \( -path './vendor' \) -prune -o -name '*.go' -print0 | xargs -0 gofmt -w \n\n" \
+		"\nOr fix all files with:\nfind . -type d \( -path './vendor' \) -prune -o -name '*.go' -print0 | xargs -0 gofmt -w \n\n" ;\
 		exit 1; \
 	fi
 
