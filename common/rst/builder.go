@@ -117,8 +117,8 @@ func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
 }
 
 // GetRemotePathInfo is not implemented and should never be called.
-func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
-	return 0, time.Time{}, ErrUnsupportedOpForRST
+func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, map[string]string, error) {
+	return 0, time.Time{}, nil, ErrUnsupportedOpForRST
 }
 
 // GenerateExternalId is not implemented and should never be called.

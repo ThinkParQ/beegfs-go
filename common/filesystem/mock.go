@@ -101,6 +101,14 @@ func (fs MockFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) err
 	return fmt.Errorf("not implemented")
 }
 
+func (fs MockFS) GetUserXattrs(path string) (map[string]string, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) SetUserXattrs(path string, userXattrs map[string]string) error {
+	return fmt.Errorf("not implemented")
+}
+
 func (fs MockFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 	return fmt.Errorf("not implemented")
 }

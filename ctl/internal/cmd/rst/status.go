@@ -50,6 +50,9 @@ Specifying Paths:
 			if len(args) < 1 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
 			}
+			if backendCfg.EnableXattr && !backendCfg.VerifyRemote {
+				return fmt.Errorf("unable to verify user extended attributes without --verify-remote flag. Usage: %s", cmd.Use)
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -66,6 +69,7 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
 	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
+	cmd.Flags().BoolVar(&backendCfg.EnableXattr, "verify-xattrs", false, "Verify tags on the remote file are set as user extended attributes on the local file (--verify-remote must be specified).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd
 }

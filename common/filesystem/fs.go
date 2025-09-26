@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pkg/xattr"
 	"golang.org/x/sys/unix"
 )
 
@@ -75,6 +76,10 @@ type Provider interface {
 	// lexicographical order. Note WalkDir may return an absolute path, thus the paths it returns
 	// should be sanitized with GetRelativePathWithinMount() if needed.
 	WalkDir(path string, fn fs.WalkDirFunc, walkOpts ...WalkOption) error
+	// Return all user extended attributes.
+	GetUserXattrs(path string) (map[string]string, error)
+	// Set all user extended attributes.
+	SetUserXattrs(path string, userXattrs map[string]string) error
 	// CopyXAttrsToFile copies the xattrs from srcPath to dstPath. If there are no xattrs or if the BeeGFS
 	// instance does not have user xattrs enabled, no error is returned.
 	CopyXAttrsToFile(srcPath, dstPath string) error
@@ -271,6 +276,40 @@ func (fs BeeGFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption) err
 		return WalkDirLexicographically(root, fn)
 	}
 	return filepath.WalkDir(root, fn)
+}
+
+func (fs BeeGFS) GetUserXattrs(path string) (map[string]string, error) {
+	return fs.getXattrs(path, "user.")
+}
+
+func (fs BeeGFS) SetUserXattrs(path string, userXattrs map[string]string) error {
+	absPath := filepath.Join(fs.MountPoint, path)
+	for key, value := range userXattrs {
+		xattr.Set(absPath, key, []byte(value))
+	}
+	return nil
+}
+
+func (fs BeeGFS) getXattrs(path string, prefix string) (map[string]string, error) {
+	absPath := filepath.Join(fs.MountPoint, path)
+	names, err := xattr.List(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	xattrs := map[string]string{}
+	for _, name := range names {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		value, err := xattr.Get(absPath, name)
+		if err != nil {
+			return nil, err
+		}
+		xattrs[name] = string(value)
+	}
+
+	return xattrs, nil
 }
 
 func (fs BeeGFS) CopyXAttrsToFile(srcPath, dstPath string) error {

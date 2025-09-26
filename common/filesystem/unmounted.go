@@ -69,6 +69,14 @@ func (fs UnmountedFS) WalkDir(path string, fn fs.WalkDirFunc, opts ...WalkOption
 	return ErrUnmounted
 }
 
+func (fs UnmountedFS) GetUserXattrs(path string) (map[string]string, error) {
+	return nil, ErrUnmounted
+}
+
+func (fs UnmountedFS) SetUserXattrs(path string, userXattrs map[string]string) error {
+	return ErrUnmounted
+}
+
 func (fs UnmountedFS) CopyXAttrsToFile(srcPath, dstPath string) error {
 	return ErrUnmounted
 }
