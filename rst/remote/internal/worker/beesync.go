@@ -2,15 +2,19 @@ package worker
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type BeeSyncNode struct {
@@ -50,6 +54,34 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	}
 
 	n.client = flex.NewWorkerNodeClient(n.conn)
+
+	// Verify the remote address is specified. If it's not specified (e.g. 0.0.0.0:9010) then use
+	// a heartbeat rpc call to determine a valid address for the sync node to reach remote.
+	host, port, err := net.SplitHostPort(config.BeeRemote.Address)
+	if err != nil {
+		return false, err
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsUnspecified() {
+		var pr peer.Peer
+		_, err := n.client.Heartbeat(n.nodeCtx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
+		if err != nil {
+			return true, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+		}
+
+		if pr.LocalAddr == nil {
+			return false, fmt.Errorf("failed to determine remote address for sync node")
+		}
+
+		host, _, err = net.SplitHostPort(pr.LocalAddr.String())
+		if err != nil {
+			return false, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+		}
+		config = proto.Clone(config).(*flex.UpdateConfigRequest)
+		remoteAddr := net.JoinHostPort(host, port)
+		n.log.Info("automatically determined address for sync node to communicate with remote", zap.String("remoteAddr", remoteAddr))
+		config.BeeRemote.SetAddress(remoteAddr)
+	}
 
 	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)
 	if err != nil {
