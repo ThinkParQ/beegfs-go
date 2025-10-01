@@ -192,7 +192,7 @@ func TestCreateAndGetEntryAutoGenKey(t *testing.T) {
 	for i := 0; i <= 10; i++ {
 		entry, err := getNext()
 		require.NoError(t, err)
-		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatUint(uint64(i), 36))
 		assert.Equal(t, expectedKey, entry.Key)
 		assert.Equal(t, i, entry.Entry.Value)
 		assert.Equal(t, expectedKey, entry.Key)
@@ -540,7 +540,7 @@ func BenchmarkCreateAndGetEntryAutoGenKey(b *testing.B) {
 	for i := 0; i <= b.N; i++ {
 		entry, err := getNext()
 		require.NoError(b, err)
-		expectedKey := fmt.Sprintf("%013s", strconv.FormatInt(int64(i), 36))
+		expectedKey := fmt.Sprintf("%013s", strconv.FormatUint(uint64(i), 36))
 		assert.Equal(b, expectedKey, entry.Key)
 		assert.Equal(b, i+1, entry.Entry.Value)
 	}
