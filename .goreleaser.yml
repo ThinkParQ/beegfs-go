@@ -191,20 +191,22 @@ nfpms:
       - src: LICENSE.md
         dst: /usr/share/doc/beegfs-watch/LICENSE.md
 
-# TODO (https://github.com/ThinkParQ/bee-watch/issues/31): Add support for building multi-platform
-# (amd64+arm64) images using GitHub Actions.
-dockers:
-  - image_templates: ["ghcr.io/thinkparq/beegfs-watch:{{ .Version }}"]
+dockers_v2:
+  - images:
+      - ghcr.io/thinkparq/beegfs-watch
+    tags:
+      - "{{ .Version }}"
     dockerfile: watch/Dockerfile
-    build_flag_templates:
-      - --label=org.opencontainers.image.title="beegfs-watch"
-      - --label=org.opencontainers.image.description="BeeGFS file system modification event watcher"
-      - --label=org.opencontainers.image.url=https://github.com/ThinkParQ/beegfs-go/pkgs/container/beegfs-watch
-      - --label=org.opencontainers.image.source=https://github.com/thinkparq/beegfs-go
-      - --label=org.opencontainers.image.version={{ .Version }}
-      - --label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}
-      - --label=org.opencontainers.image.revision={{ .FullCommit }}
-      - --label=org.opencontainers.image.licenses=Proprietary
+    labels:
+      org.opencontainers.image.title: "beegfs-watch"
+      org.opencontainers.image.description: "BeeGFS file system modification event watcher"
+      org.opencontainers.image.url: "https://github.com/ThinkParQ/beegfs-go/pkgs/container/beegfs-watch"
+      org.opencontainers.image.source: "https://github.com/thinkparq/beegfs-go"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.created: '{{ time "2006-01-02T15:04:05Z07:00" }}'
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "Proprietary"
+
 
 changelog:
   sort: asc
