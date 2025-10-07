@@ -56,7 +56,7 @@ func (m *Mgmtd) GetAuthSecretBytes() []byte {
 // available by default in all licenses certificates but won't appear explicitly in license
 // certificates generated before a certain point in time.
 var grandfatheredFeatures map[string]time.Time = map[string]time.Time{
-	"io.beegfs.rebalancing": time.Date(2025, 10, 1, 00, 00, 00, 00, time.UTC),
+	"io.beegfs.rebalancing": time.Date(2025, 11, 1, 00, 00, 00, 00, time.UTC),
 }
 
 // VerifyLicense is a wrapper for GetLicenseRequest() that verifies the requested feature is defined
