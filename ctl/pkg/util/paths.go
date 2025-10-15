@@ -37,13 +37,18 @@ type FileInfo struct {
 }
 
 var (
-	octRe    = regexp.MustCompile(`\b0?[0-7]{3}\b`)
-	timeRe   = regexp.MustCompile(`\b(?i)(mtime|atime|ctime)\s*(<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)?[smhdMyw]+)\b`)
-	sizeRe   = regexp.MustCompile(`\b(?i)(size)\s*(<=|>=|<|>|!=|=)\s*([0-9]+(?:\.[0-9]+)?(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB))\b`)
-	globRe   = regexp.MustCompile(`\b(?i)(name|path)\s*=~\s*"([^"\*\?]*[\*\?][^"\*\?]*)"`)
-	regexRe  = regexp.MustCompile(`\b(?i)(name|path)\s*=~\s*"([^"\*\?][^"\*\?]*)"`)
-	identRe  = regexp.MustCompile(`\b(?i)(mtime|atime|ctime|size|name|uid|gid|path|mode|perm)\b`)
-	fieldMap = map[string]string{
+	// modeOctRe insists on a leading 0 with 5-6 octal digits. This targets classic stat-style
+	// literals like 0100644 without touching plain decimal values like 33188. The rewrite is scoped
+	// to mode to avoid clobbering other fields that might also match.
+	modeOctRe = regexp.MustCompile(`\b(?i)(mode)\s*(==|!=|<=|>=|<|>)\s*(0[0-7]{5,6})\b`)
+	// permOctRe allows 3-4 digits with an optional leading zero. This matches the chmod style
+	// notation users expect for permissions like 644 or 01644. Because the rewrite is scoped to
+	// perm, relaxing the prefix doesn't risk clobbering arbitrary decimal limits (like sizes).
+	permOctRe = regexp.MustCompile(`\b(?i)(perm)\s*(==|!=|<=|>=|<|>)\s*(0?[0-7]{3,4})\b`)
+	timeRe    = regexp.MustCompile(`\b(?i)(mtime|atime|ctime)\s*(<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)?[smhdMyw]+)\b`)
+	sizeRe    = regexp.MustCompile(`\b(?i)(size)\s*(<=|>=|<|>|!=|=)\s*([0-9]+(?:\.[0-9]+)?(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB))\b`)
+	identRe   = regexp.MustCompile(`\b(?i)(mtime|atime|ctime|size|name|uid|gid|path|mode|perm)\b`)
+	fieldMap  = map[string]string{
 		"mtime": "Mtime", "atime": "Atime", "ctime": "Ctime",
 		"size": "Size", "name": "Name", "uid": "Uid", "gid": "Gid",
 		"path": "Path", "mode": "Mode", "perm": "Perm",
@@ -359,7 +364,7 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 	return client, nil
 }
 
-const FilterFilesHelp = "Filter files by expression: fields(mtime/atime/ctime durations[s,m,h,d,M,y], size bytes[B,KB,MiB,GiB], uid, gid, mode, perm, name/path glob|regex); operators(=,!=,<,>,<=,>=,=~); logic(and|or|not); e.g. \"mtime > 365d and uid == 1000\""
+const FilterFilesHelp = "Filter files by expression: fields(name/path <string>, uid/gid <int>, mode <octal[like 0100644, 0o0100644] | decimal[like 33188]>, perm <octal[like 644, 0644, 0o0644]>, mtime/atime/ctime <duration[like 1s, 2m, 3h, 4d, 5M, 10y]>, size <bytes[like 1B, 2KB, 3MiB, 4GiB]>); operators(==,!=,<,>,<=,>=); helpers(glob([name|path], pattern), regex([name|path], pattern)); logic(and|or|not); Example: --filter-files=\"mtime > 365d and glob(name, '*.txt')\""
 
 type FileInfoFilter func(FileInfo) (bool, error)
 
@@ -397,10 +402,8 @@ func compileFilter(query string) (FileInfoFilter, error) {
 // preprocessDSL applies all DSL→Go rewrites, including octal normalization.
 func preprocessDSL(q string) string {
 	// octal to decimal
-	q = octRe.ReplaceAllStringFunc(q, func(oct string) string {
-		v, _ := strconv.ParseInt(oct, 8, 64)
-		return strconv.FormatInt(v, 10)
-	})
+	q = normalizeOctal(q, permOctRe)
+	q = normalizeOctal(q, modeOctRe)
 	// time shifts
 	q = timeRe.ReplaceAllStringFunc(q, func(m string) string {
 		parts := timeRe.FindStringSubmatch(m)
@@ -422,9 +425,6 @@ func preprocessDSL(q string) string {
 	})
 	// size units
 	q = sizeRe.ReplaceAllString(q, `$1 $2 bytes("$3")`)
-	// globs and regex
-	q = globRe.ReplaceAllString(q, `glob($1,"$2")`)
-	q = regexRe.ReplaceAllString(q, `regex($1,"$2")`)
 	// identifiers
 	q = identRe.ReplaceAllStringFunc(q, func(s string) string {
 		if goF, ok := fieldMap[strings.ToLower(s)]; ok {
@@ -435,13 +435,35 @@ func preprocessDSL(q string) string {
 	return q
 }
 
+// normalizeOctal takes a string and parses it to a base8 integer after stripping an optional 0o
+// prefix or leading 0. For example 644, 0644, and 0o644 are all converted to 420.
+func normalizeOctal(q string, re *regexp.Regexp) string {
+	return re.ReplaceAllStringFunc(q, func(expr string) string {
+		sub := re.FindStringSubmatch(expr)
+		if len(sub) != 4 {
+			return expr
+		}
+		field, op, lit := sub[1], sub[2], sub[3]
+		if strings.HasPrefix(lit, "0o") || strings.HasPrefix(lit, "0O") {
+			lit = lit[2:]
+		} else if strings.HasPrefix(lit, "0") {
+			lit = lit[1:]
+		}
+		val, err := strconv.ParseInt(lit, 8, 64)
+		if err != nil {
+			return expr
+		}
+		return fmt.Sprintf("%s %s %d", field, op, val)
+	})
+}
+
 func statToFileInfo(path string, st *syscall.Stat_t) FileInfo {
 	return FileInfo{
 		Path:  path,
 		Name:  filepath.Base(path),
 		Size:  st.Size,
 		Mode:  st.Mode,
-		Perm:  st.Mode & uint32(os.ModePerm),
+		Perm:  st.Mode & 0o7777, // special permissions bit + os.ModePerm
 		Atime: time.Unix(st.Atim.Sec, st.Atim.Nsec),
 		Mtime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec),
 		Ctime: time.Unix(st.Ctim.Sec, st.Ctim.Nsec),
