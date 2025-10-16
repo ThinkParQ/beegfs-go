@@ -16,6 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
@@ -184,6 +185,23 @@ Using environment variables:
 		<-sigs
 		cancel()
 	}()
+
+	// Sanity check mount point config. This was only added in 8.1 and we want Remote to be
+	// backwards compatible, so it is only enforced if the parameter exists and is set incorrectly.
+	if procFsClients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{FilterByMounts: []string{mountPoint.GetMountPath()}}, logger); err != nil {
+		logger.Warn("unable to verify BeeGFS client configuration: unable to fetch configuration from /proc/fs/beegfs (ignoring)", zap.Error(err))
+	} else if len(procFsClients) != 1 {
+		logger.Warn("unable to verify BeeGFS client configuration: expected exactly one entry in /proc/fs/beegfs for this mount point (ignoring)", zap.String("mountPoint", mountPoint.GetMountPath()))
+	} else {
+		res, ok := procFsClients[0].Config["sysBypassFileAccessCheckOnMeta"]
+		if ok {
+			if res != "1" {
+				logger.Fatal("invalid BeeGFS client configuration found: the mount point used by remote must be configured with 'sysBypassFileAccessCheckOnMeta = true' (no other applications should use this mount point)")
+			}
+		} else {
+			logger.Warn("the BeeGFS client version does not appear to support file locking: parameter 'sysBypassFileAccessCheckOnMeta' was not found in the client configuration (ignoring)")
+		}
+	}
 
 	// The mgmtd gRPC client expects the cert and auth file to already be read from their respective
 	// sources (files in this case) and provided as a byte slice.

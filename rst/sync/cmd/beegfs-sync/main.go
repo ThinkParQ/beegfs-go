@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
@@ -135,6 +137,33 @@ Using environment variables:
 	// Create a channel to receive OS signals to coordinate graceful shutdown:
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	// This context signals the application has received one of the above signals. It is used by the
+	// main goroutine to understand when it should start a coordinated/ordered graceful shutdown of
+	// all components. Generally it should not be used by individual components to coordinate their
+	// shutdown, except if they require a context as part of their setup method to request
+	// cancellation of any goroutines that may otherwise block shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-sigs
+		cancel()
+	}()
+
+	// Sanity check mount point config. This was only added in 8.1 and we want Sync to be
+	// backwards compatible, so it is only enforced if the parameter exists and is set incorrectly.
+	if procFsClients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{FilterByMounts: []string{mountPoint.GetMountPath()}}, logger); err != nil {
+		logger.Warn("unable to verify BeeGFS client configuration: unable to fetch configuration from /proc/fs/beegfs (ignoring)", zap.Error(err))
+	} else if len(procFsClients) != 1 {
+		logger.Warn("unable to verify BeeGFS client configuration: expected exactly one entry in /proc/fs/beegfs for this mount point (ignoring)", zap.String("mountPoint", mountPoint.GetMountPath()))
+	} else {
+		res, ok := procFsClients[0].Config["sysBypassFileAccessCheckOnMeta"]
+		if ok {
+			if res != "1" {
+				logger.Fatal("invalid BeeGFS client configuration found: the mount point used by sync must be configured with 'sysBypassFileAccessCheckOnMeta = true' (no other applications should use this mount point)")
+			}
+		} else {
+			logger.Warn("the BeeGFS client version does not appear to support file locking: parameter 'sysBypassFileAccessCheckOnMeta' was not found in the client configuration (ignoring)")
+		}
+	}
 
 	beeRemoteClient, err := beeremote.New(initialCfg.BeeRemote)
 	if err != nil {
@@ -160,7 +189,7 @@ Using environment variables:
 	select {
 	case err := <-errChan:
 		logger.Error("component terminated unexpectedly", zap.Error(err))
-	case <-sigs:
+	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
 	jobServer.Stop()
