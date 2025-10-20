@@ -204,7 +204,7 @@ targets:
 		} else {
 			storagePool = nil
 		}
-		sTarget, err := findSuitableTarget(&pTarget.Node, storagePool)
+		sTarget, err := findSuitableTarget(pTarget.Node, storagePool)
 		if err != nil {
 			sTarget, err = findSuitableTarget(nil, storagePool)
 			if err != nil {
