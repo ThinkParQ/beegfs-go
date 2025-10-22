@@ -396,15 +396,16 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 			return fmt.Errorf("successfully completed all work requests but the file appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
 				start.Format(time.RFC3339), stop.Format(time.RFC3339))
 		}
+
+		if request.StubLocal {
+			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
+			if err != nil {
+				return fmt.Errorf("upload successful but failed to create stub file: %w", err)
+			}
+			job.GetStatus().SetState(beeremote.Job_OFFLOADED)
+		}
 	}
 
-	if request.StubLocal {
-		err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
-		if err != nil {
-			return fmt.Errorf("upload successful but failed to create stub file: %w", err)
-		}
-		job.GetStatus().SetState(beeremote.Job_OFFLOADED)
-	}
 	return nil
 }
 
