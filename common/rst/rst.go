@@ -321,10 +321,11 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 						Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
 					})
 				}
+			} else {
+				// This request will execute so ensure the lock is kept.
+				keepLock = true
 			}
-		} else {
-			keepLock = true
-		}
+		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
 
 		requests = append(requests, request)
 	}
