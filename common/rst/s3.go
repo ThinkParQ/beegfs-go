@@ -96,13 +96,14 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Sync{
 			Sync: &flex.SyncJob{
-				Operation:  operation,
-				Overwrite:  cfg.Overwrite,
-				RemotePath: cfg.RemotePath,
-				Flatten:    cfg.Flatten,
-				LockedInfo: cfg.LockedInfo,
-				Metadata:   cfg.Metadata,
-				Tagging:    cfg.Tagging,
+				Operation:    operation,
+				Overwrite:    cfg.Overwrite,
+				RemotePath:   cfg.RemotePath,
+				Flatten:      cfg.Flatten,
+				LockedInfo:   cfg.LockedInfo,
+				Metadata:     cfg.Metadata,
+				Tagging:      cfg.Tagging,
+				StorageClass: cfg.StorageClass,
 			},
 		},
 		Update: cfg.Update,
@@ -125,6 +126,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Update:              request.Update,
 		Metadata:            sync.Metadata,
 		Tagging:             sync.Tagging,
+		StorageClass:        sync.StorageClass,
 	}
 }
 
@@ -194,7 +196,7 @@ func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.Wor
 	var err error
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging)
+		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
 	case flex.SyncJob_DOWNLOAD:
 		err = r.download(ctx, request.Path, sync.RemotePath, part)
 	}
@@ -310,7 +312,7 @@ func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestC
 	if !cfg.Download {
 		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging)
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.StorageClass)
 		}
 	}
 	return "", nil
@@ -538,7 +540,7 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 	return *resp.ContentLength, mtime, nil
 }
 
-func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string) (uploadID string, err error) {
+func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string, storageClass *string) (uploadID string, err error) {
 	beegfsMtime := mtime.Format(time.RFC3339)
 	if metadata == nil {
 		metadata = map[string]string{"beegfs-mtime": beegfsMtime}
@@ -553,6 +555,9 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 		Key:      aws.String(path),
 		Metadata: metadata,
 		Tagging:  tagging,
+	}
+	if storageClass != nil && *storageClass != "" {
+		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
 	}
 
 	result, err := r.client.CreateMultipartUpload(ctx, createMultipartUploadInput)
@@ -618,6 +623,7 @@ func (r *S3Client) upload(
 	mtime time.Time,
 	metadata map[string]string,
 	tagging *string,
+	storageClass *string,
 ) error {
 
 	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
@@ -649,7 +655,7 @@ func (r *S3Client) upload(
 			metadata["beegfs-mtime"] = beegfsMtime
 		}
 
-		resp, err := r.client.PutObject(ctx, &s3.PutObjectInput{
+		input := &s3.PutObjectInput{
 			Bucket:         aws.String(r.config.GetS3().Bucket),
 			Key:            aws.String(remotePath),
 			Body:           filePart,
@@ -658,7 +664,12 @@ func (r *S3Client) upload(
 			//	- If there was a previous failure and the mtime still match then continue from the last byte write
 			Metadata: metadata,
 			Tagging:  tagging,
-		})
+		}
+		if storageClass != nil {
+			input.StorageClass = types.StorageClass(*storageClass)
+		}
+
+		resp, err := r.client.PutObject(ctx, input)
 
 		if err != nil {
 			return err

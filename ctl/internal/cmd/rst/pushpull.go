@@ -23,7 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
-		Update: new(bool),
+		Update:       new(bool),
+		StorageClass: new(string),
 	}
 
 	var priority int32
@@ -90,8 +91,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
+	cmd.Flags().StringVar(backendCfg.StorageClass, "storage-class", "", "Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --storage-class is non-idempotent and takes effect only when the object is uploaded.")
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
+	cmd.Flags().MarkHidden("storage-class")
 
 	return cmd
 }
