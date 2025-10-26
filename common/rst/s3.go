@@ -184,6 +184,44 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	if !request.HasSync() {
+		return false, 0, ErrReqAndRSTTypeMismatch
+	}
+
+	sync := request.GetSync()
+	lockedInfo := sync.GetLockedInfo()
+	if sync.Operation == flex.SyncJob_DOWNLOAD && lockedInfo.IsArchived {
+
+		_, _, isArchived, restoreInProgress, err := r.getObjectMetadata(ctx, sync.RemotePath, true)
+		if err != nil {
+			return false, 0, err
+		}
+		if isArchived {
+			if !restoreInProgress {
+
+				restoreObjectInput := &s3.RestoreObjectInput{
+					Bucket: aws.String(r.config.GetS3().Bucket),
+					Key:    aws.String(sync.RemotePath),
+					RestoreRequest: &types.RestoreRequest{
+						Days: aws.Int32(r.config.GetS3().ArchiveRestoreRetentionDays),
+					},
+				}
+				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
+					return false, 0, err
+				}
+			}
+
+			// Retry time is based on maximumRetryTime and the job's priority level.
+			// timeEstimate attempts to account for the size of the file, the archival restore speed, and the priority of the job.
+			timeEstimate := ((float64(lockedInfo.RemoteSize) / glacierRestoreSpeed) * adjustmentFactor) / float64(request.GetPriority()+1)
+			if timeEstimate < minimumRetryTime {
+				timeEstimate = minimumRetryTime
+			}
+			delay := time.Duration(timeEstimate)
+			return false, delay, nil
+		}
+	}
+
 	return true, 0, nil
 }
 
