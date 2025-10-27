@@ -107,6 +107,7 @@ func newPullCmd() *cobra.Command {
 	}
 
 	var priority int32
+	var allowRestore bool
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
@@ -124,6 +125,11 @@ func newPullCmd() *cobra.Command {
 					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
 				}
 				backendCfg.Priority = &priority
+			}
+
+			allowRestoreFlag := cmd.Flags().Lookup("allow-restore")
+			if allowRestoreFlag.Changed {
+				backendCfg.AllowRestore = &allowRestore
 			}
 
 			return nil
@@ -145,6 +151,8 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().BoolVar(&allowRestore, "allow-restore", false, "Allow archived requests to be restored.")
+	cmd.Flags().Lookup("allow-restore").DefValue = "auto"
 	return cmd
 }
 

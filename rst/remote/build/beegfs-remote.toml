@@ -66,33 +66,46 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # id = "1"
 # name = "minio"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "http://<HOSTNAME>:<PORT>"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY"
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "http://<HOSTNAME>:<PORT>"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
 
 # [[remote-storage-target]]
 # id = "2"
 # name = "aws"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "https://<BUCKET_NAME>.s3.<REGION>.amazonaws.com"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY>"
-# s3.partition-id = "<PARTITION>"
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "https://<BUCKET_NAME>.s3.<REGION>.amazonaws.com"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
+#   partition-id = "<PARTITION>"
+#
+#   [[remote-storage-target.s3.storage-classes]]
+#   name = "GLACIER"
+#   archival.tier = "standard"
+#   archival.retentionDays = 7
+#   archival.checkTime = "5h"
+#   archival.recheckTime = "30m"
+#   archival.autoRestore = true
 
 # [[remote-storage-target]]
 # id = "3"
 # name = "oci"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY>"
-
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
 
 #
 # --- Section 2: [Command Line Arguments] ---
