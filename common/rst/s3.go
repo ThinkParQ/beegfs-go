@@ -92,35 +92,35 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		storageClasses: make(map[types.StorageClass]S3StorageClass),
 	}
 
-	for _, class := range s3Provider.StorageClasses {
+	for _, class := range s3Provider.StorageClass {
 		name := types.StorageClass(class.GetName())
 		if name == "" {
 			return nil, fmt.Errorf("storage class must specify a valid storage class name")
 		}
 
 		archive := class.GetArchival()
-		tier := types.Tier(archive.GetTier())
 		if archive == nil {
-			s3Client.storageClasses[name] = S3StorageClass{tier: tier}
-			continue
+			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
 		}
 
+		tier := types.Tier(archive.GetTier())
 		retentionsDays := archive.GetRetentionDays()
 		if retentionsDays < 1 {
-			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %w", class.GetName(), err)
+			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionsDays)
 		}
 		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
 		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", class.GetName(), err)
+			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
 		} else if checkTime < time.Duration(time.Minute) {
-			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1m'", class.GetName())
+			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1m'", name)
 		}
 		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
 		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", class.GetName(), err)
+			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", name, err)
 		} else if recheckTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", class.GetName())
+			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
 		}
+
 		s3Client.storageClasses[name] = S3StorageClass{
 			tier:          tier,
 			archival:      true,
@@ -251,7 +251,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 			return false, 0, err
 		}
 
-		if archiveStatus != nil && archiveStatus.IsArchived && (archiveStatus.Info.autoRestore || sync.GetAllowRestore()) {
+		if archiveStatus != nil && archiveStatus.IsArchived && ((sync.AllowRestore != nil && sync.GetAllowRestore()) || (sync.AllowRestore == nil && archiveStatus.Info.autoRestore)) {
 			if !archiveStatus.RestoreInProgress {
 				restoreRequest := &types.RestoreRequest{
 					Days: aws.Int32(archiveStatus.Info.retentionDays),
@@ -596,26 +596,6 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	return
 }
 
-var hourMs = time.Duration(time.Hour)
-var defaultArchivalStorageClass = S3StorageClass{
-	tier:          types.TierStandard,
-	archival:      true,
-	retentionDays: 7,
-	checkTime:     3 * hourMs,
-	recheckTime:   hourMs,
-}
-var defaultArchivalStorageClasses = map[types.StorageClass]S3StorageClass{
-	types.StorageClass("glacier"):         defaultArchivalStorageClass,
-	types.StorageClass("deeparchive"):     defaultArchivalStorageClass,
-	types.StorageClass("nearline"):        defaultArchivalStorageClass,
-	types.StorageClass("coldline"):        defaultArchivalStorageClass,
-	types.StorageClass("archive"):         defaultArchivalStorageClass,
-	types.StorageClass("coldarchive"):     defaultArchivalStorageClass,
-	types.StorageClass("deepcoldarchive"): defaultArchivalStorageClass,
-	types.StorageClass("accelerated"):     defaultArchivalStorageClass,
-	types.StorageClass("cold"):            defaultArchivalStorageClass,
-}
-
 type s3ArchiveInfo struct {
 	IsArchived        bool
 	RestoreInProgress bool
@@ -625,33 +605,21 @@ type s3ArchiveInfo struct {
 // archiveStatus returns whether the resource is archived and is in the process of being restored in
 // order to be accessible.
 func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *string) *s3ArchiveInfo {
-	info := &s3ArchiveInfo{}
+	var info *s3ArchiveInfo
 	if class, ok := r.storageClasses[storageClass]; ok && class.archival {
-		info.IsArchived = true
-		info.Info = r.storageClasses[storageClass]
-	} else {
-		normalized := strings.ReplaceAll(string(storageClass), "_", "")
-		normalized = strings.ReplaceAll(normalized, " ", "")
-		normalized = strings.ToLower(normalized)
-		storageClass = types.StorageClass(normalized)
-		if _, ok := defaultArchivalStorageClasses[storageClass]; ok {
-			info.IsArchived = true
-			info.Info = r.storageClasses[storageClass]
-		} else {
-			return nil
-		}
-	}
-
-	if info.IsArchived {
+		info = &s3ArchiveInfo{Info: r.storageClasses[storageClass]}
 		if restoreMsg == nil {
+			info.IsArchived = true
 			info.RestoreInProgress = false
 		} else if strings.Contains(*restoreMsg, `ongoing-request="false"`) {
-			info.RestoreInProgress = false
 			info.IsArchived = false
+			info.RestoreInProgress = false
 		} else {
+			info.IsArchived = true
 			info.RestoreInProgress = true
 		}
 	}
+
 	return info
 }
 

@@ -643,6 +643,10 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 		workResult.GetStatus().SetState(flex.Work_CANCELLED)
 		workResult.GetStatus().SetMessage("cancelled scheduled work request")
 		m.scheduler.RemoveWorkToken(submissionID)
+	case flex.Work_RESCHEDULED:
+		workResult.GetStatus().SetState(flex.Work_CANCELLED)
+		workResult.GetStatus().SetMessage("cancelled rescheduled work request")
+		m.scheduler.RemoveWorkToken(submissionID)
 	case flex.Work_CANCELLED:
 		// If a worker was already handling this work request the state should be cancelled.
 	case flex.Work_FAILED:
