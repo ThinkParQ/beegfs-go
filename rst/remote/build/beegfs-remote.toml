@@ -87,7 +87,7 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #   secret-key = "<SECRET_KEY>"
 #   partition-id = "<PARTITION>"
 #
-#   [[remote-storage-target.s3.storage-classes]]
+#   [[remote-storage-target.s3.storage-class]]
 #   name = "GLACIER"
 #   archival.tier = "standard"
 #   archival.retentionDays = 7
