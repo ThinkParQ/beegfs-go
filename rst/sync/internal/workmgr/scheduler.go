@@ -21,10 +21,10 @@ type schedulerConfig struct {
 	// targetMultiple can cause worker starvation during sudden increases in completed work, while a
 	// larger targetMultiple may delay the execution of higher-priority requests.
 	targetMultiple float64
-	// alpha controls the weighting of previous values in the exponentially weighted moving averages
-	// (averageDeltaTimeMs and averageCompletePerMs). The halfLifeSec parameter determines how quickly the
-	// previous average decays. A larger halfLifeSec produces smoother but slower responses
-	// to changes in workload, while a smaller halfLifeSec reacts more quickly but with greater volatility.
+	// alpha controls the weighting of previous values in the exponentially weighted moving
+	// averages. The halfLifeSec parameter determines how quickly the previous average decays. A
+	// larger halfLifeSec produces smoother but slower responses to changes in workload, while a
+	// smaller halfLifeSec reacts more quickly but with greater volatility.
 	halfLifeSec float64
 	// maximumAllowedTokenGrowth limits the growth of the allowed tokens in a given cycle. Larger values
 	// response faster to spikes in completed work whereas smaller values will be slow and more
@@ -35,7 +35,7 @@ type schedulerConfig struct {
 	// starting number of tokens to grow from. This should at least be the number of workers.
 	minimumAllowedTokens int
 	// pullInWorkTicker defines the periodic release of work tokens.
-	pullInWorkTicker time.Duration
+	pullInWorkTickerDuration time.Duration
 }
 
 type schedulerOpt func(*schedulerConfig)
@@ -49,58 +49,18 @@ func WithMinimumAllowedTokens(tokens int) schedulerOpt {
 type scheduler struct {
 	ctx context.Context
 	log *zap.Logger
-	// Weights are used to distribute tokens fairly between the priority queues as to avoid starving
-	// lower priorities while giving preference to higher priorities. These weights are dynamically
-	// adjust to exclude empty queues.
-	weights [priorityLevels]float64
-	// targetMultiple determines the multiplier used to calculate how many tokens are needed to maintain
-	// steady back-pressure on the activeWorkQueue. The nextTokens() function uses this factor to
-	// estimate the number of tokens required to sustain targetMultiple * averageComplete work. A smaller
-	// targetMultiple can cause worker starvation during sudden increases in completed work, while a
-	// larger targetMultiple may delay the execution of higher-priority requests.
-	targetMultiple float64
-	// capacity is the largest number of work requests the active work queue channel can have.
-	capacity int
-	// nextPriority returns the next priority level in a rotating sequence, cycling through all
-	// priorities once before returning false.
-	nextPriority func() (int, bool)
 	// workTokens maintains the number of alloted work workTokens for each priority. Work workTokens are
 	// used by the manager's work scheduler in order to maintain fairness between priority queues
 	// and back-pressure on the activeWorkQueue. The priority workTokens are used for both priority and
 	// wait queues.
 	workTokens [priorityLevels]atomic.Int32
-	// minimumAllowedTokens is the minimum allowed tokens that can be distributed among the
-	// priority queues per cycle.
-	minimumTokensToDistribute int
-	// maximumAllowedTokenGrowth limits the growth of the allowed tokens in a given cycle. Larger values
-	// response faster to spikes in completed work whereas smaller values will be slow and more
-	// controlled. Extremely large values can cause oscillations in growth.
-	maximumAllowedTokenGrowth float64
-	// alpha determines how much weight to give to past samples and is used in computing
-	// averageDurationMs and averageCompletedWorkPerMs. It must between 0 and 1. Smaller values will
-	// give more influence to past samples whereas larger values give the influence to the current.
-	alpha                float64
-	previousUsedCapacity int
-	// previousTokensDistributed tracks the total number of tokens distributed.
-	previousTokensDistributed int
-	previousTime              time.Time
-	averageDurationMs         float64
-	averageCompletedWorkPerMs float64
-	// lowWorkThreshold is the pending requests low threshold. If the active work queue requests
-	// falls below this value then the shortSendWorkTicker will send more work.
-	lowWorkThreshold int
-	// lowWorkThresholdPct is the percentage of average work throughput that defines the low
-	// threshold.
-	lowWorkThresholdPct float64
 	// allWorkTokens is a counter that maintains the total number of existing workTokens. This is
 	// used to release more tokens when the active work queue drops below a certain threshold.
 	allWorkTokens atomic.Int32
 	// tokensReleased is a buffered channel releases the priority tokens to the sync manager. This
 	// must be buffered to avoid deadlocking with manager. The channel must hold every sendWork that
 	// can occur before the manager loop reads m.scheduler.tokensReleased.
-	tokensReleased           chan [priorityLevels]int
-	shouldReportIdleStatus   bool
-	shouldReportActiveStatus bool
+	tokensReleased chan [priorityLevels]int
 }
 
 func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignment, fairness gemetricRatio, opts ...schedulerOpt) (s *scheduler, close func() error) {
@@ -110,7 +70,7 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 		halfLifeSec:               10,
 		maximumAllowedTokenGrowth: 0.85,
 		minimumAllowedTokens:      32,
-		pullInWorkTicker:          1000 * time.Millisecond,
+		pullInWorkTickerDuration:  200 * time.Millisecond,
 	}
 
 	for _, opt := range opts {
@@ -118,45 +78,69 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 	}
 
 	s = &scheduler{
-		ctx:                       ctx,
-		log:                       log,
-		weights:                   geometricFairnessWeights(fairness),
-		targetMultiple:            cfg.targetMultiple,
-		minimumTokensToDistribute: int(cfg.targetMultiple * float64(cfg.minimumAllowedTokens)),
-		maximumAllowedTokenGrowth: cfg.maximumAllowedTokenGrowth,
-		capacity:                  cap(queue),
-		nextPriority:              GetNextPriority(),
-		alpha:                     1 - math.Exp(-math.Ln2/cfg.halfLifeSec),
-		tokensReleased:            make(chan [priorityLevels]int, 1),
-		shouldReportIdleStatus:    false,
-		shouldReportActiveStatus:  true,
+		ctx:            ctx,
+		log:            log,
+		tokensReleased: make(chan [priorityLevels]int, 1),
 	}
 	s.log.Info("worker node is idle")
 
-	pullInWorkTicker := time.NewTicker(cfg.pullInWorkTicker)
+	pullInWorkTicker := time.NewTicker(cfg.pullInWorkTickerDuration)
 	close = func() error {
 		pullInWorkTicker.Stop()
 		return nil
 	}
 
 	go func() {
-		s.previousTime = time.Now()
-		s.averageDurationMs = float64(cfg.pullInWorkTicker.Milliseconds())
+		var (
+			previousTime             time.Time = time.Now()
+			tokensDistributed        int       = 0
+			allowedTokensMs          float64   = 0.0
+			queueCapacity            int       = cap(queue)
+			updateStatsCount         int       = max(int(math.Ceil(2000.0/float64(cfg.pullInWorkTickerDuration.Milliseconds()))), 1)
+			shouldReportIdleStatus   bool      = false
+			shouldReportActiveStatus bool      = true
+			alpha                              = 1 - math.Exp(-math.Ln2/cfg.halfLifeSec)
+			weights                            = geometricFairnessWeights(fairness)
+		)
+		updateStats := s.getUpdateStatsFn(queue, cfg.targetMultiple, cfg.minimumAllowedTokens, cfg.maximumAllowedTokenGrowth, alpha, cfg.pullInWorkTickerDuration)
+		distributeTokens := s.getDistributeTokens(weights)
+
 		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case currentTime := <-pullInWorkTicker.C:
-				usedCapacity := len(queue)
+			for updateCount := range updateStatsCount {
+				select {
+				case <-s.ctx.Done():
+					return
+				case currentTime := <-pullInWorkTicker.C:
+					if updateCount == 0 {
+						allowedTokensMs = updateStats(currentTime, tokensDistributed)
+						tokensDistributed = 0
+					}
 
-				elapsedTimeMs := float64(currentTime.Sub(s.previousTime).Milliseconds())
-				s.averageDurationMs = s.alpha*elapsedTimeMs + (1-s.alpha)*s.averageDurationMs
-				s.previousTime = currentTime
+					allowedTokens := int(allowedTokensMs * float64(currentTime.Sub(previousTime).Milliseconds()))
+					previousTime = currentTime
+					availableSlots := queueCapacity - len(queue)
+					if allowedTokens > availableSlots {
+						allowedTokens = availableSlots
+					}
 
-				completedWork := float64(s.previousUsedCapacity + s.previousTokensDistributed - usedCapacity)
-				completedWorkPerMs := completedWork / elapsedTimeMs
-				s.previousUsedCapacity = usedCapacity
-				s.sendWork(usedCapacity, completedWorkPerMs)
+					tokens, isWork := distributeTokens(allowedTokens)
+					if isWork {
+						s.tokensReleased <- tokens
+						for _, count := range tokens {
+							tokensDistributed += count
+						}
+
+						if shouldReportActiveStatus {
+							log.Info("worker node is no longer idle")
+							shouldReportIdleStatus = true
+							shouldReportActiveStatus = false
+						}
+					} else if shouldReportIdleStatus && s.allWorkTokens.Load() == 0 {
+						s.log.Info("worker node is idle")
+						shouldReportIdleStatus = false
+						shouldReportActiveStatus = true
+					}
+				}
 			}
 		}
 	}()
@@ -185,134 +169,129 @@ func (s *scheduler) RemoveWorkToken(submissionId string) {
 	s.allWorkTokens.Add(-1)
 }
 
-func (s *scheduler) sendWork(currentUsedCapacity int, completedWorkPerMs float64) {
-	tokensAllowed := s.getTokensAllowed(currentUsedCapacity, completedWorkPerMs)
-	tokens, isWork := s.distributeTokens(tokensAllowed)
-	if isWork {
-		s.tokensReleased <- tokens
-		if s.shouldReportActiveStatus {
-			s.log.Info("worker node is no longer idle")
-			s.shouldReportIdleStatus = true
-			s.shouldReportActiveStatus = false
+func (s *scheduler) getUpdateStatsFn(
+	queue chan workAssignment,
+	targetMultiple float64,
+	minTokens int,
+	maxGrowth float64,
+	alpha float64,
+	tickerDuration time.Duration,
+) func(time.Time, int) float64 {
+	var (
+		averageCompletedWorkPerMs = 0.0
+		averageDurationMs         = float64(tickerDuration.Milliseconds())
+		getUsedCapacity           = func() int { return len(queue) }
+		previousTime              = time.Now()
+		previousUsedCapacity      = 0
+	)
+
+	return func(currentTime time.Time, tokensDistributed int) float64 {
+		elapsedTimeMs := float64(currentTime.Sub(previousTime).Milliseconds())
+		averageDurationMs = alpha*elapsedTimeMs + (1-alpha)*averageDurationMs
+		previousTime = currentTime
+		minTokensMs := float64(minTokens) / averageDurationMs
+
+		usedCapacity := getUsedCapacity()
+		completedWork := float64(previousUsedCapacity + tokensDistributed - usedCapacity)
+		completedWorkPerMs := completedWork / elapsedTimeMs
+		previousUsedCapacity = usedCapacity
+
+		if averageCompletedWorkPerMs <= tolerance {
+			averageCompletedWorkPerMs = completedWorkPerMs
+			s.log.Debug("scheduler allowance",
+				zap.Int("usedCapacity", usedCapacity),
+				zap.Int("tokensAllowedMs", int(RoundToMillis(minTokensMs))),
+			)
+			return minTokensMs
 		}
-	} else if s.shouldReportIdleStatus && s.allWorkTokens.Load() == 0 {
-		s.log.Info("worker node is idle")
-		s.shouldReportIdleStatus = false
-		s.shouldReportActiveStatus = true
-	}
-}
-
-// Return the token allowed to be scheduled. The tokens determined by target multiple of
-// completed work, adjusted by the recent growth trend. This calculation attempts to:
-//   - Prevent worker starvation during short throughput bursts.
-//   - Avoid saturating the activeWorkQueue so it can drain quickly enough to minimize priority
-//     inversion (long delays for high-priority work caused by a backlog of lower-priority tasks).
-func (s *scheduler) getTokensAllowed(usedCapacity int, completedWorkPerMs float64) (tokensAllowed int) {
-	availableCapacity := s.capacity - usedCapacity
-
-	if s.averageCompletedWorkPerMs <= tolerance {
-		s.averageCompletedWorkPerMs = completedWorkPerMs
-		tokensAllowed = s.minimumTokensToDistribute
-		s.log.Debug("token scheduler warmup allowance",
-			zap.Int("usedCapacity", usedCapacity),
-			zap.Int("availableCapacity", availableCapacity),
-			zap.Int("tokensAllowed", tokensAllowed),
-		)
-	} else {
 
 		var growthFactor float64 = 0
-		growthDenominator := math.Abs(s.averageCompletedWorkPerMs)
+		growthDenominator := math.Abs(averageCompletedWorkPerMs)
 		if growthDenominator > tolerance {
-			growthFactor = (completedWorkPerMs - s.averageCompletedWorkPerMs) / growthDenominator
-			if growthFactor > s.maximumAllowedTokenGrowth {
-				growthFactor = s.maximumAllowedTokenGrowth
-			} else if growthFactor < -s.maximumAllowedTokenGrowth {
-				growthFactor = -s.maximumAllowedTokenGrowth
+			growthFactor = (completedWorkPerMs - averageCompletedWorkPerMs) / growthDenominator
+			if growthFactor > maxGrowth {
+				growthFactor = maxGrowth
+			} else if growthFactor < -maxGrowth {
+				growthFactor = -maxGrowth
 			}
 		}
 
-		s.averageCompletedWorkPerMs = s.alpha*completedWorkPerMs + (1-s.alpha)*s.averageCompletedWorkPerMs
-		if s.averageCompletedWorkPerMs < 1.0/s.averageDurationMs {
-			s.averageCompletedWorkPerMs = 0
+		averageCompletedWorkPerMs = alpha*completedWorkPerMs + (1-alpha)*averageCompletedWorkPerMs
+		if averageCompletedWorkPerMs < 1.0/averageDurationMs {
+			averageCompletedWorkPerMs = 0
+			return minTokensMs
 		}
-		normalizedCompletedWork := s.averageCompletedWorkPerMs * s.averageDurationMs
-		s.lowWorkThreshold = int(math.Ceil(normalizedCompletedWork * s.lowWorkThresholdPct))
 
-		targetSlots := int(s.targetMultiple * (1 + growthFactor) * normalizedCompletedWork)
-		tokensAllowed = max(targetSlots, s.minimumTokensToDistribute) - usedCapacity
-		s.log.Debug("token scheduler computed allowance",
+		tokensAllowedMs := targetMultiple * (1 + growthFactor) * averageCompletedWorkPerMs
+		s.log.Debug("scheduler allowance",
 			zap.Int("usedCapacity", usedCapacity),
-			zap.Int("availableCapacity", availableCapacity),
-			zap.Float64("normalizedCompletedWork", RoundToMillis(normalizedCompletedWork)),
-			zap.Float64("growth", RoundToMillis(growthFactor)),
-			zap.Int("tokensAllowed", tokensAllowed),
+			zap.Int("tokensAllowedMs", int(RoundToMillis(tokensAllowedMs))),
 		)
-	}
 
-	if tokensAllowed > availableCapacity {
-		tokensAllowed = availableCapacity
-	} else if tokensAllowed < 0 {
-		tokensAllowed = 0
+		return tokensAllowedMs
 	}
-	return tokensAllowed
 }
 
-func (s *scheduler) distributeTokens(tokensAllowed int) (tokens [priorityLevels]int, isWork bool) {
-	if tokensAllowed <= 0 {
+func (s *scheduler) getDistributeTokens(weights [priorityLevels]float64) func(int) ([priorityLevels]int, bool) {
+	var (
+		nextPriority = GetNextPriority()
+	)
+
+	return func(tokensAllowed int) (tokens [priorityLevels]int, isWork bool) {
+		if tokensAllowed <= 0 {
+			return
+		}
+
+		// Distribute tokens among the priority queues. The normalizer is used to handle empty
+		// priority queues by distributing their allocations to the queues with work. Any remainder
+		// that does not evenly distribute to each priority queue will be distributed to queues with
+		// the highest priorities first. Note that that alloted tokens (ie tokensLeft)
+		normalizer := 1.0
+		workTokens := [priorityLevels]int{}
+		for priority := range priorityLevels {
+			workTokens[priority] = int(s.workTokens[priority].Load())
+			if workTokens[priority] <= 0 {
+				normalizer -= weights[priority]
+			}
+		}
+		if normalizer < tolerance {
+			s.log.Debug("all priority queues are empty")
+			return
+		}
+
+		isWork = true
+		tokensLeft := tokensAllowed
+		for priority, ok := nextPriority(); ok && tokensLeft > 0; priority, ok = nextPriority() {
+			if workTokens[priority] <= 0 {
+				continue
+			}
+			allowed := int(weights[priority] / normalizer * float64(tokensLeft))
+			tokens[priority] = min(allowed, workTokens[priority])
+			tokensLeft -= tokens[priority]
+			workTokens[priority] -= tokens[priority]
+		}
+
+		for priority := range priorityLevels {
+			if tokensLeft <= 0 || workTokens[priority] <= 0 {
+				continue
+			}
+			if workTokens[priority] >= tokensLeft {
+				tokens[priority] += tokensLeft
+				tokensLeft = 0
+			} else {
+				tokens[priority] += workTokens[priority]
+				tokensLeft -= workTokens[priority]
+			}
+		}
+
+		tokensUnused := tokensLeft
+		tokensDistributed := tokensAllowed - tokensLeft
+		s.log.Debug("token scheduler distribution",
+			zap.Int("tokensDistributed", tokensDistributed),
+			zap.Int("tokensUnused", tokensUnused),
+			zap.Any("tokensByPriority", tokens))
 		return
 	}
-
-	// Distribute tokens among the priority queues. The normalizer is used to handle empty
-	// priority queues by distributing their allocations to the queues with work. Any remainder
-	// that does not evenly distribute to each priority queue will be distributed to queues with
-	// the highest priorities first. Note that that alloted tokens (ie tokensLeft)
-	normalizer := 1.0
-	workTokens := [priorityLevels]int{}
-	for priority := range priorityLevels {
-		workTokens[priority] = int(s.workTokens[priority].Load())
-		if workTokens[priority] <= 0 {
-			normalizer -= s.weights[priority]
-		}
-	}
-	if normalizer < tolerance {
-		s.previousTokensDistributed = 0
-		s.log.Debug("all queues are empty")
-		return
-	}
-
-	isWork = true
-	tokensLeft := tokensAllowed
-	for priority, ok := s.nextPriority(); ok && tokensLeft > 0; priority, ok = s.nextPriority() {
-		if workTokens[priority] <= 0 {
-			continue
-		}
-		allowed := int(s.weights[priority] / normalizer * float64(tokensLeft))
-		tokens[priority] = min(allowed, workTokens[priority])
-		tokensLeft -= tokens[priority]
-		workTokens[priority] -= tokens[priority]
-	}
-
-	for priority := range priorityLevels {
-		if tokensLeft <= 0 || workTokens[priority] <= 0 {
-			continue
-		}
-		if workTokens[priority] >= tokensLeft {
-			tokens[priority] += tokensLeft
-			tokensLeft = 0
-		} else {
-			tokens[priority] += workTokens[priority]
-			tokensLeft -= workTokens[priority]
-		}
-	}
-
-	tokensUnused := tokensLeft
-	tokensDistributed := tokensAllowed - tokensLeft
-	s.log.Debug("token scheduler distribution",
-		zap.Int("tokensDistributed", tokensDistributed),
-		zap.Int("tokensUnused", tokensUnused),
-		zap.Any("tokensByPriority", tokens))
-	s.previousTokensDistributed = tokensDistributed
-	return
 }
 
 func RoundToMillis(x float64) float64 { return math.Round(x*1e3) / 1e3 }
