@@ -32,12 +32,22 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+type S3StorageClass struct {
+	tier          types.Tier
+	archival      bool
+	retentionDays int32         // defines how long the retrieved object will be available in days.
+	checkTime     time.Duration // defines retry time after initiating the restore.
+	recheckTime   time.Duration // defines retry time when restore was previously initiated.
+	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
+}
+
 type S3Client struct {
 	config *flex.RemoteStorageTarget
 	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Rework client into an `s3Provider` interface type.
-	client     *s3.Client
-	mountPoint filesystem.Provider
+	client         *s3.Client
+	mountPoint     filesystem.Provider
+	storageClasses map[types.StorageClass]S3StorageClass
 }
 
 var _ Provider = &S3Client{}
@@ -75,11 +85,53 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		o.UsePathStyle = usePathStyle
 	})
 
-	return &S3Client{
-		config:     rstConfig,
-		client:     client,
-		mountPoint: mountPoint,
-	}, nil
+	s3Client := &S3Client{
+		config:         rstConfig,
+		client:         client,
+		mountPoint:     mountPoint,
+		storageClasses: make(map[types.StorageClass]S3StorageClass),
+	}
+
+	for _, class := range s3Provider.StorageClass {
+		name := types.StorageClass(class.GetName())
+		if name == "" {
+			return nil, fmt.Errorf("storage class must specify a valid storage class name")
+		}
+
+		archive := class.GetArchival()
+		if archive == nil {
+			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
+		}
+
+		tier := types.Tier(archive.GetTier())
+		retentionsDays := archive.GetRetentionDays()
+		if retentionsDays < 1 {
+			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionsDays)
+		}
+		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
+		if err != nil {
+			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
+		} else if checkTime < time.Duration(time.Minute) {
+			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1m'", name)
+		}
+		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
+		if err != nil {
+			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", name, err)
+		} else if recheckTime < time.Duration(time.Second) {
+			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
+		}
+
+		s3Client.storageClasses[name] = S3StorageClass{
+			tier:          tier,
+			archival:      true,
+			retentionDays: retentionsDays,
+			checkTime:     checkTime,
+			recheckTime:   recheckTime,
+			autoRestore:   archive.GetAutoRestore(),
+		}
+	}
+
+	return s3Client, nil
 }
 
 func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
@@ -96,13 +148,15 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Sync{
 			Sync: &flex.SyncJob{
-				Operation:  operation,
-				Overwrite:  cfg.Overwrite,
-				RemotePath: cfg.RemotePath,
-				Flatten:    cfg.Flatten,
-				LockedInfo: cfg.LockedInfo,
-				Metadata:   cfg.Metadata,
-				Tagging:    cfg.Tagging,
+				Operation:    operation,
+				Overwrite:    cfg.Overwrite,
+				RemotePath:   cfg.RemotePath,
+				Flatten:      cfg.Flatten,
+				LockedInfo:   cfg.LockedInfo,
+				Metadata:     cfg.Metadata,
+				Tagging:      cfg.Tagging,
+				StorageClass: cfg.StorageClass,
+				AllowRestore: cfg.AllowRestore,
 			},
 		},
 		Update: cfg.Update,
@@ -125,6 +179,8 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		Update:              request.Update,
 		Metadata:            sync.Metadata,
 		Tagging:             sync.Tagging,
+		StorageClass:        sync.StorageClass,
+		AllowRestore:        sync.AllowRestore,
 	}
 }
 
@@ -182,6 +238,51 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	if !request.HasSync() {
+		return false, 0, ErrReqAndRSTTypeMismatch
+	}
+
+	sync := request.GetSync()
+	lockedInfo := sync.GetLockedInfo()
+	if sync.Operation == flex.SyncJob_DOWNLOAD && lockedInfo.IsArchived {
+
+		_, _, archiveStatus, err := r.getObjectMetadata(ctx, sync.RemotePath, true)
+		if err != nil {
+			return false, 0, err
+		}
+
+		if archiveStatus != nil && archiveStatus.IsArchived && ((sync.AllowRestore != nil && sync.GetAllowRestore()) || (sync.AllowRestore == nil && archiveStatus.Info.autoRestore)) {
+			if !archiveStatus.RestoreInProgress {
+				restoreRequest := &types.RestoreRequest{
+					Days: aws.Int32(archiveStatus.Info.retentionDays),
+				}
+				if archiveStatus.Info.tier != "" {
+					restoreRequest.Tier = archiveStatus.Info.tier
+				}
+
+				restoreObjectInput := &s3.RestoreObjectInput{
+					Bucket:         aws.String(r.config.GetS3().Bucket),
+					Key:            aws.String(sync.RemotePath),
+					RestoreRequest: restoreRequest,
+				}
+
+				// Multiple workers may attempt to restore the same object concurrently. In that
+				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
+				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
+				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
+					var apiErr smithy.APIError
+					if !(errors.As(err, &apiErr) && apiErr.ErrorCode() == "RestoreAlreadyInProgress") {
+						archiveStatus.RestoreInProgress = true
+					} else {
+						return false, 0, err
+					}
+				}
+				return false, archiveStatus.Info.checkTime, nil
+			}
+			return false, archiveStatus.Info.recheckTime, nil
+		}
+	}
+
 	return true, 0, nil
 }
 
@@ -194,7 +295,7 @@ func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.Wor
 	var err error
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging)
+		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
 	case flex.SyncJob_DOWNLOAD:
 		err = r.download(ctx, request.Path, sync.RemotePath, part)
 	}
@@ -302,15 +403,23 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	return walkChan, nil
 }
 
-func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
-	return r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+	remoteSize, remoteMtime, archiveStatus, err := r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+	if archiveStatus == nil {
+		return remoteSize, remoteMtime, false, false, err
+	}
+
+	isArchived := (*archiveStatus).IsArchived
+	isArchiveRestoreAllowed := (cfg.AllowRestore != nil && *cfg.AllowRestore) || (cfg.AllowRestore == nil && archiveStatus.Info.autoRestore)
+
+	return remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err
 }
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if !cfg.Download {
 		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging)
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.StorageClass)
 		}
 	}
 	return "", nil
@@ -419,7 +528,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 
-	_, mtime, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
+	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
 		return fmt.Errorf("unable to verify the remote object has not changed: %w", err)
 	}
@@ -500,13 +609,41 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	return
 }
 
+type s3ArchiveInfo struct {
+	IsArchived        bool
+	RestoreInProgress bool
+	Info              S3StorageClass
+}
+
+// archiveStatus returns whether the resource is archived and is in the process of being restored in
+// order to be accessible.
+func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *string) *s3ArchiveInfo {
+
+	var status *s3ArchiveInfo
+	if class, ok := r.storageClasses[storageClass]; ok && class.archival {
+		status = &s3ArchiveInfo{Info: r.storageClasses[storageClass]}
+		if restoreMsg == nil {
+			status.IsArchived = true
+			status.RestoreInProgress = false
+		} else if strings.Contains(*restoreMsg, `ongoing-request="false"`) {
+			status.IsArchived = false
+			status.RestoreInProgress = false
+		} else {
+			status.IsArchived = true
+			status.RestoreInProgress = true
+		}
+	}
+
+	return status
+}
+
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
-func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, error) {
+func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, *s3ArchiveInfo, error) {
 	if key == "" {
 		if keyMustExist {
-			return 0, time.Time{}, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
+			return 0, time.Time{}, nil, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
 		}
-		return 0, time.Time{}, nil
+		return 0, time.Time{}, nil, nil
 	}
 
 	headObjectInput := &s3.HeadObjectInput{
@@ -519,26 +656,28 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
-				return 0, time.Time{}, os.ErrNotExist
+				return 0, time.Time{}, nil, os.ErrNotExist
 			}
 		}
-		return 0, time.Time{}, err
+		return 0, time.Time{}, nil, err
 	}
+
+	archivedStatus := r.archiveStatus(resp.StorageClass, resp.Restore)
 
 	beegfsMtime, ok := resp.Metadata["beegfs-mtime"]
 	if !ok {
-		return *resp.ContentLength, *resp.LastModified, nil
+		return *resp.ContentLength, *resp.LastModified, archivedStatus, nil
 	}
 
 	mtime, err := time.Parse(time.RFC3339, beegfsMtime)
 	if err != nil {
-		return *resp.ContentLength, *resp.LastModified, fmt.Errorf("unable to parse remote object's beegfs-mtime")
+		return *resp.ContentLength, *resp.LastModified, archivedStatus, fmt.Errorf("unable to parse remote object's beegfs-mtime")
 	}
 
-	return *resp.ContentLength, mtime, nil
+	return *resp.ContentLength, mtime, archivedStatus, nil
 }
 
-func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string) (uploadID string, err error) {
+func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string, storageClass *string) (uploadID string, err error) {
 	beegfsMtime := mtime.Format(time.RFC3339)
 	if metadata == nil {
 		metadata = map[string]string{"beegfs-mtime": beegfsMtime}
@@ -553,6 +692,9 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 		Key:      aws.String(path),
 		Metadata: metadata,
 		Tagging:  tagging,
+	}
+	if storageClass != nil && *storageClass != "" {
+		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
 	}
 
 	result, err := r.client.CreateMultipartUpload(ctx, createMultipartUploadInput)
@@ -618,6 +760,7 @@ func (r *S3Client) upload(
 	mtime time.Time,
 	metadata map[string]string,
 	tagging *string,
+	storageClass *string,
 ) error {
 
 	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
@@ -649,7 +792,7 @@ func (r *S3Client) upload(
 			metadata["beegfs-mtime"] = beegfsMtime
 		}
 
-		resp, err := r.client.PutObject(ctx, &s3.PutObjectInput{
+		input := &s3.PutObjectInput{
 			Bucket:         aws.String(r.config.GetS3().Bucket),
 			Key:            aws.String(remotePath),
 			Body:           filePart,
@@ -658,7 +801,12 @@ func (r *S3Client) upload(
 			//	- If there was a previous failure and the mtime still match then continue from the last byte write
 			Metadata: metadata,
 			Tagging:  tagging,
-		})
+		}
+		if storageClass != nil && *storageClass != "" {
+			input.StorageClass = types.StorageClass(*storageClass)
+		}
+
+		resp, err := r.client.PutObject(ctx, input)
 
 		if err != nil {
 			return err
