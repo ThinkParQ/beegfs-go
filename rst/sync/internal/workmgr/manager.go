@@ -200,12 +200,23 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 
 	allEntriesFound := 0
 	for priority := range priorityLevels {
-		entriesFound, err := m.initScheduler(SubmissionIdPriorityRange(priority))
+		lastSubmissionId, nextRescheduledTime, entriesFound, err := m.initScheduler(SubmissionIdPriorityRange(priority))
 		if err != nil {
 			m.log.Error("failed to initialize scheduler", zap.Error(err))
 			break
 		}
+
 		allEntriesFound += entriesFound
+		if !nextRescheduledTime.IsZero() {
+			m.scheduler.SetNextRescheduledTime(nextRescheduledTime, priority)
+		}
+		if lastSubmissionId != nil {
+			if nextSubmissionId, _, err := IncrementSubmissionId(*lastSubmissionId); err != nil {
+				m.log.Error("failed to initialize scheduler", zap.Error(err))
+			} else {
+				m.scheduler.SetNextSubmissionId(nextSubmissionId, priority)
+			}
+		}
 	}
 	if allEntriesFound > 0 {
 		m.log.Info("discovered work requests from previous run", zap.Int("requests", allEntriesFound))
@@ -272,7 +283,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	// completedWork is how workers signal when they are no longer working on a request. It may have
 	// been completed successfully or cancelled, but either way it should be removed from the active
 	// work map and new request(s) can be pulled to the active work queue and map.
-	completedWork := make(chan workIdentifier, 4096)
+	completedWork := make(chan workIdentifier, cap(m.activeWorkQueue))
 
 	for i := 1; i <= m.config.NumWorkers; i++ {
 		log := m.log.With(zap.String("goroutine", strconv.Itoa(i)))
@@ -285,7 +296,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			workJournal:          m.workJournal,
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
-			rescheduleWork:       m.scheduler.AddWorkToken,
+			rescheduleWork:       m.scheduler.RescheduleWork,
 		}
 		m.workerWG.Add(1)
 		go w.run(m.workerCtx, m.workerWG)
@@ -299,6 +310,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 		case <-m.mgrCtx.Done():
 			return
 		case allowedTokens := <-m.scheduler.tokensReleased:
+			currentTime := time.Now()
 			for priority, ok := nextPriority(); ok; priority, ok = nextPriority() {
 				tokensDistributed := allowedTokens[priority]
 				if tokensDistributed == 0 {
@@ -306,10 +318,25 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 				}
 
 				start, stop := SubmissionIdPriorityRange(priority)
-				err = m.pullInWork(start, stop, allowedTokens[priority])
-				if err != nil {
+				nextSubmissionId := m.scheduler.GetNextSubmissionId(priority)
+
+				// Add rescheduled work to the activeWork map
+				nextRescheduledTime := m.scheduler.GetNextRescheduledTime(priority)
+				if currentTime.After(nextRescheduledTime) {
+					if _, nextRescheduledTime, err = m.pullInWork(start, nextSubmissionId, &allowedTokens[priority]); err != nil {
+						m.log.Error("failed to pull in new work", zap.Error(err))
+						break
+					} else {
+						m.scheduler.SetNextRescheduledTime(nextRescheduledTime, priority)
+					}
+				}
+
+				// Add new work to the activeWork map
+				if next, _, err := m.pullInWork(nextSubmissionId, stop, &allowedTokens[priority]); err != nil {
 					m.log.Error("failed to pull in new work", zap.Error(err))
 					break
+				} else if next != nil {
+					m.scheduler.SetNextSubmissionId(*next, priority)
 				}
 			}
 		case completion := <-completedWork:
@@ -335,9 +362,13 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 }
 
 // pullInWork moves ready work from the priority range to the activeWork map.
-func (m *Manager) pullInWork(start string, stop string, availableTokens int) error {
-	if availableTokens <= 0 {
-		return nil
+func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (lastSubmissionId *string, nextExecuteAfter time.Time, err error) {
+	if availableTokens == nil {
+		err = fmt.Errorf("availableTokens was unexpectedly nil: this is a bug")
+		return
+	}
+	if *availableTokens <= 0 {
+		return
 	}
 
 	m.activeWorkMu.Lock()
@@ -348,26 +379,29 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens int) err
 		kvstore.WithStopKey(stop),
 	)
 	if err != nil {
-		return fmt.Errorf("unable to get work journal entries: %w", err)
+		err = fmt.Errorf("unable to get work journal entries: %w", err)
+		return
 	}
 	defer cleanupNext()
 
 	item, err := nextItem()
 	if err != nil {
-		return fmt.Errorf("unable to get work journal entry: %w", err)
+		err = fmt.Errorf("unable to get work journal entry: %w", err)
+		return
 	}
 	if item == nil {
-		return nil
+		return
 	}
 
+	lastSubmissionId = new(string)
 	currentTime := time.Now()
-	for item != nil && availableTokens > 0 {
-		submissionID := item.Key
+	for item != nil && *availableTokens > 0 {
+		*lastSubmissionId = item.Key
 		entry := item.Entry.Value
 
 		if currentTime.After(entry.ExecuteAfter) {
 			workId := workIdentifier{
-				submissionID:  submissionID,
+				submissionID:  *lastSubmissionId,
 				jobID:         entry.WorkRequest.JobId,
 				workRequestID: entry.WorkRequest.RequestId,
 			}
@@ -380,10 +414,14 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens int) err
 				activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 				m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
 				m.activeWorkQueue <- activeWork
-				availableTokens -= 1
-				m.scheduler.RemoveWorkToken(submissionID)
+				*availableTokens -= 1
+				m.scheduler.RemoveWorkToken(*lastSubmissionId)
 				priority := priorityIdMap[entry.WorkRequest.GetPriority()]
 				beeSyncActiveQueue.Add(priority, 1)
+			}
+		} else {
+			if nextExecuteAfter.IsZero() || entry.ExecuteAfter.Before(nextExecuteAfter) {
+				nextExecuteAfter = entry.ExecuteAfter
 			}
 		}
 
@@ -393,33 +431,41 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens int) err
 		}
 	}
 
-	return err
+	return
 }
 
-// initScheduler adds tokens for unfinished work requests so they can be handled when the Sync
-// node starts.
-func (m *Manager) initScheduler(start string, stop string) (int, error) {
+// initScheduler adds tokens for unfinished work requests so they can be handled when the Sync node
+// starts. It returns the last entry's submissionId, entries found and an error if there was one.
+func (m *Manager) initScheduler(start string, stop string) (submissionId *string, nextExecuteAfter time.Time, entriesFound int, err error) {
 	nextItem, cleanupNext, err := m.workJournal.GetEntries(
 		kvstore.WithStartingKey(start),
 		kvstore.WithStopKey(stop),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("unable to get work journal entries: %w", err)
+		err = fmt.Errorf("unable to get work journal entries: %w", err)
+		return
 	}
 	defer cleanupNext()
 
 	submission, err := nextItem()
 	if err != nil {
-		return 0, fmt.Errorf("unable to get work journal entry: %w", err)
+		err = fmt.Errorf("unable to get work journal entry: %w", err)
+		return
 	}
 	if submission == nil {
-		return 0, nil
+		return
 	}
 
-	entriesFound := 0
+	submissionId = new(string)
 	for submission != nil {
-		m.scheduler.AddWorkToken(submission.Key)
+		*submissionId = submission.Key
+		entry := submission.Entry.Value
+		m.scheduler.AddWorkToken(*submissionId)
 		entriesFound++
+
+		if nextExecuteAfter.IsZero() || entry.ExecuteAfter.Before(nextExecuteAfter) {
+			nextExecuteAfter = entry.ExecuteAfter
+		}
 
 		submission, err = nextItem()
 		if err != nil {
@@ -427,7 +473,7 @@ func (m *Manager) initScheduler(start string, stop string) (int, error) {
 		}
 	}
 
-	return entriesFound, err
+	return
 }
 
 func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {

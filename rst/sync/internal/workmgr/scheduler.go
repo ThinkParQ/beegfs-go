@@ -2,6 +2,7 @@ package workmgr
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strconv"
 	"sync/atomic"
@@ -60,7 +61,9 @@ type scheduler struct {
 	// tokensReleased is a buffered channel releases the priority tokens to the sync manager. This
 	// must be buffered to avoid deadlocking with manager. The channel must hold every sendWork that
 	// can occur before the manager loop reads m.scheduler.tokensReleased.
-	tokensReleased chan [priorityLevels]int
+	tokensReleased       chan [priorityLevels]int
+	nextRescheduledTimes [priorityLevels]*time.Time
+	nextSubmissionIds    [priorityLevels]string
 }
 
 func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignment, fairness gemetricRatio, opts ...schedulerOpt) (s *scheduler, close func() error) {
@@ -135,7 +138,7 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 							shouldReportIdleStatus = true
 							shouldReportActiveStatus = false
 						}
-					} else if shouldReportIdleStatus && s.allWorkTokens.Load() == 0 {
+					} else if shouldReportIdleStatus && len(queue) == 0 {
 						s.log.Info("worker node is idle")
 						shouldReportIdleStatus = false
 						shouldReportActiveStatus = true
@@ -148,25 +151,53 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 	return
 }
 
+func (s *scheduler) GetNextRescheduledTime(priority int) time.Time {
+	if s.nextRescheduledTimes[priority] == nil {
+		return time.Time{}
+	}
+	return *s.nextRescheduledTimes[priority]
+}
+func (s *scheduler) SetNextRescheduledTime(ExecuteAfter time.Time, priority int) {
+	if s.nextRescheduledTimes[priority] == nil {
+		s.nextRescheduledTimes[priority] = new(time.Time)
+		*s.nextRescheduledTimes[priority] = ExecuteAfter
+	} else if ExecuteAfter.Before(*s.nextRescheduledTimes[priority]) {
+		*s.nextRescheduledTimes[priority] = ExecuteAfter
+	}
+}
+func (s *scheduler) GetNextSubmissionId(priority int) string {
+	return s.nextSubmissionIds[priority]
+}
+func (s *scheduler) SetNextSubmissionId(submissionId string, priority int) {
+	s.nextSubmissionIds[priority] = submissionId
+}
+
+func (s *scheduler) RescheduleWork(submissionId string, ExecuteAfter time.Time) {
+	priority := s.AddWorkToken(submissionId)
+	s.SetNextRescheduledTime(ExecuteAfter, int(priority))
+}
+
 // AddWorkToken(submissionID) tells the scheduler about a submission in the journal that is eligible
 // to be scheduled. It should be called whenever a WR is created, rediscovered on startup, or
 // rescheduled. The scheduler decodes the submission ID to determine the priority and increment that
 // bucket's token count. These counts are used to keep track of pending work at each priority to
 // ensure no priority queue is starved. Tokens represent work that is ready but not yet dispatched
 // to a worker.
-func (s *scheduler) AddWorkToken(submissionId string) {
+func (s *scheduler) AddWorkToken(submissionId string) int32 {
 	priority := submissionIdPriority(submissionId)
 	s.workTokens[priority].Add(1)
 	s.allWorkTokens.Add(1)
+	return priority
 }
 
 // RemoveWorkToken(submissionID) is called once a work assignment has been added to the active work
 // queue (not when it actually completes). This tells the scheduler a request at the given priority
 // has been handed to a worker, allowing it to internally adjust how it assigns new work.
-func (s *scheduler) RemoveWorkToken(submissionId string) {
+func (s *scheduler) RemoveWorkToken(submissionId string) int32 {
 	priority := submissionIdPriority(submissionId)
 	s.workTokens[priority].Add(-1)
 	s.allWorkTokens.Add(-1)
+	return priority
 }
 
 func (s *scheduler) getUpdateStatsFn(
@@ -346,8 +377,22 @@ func CreateSubmissionId(baseKey string, workRequestPriority int32) (string, int3
 	if priority < 0 || priority > priorityLevels-1 {
 		priority = 2
 	}
+
+	workRequestPriority = priority + 1
 	leadByte := baseKey[0] + submissionIdPriorityOffsetTable[priority]
-	return string(leadByte) + baseKey[1:], priority + 1
+	return string(leadByte) + baseKey[1:], workRequestPriority
+}
+
+func IncrementSubmissionId(key string) (string, int32, error) {
+	workRequestPriority := submissionIdPriority(key) + 1
+	value, err := strconv.ParseUint(submissionBaseKey(key), 36, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("unable to cast last submission ID to an integer '%s': %w", key, err)
+	}
+
+	baseKey := fmt.Sprintf("%013s", strconv.FormatUint(value+1, 36))
+	submissionId, priority := CreateSubmissionId(baseKey, workRequestPriority)
+	return submissionId, priority, nil
 }
 
 func DemoteSubmissionId(key string) (string, int32) {
