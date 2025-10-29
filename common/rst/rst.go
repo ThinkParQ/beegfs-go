@@ -107,7 +107,7 @@ type Provider interface {
 	// It is important for providers to maintain beegfs-mtime which is the file's last modification
 	// time of the prior upload operation. Beegfs-mtime is used in conjunction with the file's size
 	// to determine whether the file is sync.
-	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, err error)
+	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
@@ -431,9 +431,12 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		}
 	}
 
-	remoteSize, remoteMtime, isArchived, err := client.GetRemotePathInfo(ctx, cfg)
+	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
+	}
+	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
+		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --allow-restore to continue"))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))

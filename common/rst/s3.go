@@ -265,8 +265,17 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 					Key:            aws.String(sync.RemotePath),
 					RestoreRequest: restoreRequest,
 				}
+
+				// Multiple workers may attempt to restore the same object concurrently. In that
+				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
+				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
 				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
-					return false, 0, err
+					var apiErr smithy.APIError
+					if !(errors.As(err, &apiErr) && apiErr.ErrorCode() == "RestoreAlreadyInProgress") {
+						archiveStatus.RestoreInProgress = true
+					} else {
+						return false, 0, err
+					}
 				}
 				return false, archiveStatus.Info.checkTime, nil
 			}
@@ -394,12 +403,16 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	return walkChan, nil
 }
 
-func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, error) {
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
 	remoteSize, remoteMtime, archiveStatus, err := r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
 	if archiveStatus == nil {
-		return remoteSize, remoteMtime, false, err
+		return remoteSize, remoteMtime, false, false, err
 	}
-	return remoteSize, remoteMtime, (*archiveStatus).IsArchived, err
+
+	isArchived := (*archiveStatus).IsArchived
+	isArchiveRestoreAllowed := (cfg.AllowRestore != nil && *cfg.AllowRestore) || (cfg.AllowRestore == nil && archiveStatus.Info.autoRestore)
+
+	return remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err
 }
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
@@ -605,22 +618,23 @@ type s3ArchiveInfo struct {
 // archiveStatus returns whether the resource is archived and is in the process of being restored in
 // order to be accessible.
 func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *string) *s3ArchiveInfo {
-	var info *s3ArchiveInfo
+
+	var status *s3ArchiveInfo
 	if class, ok := r.storageClasses[storageClass]; ok && class.archival {
-		info = &s3ArchiveInfo{Info: r.storageClasses[storageClass]}
+		status = &s3ArchiveInfo{Info: r.storageClasses[storageClass]}
 		if restoreMsg == nil {
-			info.IsArchived = true
-			info.RestoreInProgress = false
+			status.IsArchived = true
+			status.RestoreInProgress = false
 		} else if strings.Contains(*restoreMsg, `ongoing-request="false"`) {
-			info.IsArchived = false
-			info.RestoreInProgress = false
+			status.IsArchived = false
+			status.RestoreInProgress = false
 		} else {
-			info.IsArchived = true
-			info.RestoreInProgress = true
+			status.IsArchived = true
+			status.RestoreInProgress = true
 		}
 	}
 
-	return info
+	return status
 }
 
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
@@ -788,7 +802,7 @@ func (r *S3Client) upload(
 			Metadata: metadata,
 			Tagging:  tagging,
 		}
-		if storageClass != nil {
+		if storageClass != nil && *storageClass != "" {
 			input.StorageClass = types.StorageClass(*storageClass)
 		}
 
