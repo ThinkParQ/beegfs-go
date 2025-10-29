@@ -130,7 +130,7 @@ type worker struct {
 	workJournal          *kvstore.MapStore[workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       func(string)
+	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
 }
 
 func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
@@ -296,7 +296,7 @@ func (w *worker) processWork(work workAssignment) {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
 		w.sendWorkResult(work, result.Work)
-		w.rescheduleWork(work.submissionID)
+		w.rescheduleWork(work.submissionID, journalEntry.Value.ExecuteAfter)
 		beeSyncWaitQueue.Add(mappedPriorityId, 1)
 		return
 	}

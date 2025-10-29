@@ -111,8 +111,8 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
 		if err != nil {
 			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
-		} else if checkTime < time.Duration(time.Minute) {
-			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1m'", name)
+		} else if checkTime < time.Duration(time.Second) {
+			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1s'", name)
 		}
 		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
 		if err != nil {
