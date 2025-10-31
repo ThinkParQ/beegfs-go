@@ -200,7 +200,8 @@ func checkPoolForPattern(storagePool pool.GetStoragePools_Result, pattern beegfs
 // files to be created using targets in different pools unless forced.
 func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.GetStoragePools_Result, pattern beegfs.StripePatternType, targetsOrBuddies []beegfs.EntityId) ([]uint16, error) {
 	ids := map[uint16]struct{}{}
-	if pattern == beegfs.StripePatternRaid0 {
+	switch pattern {
+	case beegfs.StripePatternRaid0:
 		targetMap := map[beegfs.EntityIdSet]struct{}{}
 		for _, t := range storagePool.Targets {
 			targetMap[t] = struct{}{}
@@ -218,7 +219,7 @@ func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.Ge
 				ids[uint16(t.LegacyId.NumId)] = struct{}{}
 			}
 		}
-	} else if pattern == beegfs.StripePatternBuddyMirror {
+	case beegfs.StripePatternBuddyMirror:
 		buddyMap := map[beegfs.EntityIdSet]struct{}{}
 		for _, b := range storagePool.BuddyGroups {
 			buddyMap[b] = struct{}{}
@@ -236,7 +237,7 @@ func checkAndGetTargets(force bool, mappings *util.Mappings, storagePool pool.Ge
 				ids[uint16(b.LegacyId.NumId)] = struct{}{}
 			}
 		}
-	} else {
+	default:
 		return nil, fmt.Errorf("unknown stripe pattern: %s", pattern)
 	}
 

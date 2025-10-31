@@ -1,3 +1,4 @@
+// Package entry provides functions and types for interacting with entries in BeeGFS.
 package entry
 
 import (
@@ -807,14 +808,14 @@ func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.No
 		return err
 	}
 
-	rstIdRequest := &msg.SetFilePatternRequest{EntryInfo: entry, RST: msg.RemoteStorageTarget{RSTIDs: rstIds}}
-	rstIdResp := &msg.SetFilePatternResponse{}
-	err = store.RequestTCP(ctx, ownerNode.Uid, rstIdRequest, rstIdResp)
+	rstIDRequest := &msg.SetFilePatternRequest{EntryInfo: entry, RST: msg.RemoteStorageTarget{RSTIDs: rstIds}}
+	rstIDResp := &msg.SetFilePatternResponse{}
+	err = store.RequestTCP(ctx, ownerNode.Uid, rstIDRequest, rstIDResp)
 	if err != nil {
 		return err
 	}
-	if rstIdResp.Result != beegfs.OpsErr_SUCCESS {
-		return fmt.Errorf("server returned an error configuring file targets, %s: %w", path, rstIdResp.Result)
+	if rstIDResp.Result != beegfs.OpsErr_SUCCESS {
+		return fmt.Errorf("server returned an error configuring file targets, %s: %w", path, rstIDResp.Result)
 	}
 
 	return nil

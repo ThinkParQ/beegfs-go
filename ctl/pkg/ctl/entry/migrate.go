@@ -428,7 +428,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	}
 
 	// Determine if the entry needs migration and if so, if there are enough targets/groups:
-	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(ctx, entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
+	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
 	if err != nil {
 		if errors.Is(err, ErrEntryHasNoTargets) {
 			result.StartingIDs = "(unavailable)"

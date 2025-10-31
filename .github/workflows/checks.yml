@@ -18,7 +18,5 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install toolchains and tools
-        run: make install-tools
       - name: Run checks and unit tests
         run: make test

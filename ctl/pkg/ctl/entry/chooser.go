@@ -1,7 +1,6 @@
 package entry
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -64,7 +63,6 @@ func getRandomIDChooser() func(fromDstIDs []uint16, idsAlreadyInStripePattern []
 // IMPORTANT: dstTargets and dstGroups should not contain any duplicates but must be provided as
 // slices to optimize copying the slice for randomization.
 func getMigrationForEntry(
-	ctx context.Context,
 	entry *GetEntryCombinedInfo,
 	srcTargets map[uint16]struct{},
 	srcGroups map[uint16]struct{},
@@ -83,13 +81,14 @@ func getMigrationForEntry(
 	dstIDs = make([]uint16, 0, 4)
 	unmodifiedIDs = make([]uint16, 0, 4)
 	var rebalanceIDType msg.RebalanceIDType = msg.RebalanceIDTypeInvalid
-	if entry.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
+	switch entry.Entry.Pattern.Type {
+	case beegfs.StripePatternBuddyMirror:
 		rebalanceIDType = msg.RebalanceIDTypeGroup
 		for _, group := range entry.Entry.Pattern.TargetIDs {
 			if _, ok := srcGroups[group]; ok {
 				randomID, err := targetChooser(dstGroups, entry.Entry.Pattern.TargetIDs)
 				if err != nil {
-					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient destination groups to migrate entry away from the specified groups (entry is currently assigned to groups %v)", entry.Entry.Pattern.TargetIDs)
+					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination groups to migrate entry away from the specified groups (entry is currently assigned to groups %v)", entry.Entry.Pattern.TargetIDs)
 				}
 				srcIDs = append(srcIDs, group)
 				dstIDs = append(dstIDs, randomID)
@@ -97,13 +96,13 @@ func getMigrationForEntry(
 				unmodifiedIDs = append(unmodifiedIDs, group)
 			}
 		}
-	} else if entry.Entry.Pattern.Type == beegfs.StripePatternRaid0 {
+	case beegfs.StripePatternRaid0:
 		rebalanceIDType = msg.RebalanceIDTypeTarget
 		for _, target := range entry.Entry.Pattern.TargetIDs {
 			if _, ok := srcTargets[target]; ok {
 				randomID, err := targetChooser(dstTargets, entry.Entry.Pattern.TargetIDs)
 				if err != nil {
-					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient destination targets to migrate entry away from the specified targets (entry is currently assigned to targets %v)", entry.Entry.Pattern.TargetIDs)
+					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination targets to migrate entry away from the specified targets (entry is currently assigned to targets %v)", entry.Entry.Pattern.TargetIDs)
 				}
 				srcIDs = append(srcIDs, target)
 				dstIDs = append(dstIDs, randomID)
@@ -111,7 +110,7 @@ func getMigrationForEntry(
 				unmodifiedIDs = append(unmodifiedIDs, target)
 			}
 		}
-	} else {
+	default:
 		return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("unsupported pattern type: %s", entry.Entry.Pattern.Type)
 	}
 
