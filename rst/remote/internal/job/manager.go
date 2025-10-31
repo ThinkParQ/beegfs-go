@@ -505,7 +505,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
 				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
 			case beeremote.JobRequest_GenerationStatus_ERROR:
-				err = fmt.Errorf(status.Message)
+				err = errors.New(status.Message)
 			default:
 				err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
 			}

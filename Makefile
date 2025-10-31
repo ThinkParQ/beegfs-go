@@ -62,10 +62,10 @@ package-all:
 # Generate NOTICE file.
 .PHONY: generate-notices
 generate-notices:
-	@go-licenses report ./ctl/... --template ctl/build/notice.tpl > ctl/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
-	@go-licenses report ./rst/remote/... --template rst/remote/build/notice.tpl > rst/remote/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
-	@go-licenses report ./rst/sync/... --template rst/sync/build/notice.tpl > rst/sync/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq	
-	@go-licenses report ./watch/... --template watch/build/notice.tpl > watch/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+	@go tool go-licenses report ./ctl/... --template ctl/build/notice.tpl > ctl/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+	@go tool go-licenses report ./rst/remote/... --template rst/remote/build/notice.tpl > rst/remote/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+	@go tool go-licenses report ./rst/sync/... --template rst/sync/build/notice.tpl > rst/sync/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq	
+	@go tool go-licenses report ./watch/... --template watch/build/notice.tpl > watch/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 
 # Test targets:
 # Test targets may make change to the local repository (e.g. running go mod tidy) to
@@ -100,21 +100,20 @@ check-gofmt:
 	@if [ -n "$$(gofmt -l ./ | grep -v vendor)" ]; then \
 		echo "The following files have not been formatted using gofmt:"; \
 		gofmt -l ./ ;\
-		echo -e "\nFix individual files with: \ngofmt -w <file> \n"\
-		"\nOr fix all files with:\nfind . -type d \( -path './vendor' \) -prune -o -name '*.go' -print0 | xargs -0 gofmt -w \n\n" ;\
+		echo -e "\nFix all files with: \ngo fmt ./... \n";\
 		exit 1; \
 	fi
 
 # Run the linters
 .PHONY: check-linters
 check-linters:
-	staticcheck ./...
+	go tool staticcheck ./...
 	go vet ./...
 
 # Check for vulnerability issues
 .PHONY: check-vulnerabilities
 check-vulnerabilities:
-	govulncheck ./...
+	go tool govulncheck ./...
 
 # Run the unit tests
 .PHONY: test-unit
@@ -150,7 +149,7 @@ check-go-tidy: tidy
 .PHONY: check-licenses
 check-licenses: generate-notices
 	@echo "Checking license compliance..."
-	@go-licenses check ./... \
+	@go tool go-licenses check ./... \
 		--disallowed_types=forbidden,permissive,reciprocal,restricted,unknown \
 		--ignore git.beegfs.io \
 		--ignore github.com/thinkparq \
@@ -171,14 +170,6 @@ check-licenses: generate-notices
         echo "NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
     fi
-
-
-# Targets for installation of various prerequisites:
-.PHONY: install-tools
-install-tools: 
-	go install honnef.co/go/tools/cmd/staticcheck@latest
-	go install github.com/google/go-licenses@v1.6.0
-	go install golang.org/x/vuln/cmd/govulncheck@latest
 
 .PHONY: tidy
 tidy :
