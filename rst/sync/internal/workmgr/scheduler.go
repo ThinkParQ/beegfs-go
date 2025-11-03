@@ -69,7 +69,7 @@ type scheduler struct {
 func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignment, fairness gemetricRatio, opts ...schedulerOpt) (s *scheduler, close func() error) {
 
 	cfg := &schedulerConfig{
-		targetMultiple:            2.5,
+		targetMultiple:            1.5,
 		halfLifeSec:               10,
 		maximumAllowedTokenGrowth: 0.85,
 		minimumAllowedTokens:      32,
@@ -83,7 +83,7 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 	s = &scheduler{
 		ctx:            ctx,
 		log:            log,
-		tokensReleased: make(chan [priorityLevels]int, 1),
+		tokensReleased: make(chan [priorityLevels]int),
 	}
 	s.log.Info("worker node is idle")
 
@@ -108,6 +108,8 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 		updateStats := s.getUpdateStatsFn(queue, cfg.targetMultiple, cfg.minimumAllowedTokens, cfg.maximumAllowedTokenGrowth, alpha, cfg.pullInWorkTickerDuration)
 		distributeTokens := s.getDistributeTokens(weights)
 
+		skipCount := 0
+		var tokens [priorityLevels]int
 		for {
 			for updateCount := range updateStatsCount {
 				select {
@@ -126,11 +128,22 @@ func NewScheduler(ctx context.Context, log *zap.Logger, queue chan workAssignmen
 						allowedTokens = availableSlots
 					}
 
-					tokens, isWork := distributeTokens(allowedTokens)
+					newTokens, isWork := distributeTokens(allowedTokens)
 					if isWork {
-						s.tokensReleased <- tokens
-						for _, count := range tokens {
+						for priority, count := range newTokens {
+							tokens[priority] += count
 							tokensDistributed += count
+						}
+
+						select {
+						case s.tokensReleased <- tokens:
+							for priority := range priorityLevels {
+								tokens[priority] = 0
+							}
+							skipCount = 0
+						default:
+							skipCount++
+							// TODO: Log something when sustained for
 						}
 
 						if shouldReportActiveStatus {
@@ -365,8 +378,8 @@ const submissionIdPriorityTableStart = byte(48)
 // submissionIdPriorityOffsetTable defines the submissionId boundaries for each priority.
 // The offset range for a given priority spans from table[priority-1] to table[priority].
 var submissionIdPriorityOffsetTable = []byte{0, 4, 49, 53, 57, 61}
-var submissionIdPriorityStarts = []string{"0000000000000", "4000000000000", "a000000000000", "e000000000000", "i000000000000"}
-var submissionIdPriorityStops = []string{"4000000000000", "a000000000000", "e000000000000", "i000000000000", "m000000000000"}
+var submissionIdPriorityStarts = [priorityLevels]string{"0000000000000", "4000000000000", "a000000000000", "e000000000000", "i000000000000"}
+var submissionIdPriorityStops = [priorityLevels]string{"4000000000000", "a000000000000", "e000000000000", "i000000000000", "m000000000000"}
 
 func SubmissionIdPriorityRange(priority int) (start, stop string) {
 	return submissionIdPriorityStarts[priority], submissionIdPriorityStops[priority]

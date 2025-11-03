@@ -185,7 +185,7 @@ func (w *worker) processWork(work workAssignment) {
 	status := result.GetStatus()
 	mappedPriorityId := priorityIdMap[request.GetPriority()]
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
-	beeSyncActiveWork.Add(mappedPriorityId, 1)
+	beeSyncProcessed.Add(mappedPriorityId, 1)
 
 	// By default we just commit the updated journal entry to the database. However if we sent the
 	// results to BeeRemote and there is nothing left to do with this work request then
@@ -240,6 +240,8 @@ func (w *worker) processWork(work workAssignment) {
 			if err != nil {
 				log.Warn("error releasing journal work entry", zap.Error(err))
 			}
+
+			beeSyncComplete.Add(mappedPriorityId, 1)
 			return
 		}
 		// Otherwise just commit the work entries to the database.
@@ -297,7 +299,7 @@ func (w *worker) processWork(work workAssignment) {
 		status.SetMessage("waiting for work request to be ready")
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, journalEntry.Value.ExecuteAfter)
-		beeSyncWaitQueue.Add(mappedPriorityId, 1)
+		beeSyncRescheduled.Add(mappedPriorityId, 1)
 		return
 	}
 
@@ -346,7 +348,6 @@ func (w *worker) processWork(work workAssignment) {
 		} else {
 			status.SetState(flex.Work_COMPLETED)
 			status.SetMessage("all jobs were submitted")
-			beeSyncComplete.Add(mappedPriorityId, 1)
 		}
 
 		if w.sendWorkResult(work, result.Work) {
@@ -404,7 +405,6 @@ func (w *worker) processWork(work workAssignment) {
 	if len(journalEntry.Value.WorkResult.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
-		beeSyncComplete.Add(mappedPriorityId, 1)
 	} else {
 		if work.ctx.Err() != nil {
 			status.SetState(flex.Work_CANCELLED)
