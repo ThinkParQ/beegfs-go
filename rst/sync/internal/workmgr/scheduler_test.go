@@ -8,7 +8,7 @@ import (
 
 type submissionExpectation struct {
 	name                 string
-	priority             int32
+	workRequestPriority  int32
 	baseKey              string
 	expectedSubmissionId string
 	expectedPriority     int32
@@ -20,7 +20,7 @@ func TestSubmissionIDFunctions(t *testing.T) {
 	tests := []submissionExpectation{
 		{
 			name:                 "test submissionId from previous release",
-			priority:             0,
+			workRequestPriority:  0,
 			baseKey:              "0000000000000",
 			expectedSubmissionId: "a000000000000",
 			expectedPriority:     3,
@@ -28,15 +28,15 @@ func TestSubmissionIDFunctions(t *testing.T) {
 		},
 		{
 			name:                 "test lowest priority",
-			priority:             1,
+			workRequestPriority:  1,
 			baseKey:              "0000000000000",
 			expectedSubmissionId: "0000000000000",
 			expectedPriority:     1,
-			expectedIncrement:    "4000000000001",
+			expectedIncrement:    "0000000000001",
 		},
 		{
 			name:                 "test highest priority",
-			priority:             5,
+			workRequestPriority:  5,
 			baseKey:              "0000000000000",
 			expectedSubmissionId: "i000000000000",
 			expectedPriority:     5,
@@ -44,7 +44,7 @@ func TestSubmissionIDFunctions(t *testing.T) {
 		},
 		{
 			name:                 "test when submission id is the largest uint64 value and is incremented",
-			priority:             3,
+			workRequestPriority:  3,
 			baseKey:              "3w5e11264sgsf", // is the highest value uint64 can represent in base-36
 			expectedSubmissionId: "dw5e11264sgsf",
 			expectedPriority:     3,
@@ -54,14 +54,18 @@ func TestSubmissionIDFunctions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			submissionId, _ := CreateSubmissionId(test.baseKey, test.priority)
-			assert.Equal(t, test.expectedSubmissionId, submissionId, "createSubmissionID(%s, %d)", test.baseKey, test.priority)
+			submissionId, _ := CreateSubmissionId(test.baseKey, test.workRequestPriority)
+			assert.Equal(t, test.expectedSubmissionId, submissionId, "createSubmissionID(%s, %d)", test.baseKey, test.workRequestPriority)
 
 			workRequestPriority := submissionIdPriority(submissionId) + 1
 			assert.Equal(t, test.expectedPriority, workRequestPriority, "submissionIDPriority(%s)", submissionId)
 
 			base := submissionBaseKey(submissionId)
 			assert.Equal(t, test.baseKey, base, "submissionBaseKey(%s)", submissionId)
+
+			next, workRequestPriority, err := IncrementSubmissionId(submissionId)
+			assert.NoError(t, err, "unexpected error for incrementSubmissionID(%s)", submissionId)
+			assert.Equal(t, test.expectedIncrement, next, "incrementSubmissionID(%s)", submissionId)
 
 			demoted, workRequestPriority := DemoteSubmissionId(submissionId)
 			wantDemotedPriority := test.expectedPriority

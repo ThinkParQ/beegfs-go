@@ -24,17 +24,20 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// priorityIdMap maps each priority level to its string representation. Valid priorities range from
-// 1–5. Priority 0 is included only for backward compatibility with work requests from earlier
-// versions, which may still exist in the work journal. These legacy requests already have
-// submissionIds assigned to the highest priority.
-var priorityIdMap = map[int32]string{0: "1", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
-var beeSyncPriorityQueue = expvar.NewMap("beesync_priority_queue")
-var beeSyncActiveQueue = expvar.NewMap("beesync_active_queue")
-var beeSyncActiveWork = expvar.NewMap("beesync_active_work")
-var beeSyncWaitQueue = expvar.NewMap("beesync_wait_queue")
-var beeSyncComplete = expvar.NewMap("beesync_complete")
-var beeSyncPriorityFairnessMode = expvar.NewString("beesync_priority_fairness_mode")
+var (
+	// priorityIdMap maps each priority level to its string representation. Valid priorities range
+	// from 1–5. Priority 0 is included only for backward compatibility with work requests from
+	// earlier versions, which may still exist in the work journal. These legacy requests already
+	// have submissionIds assigned to the highest priority.
+	priorityIdMap               = map[int32]string{0: "1", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
+	beeSyncNewRequests          = expvar.NewMap("beesync_work_requests_new")         // Counts new work requests submitted.
+	beeSyncRecoveredRequests    = expvar.NewMap("beesync_work_requests_recovered")   // Counts work requests recovered after a crash or restart.
+	beeSyncQueued               = expvar.NewMap("beesync_work_requests_queued")      // Counts work requests added to the active queue for worker processing.
+	beeSyncProcessed            = expvar.NewMap("beesync_work_requests_processed")   // Counts work requests removed from the active queue by a worker to begin processing.
+	beeSyncRescheduled          = expvar.NewMap("beesync_work_requests_rescheduled") // Counts work requests rescheduled for later processing.
+	beeSyncComplete             = expvar.NewMap("beesync_work_requests_completed")   // Counts work requests that were processed and removed from the work journal.
+	beeSyncPriorityFairnessMode = expvar.NewString("beesync_priority_fairness_mode")
+)
 
 type Config struct {
 	WorkJournalPath string `mapstructure:"journal-db"`
@@ -149,11 +152,12 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 	beeSyncPriorityFairnessMode.Set(priorityFairness.String())
 	for i := range priorityLevels {
 		priority := priorityIdMap[int32(i+1)]
-		beeSyncPriorityQueue.Set(priority, new(expvar.Int))
-		beeSyncActiveQueue.Set(priority, new(expvar.Int))
-		beeSyncActiveWork.Set(priority, new(expvar.Int))
+		beeSyncNewRequests.Set(priority, new(expvar.Int))
+		beeSyncRecoveredRequests.Set(priority, new(expvar.Int))
+		beeSyncQueued.Set(priority, new(expvar.Int))
+		beeSyncProcessed.Set(priority, new(expvar.Int))
 		beeSyncComplete.Set(priority, new(expvar.Int))
-		beeSyncWaitQueue.Set(priority, new(expvar.Int))
+		beeSyncRescheduled.Set(priority, new(expvar.Int))
 	}
 
 	// If anything goes wrong we want to execute all deferred functions
@@ -205,6 +209,7 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 			m.log.Error("failed to initialize scheduler", zap.Error(err))
 			break
 		}
+		beeSyncRecoveredRequests.Add(priorityIdMap[int32(priority)], int64(entriesFound))
 
 		allEntriesFound += entriesFound
 		if !nextRescheduledTime.IsZero() {
@@ -283,7 +288,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	// completedWork is how workers signal when they are no longer working on a request. It may have
 	// been completed successfully or cancelled, but either way it should be removed from the active
 	// work map and new request(s) can be pulled to the active work queue and map.
-	completedWork := make(chan workIdentifier, cap(m.activeWorkQueue))
+	completedWork := make(chan workIdentifier, m.config.ActiveWorkQueueSize+1)
 
 	for i := 1; i <= m.config.NumWorkers; i++ {
 		log := m.log.With(zap.String("goroutine", strconv.Itoa(i)))
@@ -332,14 +337,25 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 				}
 
 				// Add new work to the activeWork map
-				if next, _, err := m.pullInWork(nextSubmissionId, stop, &allowedTokens[priority]); err != nil {
+				if lastSubmissionId, _, err := m.pullInWork(nextSubmissionId, stop, &allowedTokens[priority]); err != nil {
 					m.log.Error("failed to pull in new work", zap.Error(err))
 					break
-				} else if next != nil {
-					m.scheduler.SetNextSubmissionId(*next, priority)
+				} else if lastSubmissionId != "" {
+					nextSubmissionId, _, err := IncrementSubmissionId(lastSubmissionId)
+					if err != nil {
+						m.log.Error("failed to increment submissionId", zap.Error(err))
+					} else {
+						m.scheduler.SetNextSubmissionId(nextSubmissionId, priority)
+					}
 				}
 			}
 		case completion := <-completedWork:
+			// Select statements do not enforce fairness rather each case picked pseudo-randomly
+			// which will enforce fairness in the log run but it is possible for completedWork to be
+			// starved which could result in a temporary backup. The following is a very quick
+			// operation and should be able delete entries in the order of millions per second or
+			// thousands per millisecond.
+
 			m.activeWorkMu.Lock()
 			delete(m.activeWork, completion)
 			// Locking is expensive, complete/delete as many items as possible while holding the lock.
@@ -348,7 +364,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			// number of items to delete in one go, to avoid holding on to the lock for too long
 			// which in the extreme would cause workers to become idle if we can't pull in work.
 		completeWork:
-			for i := 0; i < 1024; i++ {
+			for range len(completedWork) {
 				select {
 				case completion := <-completedWork:
 					delete(m.activeWork, completion)
@@ -362,7 +378,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 }
 
 // pullInWork moves ready work from the priority range to the activeWork map.
-func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (lastSubmissionId *string, nextExecuteAfter time.Time, err error) {
+func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (lastSubmissionId string, nextExecuteAfter time.Time, err error) {
 	if availableTokens == nil {
 		err = fmt.Errorf("availableTokens was unexpectedly nil: this is a bug")
 		return
@@ -393,15 +409,15 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (l
 		return
 	}
 
-	lastSubmissionId = new(string)
 	currentTime := time.Now()
 	for item != nil && *availableTokens > 0 {
-		*lastSubmissionId = item.Key
+		submissionId := item.Key
 		entry := item.Entry.Value
 
 		if currentTime.After(entry.ExecuteAfter) {
+			lastSubmissionId = submissionId
 			workId := workIdentifier{
-				submissionID:  *lastSubmissionId,
+				submissionID:  submissionId,
 				jobID:         entry.WorkRequest.JobId,
 				workRequestID: entry.WorkRequest.RequestId,
 			}
@@ -415,9 +431,9 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (l
 				m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
 				m.activeWorkQueue <- activeWork
 				*availableTokens -= 1
-				m.scheduler.RemoveWorkToken(*lastSubmissionId)
+				m.scheduler.RemoveWorkToken(submissionId)
 				priority := priorityIdMap[entry.WorkRequest.GetPriority()]
-				beeSyncActiveQueue.Add(priority, 1)
+				beeSyncQueued.Add(priority, 1)
 			}
 		} else {
 			if nextExecuteAfter.IsZero() || entry.ExecuteAfter.Before(nextExecuteAfter) {
@@ -526,7 +542,7 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
 		m.scheduler.AddWorkToken(submissionId)
-		beeSyncPriorityQueue.Add(priorityIdMap[priority], 1)
+		beeSyncNewRequests.Add(priorityIdMap[priority], 1)
 	}()
 
 	wr.SetPriority(priority)
@@ -601,8 +617,8 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	}
 
 	m.activeWorkMu.Lock()
-	activeWork, ok := m.activeWork[workIdentifier]
-	if ok {
+	activeWork, isWorkQueued := m.activeWork[workIdentifier]
+	if isWorkQueued {
 		// Request is already in the queue. We need to cancel it but don't delete it from the active
 		// work map. If it was already picked up (or when it gets picked up) the worker goroutine
 		// will tell manage() it was completed which handles removing it from the map (technically
@@ -621,7 +637,7 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	// If for some reason the application was killed at this point after a restart this work request
 	// would get picked back up, but otherwise there is no mechanism to check for orphaned requests.
 	workEntry, releaseEntry, err := m.workJournal.GetAndLockEntry(submissionID)
-	if !ok {
+	if !isWorkQueued {
 		// Documenting the rationale for how we handle locking here:
 		//
 		// If the request was not yet active then we have to leave mutex locked until we are able to
@@ -688,11 +704,15 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	case flex.Work_SCHEDULED:
 		workResult.GetStatus().SetState(flex.Work_CANCELLED)
 		workResult.GetStatus().SetMessage("cancelled scheduled work request")
-		m.scheduler.RemoveWorkToken(submissionID)
+		if !isWorkQueued {
+			m.scheduler.RemoveWorkToken(submissionID)
+		}
 	case flex.Work_RESCHEDULED:
 		workResult.GetStatus().SetState(flex.Work_CANCELLED)
 		workResult.GetStatus().SetMessage("cancelled rescheduled work request")
-		m.scheduler.RemoveWorkToken(submissionID)
+		if !isWorkQueued {
+			m.scheduler.RemoveWorkToken(submissionID)
+		}
 	case flex.Work_CANCELLED:
 		// If a worker was already handling this work request the state should be cancelled.
 	case flex.Work_FAILED:
