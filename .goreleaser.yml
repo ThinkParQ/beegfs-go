@@ -124,10 +124,9 @@ nfpms:
         type: "symlink"
       - src: rst/remote/build/beegfs-remote.service
         dst: /usr/lib/systemd/system/beegfs-remote.service
-        type: config
       - src: rst/remote/build/beegfs-remote.toml
         dst: /etc/beegfs/beegfs-remote.toml
-        type: config
+        type: "config|noreplace"
       - src: rst/remote/NOTICE.md
         dst: /usr/share/doc/beegfs-remote/NOTICE.md
       - src: LICENSE.md
@@ -156,7 +155,7 @@ nfpms:
         type: config
       - src: rst/sync/build/beegfs-sync.toml
         dst: /etc/beegfs/beegfs-sync.toml
-        type: config
+        type: "config|noreplace"
       - src: rst/sync/NOTICE.md
         dst: /usr/share/doc/beegfs-sync/NOTICE.md
       - src: LICENSE.md
@@ -182,10 +181,9 @@ nfpms:
         type: "symlink"
       - src: watch/build/beegfs-watch.service
         dst: /usr/lib/systemd/system/beegfs-watch.service
-        type: config
       - src: watch/build/beegfs-watch.toml
         dst: /etc/beegfs/beegfs-watch.toml
-        type: config
+        type: "config|noreplace"
       - src: watch/NOTICE.md
         dst: /usr/share/doc/beegfs-watch/NOTICE.md
       - src: LICENSE.md
