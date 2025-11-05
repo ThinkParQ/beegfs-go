@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Equivalent of the original MODESETPATTERN args. Fields that are nil are unmodified.
+// SetEntryCfg is equivalent to the original MODESETPATTERN args. Nil fields are unmodified.
 //
 // IMPORTANT: When updating this struct, add any fields that can only be modified by root to the
 // checks in Validate().

@@ -1,7 +1,6 @@
 package entry
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -167,7 +166,7 @@ func TestStartRebalancingJobs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			rebalanceIDType, srcIDs, dstIDs, unmodifiedIDs, err := getMigrationForEntry(context.Background(), tt.entry, tt.srcTargets, tt.srcGroups, tt.dstTargets, tt.dstGroups)
+			rebalanceIDType, srcIDs, dstIDs, unmodifiedIDs, err := getMigrationForEntry(tt.entry, tt.srcTargets, tt.srcGroups, tt.dstTargets, tt.dstGroups)
 			if tt.wantErr {
 				assert.Error(t, err, "expected an error getting migrations for entry")
 				assert.Empty(t, srcIDs, "expected no srcIDs when no rebalance started")

@@ -150,7 +150,7 @@ func (s *BeeRemoteServer) GetJobs(request *beeremote.GetJobsRequest, stream beer
 	wg.Wait()
 	if err != nil {
 		if errors.Is(err, kvstore.ErrEntryNotInDB) {
-			return status.Errorf(codes.NotFound, err.Error())
+			return status.Errorf(codes.NotFound, "%s", err.Error())
 		}
 		return err
 	}

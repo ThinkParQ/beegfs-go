@@ -47,7 +47,7 @@ type disposalCleaner struct {
 	log         *logger.Logger
 }
 
-// CleanupDisposals() returns two channels where the results or errors running the disposal cleaner
+// CleanupDisposals returns two channels where the results or errors running the disposal cleaner
 // will be sent. It immediately returns an error if any initialization fails. The DisposalResult
 // channel will be closed once all results have been returned, or if a fatal error occurs.
 func CleanupDisposals(ctx context.Context, cfg DisposalCfg) (<-chan DisposalResult, <-chan error, error) {
