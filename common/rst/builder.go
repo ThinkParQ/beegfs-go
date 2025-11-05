@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -184,6 +185,26 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
+
+	processedDirs := make(map[string]struct{})
+	var processedDirsMu sync.Mutex
+
+	updateDirectory := func(dirPath string) error {
+		if !cfg.GetUpdate() || !IsValidRstId(cfg.RemoteStorageTarget) {
+			return nil
+		}
+
+		processedDirsMu.Lock()
+		if _, seen := processedDirs[dirPath]; seen {
+			processedDirsMu.Unlock()
+			return nil
+		}
+		processedDirs[dirPath] = struct{}{}
+		processedDirsMu.Unlock()
+
+		return entry.SetDirectoryRstIds(ctx, dirPath, []uint32{cfg.RemoteStorageTarget})
+	}
+
 	createJobRequests := func() error {
 		var err error
 		var inMountPath string
@@ -204,6 +225,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				if walkResp.Err != nil {
 					return walkResp.Err
 				}
+
+				if walkResp.IsDir {
+						if err := updateDirectory(walkResp.Path); err != nil {
+							return err
+						}
+						continue
+					}
 
 				if walkResp.ResumeToken != "" {
 					builderStateMu.Lock()
@@ -231,6 +259,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 						if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
 							return err
 						}
+							if err := updateDirectory(filepath.Dir(inMountPath)); err != nil {
+								return err
+							}
 					}
 				} else {
 					inMountPath = walkResp.Path

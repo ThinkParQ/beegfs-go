@@ -105,6 +105,7 @@ func walkDirLexicographically(path string, d fs.DirEntry, walkDirFn fs.WalkDirFu
 type StreamPathResult struct {
 	Path        string
 	ResumeToken string
+	IsDir       bool
 	Err         error
 }
 
