@@ -695,8 +695,9 @@ func GetLockedInfo(
 }
 
 type WalkResponse struct {
-	Path string
-	Err  error
+	Path  string
+	IsDir bool
+	Err   error
 }
 
 // WalkPath returns a *WalkResponse channel that streams the files that match the pattern. The
@@ -722,6 +723,7 @@ func WalkPath(ctx context.Context, mountPoint filesystem.Provider, pattern strin
 			}
 
 			if d.IsDir() {
+				walkChan <- &WalkResponse{Path: "/" + path, IsDir: true}
 				return nil
 			}
 			walkChan <- &WalkResponse{Path: "/" + path}
