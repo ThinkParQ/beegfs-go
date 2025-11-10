@@ -338,12 +338,13 @@ type workStateEmoji struct {
 }
 
 var workStateMap = map[flex.Work_State]workStateEmoji{
-	flex.Work_UNKNOWN:   {"❓", flex.Work_UNKNOWN.String()},
-	flex.Work_CREATED:   {"⏳", flex.Work_CREATED.String()},
-	flex.Work_SCHEDULED: {"⏳", flex.Work_SCHEDULED.String()},
-	flex.Work_RUNNING:   {"🔄", flex.Work_RUNNING.String()},
-	flex.Work_ERROR:     {"\u26A0\ufe0f\u200C", flex.Work_ERROR.String()},
-	flex.Work_FAILED:    {"❌", flex.Work_FAILED.String()},
-	flex.Work_CANCELLED: {"🚫", flex.Work_CANCELLED.String()},
-	flex.Work_COMPLETED: {"✅", flex.Work_COMPLETED.String()},
+	flex.Work_UNKNOWN:     {"❓", flex.Work_UNKNOWN.String()},
+	flex.Work_CREATED:     {"⏳", flex.Work_CREATED.String()},
+	flex.Work_SCHEDULED:   {"⏳", flex.Work_SCHEDULED.String()},
+	flex.Work_RESCHEDULED: {"🕒", flex.Work_RESCHEDULED.String()},
+	flex.Work_RUNNING:     {"🔄", flex.Work_RUNNING.String()},
+	flex.Work_ERROR:       {"\u26A0\ufe0f\u200C", flex.Work_ERROR.String()},
+	flex.Work_FAILED:      {"❌", flex.Work_FAILED.String()},
+	flex.Work_CANCELLED:   {"🚫", flex.Work_CANCELLED.String()},
+	flex.Work_COMPLETED:   {"✅", flex.Work_COMPLETED.String()},
 }
