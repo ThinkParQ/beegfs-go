@@ -88,11 +88,13 @@ type Manager struct {
 	// A pointer to an initialized/started worker manager.
 	workerManager *workermgr.Manager
 	// function to release the file's access locks when no longer needed.
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	releaseUnusedFileLockFunc     func(path string, jobs map[string]*Job) error
+	shouldDeleteCompletedJobsFunc func(path string) (bool, error)
 }
 
 type managerOptConfig struct {
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	releaseUnusedFileLockFunc     func(path string, jobs map[string]*Job) error
+	shouldDeleteCompletedJobsFunc func(path string) (bool, error)
 }
 type managerOpt func(*managerOptConfig)
 
@@ -102,6 +104,12 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 		cfg.releaseUnusedFileLockFunc = func(path string, jobs map[string]*Job) error {
 			return nil
 		}
+	}
+}
+
+func withShouldDeleteCompletedJobsFunc(fn func(path string) (bool, error)) managerOpt {
+	return func(cfg *managerOptConfig) {
+		cfg.shouldDeleteCompletedJobsFunc = fn
 	}
 }
 
@@ -120,7 +128,7 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		opt(cfg)
 	}
 
-	return &Manager{
+	mgr := &Manager{
 		log:                       log,
 		ctx:                       ctx,
 		ctxCancel:                 cancel,
@@ -135,6 +143,12 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
 	}
+	if cfg.shouldDeleteCompletedJobsFunc != nil {
+		mgr.shouldDeleteCompletedJobsFunc = cfg.shouldDeleteCompletedJobsFunc
+	} else {
+		mgr.shouldDeleteCompletedJobsFunc = mgr.shouldDeleteCompletedJobs
+	}
+	return mgr
 }
 
 // Start handles initializing all databases and starting a goroutine that
@@ -735,7 +749,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 
 	allowCompletedDeletion := false
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && !jobUpdate.GetForceUpdate() {
-		allowCompletedDeletion, err = m.shouldDeleteCompletedJobs(jobUpdate.GetPath())
+		allowCompletedDeletion, err = m.shouldDeleteCompletedJobsFunc(jobUpdate.GetPath())
 		if err != nil {
 			releaseErr := releasePath()
 			if releaseErr != nil {
