@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	beeBinary   = "/opt/beegfs/python/index/bee"
-	indexConfig = "/etc/beegfs/index/config"
+	beeBinary         = "/usr/local/bin/gufi_dir2index"
+	treeSummaryBinary = "/usr/local/bin/gufi_treesummary"
+	lsBinary          = "/usr/local/bin/gufi_ls"
+	statsBinary       = "/usr/local/bin/gufi_stats"
+	indexConfig       = "/etc/GUFI/config"
 )
 
 var path string
@@ -20,17 +23,22 @@ var commonIndexFlags = []bflag.FlagWrapper{
 		"File system path for which index will be created.", "-F", ""),
 	bflag.Flag("index-path", "I",
 		"File system path at which the index will be stored.", "-I", ""),
-	bflag.GlobalFlag(config.BeeGFSMountPointKey, "-M"),
-	bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
-	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
 	bflag.Flag("summary", "s", "Create tree summary table along with other tables", "-s", false),
 	bflag.Flag("only-summary", "S", "Create only tree summary table", "-S", false),
-	bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
-	bflag.Flag("max-level", "z", "Max level to go down", "-z", ""),
-	bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
-	bflag.Flag("version", "v", "BeeGFS Hive Index Version", "-v", false),
-	bflag.GlobalFlag(config.DebugKey, "-V=1"),
-	bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
+	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
+	bflag.Flag("min-level", "", "Minimum level to go down", "--min-level", ""),
+	bflag.Flag("max-level", "", "Maximum level to go down", "--max-level", ""),
+	bflag.Flag("path-list", "", "File containing paths at a single level to index (not including starting path). Must also use --min-level.", "--path-list", ""),
+	bflag.Flag("index-xattrs", "x", "Index xattrs", "-x", false),
+	bflag.Flag("skip-file", "", "File containing directory names to skip", "--skip-file", ""),
+	bflag.Flag("validate-external-dbs", "q", "Check that external databases are valid before tracking during indexing", "-q", false),
+	bflag.Flag("plugin", "", "Plugin library for modifying database entries", "--plugin", ""),
+	bflag.Flag("target-memory", "", "Target memory utilization (soft limit)", "--target-memory", ""),
+	bflag.Flag("swap-prefix", "", "File name prefix for swap files", "--swap-prefix", ""),
+	bflag.Flag("subdir-limit", "", "Number of subdirectories allowed to be enqueued for parallel processing. Any remainders will be processed serially", "--subdir-limit", ""),
+	bflag.Flag("compress", "", "Compress work items", "--compress", false),
+	bflag.Flag("version", "v", "BeeGFS Hive Index version", "-v", false),
+	bflag.GlobalFlag(config.DebugKey, "--debug"),
 }
 
 func checkBeeGFSConfig() error {

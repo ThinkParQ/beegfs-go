@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const statsCmd = "stats"
-
 var stat string
 
 func newGenericStatsCmd() *cobra.Command {
@@ -49,18 +47,17 @@ func newGenericStatsCmd() *cobra.Command {
 	copyFlags := []bflag.FlagWrapper{
 		bflag.Flag("recursive", "r", "Run command recursively", "-r", false),
 		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
-		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
+		bflag.Flag("order", "", "Sort output (if applicable)", "--order", ""),
 		bflag.Flag("num-results", "n", "Limit the number of results", "--num-results", 0),
 		bflag.Flag("uid", "", "Restrict to a user uid", "--uid", ""),
-		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
-		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
+		bflag.Flag("version", "v", "Show program's version number and exit", "--version", false),
+		bflag.Flag("in-memory-name", "", "Name of in-memory database when aggregation is performed", "--in-memory-name", "out"),
+		bflag.Flag("aggregate-name", "", "Name of final database when aggregation is performed", "--aggregate-name", ""),
+		bflag.Flag("skip-file", "", "Name of file containing directory basenames to skip", "--skip-file", ""),
+		bflag.Flag("verbose", "V", "Show the gufi_query being executed", "--verbose", false),
 		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
-	err := cmd.Flags().MarkHidden("in-memory-name")
-	if err != nil {
-		return nil
-	}
 
 	return cmd
 }
@@ -94,7 +91,7 @@ func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+4)
-	allArgs = append(allArgs, statsCmd, stat, path)
+	allArgs = append(allArgs, stat, path)
 	allArgs = append(allArgs, wrappedArgs...)
 	outputFormat := viper.GetString(config.OutputKey)
 	if outputFormat != "" && outputFormat != config.OutputTable.String() {
@@ -102,12 +99,11 @@ func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
 	}
 	log.Debug("Running BeeGFS Hive Index stats command",
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("statsCmd", statsCmd),
 		zap.Any("stat", stat),
 		zap.String("path", path),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
+	cmd := exec.Command(statsBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()

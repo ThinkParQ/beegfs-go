@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const lsCmd = "ls"
-
 func newGenericLsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
@@ -37,10 +35,9 @@ func newGenericLsCmd() *cobra.Command {
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("beegfs", "b", "Print BeeGFS metadata for the file(s)", "--beegfs", false),
 		bflag.Flag("all", "a", "Do not ignore entries starting with .", "-a", false),
 		bflag.Flag("almost-all", "A", "Do not list implied . and ..", "-A", false),
-		bflag.Flag("block-size", "", "{K,KB,KiB,M,MB,MiB,G,GB,GiB,T,TB,TiB,P,PB,PiB,E,EB,EiB,Z,ZB,ZiB,Y,YB,YiB}, With -l, scale sizes by SIZE when printing them", "--block-size", ""),
+		bflag.Flag("block-size", "", "With -l, scale sizes by SIZE when printing them", "--block-size", ""),
 		bflag.Flag("ignore-backups", "B", "Do not list implied entries ending with ~", "--ignore-backups", false),
 		bflag.Flag("full-time", "", "Like -l --time-style=full-iso", "--full-time", false),
 		bflag.Flag("no-group", "G", "In a long listing, don't print group names", "--no-group", false),
@@ -54,13 +51,11 @@ func newGenericLsCmd() *cobra.Command {
 		bflag.Flag("version", "v", "BeeGFS Hive Index Version", "--version", false),
 		bflag.Flag("time-style", "", "Time/date format with -l", "--time-style", ""),
 		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "-t", false),
-		bflag.Flag("no-sort", "U", "Do not sort; list entries in directory order", "-U", false),
 		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
 		bflag.Flag("in-memory-name", "", "In-memory name", "--in-memory-name", "out"),
-		bflag.Flag("nlink-width", "", "Width of nlink column", "--nlink-width", 2),
-		bflag.Flag("size-width", "", "Width of size column", "--size-width", 10),
-		bflag.Flag("user-width", "", "Width of user column", "--user-width", 5),
-		bflag.Flag("group-width", "", "Width of group column", "--group-width", 5),
+		bflag.Flag("aggregate-name", "", "Name of final database when aggregation is performed", "--aggregate-name", ""),
+		bflag.Flag("skip-file", "", "Name of file containing directory basenames to skip", "--skip-file", ""),
+		bflag.Flag("verbose", "V", "Show the gufi_query being executed", "--verbose", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 	cmd.PersistentFlags().BoolP("help", "", false, "Help for ls")
@@ -89,7 +84,6 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+2)
-	allArgs = append(allArgs, lsCmd)
 	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
 	outputFormat := viper.GetString(config.OutputKey)
@@ -98,11 +92,11 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, paths []string) error {
 	}
 	log.Debug("Running BeeGFS Hive Index ls command",
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("lsCmd", lsCmd),
+		zap.Any("lsBinary", lsBinary),
 		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
+	cmd := exec.Command(lsBinary, allArgs...)
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
