@@ -3,6 +3,7 @@ package rst
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,7 +35,7 @@ import (
 )
 
 type S3StorageClass struct {
-	tier          types.Tier
+	retrievalTier types.Tier
 	archival      bool
 	retentionDays int32         // defines how long the retrieved object will be available in days.
 	checkTime     time.Duration // defines retry time after initiating the restore.
@@ -45,9 +47,11 @@ type S3Client struct {
 	config *flex.RemoteStorageTarget
 	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Rework client into an `s3Provider` interface type.
-	client         *s3.Client
-	mountPoint     filesystem.Provider
-	storageClasses map[types.StorageClass]S3StorageClass
+	client                         *s3.Client
+	mountPoint                     filesystem.Provider
+	storageClasses                 map[types.StorageClass]S3StorageClass
+	isListStartAfterKeySupported   *bool
+	isListStartAfterKeySupportedMu sync.Mutex
 }
 
 var _ Provider = &S3Client{}
@@ -86,10 +90,11 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	})
 
 	s3Client := &S3Client{
-		config:         rstConfig,
-		client:         client,
-		mountPoint:     mountPoint,
-		storageClasses: make(map[types.StorageClass]S3StorageClass),
+		config:                         rstConfig,
+		client:                         client,
+		mountPoint:                     mountPoint,
+		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
+		isListStartAfterKeySupportedMu: sync.Mutex{},
 	}
 
 	for _, class := range s3Provider.StorageClass {
@@ -103,7 +108,7 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
 		}
 
-		tier := types.Tier(archive.GetTier())
+		retrievalTier := types.Tier(archive.GetRetrievalTier())
 		retentionsDays := archive.GetRetentionDays()
 		if retentionsDays < 1 {
 			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionsDays)
@@ -122,7 +127,7 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		}
 
 		s3Client.storageClasses[name] = S3StorageClass{
-			tier:          tier,
+			retrievalTier: retrievalTier,
 			archival:      true,
 			retentionDays: retentionsDays,
 			checkTime:     checkTime,
@@ -132,6 +137,33 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	}
 
 	return s3Client, nil
+}
+
+func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
+	s.isListStartAfterKeySupportedMu.Lock()
+	defer s.isListStartAfterKeySupportedMu.Unlock()
+	if s.isListStartAfterKeySupported != nil {
+		return nil
+	}
+
+	input := &s3.ListObjectsV2Input{
+		Bucket:     aws.String(s.config.GetS3().Bucket),
+		StartAfter: aws.String(""),
+		MaxKeys:    aws.Int32(0),
+	}
+
+	if _, err := s.client.ListObjectsV2(ctx, input); err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidArgument" && strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "startafter") {
+			s.isListStartAfterKeySupported = new(bool)
+			*s.isListStartAfterKeySupported = false
+			return nil
+		}
+		return fmt.Errorf("unable to determine bucket's StartAfter option support: %w", err)
+	}
+	s.isListStartAfterKeySupported = new(bool)
+	*s.isListStartAfterKeySupported = true
+	return nil
 }
 
 func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
@@ -233,8 +265,8 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
-	return ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (string, error) {
+	return "", ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -256,8 +288,8 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				restoreRequest := &types.RestoreRequest{
 					Days: aws.Int32(archiveStatus.Info.retentionDays),
 				}
-				if archiveStatus.Info.tier != "" {
-					restoreRequest.Tier = archiveStatus.Info.tier
+				if archiveStatus.Info.retrievalTier != "" {
+					restoreRequest.Tier = archiveStatus.Info.retrievalTier
 				}
 
 				restoreObjectInput := &s3.RestoreObjectInput{
@@ -328,7 +360,24 @@ func (r *S3Client) GetConfig() *flex.RemoteStorageTarget {
 	return proto.Clone(r.config).(*flex.RemoteStorageTarget)
 }
 
-func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-chan *WalkResponse, error) {
+const maxWalkPageSize = 1000
+
+// GetWalk returns WalkResponse for each prefix match found. The prefix can include glob patterns.
+// The resumeToken is returned with the WalkStoppedWithMoreError sentinel when maxKeys is
+// exceeded and should be used to resume from the prior walk position. maxKeys must be greater
+// than zero or -1 to walk all paths.
+//
+// Sort order of returned aws objects from ListObjectsV2
+// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
+//   - For general purpose buckets, ListObjectsV2 returns objects in lexicographical order based
+//     on their key names. This is important since it allows resuming at any point in the walk.
+//   - For directory buckets, ListObjectsV2 does not return objects in lexicographical order so
+//     this bucket type must start at the beginning of a new page using the continuation token.
+func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *WalkResponse, error) {
+	if maxKeys != -1 && maxKeys <= 0 {
+		return nil, fmt.Errorf("maxKeys must be greater than zero or -1")
+	}
+
 	prefix = r.SanitizeRemotePath(prefix)
 	if _, err := filepath.Match(prefix, ""); err != nil {
 		return nil, fmt.Errorf("invalid prefix %s: %w", prefix, err)
@@ -336,42 +385,100 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 	prefixWithoutPattern := StripGlobPattern(prefix)
 	isKey := prefix == prefixWithoutPattern
 
+	startAfterKey, continuationToken, err := decodeResumeToken(resumeToken)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if ListObjectV2 StartAfter input is supported. This will only run once unless it fails
+	// which would most likely be the result of an unavailable remote target.
+	if r.isListStartAfterKeySupported == nil {
+		if err := r.checkStartAfterSupport(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	walkChan := make(chan *WalkResponse, chanSize)
 	go func() {
 		defer close(walkChan)
 
-		prefixWalk := func() bool {
-			var err error
-			var output *s3.ListObjectsV2Output
-			input := &s3.ListObjectsV2Input{
-				Bucket: aws.String(r.config.GetS3().Bucket),
-				Prefix: aws.String(prefixWithoutPattern),
+		prefixWalk := func() (keysFound bool) {
+			// Size the request's MaxKeys to minimize requests. Sizing with respect to maxKeys
+			// optimizes the response size and optimizes both general-purpose and directory bucket
+			// types.
+			maxKeysPerPage := maxKeys
+			if maxKeysPerPage == -1 {
+				maxKeysPerPage = maxWalkPageSize
+			} else if maxKeysPerPage > maxWalkPageSize {
+				pages := (maxKeys + maxWalkPageSize - 1) / maxWalkPageSize
+				maxKeysPerPage = (maxKeys + pages - 1) / pages
 			}
 
-			keysFound := false
+			input := &s3.ListObjectsV2Input{
+				Bucket:  aws.String(r.config.GetS3().Bucket),
+				Prefix:  aws.String(prefixWithoutPattern),
+				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
+			}
+			if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported && startAfterKey != "" {
+				input.StartAfter = aws.String(startAfterKey)
+			} else if continuationToken != "" {
+				input.ContinuationToken = aws.String(continuationToken)
+			}
+
+			var key string
+			var lastKey string
+			stopBeforeNextPage := false
 			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
+			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
-				output, err = objectPaginator.NextPage(ctx)
+				if stopBeforeNextPage && continuationToken != "" {
+					walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{resumeToken: encodeResumeToken("", continuationToken)}}
+					return
+				}
+
+				output, err := objectPaginator.NextPage(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk was cancelled: %w", err)}
 					} else {
 						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk failed: %w", err)}
 					}
-					return keysFound
+					return
 				}
 
 				for _, content := range output.Contents {
+					key = *content.Key
 					if !isKey {
-						if match, _ := doublestar.Match(prefix, *content.Key); !match {
+						if match, _ := doublestar.Match(prefix, key); !match {
 							continue
 						}
 					}
-					keysFound = true
-					walkChan <- &WalkResponse{Path: *content.Key}
+
+					if maxKeys == 0 {
+						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
+							walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{resumeToken: encodeResumeToken(lastKey, "")}}
+							return
+						}
+
+						stopBeforeNextPage = true
+						continuationToken = ""
+						if output.IsTruncated != nil && *output.IsTruncated {
+							continuationToken = *output.NextContinuationToken
+						}
+					}
+
+					select {
+					case <-ctx.Done():
+						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}
+						return
+					default:
+						walkChan <- &WalkResponse{Path: key}
+					}
+					lastKey = key
+					maxKeys--
 				}
 			}
-			return keysFound
+			return
 		}
 
 		if isKey {
@@ -395,12 +502,42 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 
 			walkChan <- &WalkResponse{Path: prefix}
 			return
-		} else {
-			prefixWalk()
 		}
+
+		prefixWalk()
 	}()
 
 	return walkChan, nil
+}
+
+func encodeResumeToken(startAfterKey string, continuationToken string) string {
+	encodedNextKey := base64.StdEncoding.EncodeToString([]byte(startAfterKey))
+	encodedContinuationToken := base64.StdEncoding.EncodeToString([]byte(continuationToken))
+	return encodedNextKey + ":" + encodedContinuationToken
+}
+
+func decodeResumeToken(resumeToken string) (startAfterKey string, continuationToken string, err error) {
+	if !strings.Contains(resumeToken, ":") {
+		return "", "", nil
+	}
+
+	decode := func(encoded string) (string, error) {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("unable to decode walk resume token: %w", err)
+		}
+		return string(data), err
+	}
+	parts := strings.Split(resumeToken, ":")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("unable to decode walk resume token: %q", resumeToken)
+	}
+
+	if startAfterKey, err = decode(parts[0]); err != nil {
+		return
+	}
+	continuationToken, err = decode(parts[1])
+	return
 }
 
 func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {

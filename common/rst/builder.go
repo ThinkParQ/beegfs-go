@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sync/atomic"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -58,39 +60,53 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return workRequests, nil
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (externalId string, err error) {
 	if !workRequest.HasBuilder() {
-		return ErrReqAndRSTTypeMismatch
+		err = ErrReqAndRSTTypeMismatch
+		return
+	}
+
+	lastState, err := GetJobBuilderLastState(workRequest.GetExternalId())
+	if err != nil {
+		return
 	}
 
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
-	walkChanSize := len(jobSubmissionChan)
+	// TODO: maxRequests limits the number of requests that can be created at a time before the
+	// builder job is rescheduled. This should probably be based on the client if possible;
+	// otherwise, client based metric that are based on builder short/long-term data collection.
+	// Each client should at least have some input since there may be costs associated with the
+	// requests as in s3.
+	maxRequests := 1000
+
+	walkChanSize := cap(jobSubmissionChan)
 	var walkChan <-chan *WalkResponse
-	var err error
 	if cfg.Download {
 		if walkLocalPathInsteadOfRemote(cfg) {
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = WalkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
-				return err
+			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
+				return
 			}
 		} else {
 			client, ok := c.rstMap[cfg.RemoteStorageTarget]
 			if !ok {
-				return fmt.Errorf("failed to determine rst client")
+				err = fmt.Errorf("failed to determine rst client")
+				return
 			}
-			if walkChan, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.RemotePath), walkChanSize); err != nil {
-				return err
+
+			if walkChan, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.RemotePath), walkChanSize, lastState.continuationToken, maxRequests); err != nil {
+				return
 			}
 		}
-	} else if walkChan, err = WalkPath(ctx, c.mountPoint, workRequest.Path, walkChanSize); err != nil {
-		return err
+	} else if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
+		return
 	}
 
-	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
+	return c.executeJobBuilderRequest(ctx, walkChan, jobSubmissionChan, cfg)
 }
 
 func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -112,7 +128,7 @@ func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
 }
 
 // GetWalk is not implemented and should never be called.
-func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *WalkResponse, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 
@@ -131,7 +147,7 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request *flex.WorkRequest, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest, cfg *flex.JobRequestCfg) error {
+func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest, cfg *flex.JobRequestCfg) (string, error) {
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
@@ -143,78 +159,96 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		isPathDir = err == nil && stat.IsDir()
 	}
 
-	var err error
-	var submittedTotal atomic.Uint32
-	var submittedWithErrors atomic.Uint32
+	reschedule := false
+	rescheduleStateMu := sync.Mutex{}
+	lastKnownState := JobBuilderState{}
+	createJobRequests := func() error {
+		var err error
+		var inMountPath string
+		var remotePath string
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case walkResp, ok := <-walkChan:
+				if !ok {
+					return nil
+				}
+				if walkResp.Err != nil {
+					var walkErr WalkStoppedWithMoreError
+					if errors.As(walkResp.Err, &walkErr) {
+						rescheduleStateMu.Lock()
+						reschedule = true
+						lastKnownState.continuationToken = walkErr.resumeToken
+						rescheduleStateMu.Unlock()
+						return nil
+					}
+					return walkResp.Err
+				}
+
+				if cfg.Download {
+					if walkingLocalPath {
+						// Walking cfg.Path to support stub file download and files with a defined rst.
+						inMountPath = walkResp.Path
+					} else {
+						remotePath = walkResp.Path
+						inMountPath, err = GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
+						if err != nil {
+							// This should never happen since both remotePath and remotePathDir
+							// come directly from cfg.RemotePath, so any error here indicates a
+							// bug in the walking logic.
+							return err
+						}
+
+						// Ensure the local directory structure supports the object downloads
+						if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
+							return err
+						}
+					}
+				} else {
+					inMountPath = walkResp.Path
+					remotePath = inMountPath
+				}
+			}
+
+			jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
+			if err != nil {
+				// BuildJobRequest should only return fatal errors, or if there are no RSTs
+				// specified/configured on an entry and there is no other way to return the
+				// error other then aborting the builder job entirely.
+				return err
+			}
+
+			errorCount := 0
+			for _, jobRequest := range jobRequests {
+				status := jobRequest.GetGenerationStatus()
+				if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
+					errorCount++
+				}
+				jobSubmissionChan <- jobRequest
+			}
+
+			rescheduleStateMu.Lock()
+			lastKnownState.submittedTotal += len(jobRequests)
+			lastKnownState.submittedTotalWithErrors += errorCount
+			rescheduleStateMu.Unlock()
+		}
+	}
+
 	workers := 2
 	g, ctx := errgroup.WithContext(ctx)
 	for range workers {
-		g.Go(func() error {
-
-			var inMountPath string
-			var remotePath string
-			for {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case walkResp, ok := <-walkChan:
-					if !ok {
-						return nil
-					}
-					if walkResp.Err != nil {
-						return walkResp.Err
-					}
-
-					if cfg.Download {
-						if walkingLocalPath {
-							// Walking cfg.Path to support stub file download and files with a defined rst.
-							inMountPath = walkResp.Path
-						} else {
-							remotePath = walkResp.Path
-							inMountPath, err = GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
-							if err != nil {
-								// This should never happen since both remotePath and remotePathDir
-								// come directly from cfg.RemotePath, so any error here indicates a
-								// bug in the walking logic.
-								return err
-							}
-
-							// Ensure the local directory structure supports the object downloads
-							if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
-								return err
-							}
-						}
-					} else {
-						inMountPath = walkResp.Path
-						remotePath = inMountPath
-					}
-				}
-
-				jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
-				if err != nil {
-					// BuildJobRequest should only return fatal errors, or if there are no RSTs
-					// specified/configured on an entry and there is no other way to return the
-					// error other then aborting the builder job entirely.
-					return err
-				}
-
-				for _, jobRequest := range jobRequests {
-					status := jobRequest.GetGenerationStatus()
-					if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
-						submittedWithErrors.Add(1)
-					}
-					jobSubmissionChan <- jobRequest
-					submittedTotal.Add(1)
-				}
-			}
-		})
+		g.Go(createJobRequests)
 	}
-	if err = g.Wait(); err != nil {
-		return fmt.Errorf("job builder request was aborted: %w", err)
+	if err := g.Wait(); err != nil {
+		return "", fmt.Errorf("job builder request was aborted: %w", err)
+	}
+	if reschedule {
+		return lastKnownState.String(), nil
 	}
 
 	var errMessage string
-	if submittedTotal.Load() == 0 {
+	if lastKnownState.submittedTotal == 0 {
 		if cfg.Download {
 			if walkingLocalPath {
 				errMessage = fmt.Sprintf("walking local path since --remote-path was not provided; No matches found in path: %s", cfg.Path)
@@ -224,19 +258,51 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 		} else {
 			errMessage = fmt.Sprintf("no matches found in local path: %s", cfg.Path)
 		}
-	} else if submittedWithErrors.Load() > 0 {
-		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", submittedWithErrors.Load(), submittedTotal.Load())
+	} else if lastKnownState.submittedTotalWithErrors > 0 {
+		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", lastKnownState.submittedTotalWithErrors, lastKnownState.submittedTotal)
 	}
 
 	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			errMessage += "; --remote-target was not provided so relying on configured rstIds and stub urls"
 		}
-		return errors.New(errMessage)
+		return "", errors.New(errMessage)
 	}
-	return nil
+	return "", nil
 }
 
 func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
 	return cfg.RemotePath == ""
+}
+
+type JobBuilderState struct {
+	continuationToken        string
+	submittedTotal           int
+	submittedTotalWithErrors int
+}
+
+func GetJobBuilderLastState(externalId string) (state JobBuilderState, err error) {
+	if externalId == "" {
+		return
+	}
+	externalIdParts := strings.SplitN(externalId, ",", 3)
+	if len(externalIdParts) != 3 {
+		return JobBuilderState{}, fmt.Errorf("invalid external Id: %s", externalId)
+	}
+	if state.submittedTotal, err = strconv.Atoi(externalIdParts[0]); err != nil {
+		return JobBuilderState{}, fmt.Errorf("unable to parse previous errors: %w", err)
+	}
+	if state.submittedTotalWithErrors, err = strconv.Atoi(externalIdParts[1]); err != nil {
+		return JobBuilderState{}, fmt.Errorf("unable to parse previous errors: %w", err)
+	}
+	state.continuationToken = externalIdParts[2]
+	return
+}
+
+func (s *JobBuilderState) String() string {
+	if s.continuationToken == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d,%d,%s", s.submittedTotal, s.submittedTotalWithErrors, s.continuationToken)
+
 }

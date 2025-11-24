@@ -1,9 +1,11 @@
-package workmgr
+package scheduler
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 )
 
 type submissionExpectation struct {
@@ -83,5 +85,84 @@ func TestSubmissionIDFunctions(t *testing.T) {
 			assert.Equal(t, wantPromotedPriority, workRequestPriority, "submissionIDPriority(promoteSubmissionId(%s))", submissionId)
 			assert.Equal(t, test.baseKey, submissionBaseKey(promoted), "submissionBaseKey(promoteSubmissionId(%s))", submissionId)
 		})
+	}
+}
+func TestGetNextPriority(t *testing.T) {
+	nextPriority := getNextPriorityFunc()
+
+	var ok bool
+	var priority int
+	for range 2 {
+		var startPoints []int
+		var counts [priorityLevels]int
+		for range priorityLevels {
+			start := true
+			for priority, ok = nextPriority(); ok; priority, ok = nextPriority() {
+				if start {
+					startPoints = append(startPoints, priority)
+					start = false
+				}
+				counts[priority]++
+			}
+		}
+
+		assert.Equal(t, startPoints, []int{0, 1, 2, 3, 4})
+		for priority = range priorityLevels {
+			assert.Equal(t, counts[priority], priorityLevels)
+		}
+	}
+}
+
+func BenchmarkDistributeTokensEvenWork(b *testing.B) {
+	weights := geometricFairnessWeights(STRONG)
+	tokens := 100
+	for exponent := 1; exponent <= 3; exponent++ {
+		tokens *= 10
+		b.Run(fmt.Sprintf("tokens_%d", tokens), func(b *testing.B) {
+			s := &Scheduler{log: zap.NewNop()}
+			for priority := range priorityLevels {
+				s.workTokens[priority].Store(int32(tokens))
+			}
+
+			distributeTokens := s.getDistributeTokensFunc(weights)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				distributeTokens(tokens)
+			}
+		})
+	}
+}
+
+func BenchmarkDistributeTokensUnevenWork(b *testing.B) {
+	weights := geometricFairnessWeights(STRONG)
+	testCases := []struct {
+		name string
+		work [priorityLevels]int32
+	}{
+		{name: "head_heavy", work: [priorityLevels]int32{10000, 2000, 500, 200, 100}},
+		{name: "middle_hot", work: [priorityLevels]int32{1000, 2000, 4000, 2000, 1000}},
+		{name: "tail_heavy", work: [priorityLevels]int32{100, 200, 500, 2000, 10000}},
+		{name: "single_queue", work: [priorityLevels]int32{0, 0, 10000, 0, 0}},
+		{name: "couple_queues", work: [priorityLevels]int32{10000, 0, 0, 0, 10000}},
+		{name: "some_queues", work: [priorityLevels]int32{10000, 0, 10000, 0, 10000}},
+	}
+
+	tokens := 100
+	for exponent := 1; exponent <= 3; exponent++ {
+		tokens *= 10
+		for _, tc := range testCases {
+			b.Run(tc.name, func(b *testing.B) {
+				s := &Scheduler{log: zap.NewNop()}
+				for priority := range priorityLevels {
+					s.workTokens[priority].Store(tc.work[priority])
+				}
+
+				distributeTokens := s.getDistributeTokensFunc(weights)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					distributeTokens(tokens)
+				}
+			})
+		}
 	}
 }
