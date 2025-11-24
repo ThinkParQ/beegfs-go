@@ -179,9 +179,9 @@ func (w *worker) processWork(work workAssignment) {
 		// about the request to send the results to BeeRemote (we would need the path).
 		return
 	}
-
-	request := journalEntry.Value.WorkRequest
-	result := journalEntry.Value.WorkResult
+	entry := journalEntry.Value
+	request := entry.WorkRequest
+	result := entry.WorkResult
 	status := result.GetStatus()
 	mappedPriorityId := priorityIdMap[request.GetPriority()]
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
@@ -294,11 +294,11 @@ func (w *worker) processWork(work workAssignment) {
 		if workDelay <= workDelayMinimum {
 			workDelay = workDelayMinimum
 		}
-		journalEntry.Value.ExecuteAfter = time.Now().Add(workDelay)
+		entry.ExecuteAfter = time.Now().Add(workDelay)
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
 		w.sendWorkResult(work, result.Work)
-		w.rescheduleWork(work.submissionID, journalEntry.Value.ExecuteAfter)
+		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		beeSyncRescheduled.Add(mappedPriorityId, 1)
 		return
 	}
@@ -308,23 +308,29 @@ func (w *worker) processWork(work workAssignment) {
 	status.SetMessage("attempting to carry out the work request")
 	commitJournalEntry(kvstore.WithUpdateOnly(true))
 
+	// Handle job builder request.
 	if request.HasBuilder() {
-		builderErrCh := make(chan error, 1)
+
+		var externalId string
+		var err error
 		jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 		go func() {
-			builderErrCh <- client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
-			close(jobSubmissionChan)
+			defer close(jobSubmissionChan)
+			externalId, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 		}()
 
-		submitErrCount := 0
+		total := 0
+		totalErrors := 0
 	processJobs:
 		for {
 			select {
 			case <-work.ctx.Done():
 				status.SetState(flex.Work_CANCELLED)
-				status.SetMessage("the work context was cancelled before job requests could be created")
+				status.SetMessage("work context was cancelled before job requests could be created")
 				if w.sendWorkResult(work, result.Work) {
 					cleanupEntries = true
+				}
+				for range jobSubmissionChan {
 				}
 				return
 			case jobRequest, ok := <-jobSubmissionChan:
@@ -333,18 +339,31 @@ func (w *worker) processWork(work workAssignment) {
 				}
 
 				if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
-					submitErrCount += 1
+					totalErrors += 1
 				}
+				total++
 			}
 		}
 
-		builderErr := <-builderErrCh
-		if builderErr != nil {
+		if err != nil {
 			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("job builder failed to complete: " + builderErr.Error())
-		} else if submitErrCount > 0 {
+			status.SetMessage("job builder failed to complete: " + err.Error())
+		} else if externalId != "" {
+			status.SetState(flex.Work_RESCHEDULED)
+			message := "waiting for builder job to continue"
+			if totalErrors > 0 {
+				message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
+			}
+			status.SetMessage(message)
+			entry.ExecuteAfter = time.Now()
+			request.SetExternalId(externalId)
+			w.sendWorkResult(work, result.Work)
+			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+			beeSyncRescheduled.Add(mappedPriorityId, 1)
+			return
+		} else if totalErrors > 0 {
 			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage(fmt.Sprintf("%d job request(s) failed! See `beegfs remote status/job list` for details", submitErrCount))
+			status.SetMessage(fmt.Sprintf("%d job request(s) failed! See `beegfs remote status/job list` for details", totalErrors))
 		} else {
 			status.SetState(flex.Work_COMPLETED)
 			status.SetMessage("all jobs were submitted")
@@ -402,7 +421,7 @@ func (w *worker) processWork(work workAssignment) {
 		commitJournalEntry(kvstore.WithUpdateOnly(true))
 	}
 
-	if len(journalEntry.Value.WorkResult.Parts) == completedParts {
+	if len(result.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
 	} else {

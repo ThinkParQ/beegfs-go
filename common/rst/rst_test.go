@@ -1,11 +1,17 @@
 package rst
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
+	"slices"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -214,5 +220,284 @@ func TestGenerateSegments(t *testing.T) {
 			assert.Equal(t, e.partsStart, s.PartsStart, test.name)
 			assert.Equal(t, e.partsStop, s.PartsStop, test.name)
 		}
+	}
+}
+
+func TestWalkSortedPathFileAndDirectory(t *testing.T) {
+	type testCase struct {
+		name          string
+		pattern       string
+		startAfter    string
+		expectedPaths []string
+		maxPaths      int
+		expectMore    bool
+	}
+
+	commonTestPaths := []string{
+		"/a/a/a.txt",
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+		"/data/c/c.txt",
+		"/data/c/c.txt2",
+		"/data/c/x.txt",
+		"/data1/a/a.txt",
+		"/data2/a/a.txt",
+		"/z/a/a.txt",
+		"/deep/a/b0",
+		"/deep/a/b.txt",
+		"/deep/a/b/c0",
+		"/deep/a/b/c.txt",
+		"/deep/a/b/c/d0",
+		"/deep/a/b/c/d.txt",
+		"/deep/a/b/c/d/e0",
+		"/deep/a/b/c/d/e.txt",
+		"/deep/a/b/c/d/e/f0",
+		"/deep/a/b/c/d/e/f.txt",
+	}
+
+	mountDir := t.TempDir()
+	for _, path := range commonTestPaths {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := filesystem.BeeGFS{MountPoint: mountDir}
+	tests := []testCase{
+		{
+			name:     "basic-directory-walk",
+			pattern:  "/data",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+				"/data/a/z.txt",
+				"/data/b.txt",
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/c.txt2",
+				"/data/c/x.txt",
+			},
+		},
+		{
+			name:          "glob-no-matching-target",
+			pattern:       "/data/**/target.txt",
+			maxPaths:      -1,
+			expectedPaths: []string{},
+		},
+		{
+			name:     "glob-all-data-text-files",
+			pattern:  "/data/**/*.txt",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+				"/data/a/z.txt",
+				"/data/b.txt",
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/x.txt",
+			},
+		},
+		{
+			name:     "single-character-wildcard-data-siblings",
+			pattern:  "/data?",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data1/a/a.txt",
+				"/data2/a/a.txt",
+			},
+		},
+		{
+			name:     "root-directory-with-wildcard",
+			pattern:  "/data*",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+				"/data/a/z.txt",
+				"/data/b.txt",
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/c.txt2",
+				"/data/c/x.txt",
+				"/data1/a/a.txt",
+				"/data2/a/a.txt",
+			},
+		},
+		{
+			name:     "files-from-common-directories-in-root-directories",
+			pattern:  "/data*/b/*",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+			},
+		},
+		{
+			name:     "single file",
+			pattern:  "/data/a/a.txt",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+			},
+		},
+		{
+			name:       "resume-directory-walk",
+			pattern:    "/data",
+			startAfter: "/data/b/b.txt",
+			maxPaths:   4,
+			expectMore: true,
+			expectedPaths: []string{
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+			},
+		},
+		{
+			name:     "directory-walk-limited-results",
+			pattern:  "/data",
+			maxPaths: 2,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+				"/data/a/z.txt",
+			},
+			expectMore: true,
+		},
+		{
+			name:       "complete-directory-walk-after-resume",
+			pattern:    "/data",
+			startAfter: "/data/a/z.txt",
+			expectMore: false,
+			maxPaths:   -1,
+			expectedPaths: []string{
+				"/data/b.txt",
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/c.txt2",
+				"/data/c/x.txt",
+			},
+		},
+		{
+			name:       "glob-range-excludes-start-after-match",
+			pattern:    "/data/c/[a-c]*",
+			startAfter: "/data/c/c.txt",
+			maxPaths:   -1,
+			expectedPaths: []string{
+				"/data/c/c.txt2",
+			},
+		},
+		{
+			name:     "doublestar-to-grab-all-txt-files",
+			pattern:  "/data/**/*.txt",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/data/a/a.txt",
+				"/data/a/z.txt",
+				"/data/b.txt",
+				"/data/b/b.txt",
+				"/data/b/b/b.txt",
+				"/data/b/y.txt",
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/x.txt",
+			},
+		},
+		{
+			name:       "doublestar-to-grab-all-txt-files-after-resume",
+			pattern:    "/**/*.txt",
+			startAfter: "/data/b/y.txt",
+			maxPaths:   -1,
+			expectedPaths: []string{
+				"/data/b0.txt",
+				"/data/c/c.txt",
+				"/data/c/x.txt",
+				"/data1/a/a.txt",
+				"/data2/a/a.txt",
+				"/deep/a/b.txt",
+				"/deep/a/b/c.txt",
+				"/deep/a/b/c/d.txt",
+				"/deep/a/b/c/d/e.txt",
+				"/deep/a/b/c/d/e/f.txt",
+				"/z/a/a.txt",
+			},
+		},
+		{
+			name:     "deeply-nested-glob-pattern",
+			pattern:  "deep/*",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/deep/a/b0",
+				"/deep/a/b.txt",
+				"/deep/a/b/c0",
+				"/deep/a/b/c.txt",
+				"/deep/a/b/c/d0",
+				"/deep/a/b/c/d.txt",
+				"/deep/a/b/c/d/e0",
+				"/deep/a/b/c/d/e.txt",
+				"/deep/a/b/c/d/e/f0",
+				"/deep/a/b/c/d/e/f.txt",
+			},
+		},
+		{
+			name:     "deeply-nested-glob-pattern-with-doublestar",
+			pattern:  "deep/**/*0",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/deep/a/b0",
+				"/deep/a/b/c0",
+				"/deep/a/b/c/d0",
+				"/deep/a/b/c/d/e0",
+				"/deep/a/b/c/d/e/f0",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	for _, test := range tests {
+
+		t.Run(test.name, func(t *testing.T) {
+			maxPaths := test.maxPaths
+			if maxPaths == -1 {
+				maxPaths = len(commonTestPaths)
+			}
+
+			responseChan, err := WalkSortedPath(ctx, provider, test.pattern, test.startAfter, maxPaths, 0)
+			require.NoError(t, err)
+
+			paths := []string{}
+			moreWork := false
+			for resp := range responseChan {
+				if resp.Err != nil {
+					require.ErrorIs(t, resp.Err, ErrWalkStoppedWithMore)
+					moreWork = true
+					break
+				}
+				paths = append(paths, resp.Path)
+			}
+			assert.Equal(t, test.expectMore, moreWork)
+
+			slices.Sort(test.expectedPaths)
+			if test.expectedPaths != nil {
+				assert.Equal(t, test.expectedPaths, paths)
+			} else {
+				assert.Equal(t, commonTestPaths, paths)
+			}
+		})
 	}
 }

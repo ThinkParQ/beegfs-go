@@ -89,8 +89,8 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
-	return ErrUnsupportedOpForRST
+func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (string, error) {
+	return "", ErrUnsupportedOpForRST
 }
 
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
@@ -111,7 +111,7 @@ func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *WalkResponse, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 

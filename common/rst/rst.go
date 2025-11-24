@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -75,9 +76,10 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
-	// ExecuteJobBuilderRequest is specifically designed for providers that generate subsequent job
-	// requests.
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error
+	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
+	// any new requests into jobSubmissionChan. If building jobs is long running, return an
+	// externalId so the worker can reschedule and later resume from that point.
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (externalId string, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -97,9 +99,15 @@ type Provider interface {
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
 	// GetWalk returns a channel that streams *WalkResponse entries for matching files or objects.
-	// If the provided path includes a file glob pattern, all matching entries will be streamed.
-	// Otherwise, only the specified file or object is returned if it exists.
-	GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error)
+	// If the provided path includes a file glob pattern, only matching entries will be return.
+	// maxRequests should trigger a WalkStoppedWithMoreError to signal to job builder to
+	// reschedule the remaining work.
+	//
+	// GetWalk must generate an externalId that can be used to resume the walk from a previous
+	// point. Pass the externalId back to job builder using WalkStoppedWithMoreError{resumeToken:
+	// externalId}; this signals job builder to schedule the job again later and allows workers to
+	// start processing any already-streamed requests.
+	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *WalkResponse, error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
 	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.
@@ -698,52 +706,194 @@ func GetLockedInfo(
 	return
 }
 
+var ErrWalkStoppedWithMore = errors.New("walk was stopped with more work")
+
+// Sentinel WalkResponse error which signals the processor that the maximum number of paths had been
+// reached. The error also contains the resume token.
+type WalkStoppedWithMoreError struct {
+	resumeToken string
+}
+
+func (e WalkStoppedWithMoreError) Error() string {
+	return fmt.Errorf("%s: %w", e.resumeToken, ErrWalkStoppedWithMore).Error()
+}
+
+func (e WalkStoppedWithMoreError) Unwrap() error {
+	return ErrWalkStoppedWithMore
+}
+
 type WalkResponse struct {
 	Path string
 	Err  error
 }
 
-// WalkPath returns a *WalkResponse channel that streams the files that match the pattern. The
-// pattern may be a single file, directory, or a glob pattern. The pattern must be a path that's
-// relative to the BeeGFS mount with or without a leading forward slash.
-func WalkPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, chanSize int) (<-chan *WalkResponse, error) {
-	fsys := os.DirFS(mountPoint.GetMountPath())
-	pattern = strings.TrimLeft(pattern, "/")
-	if !IsFileGlob(pattern) {
-		if stat, err := mountPoint.Lstat(pattern); err == nil && stat.IsDir() {
-			pattern = filepath.Join(pattern, "**")
-		} else if err != nil {
-			return nil, fmt.Errorf("unable walk path: %w", err)
-		}
+// WalkSortedPath returns a *WalkResponse channel that returns the pattern's paths in a
+// lexicographically increasing order. If startAfter != "" then only files lexically greater than
+// will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
+// paths. chanSize is the buffer size for the returned *WalkResponse channel.
+func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, startAfter string, maxPaths int, chanSize int) (<-chan *WalkResponse, error) {
+	if maxPaths != -1 && maxPaths <= 0 {
+		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
 	}
 
+	preparePath := func(path string) string {
+		path = strings.TrimLeft(path, "/")
+		path = filepath.Clean("/" + path)
+		path = strings.TrimPrefix(path, "/")
+		return strings.TrimRight(path, "/")
+	}
+	pattern = preparePath(pattern)
+	startAfter = preparePath(startAfter)
+
+	isGlob := IsGlobPattern(pattern)
+	if !isGlob {
+		if stat, err := mountPoint.Lstat(pattern); err != nil {
+			return nil, fmt.Errorf("unable walk path: %w", err)
+		} else if !stat.IsDir() {
+			// prefix is a file path so only stream it back if it's a match.
+			walkChan := make(chan *WalkResponse, 1)
+			go func() {
+				defer close(walkChan)
+				if pattern > startAfter {
+					select {
+					case <-ctx.Done():
+						walkChan <- &WalkResponse{Err: ctx.Err()}
+					case walkChan <- &WalkResponse{Path: "/" + pattern}:
+					}
+				}
+			}()
+			return walkChan, nil
+		}
+	} else {
+		// Adding '/**' forces doublestar to match the entire path (only whole directories, never
+		// partial filenames) rather than just the prefix used to pick the walk root.
+		pattern += "/**"
+	}
+
+	// Recursively walk the local path and send matching paths to walkChan. Any encountered errors
+	// will terminate the walk. Paths lexicographically less than or equal to startAfter will be
+	// ignored which also avoids walking directories unnecessarily.
+	mountPath := mountPoint.GetMountPath()
 	walkChan := make(chan *WalkResponse, chanSize)
 	go func() {
 		defer close(walkChan)
-		err := doublestar.GlobWalk(fsys, pattern, func(path string, d fs.DirEntry) error {
-			if ctx.Err() != nil {
-				return ctx.Err()
+
+		var walkDir func(string) bool
+		walkDir = func(directory string) bool {
+			if err := ctx.Err(); err != nil {
+				walkChan <- &WalkResponse{Err: err}
+				return false
 			}
 
-			if d.IsDir() {
-				return nil
+			entries, err := readDir(mountPath, directory, startAfter)
+			if err != nil {
+				walkChan <- &WalkResponse{Err: fmt.Errorf("unable to read directory, %q: %w", directory, err)}
+				return false
 			}
-			walkChan <- &WalkResponse{Path: "/" + path}
-			return nil
-		}, doublestar.WithNoFollow())
 
-		if err != nil {
-			walkChan <- &WalkResponse{Err: err}
+			lastPath := directory
+			for _, entry := range entries {
+				path := filepath.Join(directory, entry.Name())
+				if entry.IsDir() {
+					if !walkDir(path) {
+						return false
+					}
+					continue
+				} else if path <= startAfter {
+					continue
+				}
+
+				if isGlob {
+					if match, err := doublestar.Match(pattern, path); err != nil {
+						walkChan <- &WalkResponse{Err: err}
+						return false
+					} else if !match {
+						continue
+					}
+				}
+
+				if maxPaths == 0 {
+					walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{lastPath}}
+					return false
+				}
+
+				select {
+				case <-ctx.Done():
+					walkChan <- &WalkResponse{Err: ctx.Err()}
+					return false
+
+				case walkChan <- &WalkResponse{Path: "/" + path}:
+				}
+				lastPath = path
+				maxPaths--
+			}
+
+			return true
 		}
+
+		root := pattern
+		if isGlob {
+			// Find the root directory of the file glob by stepping back until a directory is found.
+			for {
+				if _, err := mountPoint.Lstat(root); err == nil {
+					break
+				}
+				root = filepath.Dir(root)
+			}
+		}
+		walkDir(root)
 	}()
 
 	return walkChan, nil
 }
 
+// readDir returns a lexically sorted directory list of files that come after startAfter. It should
+// be used instead of fs.ReadDir/os.ReadDir to avoid their non-lexical path sort.
+func readDir(root string, directory string, startAfter string) (entries []os.DirEntry, err error) {
+	var f *os.File
+	if f, err = os.Open(filepath.Join(root, directory)); err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Directories receive a trailing '/' so they sort distinctly from files with the same prefix.
+	// Without the '/', a directory sortName may sort incorrectly relative to files prefixed with the
+	// same sortName.
+	sortName := func(entry os.DirEntry) string {
+		if entry.IsDir() {
+			return entry.Name() + "/"
+		}
+		return entry.Name()
+	}
+
+	if entries, err = f.ReadDir(-1); err != nil {
+		return
+	}
+
+	// Filter any entries that come after startAfter in-place so they are not part of the sorting
+	if startAfter != "" && strings.HasPrefix(startAfter, directory+"/") {
+		relative := strings.TrimPrefix(startAfter, directory)
+		relative = strings.TrimLeft(relative, "/")
+		filtered := entries[:0]
+		for _, entry := range entries {
+			name := sortName(entry)
+			if name > relative || strings.HasPrefix(relative, name) {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return sortName(entries[i]) < sortName(entries[j])
+	})
+	return
+}
+
 const globCharacters = "*?["
 
-// IsFileGlob returns whether the pattern contains a glob pattern.
-func IsFileGlob(pattern string) bool {
+// IsGlobPattern returns whether the pattern contains a glob pattern.
+func IsGlobPattern(pattern string) bool {
 	return strings.ContainsAny(pattern, globCharacters)
 }
 
