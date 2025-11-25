@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -89,7 +90,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
+			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize, nil); err != nil {
 				return
 			}
 		} else {
@@ -103,8 +104,22 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return
 			}
 		}
-	} else if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
-		return
+	} else {
+		filterExpr := cfg.GetFilterExpr()
+		if filterExpr != "" {
+			var filter util.FileInfoFilter
+			filter, err = util.CompileFilter(filterExpr)
+			if err != nil {
+				err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+				return
+			}
+			walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize, filter)
+		} else {
+			walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize, nil)
+		}
+		if err != nil {
+			return
+		}
 	}
 
 	return c.executeJobBuilderRequest(ctx, walkChan, jobSubmissionChan, cfg)
