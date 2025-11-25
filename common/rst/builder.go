@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,6 +163,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 	reschedule := false
 	rescheduleStateMu := sync.Mutex{}
 	lastKnownState := JobBuilderState{}
+	maxWorkers := runtime.GOMAXPROCS(0)
+	walkDoneChan := make(chan struct{}, maxWorkers)
+	defer close(walkDoneChan)
 	createJobRequests := func() error {
 		var err error
 		var inMountPath string
@@ -172,6 +176,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 				return ctx.Err()
 			case walkResp, ok := <-walkChan:
 				if !ok {
+					select {
+					case walkDoneChan <- struct{}{}:
+					default:
+					}
 					return nil
 				}
 				if walkResp.Err != nil {
@@ -225,7 +233,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 				if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
 					errorCount++
 				}
-				jobSubmissionChan <- jobRequest
+				select {
+				case <-ctx.Done():
+				case jobSubmissionChan <- jobRequest:
+				}
 			}
 
 			rescheduleStateMu.Lock()
@@ -235,11 +246,41 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 		}
 	}
 
-	workers := 2
+	// Start worker(s) that process walk paths and enqueue job requests. Begin with one and add more
+	// (up to GOMAXPROCS) when the job submission channel stays near empty, indicating the consumer is
+	// draining faster than we can fill it. This keeps throughput balanced without over saturating
+	// the system.
 	g, ctx := errgroup.WithContext(ctx)
-	for range workers {
+	g.Go(func() error {
+		workers := 1
+		lowThresholdTicks := 0
 		g.Go(createJobRequests)
-	}
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-walkDoneChan:
+				return nil
+			case <-time.After(100 * time.Millisecond):
+				size := len(jobSubmissionChan)
+				if workers < maxWorkers && size <= 2*workers {
+					if size <= workers {
+						lowThresholdTicks += 3
+					} else {
+						lowThresholdTicks++
+					}
+
+					if lowThresholdTicks >= 3 {
+						g.Go(createJobRequests)
+						workers++
+						lowThresholdTicks = 0
+					}
+				} else {
+					lowThresholdTicks = 0
+				}
+			}
+		}
+	})
 	if err := g.Wait(); err != nil {
 		return "", fmt.Errorf("job builder request was aborted: %w", err)
 	}
