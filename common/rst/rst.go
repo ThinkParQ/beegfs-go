@@ -34,6 +34,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -731,7 +732,7 @@ type WalkResponse struct {
 // lexicographically increasing order. If startAfter != "" then only files lexically greater than
 // will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
 // paths. chanSize is the buffer size for the returned *WalkResponse channel.
-func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, startAfter string, maxPaths int, chanSize int) (<-chan *WalkResponse, error) {
+func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter util.FileInfoFilter) (<-chan *WalkResponse, error) {
 	if maxPaths != -1 && maxPaths <= 0 {
 		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
 	}
@@ -810,6 +811,33 @@ func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern
 					} else if !match {
 						continue
 					}
+				}
+
+				if filter != nil {
+					info, err := os.Lstat(filepath.Join(mountPath, path))
+					if err != nil {
+						walkChan <- &WalkResponse{Err: fmt.Errorf("unable to filter files: %w", err)}
+						continue
+					}
+
+					statT, ok := info.Sys().(*syscall.Stat_t)
+					if !ok {
+						walkChan <- &WalkResponse{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
+						continue
+					}
+
+					fileInfo := util.StatToFileInfo(path, statT)
+
+					var keep bool
+					keep, err = filter(fileInfo)
+					if err != nil {
+						walkChan <- &WalkResponse{Err: fmt.Errorf("unable to apply filter: %w", err)}
+						continue
+					}
+					if !keep {
+						continue
+					}
+					entries = append(entries, fs.FileInfoToDirEntry(info))
 				}
 
 				if maxPaths == 0 {
