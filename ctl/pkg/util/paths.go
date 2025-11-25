@@ -218,7 +218,7 @@ func StreamPaths(ctx context.Context, method PathInputMethod, out chan<- string,
 	var err error
 	var filter FileInfoFilter
 	if args.FilterExpr != "" {
-		filter, err = compileFilter(args.FilterExpr)
+		filter, err = CompileFilter(args.FilterExpr)
 		if err != nil {
 			return fmt.Errorf("invalid filter %q: %w", args.FilterExpr, err)
 		}
@@ -346,7 +346,7 @@ func pushFilterInMountPath(ctx context.Context, path string, filter FileInfoFilt
 		if !ok {
 			return client, fmt.Errorf("unable to retrieve stat information: unsupported platform")
 		}
-		keep, err := filter(statToFileInfo(inMountPath, statT))
+		keep, err := filter(StatToFileInfo(inMountPath, statT))
 		if err != nil {
 			return client, fmt.Errorf("unable to apply filter: %w", err)
 		}
@@ -368,8 +368,8 @@ const FilterFilesHelp = "Filter files by expression: fields(name/path <string>, 
 
 type FileInfoFilter func(FileInfo) (bool, error)
 
-// compileFilter turns a DSL expression into a filter function.
-func compileFilter(query string) (FileInfoFilter, error) {
+// CompileFilter turns a DSL expression into a filter function.
+func CompileFilter(query string) (FileInfoFilter, error) {
 	// Preprocess DSL (includes octal normalization now)
 	q := preprocessDSL(query)
 
@@ -457,7 +457,7 @@ func normalizeOctal(q string, re *regexp.Regexp) string {
 	})
 }
 
-func statToFileInfo(path string, st *syscall.Stat_t) FileInfo {
+func StatToFileInfo(path string, st *syscall.Stat_t) FileInfo {
 	return FileInfo{
 		Path:  path,
 		Name:  filepath.Base(path),
