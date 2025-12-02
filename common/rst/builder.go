@@ -184,7 +184,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 					return nil
 				}
 				if walkResp.Err != nil {
-					var walkErr WalkStoppedWithMoreError
+					var walkErr walkStoppedWithMoreError
 					if errors.As(walkResp.Err, &walkErr) {
 						rescheduleStateMu.Lock()
 						reschedule = true

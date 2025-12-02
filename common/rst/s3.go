@@ -432,7 +432,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
 				if stopBeforeNextPage && continuationToken != "" {
-					walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{resumeToken: encodeResumeToken("", continuationToken)}}
+					walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{resumeToken: encodeResumeToken("", continuationToken)}}
 					return
 				}
 
@@ -456,7 +456,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 					if maxKeys == 0 {
 						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
-							walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{resumeToken: encodeResumeToken(lastKey, "")}}
+							walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{resumeToken: encodeResumeToken(lastKey, "")}}
 							return
 						}
 

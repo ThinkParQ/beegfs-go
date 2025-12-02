@@ -706,20 +706,20 @@ func GetLockedInfo(
 	return
 }
 
-var ErrWalkStoppedWithMore = errors.New("walk was stopped with more work")
+var errWalkStoppedWithMore = errors.New("walk was stopped with more work")
 
 // Sentinel WalkResponse error which signals the processor that the maximum number of paths had been
 // reached. The error also contains the resume token.
-type WalkStoppedWithMoreError struct {
+type walkStoppedWithMoreError struct {
 	resumeToken string
 }
 
-func (e WalkStoppedWithMoreError) Error() string {
-	return fmt.Errorf("%s: %w", e.resumeToken, ErrWalkStoppedWithMore).Error()
+func (e walkStoppedWithMoreError) Error() string {
+	return fmt.Errorf("%s: %w", e.resumeToken, errWalkStoppedWithMore).Error()
 }
 
-func (e WalkStoppedWithMoreError) Unwrap() error {
-	return ErrWalkStoppedWithMore
+func (e walkStoppedWithMoreError) Unwrap() error {
+	return errWalkStoppedWithMore
 }
 
 type WalkResponse struct {
@@ -813,7 +813,7 @@ func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern
 				}
 
 				if maxPaths == 0 {
-					walkChan <- &WalkResponse{Err: WalkStoppedWithMoreError{lastPath}}
+					walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{lastPath}}
 					return false
 				}
 

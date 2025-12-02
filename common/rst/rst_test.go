@@ -484,7 +484,7 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			moreWork := false
 			for resp := range responseChan {
 				if resp.Err != nil {
-					require.ErrorIs(t, resp.Err, ErrWalkStoppedWithMore)
+					require.ErrorIs(t, resp.Err, errWalkStoppedWithMore)
 					moreWork = true
 					break
 				}
