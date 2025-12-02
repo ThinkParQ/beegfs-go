@@ -303,9 +303,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
 				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
 					var apiErr smithy.APIError
-					if !(errors.As(err, &apiErr) && apiErr.ErrorCode() == "RestoreAlreadyInProgress") {
-						archiveStatus.RestoreInProgress = true
-					} else {
+					if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "RestoreAlreadyInProgress" {
 						return false, 0, err
 					}
 				}
