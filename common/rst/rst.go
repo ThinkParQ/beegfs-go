@@ -79,7 +79,7 @@ type Provider interface {
 	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
 	// any new requests into jobSubmissionChan. If building jobs is long running, return an
 	// externalId so the worker can reschedule and later resume from that point.
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (externalId string, err error)
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly

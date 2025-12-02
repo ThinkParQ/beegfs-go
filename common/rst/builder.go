@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -61,19 +59,15 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return workRequests, nil
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (externalId string, err error) {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error) {
 	if !workRequest.HasBuilder() {
 		err = ErrReqAndRSTTypeMismatch
 		return
 	}
 
-	lastState, err := GetJobBuilderLastState(workRequest.GetExternalId())
-	if err != nil {
-		return
-	}
-
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
+	resumeToken := workRequest.GetExternalId()
 
 	// TODO: maxRequests limits the number of requests that can be created at a time before the
 	// builder job is rescheduled. This should probably be based on the client if possible;
@@ -89,7 +83,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
+			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
 				return
 			}
 		} else {
@@ -99,15 +93,15 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return
 			}
 
-			if walkChan, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.RemotePath), walkChanSize, lastState.continuationToken, maxRequests); err != nil {
+			if walkChan, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.RemotePath), walkChanSize, resumeToken, maxRequests); err != nil {
 				return
 			}
 		}
-	} else if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, lastState.continuationToken, maxRequests, walkChanSize); err != nil {
+	} else if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
 		return
 	}
 
-	return c.executeJobBuilderRequest(ctx, walkChan, jobSubmissionChan, cfg)
+	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
 }
 
 func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -148,7 +142,15 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkChan <-chan *WalkResponse, jobSubmissionChan chan<- *beeremote.JobRequest, cfg *flex.JobRequestCfg) (string, error) {
+func (c *JobBuilderClient) executeJobBuilderRequest(
+	ctx context.Context,
+	request *flex.WorkRequest,
+	walkChan <-chan *WalkResponse,
+	jobSubmissionChan chan<- *beeremote.JobRequest,
+	cfg *flex.JobRequestCfg,
+) (bool, error) {
+	builder := request.GetBuilder()
+
 	var walkingLocalPath bool
 	var remotePathDir string
 	var remotePathIsGlob bool
@@ -162,7 +164,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 
 	reschedule := false
 	rescheduleStateMu := sync.Mutex{}
-	lastKnownState := JobBuilderState{}
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
@@ -187,7 +188,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 					if errors.As(walkResp.Err, &walkErr) {
 						rescheduleStateMu.Lock()
 						reschedule = true
-						lastKnownState.continuationToken = walkErr.resumeToken
+						request.SetExternalId(walkErr.resumeToken)
 						rescheduleStateMu.Unlock()
 						return nil
 					}
@@ -240,8 +241,8 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 			}
 
 			rescheduleStateMu.Lock()
-			lastKnownState.submittedTotal += len(jobRequests)
-			lastKnownState.submittedTotalWithErrors += errorCount
+			builder.Submitted += int32(len(jobRequests))
+			builder.Errors += int32(errorCount)
 			rescheduleStateMu.Unlock()
 		}
 	}
@@ -282,14 +283,16 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 		}
 	})
 	if err := g.Wait(); err != nil {
-		return "", fmt.Errorf("job builder request was aborted: %w", err)
+		return false, fmt.Errorf("job builder request was aborted: %w", err)
 	}
 	if reschedule {
-		return lastKnownState.String(), nil
+		return true, nil
 	}
 
 	var errMessage string
-	if lastKnownState.submittedTotal == 0 {
+	totalSubmitted := builder.GetSubmitted()
+	totalErrors := builder.GetErrors()
+	if totalSubmitted == 0 {
 		if cfg.Download {
 			if walkingLocalPath {
 				errMessage = fmt.Sprintf("walking local path since --remote-path was not provided; No matches found in path: %s", cfg.Path)
@@ -299,51 +302,19 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, walkCha
 		} else {
 			errMessage = fmt.Sprintf("no matches found in local path: %s", cfg.Path)
 		}
-	} else if lastKnownState.submittedTotalWithErrors > 0 {
-		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", lastKnownState.submittedTotalWithErrors, lastKnownState.submittedTotal)
+	} else if totalErrors > 0 {
+		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", totalErrors, totalSubmitted)
 	}
 
 	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			errMessage += "; --remote-target was not provided so relying on configured rstIds and stub urls"
 		}
-		return "", errors.New(errMessage)
+		return false, errors.New(errMessage)
 	}
-	return "", nil
+	return false, nil
 }
 
 func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
 	return cfg.RemotePath == ""
-}
-
-type JobBuilderState struct {
-	continuationToken        string
-	submittedTotal           int
-	submittedTotalWithErrors int
-}
-
-func GetJobBuilderLastState(externalId string) (state JobBuilderState, err error) {
-	if externalId == "" {
-		return
-	}
-	externalIdParts := strings.SplitN(externalId, ",", 3)
-	if len(externalIdParts) != 3 {
-		return JobBuilderState{}, fmt.Errorf("invalid external Id: %s", externalId)
-	}
-	if state.submittedTotal, err = strconv.Atoi(externalIdParts[0]); err != nil {
-		return JobBuilderState{}, fmt.Errorf("unable to parse previous errors: %w", err)
-	}
-	if state.submittedTotalWithErrors, err = strconv.Atoi(externalIdParts[1]); err != nil {
-		return JobBuilderState{}, fmt.Errorf("unable to parse previous errors: %w", err)
-	}
-	state.continuationToken = externalIdParts[2]
-	return
-}
-
-func (s *JobBuilderState) String() string {
-	if s.continuationToken == "" {
-		return ""
-	}
-	return fmt.Sprintf("%d,%d,%s", s.submittedTotal, s.submittedTotalWithErrors, s.continuationToken)
-
 }

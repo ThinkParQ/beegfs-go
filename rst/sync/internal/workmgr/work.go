@@ -393,12 +393,12 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	status := result.GetStatus()
 	mappedPriorityId := priorityIdMap[request.GetPriority()]
 
-	var externalId string
+	var reschedule bool
 	var err error
 	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionChan)
-		externalId, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 	}()
 
 	total := 0
@@ -430,7 +430,7 @@ processJobs:
 	if err != nil {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("job builder failed to complete: " + err.Error())
-	} else if externalId != "" {
+	} else if reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		message := "waiting for builder job to continue"
 		if totalErrors > 0 {
@@ -438,7 +438,6 @@ processJobs:
 		}
 		status.SetMessage(message)
 		entry.ExecuteAfter = time.Now()
-		request.SetExternalId(externalId)
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		beeSyncRescheduled.Add(mappedPriorityId, 1)
