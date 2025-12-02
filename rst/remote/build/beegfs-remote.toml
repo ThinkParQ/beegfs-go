@@ -89,7 +89,7 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #
 #   [[remote-storage-target.s3.storage-class]]
 #   name = "GLACIER"
-#   archival.tier = "standard"
+#   archival.retrievalTier = "standard"
 #   archival.retentionDays = 7
 #   archival.checkTime = "5h"
 #   archival.recheckTime = "30m"
@@ -354,3 +354,31 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # s3.partitionid: Generally the partition ID does not need to specified and the default partition
 # for the S3 provider can be used. If your S3 bucket is in a specialized region such as AWS GovCloud
 # this may need to be specified/
+
+
+#
+# --- Section 6.1.1: [S3 Storage Class Settings] ---
+#
+
+# Storage class definitions should be specified under [[remote-storage-target.s3.storage-class]] to
+# control how archived tiers (for example AWS Glacier or Deep Archive) are restored. Multiple
+# storage classes can be specified by adding additional [[remote-storage-target.s3.storage-class]]
+# sections. Currently all storage class definitions must be archival.
+
+# name: The exact storage class value returned by the S3 provider (for AWS examples: GLACIER,
+# DEEP_ARCHIVE, or STANDARD_IA).
+
+# archival.retrievalTier: Retrieval tier to request when restoring an archived object. AWS examples
+# include Standard, Bulk, or Expedited depending on what the storage class supports.
+
+# archival.retentionDays: Number of days a restored object remains available before it is archived
+# again. Must be at least 1.
+
+# archival.checkTime: How long to wait after initiating a restore before checking status again.
+# Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
+
+# archival.recheckTime: How long to wait between additional status checks while a restore is already
+# in progress. Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
+
+# archival.autoRestore: Whether Remote can automatically request a restore when downloading an
+# archived object if allow-restore is not explicitly set on the job request.

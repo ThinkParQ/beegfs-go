@@ -312,7 +312,6 @@ func (w *worker) process(work workAssignment) {
 	} else {
 		cleanupEntries = w.processWork(work, client, entry, func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }, log)
 	}
-	return
 }
 
 func (w *worker) processWork(work workAssignment, client rst.Provider, entry workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
