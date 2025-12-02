@@ -154,7 +154,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		client, ok := rstMap[cfg.RemoteStorageTarget]
 		if !ok {
-			return nil, fmt.Errorf("remote storage target does not exist! Check --remote-target or BeeGFS Remote configuration before retrying")
+			return nil, fmt.Errorf("remote storage target does not exist! Check --%s or BeeGFS Remote configuration before retrying", RemoteTargetFlag)
 		}
 		request := client.GetJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
@@ -186,7 +186,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	if len(entry.Remote.RSTIDs) == 0 {
-		return nil, fmt.Errorf("unable to build job request(s)! --remote-target must be specified: %w", ErrFileHasNoRSTs)
+		return nil, fmt.Errorf("unable to build job request(s)! --%s must be specified: %w", RemoteTargetFlag, ErrFileHasNoRSTs)
 	}
 
 	var requests []*beeremote.JobRequest

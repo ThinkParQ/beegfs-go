@@ -444,7 +444,7 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --allow-restore to continue"))
+		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
@@ -459,7 +459,7 @@ func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo m
 	if IsValidRstId(rstID) {
 		rstIds = []uint32{rstID}
 	} else {
-		return fmt.Errorf("--update requires a valid --remote-target to be specified")
+		return fmt.Errorf("--%s requires a valid --%s to be specified", UpdateFlag, RemoteTargetFlag)
 	}
 
 	err := entry.SetFileRstIds(ctx, entryInfo, ownerNode, path, rstIds)
@@ -687,7 +687,7 @@ func GetLockedInfo(
 		}
 
 		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return lockedInfo, writeLockSet, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --remote-target does not match stub file")
+			return lockedInfo, writeLockSet, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag)
 		}
 		rstIds = []uint32{lockedInfo.StubUrlRstId}
 	}

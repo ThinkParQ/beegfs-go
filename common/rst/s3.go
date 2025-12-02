@@ -778,7 +778,7 @@ func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *st
 func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, *s3ArchiveInfo, error) {
 	if key == "" {
 		if keyMustExist {
-			return 0, time.Time{}, nil, fmt.Errorf("unable to retrieve object metadata! --remote-path must be specified")
+			return 0, time.Time{}, nil, fmt.Errorf("unable to retrieve object metadata! --%s must be specified", RemotePathFlag)
 		}
 		return 0, time.Time{}, nil, nil
 	}

@@ -295,7 +295,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	if totalSubmitted == 0 {
 		if cfg.Download {
 			if walkingLocalPath {
-				errMessage = fmt.Sprintf("walking local path since --remote-path was not provided; No matches found in path: %s", cfg.Path)
+				errMessage = fmt.Sprintf("walking local path since --%s was not provided; No matches found in path: %s", RemotePathFlag, cfg.Path)
 			} else {
 				errMessage = fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath)
 			}
@@ -308,7 +308,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
-			errMessage += "; --remote-target was not provided so relying on configured rstIds and stub urls"
+			errMessage += fmt.Sprintf("; --%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag)
 		}
 		return false, errors.New(errMessage)
 	}
