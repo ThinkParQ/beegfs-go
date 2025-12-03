@@ -77,13 +77,13 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	maxRequests := 1000
 
 	walkChanSize := cap(jobSubmissionChan)
-	var walkChan <-chan *WalkResponse
+	var walkChan <-chan *filesystem.StreamPathResult
 	if cfg.Download {
 		if walkLocalPathInsteadOfRemote(cfg) {
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
+			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
 				return
 			}
 		} else {
@@ -97,7 +97,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return
 			}
 		}
-	} else if walkChan, err = WalkSortedPath(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
+	} else if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
 		return
 	}
 
@@ -123,7 +123,7 @@ func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
 }
 
 // GetWalk is not implemented and should never be called.
-func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *WalkResponse, error) {
+func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 
@@ -145,7 +145,7 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 func (c *JobBuilderClient) executeJobBuilderRequest(
 	ctx context.Context,
 	request *flex.WorkRequest,
-	walkChan <-chan *WalkResponse,
+	walkChan <-chan *filesystem.StreamPathResult,
 	jobSubmissionChan chan<- *beeremote.JobRequest,
 	cfg *flex.JobRequestCfg,
 ) (bool, error) {
@@ -184,11 +184,11 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 					return nil
 				}
 				if walkResp.Err != nil {
-					var walkErr walkStoppedWithMoreError
+					var walkErr filesystem.StreamPathLimitError
 					if errors.As(walkResp.Err, &walkErr) {
 						rescheduleStateMu.Lock()
 						reschedule = true
-						request.SetExternalId(walkErr.resumeToken)
+						request.SetExternalId(walkErr.ResumeToken)
 						rescheduleStateMu.Unlock()
 						return nil
 					}

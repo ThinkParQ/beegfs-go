@@ -22,13 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -107,7 +105,7 @@ type Provider interface {
 	// point. Pass the externalId back to job builder using WalkStoppedWithMoreError{resumeToken:
 	// externalId}; this signals job builder to schedule the job again later and allows workers to
 	// start processing any already-streamed requests.
-	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *WalkResponse, error)
+	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
 	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.
@@ -706,226 +704,6 @@ func GetLockedInfo(
 	return
 }
 
-var errWalkStoppedWithMore = errors.New("walk was stopped with more work")
-
-// Sentinel WalkResponse error which signals the processor that the maximum number of paths had been
-// reached. The error also contains the resume token.
-type walkStoppedWithMoreError struct {
-	resumeToken string
-}
-
-func (e walkStoppedWithMoreError) Error() string {
-	return fmt.Errorf("%s: %w", e.resumeToken, errWalkStoppedWithMore).Error()
-}
-
-func (e walkStoppedWithMoreError) Unwrap() error {
-	return errWalkStoppedWithMore
-}
-
-type WalkResponse struct {
-	Path string
-	Err  error
-}
-
-// WalkSortedPath returns a *WalkResponse channel that returns the pattern's paths in a
-// lexicographically increasing order. If startAfter != "" then only files lexically greater than
-// will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
-// paths. chanSize is the buffer size for the returned *WalkResponse channel.
-func WalkSortedPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, startAfter string, maxPaths int, chanSize int) (<-chan *WalkResponse, error) {
-	if maxPaths != -1 && maxPaths <= 0 {
-		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
-	}
-
-	preparePath := func(path string) string {
-		path = strings.TrimLeft(path, "/")
-		path = filepath.Clean("/" + path)
-		path = strings.TrimPrefix(path, "/")
-		return strings.TrimRight(path, "/")
-	}
-	pattern = preparePath(pattern)
-	startAfter = preparePath(startAfter)
-
-	isGlob := IsGlobPattern(pattern)
-	if !isGlob {
-		if stat, err := mountPoint.Lstat(pattern); err != nil {
-			return nil, fmt.Errorf("unable walk path: %w", err)
-		} else if !stat.IsDir() {
-			// prefix is a file path so only stream it back if it's a match.
-			walkChan := make(chan *WalkResponse, 1)
-			go func() {
-				defer close(walkChan)
-				if pattern > startAfter {
-					select {
-					case <-ctx.Done():
-						walkChan <- &WalkResponse{Err: ctx.Err()}
-					case walkChan <- &WalkResponse{Path: "/" + pattern}:
-					}
-				}
-			}()
-			return walkChan, nil
-		}
-	} else {
-		// Adding '/**' forces doublestar to match the entire path (only whole directories, never
-		// partial filenames) rather than just the prefix used to pick the walk root.
-		pattern += "/**"
-	}
-
-	// Recursively walk the local path and send matching paths to walkChan. Any encountered errors
-	// will terminate the walk. Paths lexicographically less than or equal to startAfter will be
-	// ignored which also avoids walking directories unnecessarily.
-	mountPath := mountPoint.GetMountPath()
-	walkChan := make(chan *WalkResponse, chanSize)
-	go func() {
-		defer close(walkChan)
-
-		var walkDir func(string) bool
-		walkDir = func(directory string) bool {
-			if err := ctx.Err(); err != nil {
-				walkChan <- &WalkResponse{Err: err}
-				return false
-			}
-
-			entries, err := readDir(mountPath, directory, startAfter)
-			if err != nil {
-				walkChan <- &WalkResponse{Err: fmt.Errorf("unable to read directory, %q: %w", directory, err)}
-				return false
-			}
-
-			lastPath := directory
-			for _, entry := range entries {
-				path := filepath.Join(directory, entry.Name())
-				if entry.IsDir() {
-					if !walkDir(path) {
-						return false
-					}
-					continue
-				} else if path <= startAfter {
-					continue
-				}
-
-				if isGlob {
-					if match, err := doublestar.Match(pattern, path); err != nil {
-						walkChan <- &WalkResponse{Err: err}
-						return false
-					} else if !match {
-						continue
-					}
-				}
-
-				if maxPaths == 0 {
-					walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{lastPath}}
-					return false
-				}
-
-				select {
-				case <-ctx.Done():
-					walkChan <- &WalkResponse{Err: ctx.Err()}
-					return false
-
-				case walkChan <- &WalkResponse{Path: "/" + path}:
-				}
-				lastPath = path
-				maxPaths--
-			}
-
-			return true
-		}
-
-		root := pattern
-		if isGlob {
-			// Find the root directory of the file glob by stepping back until a directory is found.
-			for {
-				if _, err := mountPoint.Lstat(root); err == nil {
-					break
-				}
-				root = filepath.Dir(root)
-			}
-		}
-		walkDir(root)
-	}()
-
-	return walkChan, nil
-}
-
-// readDir returns a lexically sorted directory list of files that come after startAfter. It should
-// be used instead of fs.ReadDir/os.ReadDir to avoid their non-lexical path sort.
-func readDir(root string, directory string, startAfter string) (entries []os.DirEntry, err error) {
-	var f *os.File
-	if f, err = os.Open(filepath.Join(root, directory)); err != nil {
-		return
-	}
-	defer f.Close()
-
-	// Directories receive a trailing '/' so they sort distinctly from files with the same prefix.
-	// Without the '/', a directory sortName may sort incorrectly relative to files prefixed with the
-	// same sortName.
-	sortName := func(entry os.DirEntry) string {
-		if entry.IsDir() {
-			return entry.Name() + "/"
-		}
-		return entry.Name()
-	}
-
-	if entries, err = f.ReadDir(-1); err != nil {
-		return
-	}
-
-	// Filter any entries that come after startAfter in-place so they are not part of the sorting
-	if startAfter != "" && strings.HasPrefix(startAfter, directory+"/") {
-		relative := strings.TrimPrefix(startAfter, directory)
-		relative = strings.TrimLeft(relative, "/")
-		filtered := entries[:0]
-		for _, entry := range entries {
-			name := sortName(entry)
-			if name > relative || strings.HasPrefix(relative, name) {
-				filtered = append(filtered, entry)
-			}
-		}
-		entries = filtered
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return sortName(entries[i]) < sortName(entries[j])
-	})
-	return
-}
-
-const globCharacters = "*?["
-
-// IsGlobPattern returns whether the pattern contains a glob pattern.
-func IsGlobPattern(pattern string) bool {
-	return strings.ContainsAny(pattern, globCharacters)
-}
-
-// StripGlobPattern extracts the longest leading substring from the given pattern that contains
-// no glob characters (e.g., '*', '?', or '['). This base prefix is used to efficiently list
-// objects in an S3 bucket, while the original glob pattern is later applied to filter the results.
-func StripGlobPattern(pattern string) string {
-	position := 0
-	for {
-		index := strings.IndexAny(pattern[position:], globCharacters)
-		if index == -1 {
-			return pattern
-		}
-		candidate := position + index
-
-		// Check for escape characters
-		backslashCount := 0
-		for i := candidate - 1; i >= 0 && pattern[i] == '\\'; i-- {
-			backslashCount++
-		}
-		if backslashCount%2 == 0 {
-			return pattern[:candidate]
-		}
-
-		// Check whether the last character was escaped
-		position = candidate + 1
-		if position >= len(pattern) {
-			return pattern
-		}
-	}
-}
-
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
 func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
@@ -1002,7 +780,7 @@ func IsValidRstId(rstId uint32) bool {
 // pattern.
 func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
 	normalizedRemotePath := NormalizePath(remotePath)
-	directory = StripGlobPattern(normalizedRemotePath)
+	directory = filesystem.StripGlobPattern(normalizedRemotePath)
 	isGlob = directory != normalizedRemotePath
 	if isGlob && !strings.HasSuffix(directory, "/") {
 		directory = filepath.Dir(directory)

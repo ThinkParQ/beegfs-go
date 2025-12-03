@@ -371,7 +371,7 @@ const maxWalkPageSize = 1000
 //     on their key names. This is important since it allows resuming at any point in the walk.
 //   - For directory buckets, ListObjectsV2 does not return objects in lexicographical order so
 //     this bucket type must start at the beginning of a new page using the continuation token.
-func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *WalkResponse, error) {
+func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *filesystem.StreamPathResult, error) {
 	if maxKeys != -1 && maxKeys <= 0 {
 		return nil, fmt.Errorf("maxKeys must be greater than zero or -1")
 	}
@@ -380,7 +380,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	if _, err := filepath.Match(prefix, ""); err != nil {
 		return nil, fmt.Errorf("invalid prefix %s: %w", prefix, err)
 	}
-	prefixWithoutPattern := StripGlobPattern(prefix)
+	prefixWithoutPattern := filesystem.StripGlobPattern(prefix)
 	isKey := prefix == prefixWithoutPattern
 
 	startAfterKey, continuationToken, err := decodeResumeToken(resumeToken)
@@ -396,7 +396,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		}
 	}
 
-	walkChan := make(chan *WalkResponse, chanSize)
+	walkChan := make(chan *filesystem.StreamPathResult, chanSize)
 	go func() {
 		defer close(walkChan)
 
@@ -430,16 +430,16 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
 				if stopBeforeNextPage && continuationToken != "" {
-					walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{resumeToken: encodeResumeToken("", continuationToken)}}
+					walkChan <- &filesystem.StreamPathResult{Err: filesystem.StreamPathLimitError{ResumeToken: encodeResumeToken("", continuationToken)}}
 					return
 				}
 
 				output, err := objectPaginator.NextPage(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk was cancelled: %w", err)}
+						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)}
 					} else {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk failed: %w", err)}
+						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)}
 					}
 					return
 				}
@@ -454,7 +454,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 					if maxKeys == 0 {
 						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
-							walkChan <- &WalkResponse{Err: walkStoppedWithMoreError{resumeToken: encodeResumeToken(lastKey, "")}}
+							walkChan <- &filesystem.StreamPathResult{Err: filesystem.StreamPathLimitError{ResumeToken: encodeResumeToken(lastKey, "")}}
 							return
 						}
 
@@ -467,10 +467,10 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 					select {
 					case <-ctx.Done():
-						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}
+						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}
 						return
 					default:
-						walkChan <- &WalkResponse{Path: key}
+						walkChan <- &filesystem.StreamPathResult{Path: key}
 					}
 					lastKey = key
 					maxKeys--
@@ -490,15 +490,15 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					// Try walking as a prefix since there was no key. If not a valid prefix
 					// fallback to the original error.
 					if !prefixWalk() {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("key not found: %s", prefix)}
+						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", prefix)}
 					}
 				} else {
-					walkChan <- &WalkResponse{Err: fmt.Errorf("query failed: %w", err)}
+					walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("query failed: %w", err)}
 				}
 				return
 			}
 
-			walkChan <- &WalkResponse{Path: prefix}
+			walkChan <- &filesystem.StreamPathResult{Path: prefix}
 			return
 		}
 
