@@ -414,8 +414,7 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			paths := []string{}
 			moreWork := false
 			for resp := range responseChan {
-				if resp.Err != nil {
-					require.ErrorIs(t, resp.Err, ErrStreamPathLimitReached)
+				if resp.ResumeToken != "" {
 					moreWork = true
 					break
 				}

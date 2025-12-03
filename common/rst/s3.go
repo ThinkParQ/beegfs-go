@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -360,17 +361,18 @@ func (r *S3Client) GetConfig() *flex.RemoteStorageTarget {
 
 const maxWalkPageSize = 1000
 
-// GetWalk returns WalkResponse for each prefix match found. The prefix can include glob patterns.
-// The resumeToken is returned with the WalkStoppedWithMoreError sentinel when maxKeys is
-// exceeded and should be used to resume from the prior walk position. maxKeys must be greater
-// than zero or -1 to walk all paths.
+// GetWalk streams StreamPathResult entries for each object whose key matches the prefix; glob
+// patterns in the prefix are supported. Provide resumeToken to continue a previous walk (empty
+// string starts fresh).
 //
-// Sort order of returned aws objects from ListObjectsV2
-// (https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
-//   - For general purpose buckets, ListObjectsV2 returns objects in lexicographical order based
-//     on their key names. This is important since it allows resuming at any point in the walk.
-//   - For directory buckets, ListObjectsV2 does not return objects in lexicographical order so
-//     this bucket type must start at the beginning of a new page using the continuation token.
+// The maxKeys argument must be greater than zero or -1 to walk all paths; be aware that maxKeys can
+// only be guaranteed when the bucket supports StartAfter and should not be relied on otherwise.
+
+// ListObjectsV2 ordering varies by bucket type: (https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
+//   - General purpose buckets return keys in lexicographical order, enabling precise resume
+//     positions via StartAfter.
+//   - Directory buckets do not guarantee lexicographical order, so resuming must restart at the
+//     beginning of the next page using the continuation token.
 func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *filesystem.StreamPathResult, error) {
 	if maxKeys != -1 && maxKeys <= 0 {
 		return nil, fmt.Errorf("maxKeys must be greater than zero or -1")
@@ -383,7 +385,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	prefixWithoutPattern := filesystem.StripGlobPattern(prefix)
 	isKey := prefix == prefixWithoutPattern
 
-	startAfterKey, continuationToken, err := decodeResumeToken(resumeToken)
+	rt, err := decodeResumeToken(resumeToken)
 	if err != nil {
 		return nil, err
 	}
@@ -417,20 +419,26 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				Prefix:  aws.String(prefixWithoutPattern),
 				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
 			}
-			if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported && startAfterKey != "" {
-				input.StartAfter = aws.String(startAfterKey)
-			} else if continuationToken != "" {
-				input.ContinuationToken = aws.String(continuationToken)
+			if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported && rt.StartAfter != "" {
+				input.StartAfter = aws.String(rt.StartAfter)
+			} else if rt.ContinuationToken != "" {
+				input.ContinuationToken = aws.String(rt.ContinuationToken)
 			}
 
 			var key string
 			var lastKey string
-			stopBeforeNextPage := false
+			var continuationToken string
 			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
 			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
-				if stopBeforeNextPage && continuationToken != "" {
-					walkChan <- &filesystem.StreamPathResult{Err: filesystem.StreamPathLimitError{ResumeToken: encodeResumeToken("", continuationToken)}}
+
+				if continuationToken != "" {
+					rt := s3ResumeToken{ContinuationToken: continuationToken}
+					if token, err := rt.encode(); err != nil {
+						walkChan <- &filesystem.StreamPathResult{Err: err}
+					} else {
+						walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
+					}
 					return
 				}
 
@@ -454,13 +462,18 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 					if maxKeys == 0 {
 						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
-							walkChan <- &filesystem.StreamPathResult{Err: filesystem.StreamPathLimitError{ResumeToken: encodeResumeToken(lastKey, "")}}
+							rt := s3ResumeToken{StartAfter: lastKey}
+							if token, err := rt.encode(); err != nil {
+								walkChan <- &filesystem.StreamPathResult{Err: err}
+							} else {
+								walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
+							}
 							return
 						}
 
-						stopBeforeNextPage = true
-						continuationToken = ""
-						if output.IsTruncated != nil && *output.IsTruncated {
+						// Resuming from the lastKey using startAfter is not supported to finish the
+						// page. If there are more keys, resume walk using the continuationToken instead.
+						if objectPaginator.HasMorePages() {
 							continuationToken = *output.NextContinuationToken
 						}
 					}
@@ -508,33 +521,35 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	return walkChan, nil
 }
 
-func encodeResumeToken(startAfterKey string, continuationToken string) string {
-	encodedNextKey := base64.StdEncoding.EncodeToString([]byte(startAfterKey))
-	encodedContinuationToken := base64.StdEncoding.EncodeToString([]byte(continuationToken))
-	return encodedNextKey + ":" + encodedContinuationToken
+type s3ResumeToken struct {
+	StartAfter        string
+	ContinuationToken string
 }
 
-func decodeResumeToken(resumeToken string) (startAfterKey string, continuationToken string, err error) {
-	if !strings.Contains(resumeToken, ":") {
-		return "", "", nil
+func (r s3ResumeToken) encode() (string, error) {
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+	if err := encoder.Encode(r); err != nil {
+		return "", fmt.Errorf("failed to encode s3 resume token: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(buffer.Bytes()), nil
+}
+
+func decodeResumeToken(s string) (token s3ResumeToken, err error) {
+	if s == "" {
+		return s3ResumeToken{}, nil
 	}
 
-	decode := func(encoded string) (string, error) {
-		data, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return "", fmt.Errorf("unable to decode walk resume token: %w", err)
-		}
-		return string(data), err
-	}
-	parts := strings.Split(resumeToken, ":")
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("unable to decode walk resume token: %q", resumeToken)
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		err = fmt.Errorf("failed to decode s3 resume token: %w", err)
 	}
 
-	if startAfterKey, err = decode(parts[0]); err != nil {
-		return
+	reader := bytes.NewReader(raw)
+	decoder := gob.NewDecoder(reader)
+	if err = decoder.Decode(&token); err != nil {
+		err = fmt.Errorf("failed to decode s3 resume token: %w", err)
 	}
-	continuationToken, err = decode(parts[1])
 	return
 }
 

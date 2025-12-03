@@ -10,7 +10,6 @@ package filesystem
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -101,25 +100,10 @@ func walkDirLexicographically(path string, d fs.DirEntry, walkDirFn fs.WalkDirFu
 	return nil
 }
 
-var ErrStreamPathLimitReached = errors.New("stream limit was reached")
-
-// Sentinel StreamPathLimitError error which signals the processor that the maximum number of paths had been
-// reached. The error also contains the ResumeToken.
-type StreamPathLimitError struct {
-	ResumeToken string
-}
-
-func (e StreamPathLimitError) Error() string {
-	return fmt.Errorf("%s: %w", e.ResumeToken, ErrStreamPathLimitReached).Error()
-}
-
-func (e StreamPathLimitError) Unwrap() error {
-	return ErrStreamPathLimitReached
-}
-
 type StreamPathResult struct {
-	Path string
-	Err  error
+	Path        string
+	ResumeToken string
+	Err         error
 }
 
 // StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
@@ -208,7 +192,7 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				}
 
 				if maxPaths == 0 {
-					walkChan <- &StreamPathResult{Err: StreamPathLimitError{lastPath}}
+					walkChan <- &StreamPathResult{ResumeToken: lastPath}
 					return false
 				}
 

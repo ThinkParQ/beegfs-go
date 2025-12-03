@@ -183,16 +183,17 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 					}
 					return nil
 				}
+
 				if walkResp.Err != nil {
-					var walkErr filesystem.StreamPathLimitError
-					if errors.As(walkResp.Err, &walkErr) {
-						rescheduleStateMu.Lock()
-						reschedule = true
-						request.SetExternalId(walkErr.ResumeToken)
-						rescheduleStateMu.Unlock()
-						return nil
-					}
 					return walkResp.Err
+				}
+
+				if walkResp.ResumeToken != "" {
+					rescheduleStateMu.Lock()
+					reschedule = true
+					request.SetExternalId(walkResp.ResumeToken)
+					rescheduleStateMu.Unlock()
+					return nil
 				}
 
 				if cfg.Download {
