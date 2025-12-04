@@ -535,22 +535,23 @@ func (r s3ResumeToken) encode() (string, error) {
 	return base64.StdEncoding.EncodeToString(buffer.Bytes()), nil
 }
 
-func decodeResumeToken(s string) (token s3ResumeToken, err error) {
+func decodeResumeToken(s string) (s3ResumeToken, error) {
 	if s == "" {
 		return s3ResumeToken{}, nil
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
-		err = fmt.Errorf("failed to decode s3 resume token: %w", err)
+		return s3ResumeToken{}, fmt.Errorf("failed to decode s3 resume token: %w", err)
 	}
 
+	var token s3ResumeToken
 	reader := bytes.NewReader(raw)
 	decoder := gob.NewDecoder(reader)
 	if err = decoder.Decode(&token); err != nil {
-		err = fmt.Errorf("failed to decode s3 resume token: %w", err)
+		return token, fmt.Errorf("failed to decode s3 resume token: %w", err)
 	}
-	return
+	return token, nil
 }
 
 func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
