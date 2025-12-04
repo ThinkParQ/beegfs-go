@@ -363,16 +363,7 @@ const maxWalkPageSize = 1000
 
 // GetWalk streams StreamPathResult entries for each object whose key matches the prefix; glob
 // patterns in the prefix are supported. Provide resumeToken to continue a previous walk (empty
-// string starts fresh).
-//
-// The maxKeys argument must be greater than zero or -1 to walk all paths; be aware that maxKeys can
-// only be guaranteed when the bucket supports StartAfter and should not be relied on otherwise.
-
-// ListObjectsV2 ordering varies by bucket type: (https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
-//   - General purpose buckets return keys in lexicographical order, enabling precise resume
-//     positions via StartAfter.
-//   - Directory buckets do not guarantee lexicographical order, so resuming must restart at the
-//     beginning of the next page using the continuation token.
+// string starts fresh). The maxKeys argument must be greater than zero or -1 to walk all paths.
 func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *filesystem.StreamPathResult, error) {
 	if maxKeys != -1 && maxKeys <= 0 {
 		return nil, fmt.Errorf("maxKeys must be greater than zero or -1")
@@ -425,23 +416,16 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				input.ContinuationToken = aws.String(rt.ContinuationToken)
 			}
 
+			continuationFindStart := false
+			if rt.ContinuationStartKey != "" {
+				continuationFindStart = true
+			}
+
 			var key string
 			var lastKey string
-			var continuationToken string
 			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
 			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
-
-				if continuationToken != "" {
-					rt := s3ResumeToken{ContinuationToken: continuationToken}
-					if token, err := rt.encode(); err != nil {
-						walkChan <- &filesystem.StreamPathResult{Err: err}
-					} else {
-						walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
-					}
-					return
-				}
-
 				output, err := objectPaginator.NextPage(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -452,8 +436,68 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					return
 				}
 
+				// When resuming from a continuation token, ensure the expected next key is on the current page.
+				// If the key is missing from this page:
+				//   - Check if it still exists.
+				//   - If it exists but isn’t on remaining pages, restart pagination from scratch (bucket likely rebalanced) with a warning.
+				//   - If it no longer exists and there’s a greater key, resume from that greater key with a warning.
+				//   - If it’s gone and no greater key exists (and no more pages), fail the walk.
+				// This keeps the walk resilient to deletions and S3 reordering while preserving lexicographic progress.
+				if continuationFindStart {
+					filteredContents := output.Contents[:0]
+					nextGreaterKeyIndex := -1
+					for index, content := range output.Contents {
+						key := *content.Key
+						if key == rt.ContinuationStartKey {
+							filteredContents = append(filteredContents, output.Contents[index:]...)
+							break
+						}
+						if nextGreaterKeyIndex == -1 && key > rt.ContinuationStartKey {
+							nextGreaterKeyIndex = index
+						}
+					}
+
+					if len(filteredContents) == 0 {
+						nextKeyExists := true
+						if _, _, _, err := r.getObjectMetadata(ctx, rt.ContinuationStartKey, true); err != nil {
+							if errors.Is(err, os.ErrNotExist) {
+								nextKeyExists = false
+							} else {
+								walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("failed to resume walk: missing start key, %s: %w", rt.ContinuationStartKey, err)}
+								return
+							}
+						}
+						if nextKeyExists {
+							if nextGreaterKeyIndex == -1 {
+								if !objectPaginator.HasMorePages() {
+									// The object existed but we ran out of next pages so rt.Next
+									// must have been moved to a page associated with a previous
+									// continuation token. This can happen when objects were deleted
+									// or if the S3 provider internally rebalanced the bucket in a
+									// way that changes the ordering.
+									walkChan <- &filesystem.StreamPathResult{Warning: true, Err: fmt.Errorf("failed to resume walk: next key, %s, exists but not in the continuation pages", rt.ContinuationStartKey)}
+									objectPaginator = s3.NewListObjectsV2Paginator(r.client, input)
+									continuationFindStart = false
+								}
+							}
+							continue
+						} else if nextGreaterKeyIndex == -1 {
+							if !objectPaginator.HasMorePages() {
+								walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("failed to resume walk: next key, %s, no longer exists and there is no greater", rt.ContinuationStartKey)}
+								return
+							}
+							continue
+						} else {
+							filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
+							walkChan <- &filesystem.StreamPathResult{Warning: true, Err: fmt.Errorf("failed to resume walk: next key, %s, no longer exists so resuming from the next greatest key", rt.ContinuationStartKey)}
+						}
+					}
+					continuationFindStart = false
+					output.Contents = filteredContents
+				}
+
 				for _, content := range output.Contents {
-					key = *content.Key
+					key = aws.ToString(content.Key)
 					if !isKey {
 						if match, _ := doublestar.Match(prefix, key); !match {
 							continue
@@ -471,11 +515,13 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 							return
 						}
 
-						// Resuming from the lastKey using startAfter is not supported to finish the
-						// page. If there are more keys, resume walk using the continuationToken instead.
-						if objectPaginator.HasMorePages() {
-							continuationToken = *output.NextContinuationToken
+						rt := s3ResumeToken{ContinuationToken: aws.ToString(output.ContinuationToken), ContinuationStartKey: key}
+						if token, err := rt.encode(); err != nil {
+							walkChan <- &filesystem.StreamPathResult{Err: err}
+						} else {
+							walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
 						}
+						return
 					}
 
 					select {
@@ -522,8 +568,9 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 }
 
 type s3ResumeToken struct {
-	StartAfter        string
-	ContinuationToken string
+	StartAfter           string
+	ContinuationToken    string
+	ContinuationStartKey string
 }
 
 func (r s3ResumeToken) encode() (string, error) {

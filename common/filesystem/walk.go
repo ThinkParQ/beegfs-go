@@ -104,6 +104,7 @@ type StreamPathResult struct {
 	Path        string
 	ResumeToken string
 	Err         error
+	Warning     bool
 }
 
 // StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a

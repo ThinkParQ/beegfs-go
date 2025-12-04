@@ -163,7 +163,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	}
 
 	reschedule := false
-	rescheduleStateMu := sync.Mutex{}
+	builderStateMu := sync.Mutex{}
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
@@ -185,14 +185,20 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 
 				if walkResp.Err != nil {
-					return walkResp.Err
+					if !walkResp.Warning {
+						return walkResp.Err
+					}
+					builderStateMu.Lock()
+					builder.WalkWarning++
+					builderStateMu.Unlock()
+					continue
 				}
 
 				if walkResp.ResumeToken != "" {
-					rescheduleStateMu.Lock()
+					builderStateMu.Lock()
 					reschedule = true
 					request.SetExternalId(walkResp.ResumeToken)
-					rescheduleStateMu.Unlock()
+					builderStateMu.Unlock()
 					return nil
 				}
 
@@ -241,10 +247,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 			}
 
-			rescheduleStateMu.Lock()
+			builderStateMu.Lock()
 			builder.Submitted += int32(len(jobRequests))
 			builder.Errors += int32(errorCount)
-			rescheduleStateMu.Unlock()
+			builderStateMu.Unlock()
 		}
 	}
 
@@ -307,11 +313,17 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", totalErrors, totalSubmitted)
 	}
 
+	totalWalkWarnings := builder.GetWalkWarning()
 	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			errMessage += fmt.Sprintf("; --%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag)
 		}
+		if totalWalkWarnings > 0 {
+			errMessage += fmt.Sprintf("; %d walk warning(s) occurred and files may have been skipped so verify status", totalWalkWarnings)
+		}
 		return false, errors.New(errMessage)
+	} else if totalWalkWarnings > 0 {
+		return false, fmt.Errorf("%d walk warning(s) occurred and files may have been skipped so verify status", totalWalkWarnings)
 	}
 	return false, nil
 }
