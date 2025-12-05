@@ -104,7 +104,6 @@ type StreamPathResult struct {
 	Path        string
 	ResumeToken string
 	Err         error
-	Warning     bool
 }
 
 // StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
@@ -147,7 +146,7 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	} else {
 		// Adding '/**' forces doublestar to match the entire path (only whole directories, never
 		// partial filenames) rather than just the prefix used to pick the walk root.
-		pattern += "/**"
+		pattern = filepath.Join(pattern, "**")
 	}
 
 	// Recursively walk the local path and send matching paths to walkChan. Any encountered errors
@@ -157,17 +156,32 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	walkChan := make(chan *StreamPathResult, chanSize)
 	go func() {
 		defer close(walkChan)
+		send := func(result *StreamPathResult) bool {
+			select {
+			case <-ctx.Done():
+				select {
+				case walkChan <- &StreamPathResult{Err: ctx.Err()}:
+				default:
+				}
+				return false
+			case walkChan <- result:
+				return true
+			}
+		}
 
 		var walkDir func(string) bool
 		walkDir = func(directory string) bool {
 			if err := ctx.Err(); err != nil {
-				walkChan <- &StreamPathResult{Err: err}
+				select {
+				case walkChan <- &StreamPathResult{Err: err}:
+				default:
+				}
 				return false
 			}
 
 			entries, err := readDir(mountPath, directory, startAfter)
 			if err != nil {
-				walkChan <- &StreamPathResult{Err: fmt.Errorf("unable to read directory, %q: %w", directory, err)}
+				send(&StreamPathResult{Err: fmt.Errorf("unable to read directory, %q: %w", directory, err)})
 				return false
 			}
 
@@ -185,7 +199,7 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 
 				if isGlob {
 					if match, err := doublestar.Match(pattern, path); err != nil {
-						walkChan <- &StreamPathResult{Err: err}
+						send(&StreamPathResult{Err: fmt.Errorf("failed to match path %q with pattern %q: %w", path, pattern, err)})
 						return false
 					} else if !match {
 						continue
@@ -193,19 +207,17 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				}
 
 				if maxPaths == 0 {
-					walkChan <- &StreamPathResult{ResumeToken: lastPath}
+					send(&StreamPathResult{ResumeToken: lastPath})
 					return false
 				}
 
-				select {
-				case <-ctx.Done():
-					walkChan <- &StreamPathResult{Err: ctx.Err()}
+				if !send(&StreamPathResult{Path: "/" + path}) {
 					return false
-
-				case walkChan <- &StreamPathResult{Path: "/" + path}:
 				}
 				lastPath = path
-				maxPaths--
+				if maxPaths > 0 {
+					maxPaths--
+				}
 			}
 
 			return true

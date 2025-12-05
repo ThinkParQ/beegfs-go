@@ -185,13 +185,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 
 				if walkResp.Err != nil {
-					if !walkResp.Warning {
-						return walkResp.Err
-					}
-					builderStateMu.Lock()
-					builder.WalkWarning++
-					builderStateMu.Unlock()
-					continue
+					return walkResp.Err
 				}
 
 				if walkResp.ResumeToken != "" {
@@ -313,17 +307,11 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", totalErrors, totalSubmitted)
 	}
 
-	totalWalkWarnings := builder.GetWalkWarning()
 	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
 			errMessage += fmt.Sprintf("; --%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag)
 		}
-		if totalWalkWarnings > 0 {
-			errMessage += fmt.Sprintf("; %d walk warning(s) occurred and files may have been skipped so verify status", totalWalkWarnings)
-		}
 		return false, errors.New(errMessage)
-	} else if totalWalkWarnings > 0 {
-		return false, fmt.Errorf("%d walk warning(s) occurred and files may have been skipped so verify status", totalWalkWarnings)
 	}
 	return false, nil
 }

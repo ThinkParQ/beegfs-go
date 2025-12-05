@@ -80,7 +80,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
 	cmd.Flags().Int32Var(&priority, rst.PriorityFlag, 0, "Set job priority (1-5, 1 is the highest)")
 	cmd.Flags().Lookup(rst.PriorityFlag).DefValue = "auto"
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
@@ -94,7 +94,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
-	cmd.Flags().MarkHidden("storage-class")
+	cmd.Flags().MarkHidden(rst.StorageClassFlag)
 
 	return cmd
 }
@@ -139,7 +139,7 @@ func newPullCmd() *cobra.Command {
 			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
 	cmd.Flags().StringVarP(&backendCfg.RemotePath, rst.RemotePathFlag, "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")

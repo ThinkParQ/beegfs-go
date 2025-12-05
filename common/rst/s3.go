@@ -390,6 +390,19 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	}
 
 	walkChan := make(chan *filesystem.StreamPathResult, chanSize)
+	send := func(result *filesystem.StreamPathResult) bool {
+		select {
+		case <-ctx.Done():
+			select {
+			case walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
+			default:
+			}
+			return false
+		case walkChan <- result:
+			return true
+		}
+	}
+
 	go func() {
 		defer close(walkChan)
 
@@ -429,20 +442,17 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				output, err := objectPaginator.NextPage(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
 					} else {
-						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
 					}
 					return
 				}
 
-				// When resuming from a continuation token, ensure the expected next key is on the current page.
-				// If the key is missing from this page:
-				//   - Check if it still exists.
-				//   - If it exists but isn’t on remaining pages, restart pagination from scratch (bucket likely rebalanced) with a warning.
-				//   - If it no longer exists and there’s a greater key, resume from that greater key with a warning.
-				//   - If it’s gone and no greater key exists (and no more pages), fail the walk.
-				// This keeps the walk resilient to deletions and S3 reordering while preserving lexicographic progress.
+				// When resuming with s3ResumeToken ContinuationToken and ContinuationStartKey,
+				// search for ContinuationStartKey on the page. If it does not exist and there's a
+				// key that's lexically greater than start with it; otherwise, try again on the next
+				// page.
 				if continuationFindStart {
 					filteredContents := output.Contents[:0]
 					nextGreaterKeyIndex := -1
@@ -458,39 +468,12 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					}
 
 					if len(filteredContents) == 0 {
-						nextKeyExists := true
-						if _, _, _, err := r.getObjectMetadata(ctx, rt.ContinuationStartKey, true); err != nil {
-							if errors.Is(err, os.ErrNotExist) {
-								nextKeyExists = false
-							} else {
-								walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("failed to resume walk: missing start key, %s: %w", rt.ContinuationStartKey, err)}
-								return
-							}
-						}
-						if nextKeyExists {
-							if nextGreaterKeyIndex == -1 {
-								if !objectPaginator.HasMorePages() {
-									// The object existed but we ran out of next pages so rt.Next
-									// must have been moved to a page associated with a previous
-									// continuation token. This can happen when objects were deleted
-									// or if the S3 provider internally rebalanced the bucket in a
-									// way that changes the ordering.
-									walkChan <- &filesystem.StreamPathResult{Warning: true, Err: fmt.Errorf("failed to resume walk: next key, %s, exists but not in the continuation pages", rt.ContinuationStartKey)}
-									objectPaginator = s3.NewListObjectsV2Paginator(r.client, input)
-									continuationFindStart = false
-								}
-							}
+						if nextGreaterKeyIndex == -1 {
+							// There were no greater keys on the current page. So check the next page.
 							continue
-						} else if nextGreaterKeyIndex == -1 {
-							if !objectPaginator.HasMorePages() {
-								walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("failed to resume walk: next key, %s, no longer exists and there is no greater", rt.ContinuationStartKey)}
-								return
-							}
-							continue
-						} else {
-							filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
-							walkChan <- &filesystem.StreamPathResult{Warning: true, Err: fmt.Errorf("failed to resume walk: next key, %s, no longer exists so resuming from the next greatest key", rt.ContinuationStartKey)}
 						}
+						continuationFindStart = false
+						filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
 					}
 					continuationFindStart = false
 					output.Contents = filteredContents
@@ -508,31 +491,30 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
 							rt := s3ResumeToken{StartAfter: lastKey}
 							if token, err := rt.encode(); err != nil {
-								walkChan <- &filesystem.StreamPathResult{Err: err}
+								send(&filesystem.StreamPathResult{Err: err})
 							} else {
-								walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
+								send(&filesystem.StreamPathResult{ResumeToken: token})
 							}
 							return
 						}
 
 						rt := s3ResumeToken{ContinuationToken: aws.ToString(output.ContinuationToken), ContinuationStartKey: key}
 						if token, err := rt.encode(); err != nil {
-							walkChan <- &filesystem.StreamPathResult{Err: err}
+							send(&filesystem.StreamPathResult{Err: err})
 						} else {
-							walkChan <- &filesystem.StreamPathResult{ResumeToken: token}
+							send(&filesystem.StreamPathResult{ResumeToken: token})
 						}
 						return
 					}
 
-					select {
-					case <-ctx.Done():
-						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}
+					if !send(&filesystem.StreamPathResult{Path: key}) {
 						return
-					default:
-						walkChan <- &filesystem.StreamPathResult{Path: key}
 					}
+
 					lastKey = key
-					maxKeys--
+					if maxKeys > 0 {
+						maxKeys--
+					}
 				}
 			}
 			return
@@ -549,15 +531,15 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					// Try walking as a prefix since there was no key. If not a valid prefix
 					// fallback to the original error.
 					if !prefixWalk() {
-						walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", prefix)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", prefix)})
 					}
 				} else {
-					walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("query failed: %w", err)}
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("query failed: %w", err)})
 				}
 				return
 			}
 
-			walkChan <- &filesystem.StreamPathResult{Path: prefix}
+			send(&filesystem.StreamPathResult{Path: prefix})
 			return
 		}
 
@@ -567,6 +549,9 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	return walkChan, nil
 }
 
+// s3ResumeToken holds pagination state so a walk can be resumed. When the list-object api supports
+// starting after a specific key then StartAfter will be populated; otherwise, ContinuationToken and
+// ContinuationStartKey will be.
 type s3ResumeToken struct {
 	StartAfter           string
 	ContinuationToken    string

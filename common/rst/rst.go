@@ -75,8 +75,9 @@ type Provider interface {
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
 	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
-	// any new requests into jobSubmissionChan. If building jobs is long running, return an
-	// externalId so the worker can reschedule and later resume from that point.
+	// any new requests into jobSubmissionChan. If building jobs is long running, return
+	// rescheduled==true to reschedule the remaining work for later which allows other work time to
+	// complete.
 	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
