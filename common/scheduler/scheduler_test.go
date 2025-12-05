@@ -65,7 +65,7 @@ func TestSubmissionIDFunctions(t *testing.T) {
 			base := submissionBaseKey(submissionId)
 			assert.Equal(t, test.baseKey, base, "submissionBaseKey(%s)", submissionId)
 
-			next, workRequestPriority, err := IncrementSubmissionId(submissionId)
+			next, _, err := IncrementSubmissionId(submissionId)
 			assert.NoError(t, err, "unexpected error for incrementSubmissionID(%s)", submissionId)
 			assert.Equal(t, test.expectedIncrement, next, "incrementSubmissionID(%s)", submissionId)
 
