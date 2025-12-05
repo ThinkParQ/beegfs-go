@@ -21,6 +21,7 @@ const (
 )
 
 var (
+	schedulerMetricsOnce          sync.Once
 	schedulerCompletedWorkHz      *expvar.Float
 	schedulerTokensAllowedHz      *expvar.Float
 	schedulerPriorityFairnessMode *expvar.String
@@ -146,11 +147,15 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	cfg.allowedTokensMin = max(allowedTokensAbsoluteMinimum, cfg.allowedTokensMin)
 	cfg.nodeName = strings.ReplaceAll(cfg.nodeName, " ", "")
 
-	schedulerCompletedWorkHz = expvar.NewFloat(cfg.nodeName + "_scheduler_completedWorkHz")
-	schedulerTokensAllowedHz = expvar.NewFloat(cfg.nodeName + "_scheduler_tokensAllowedHz")
-	schedulerPriorityFairnessMode = expvar.NewString(cfg.nodeName + "_priority_fairness_mode")
-	schedulerPriorityFairnessMode.Set(cfg.priorityFairness.String())
-
+	// Expvars are registered globally and duplication registrations panic. This should never be
+	// done except the benchmark tests in rst/sync/internal/workmgr/manager_test.go which create
+	// many schedulers.
+	schedulerMetricsOnce.Do(func() {
+		schedulerCompletedWorkHz = expvar.NewFloat(cfg.nodeName + "_scheduler_completedWorkHz")
+		schedulerTokensAllowedHz = expvar.NewFloat(cfg.nodeName + "_scheduler_tokensAllowedHz")
+		schedulerPriorityFairnessMode = expvar.NewString(cfg.nodeName + "_priority_fairness_mode")
+		schedulerPriorityFairnessMode.Set(cfg.priorityFairness.String())
+	})
 	s = &Scheduler{
 		ctx:              ctx,
 		log:              log,
