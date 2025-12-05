@@ -200,7 +200,7 @@ func filterTargetsByNode(ctx context.Context, mappings *util.Mappings, benchConf
 			return nil, err
 		}
 		for _, target := range allTargets {
-			if target.NodeType == beegfs.Storage {
+			if target.NodeType == beegfs.Storage && target.Node != nil {
 				filteredTargetsByNode[*target.Node] = append(filteredTargetsByNode[*target.Node], uint16(target.Target.LegacyId.NumId))
 			}
 		}

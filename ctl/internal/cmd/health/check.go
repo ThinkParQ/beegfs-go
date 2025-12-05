@@ -213,7 +213,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		fmt.Printf("%s Mapping Status %s\n\n", mappingStatus, hint("-> All targets are mapped to a storage node."))
 	}
 
-	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy
+	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy
 	if unhealthyTargets || frontendCfg.printDF {
 		if unhealthyTargets {
 			failedCheck = true
