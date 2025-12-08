@@ -149,7 +149,7 @@ func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
 
 	input := &s3.ListObjectsV2Input{
 		Bucket:     aws.String(s.config.GetS3().Bucket),
-		StartAfter: aws.String(""),
+		StartAfter: aws.String("-"),
 		MaxKeys:    aws.Int32(0),
 	}
 
