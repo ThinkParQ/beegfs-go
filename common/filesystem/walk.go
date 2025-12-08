@@ -10,6 +10,7 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -125,28 +126,43 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	startAfter = preparePath(startAfter)
 
 	isGlob := IsGlobPattern(pattern)
-	if !isGlob {
-		if stat, err := mountPoint.Lstat(pattern); err != nil {
-			return nil, fmt.Errorf("unable walk path: %w", err)
-		} else if !stat.IsDir() {
-			// prefix is a file path so only stream it back if it's a match.
-			walkChan := make(chan *StreamPathResult, 1)
-			go func() {
-				defer close(walkChan)
-				if pattern > startAfter {
-					select {
-					case <-ctx.Done():
-						walkChan <- &StreamPathResult{Err: ctx.Err()}
-					case walkChan <- &StreamPathResult{Path: "/" + pattern}:
-					}
-				}
-			}()
-			return walkChan, nil
-		}
-	} else {
-		// Adding '/**' forces doublestar to match the entire path (only whole directories, never
-		// partial filenames) rather than just the prefix used to pick the walk root.
+	if isGlob {
+		// Append '/**' so the glob pattern matches everything under the directories instead of just
+		// the directory itself. Without it, a pattern like 'deep/*' would match '/deep/a' but skip
+		// '/deep/a/b.txt'; adding '**' turns it into 'deep/*/**' so all descendants qualify while
+		// still matching whole directories.
 		pattern = filepath.Join(pattern, "**")
+	} else if stat, err := mountPoint.Lstat(pattern); err != nil {
+		return nil, fmt.Errorf("unable walk path: %w", err)
+	} else if !stat.IsDir() {
+		// prefix is a file path so only stream it back if it's a match.
+		walkChan := make(chan *StreamPathResult, 1)
+		go func() {
+			defer close(walkChan)
+			if pattern > startAfter {
+				select {
+				case <-ctx.Done():
+					walkChan <- &StreamPathResult{Err: ctx.Err()}
+				case walkChan <- &StreamPathResult{Path: "/" + pattern}:
+				}
+			}
+		}()
+		return walkChan, nil
+	}
+
+	root := pattern
+	if isGlob {
+		// Find the root directory of the file glob by stepping back until a directory is found.
+		for {
+			if _, err := mountPoint.Lstat(root); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil, fmt.Errorf("unable walk path: %w", err)
+				}
+			} else {
+				break
+			}
+			root = filepath.Dir(root)
+		}
 	}
 
 	// Recursively walk the local path and send matching paths to walkChan. Any encountered errors
@@ -223,16 +239,6 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 			return true
 		}
 
-		root := pattern
-		if isGlob {
-			// Find the root directory of the file glob by stepping back until a directory is found.
-			for {
-				if _, err := mountPoint.Lstat(root); err == nil {
-					break
-				}
-				root = filepath.Dir(root)
-			}
-		}
 		walkDir(root)
 	}()
 
