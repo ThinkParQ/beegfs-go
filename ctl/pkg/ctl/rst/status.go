@@ -491,7 +491,7 @@ func getPathStatusFromTarget(
 			continue
 		}
 
-		remoteSize, remoteMtime, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
+		remoteSize, remoteMtime, _, _, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				result.SyncStatus = NotAttempted

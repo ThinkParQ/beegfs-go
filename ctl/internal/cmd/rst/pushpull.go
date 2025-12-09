@@ -23,7 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
-		Update: new(bool),
+		Update:       new(bool),
+		StorageClass: new(string),
 	}
 
 	var priority int32
@@ -49,7 +50,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 				return fmt.Errorf("invalid number of arguments. Be sure to quote file glob pattern")
 			}
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
-				return errors.New("--update requires a valid --remote-target to be specified")
+				return fmt.Errorf("--%s requires a valid --%s to be specified", rst.UpdateFlag, rst.RemoteTargetFlag)
 			}
 
 			if len(tagging) != 0 {
@@ -64,10 +65,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			}
 			backendCfg.Metadata = metadata
 
-			priorityFlag := cmd.Flags().Lookup("priority")
+			priorityFlag := cmd.Flags().Lookup(rst.PriorityFlag)
 			if priorityFlag.Changed {
 				if priority < 1 || priority > 5 {
-					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
+					return fmt.Errorf("invalid --%s value, %d: must be between 1 and 5 (inclusive)", rst.PriorityFlag, backendCfg.Priority)
 				}
 				backendCfg.Priority = &priority
 			}
@@ -79,19 +80,21 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
-	cmd.Flags().Int32Var(&priority, "priority", 0, "Set job priority (1-5, 1 is the highest)")
-	cmd.Flags().Lookup("priority").DefValue = "auto"
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "Perform a one time push to the specified Remote Storage Target ID.")
+	cmd.Flags().Int32Var(&priority, rst.PriorityFlag, 0, "Set job priority (1-5, 1 is the highest)")
+	cmd.Flags().Lookup(rst.PriorityFlag).DefValue = "auto"
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force push file(s) to the remote target even if the file is already in sync or another client currently has them open for writing (note the job may later fail or the uploaded file may not be the latest version).")
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
-	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().BoolVar(backendCfg.Update, rst.UpdateFlag, false, fmt.Sprintf("Set the file's persistent remote target. Requires --%s.", rst.RemoteTargetFlag))
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
+	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
+	cmd.Flags().MarkHidden(rst.StorageClassFlag)
 
 	return cmd
 }
@@ -104,23 +107,29 @@ func newPullCmd() *cobra.Command {
 	}
 
 	var priority int32
+	var allowRestore bool
 	cmd := &cobra.Command{
-		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
+		Use:   fmt.Sprintf("pull --%s=<id> --%s=<path> <path>", rst.RemoteTargetFlag, rst.RemotePathFlag),
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument")
 			}
 			if *backendCfg.Update && !rst.IsValidRstId(backendCfg.RemoteStorageTarget) {
-				return errors.New("--update requires a valid --remote-target to be specified")
+				return fmt.Errorf("--%s requires a valid --%s to be specified", rst.UpdateFlag, rst.RemoteTargetFlag)
 			}
 
-			priorityFlag := cmd.Flags().Lookup("priority")
+			priorityFlag := cmd.Flags().Lookup(rst.PriorityFlag)
 			if priorityFlag.Changed {
 				if priority < 1 || priority > 5 {
-					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
+					return fmt.Errorf("invalid --%s value, %d: must be between 1 and 5 (inclusive)", rst.PriorityFlag, backendCfg.Priority)
 				}
 				backendCfg.Priority = &priority
+			}
+
+			allowRestoreFlag := cmd.Flags().Lookup(rst.AllowRestoreFlag)
+			if allowRestoreFlag.Changed {
+				backendCfg.AllowRestore = &allowRestore
 			}
 
 			return nil
@@ -130,18 +139,20 @@ func newPullCmd() *cobra.Command {
 			return runPushOrPullCmd(cmd, frontendCfg, &backendCfg)
 		},
 	}
-	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, "remote-target", "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
+	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
-	cmd.Flags().StringVarP(&backendCfg.RemotePath, "remote-path", "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
+	cmd.Flags().StringVarP(&backendCfg.RemotePath, rst.RemotePathFlag, "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")
 	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
-	cmd.Flags().Int32Var(&priority, "priority", 0, "Set job priority (1-5, 1 is the highest)")
-	cmd.Flags().Lookup("priority").DefValue = "auto"
+	cmd.Flags().Int32Var(&priority, rst.PriorityFlag, 0, "Set job priority (1-5, 1 is the highest)")
+	cmd.Flags().Lookup(rst.PriorityFlag).DefValue = "auto"
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
-	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().BoolVar(backendCfg.Update, rst.UpdateFlag, false, fmt.Sprintf("Set the file's persistent remote target. Requires --%s.", rst.RemoteTargetFlag))
+	cmd.Flags().BoolVar(&allowRestore, rst.AllowRestoreFlag, false, "Allow archived requests to be restored.")
+	cmd.Flags().Lookup(rst.AllowRestoreFlag).DefValue = "auto"
 	return cmd
 }
 
