@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -97,8 +98,22 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return
 			}
 		}
-	} else if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
-		return
+	} else {
+		filterExpr := cfg.GetFilterExpr()
+		if filterExpr != "" {
+			var filter util.FileInfoFilter
+			filter, err = util.CompileFilter(filterExpr)
+			if err != nil {
+				err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+				return
+			}
+			walkChan, err = StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
+		} else {
+			walkChan, err = StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil)
+		}
+		if err != nil {
+			return
+		}
 	}
 
 	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
