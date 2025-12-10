@@ -820,3 +820,37 @@ func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.No
 
 	return nil
 }
+
+// SetDirectoryRstIds updates the directory RST configuration to the provided IDs.
+func SetDirectoryRstIds(ctx context.Context, path string, rstIds []uint32) error {
+	entryInfo, err := GetEntry(ctx, nil, GetEntriesCfg{
+		Verbose:        false,
+		IncludeOrigMsg: true,
+	}, path)
+	if err != nil {
+		return err
+	}
+
+	store, err := config.NodeStore(ctx)
+	if err != nil {
+		return err
+	}
+
+	request := &msg.SetDirPatternRequest{
+		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
+		Pattern:   entryInfo.Entry.Pattern.StripePattern,
+		RST:       entryInfo.Entry.Remote.RemoteStorageTarget,
+	}
+	request.RST.RSTIDs = rstIds
+
+	response := &msg.SetDirPatternResponse{}
+	if err := store.RequestTCP(ctx, entryInfo.Entry.MetaOwnerNode.Uid, request, response); err != nil {
+		return err
+	}
+
+	if response.Result != beegfs.OpsErr_SUCCESS && response.Result != beegfs.OpsErr_NOTADIR {
+		return fmt.Errorf("server returned an error configuring directory targets, %s: %w", path, response.Result)
+	}
+
+	return nil
+}

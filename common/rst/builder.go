@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -147,6 +149,25 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 	var submittedTotal atomic.Uint32
 	var submittedWithErrors atomic.Uint32
 	workers := 2
+	processedDirs := make(map[string]struct{})
+	var processedDirsMu sync.Mutex
+
+	updateDirectory := func(dirPath string) error {
+		if !cfg.GetUpdate() || !IsValidRstId(cfg.RemoteStorageTarget) {
+			return nil
+		}
+
+		processedDirsMu.Lock()
+		if _, seen := processedDirs[dirPath]; seen {
+			processedDirsMu.Unlock()
+			return nil
+		}
+		processedDirs[dirPath] = struct{}{}
+		processedDirsMu.Unlock()
+
+		return entry.SetDirectoryRstIds(ctx, dirPath, []uint32{cfg.RemoteStorageTarget})
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 	for range workers {
 		g.Go(func() error {
@@ -163,6 +184,12 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 					}
 					if walkResp.Err != nil {
 						return walkResp.Err
+					}
+					if walkResp.IsDir {
+						if err := updateDirectory(walkResp.Path); err != nil {
+							return err
+						}
+						continue
 					}
 
 					if cfg.Download {
@@ -181,6 +208,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(ctx context.Context, request
 
 							// Ensure the local directory structure supports the object downloads
 							if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
+								return err
+							}
+							if err := updateDirectory(filepath.Dir(inMountPath)); err != nil {
 								return err
 							}
 						}
