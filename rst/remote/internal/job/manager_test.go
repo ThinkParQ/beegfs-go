@@ -105,7 +105,10 @@ func TestManage(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	missingPaths := map[string]bool{}
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc(), withShouldDeleteCompletedJobsFunc(func(path string) (bool, error) {
+		return missingPaths[path], nil
+	}))
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be scheduled:
@@ -265,7 +268,10 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	missingPaths := map[string]bool{}
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc(), withShouldDeleteCompletedJobsFunc(func(path string) (bool, error) {
+		return missingPaths[path], nil
+	}))
 	require.NoError(t, jobManager.Start())
 
 	// Submit two jobs for testing:
@@ -340,10 +346,11 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	}
 
 	// Then delete it:
+	missingPaths[testJobRequest1.GetPath()] = true
 	deleteJobByPathResponse, err = jobManager.UpdateJobs(deleteJobByPathRequest)
 	assert.NoError(t, err)
 	assert.True(t, deleteJobByPathResponse.GetOk())
-	assert.Equal(t, "job scheduled for deletion", deleteJobByPathResponse.GetResults()[0].GetJob().GetStatus().GetMessage())
+	assert.Contains(t, deleteJobByPathResponse.GetResults()[0].GetJob().GetStatus().GetMessage(), "job scheduled for deletion")
 
 	// Verify the job was fully deleted:
 	getJobRequestsByPath := beeremote.GetJobsRequest_builder{
@@ -405,10 +412,11 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	}
 
 	// Then delete it:
+	missingPaths[submitJobResponse2.GetJob().GetRequest().GetPath()] = true
 	updateJobByIDResponse, err = jobManager.UpdateJobs(deleteJobByIDRequest)
 	assert.NoError(t, err)
 	assert.True(t, updateJobByIDResponse.GetOk())
-	assert.Equal(t, "job scheduled for deletion", updateJobByIDResponse.GetResults()[0].GetJob().GetStatus().GetMessage())
+	assert.Contains(t, updateJobByIDResponse.GetResults()[0].GetJob().GetStatus().GetMessage(), "job scheduled for deletion")
 
 	// Verify the job was fully deleted:
 	getJobRequestsByID := beeremote.GetJobsRequest_builder{
@@ -422,6 +430,10 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	responses = make(chan *beeremote.GetJobsResponse, 1)
 	err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses)
 	assert.ErrorIs(t, err, kvstore.ErrEntryNotInDB)
+
+	// Reset missing path tracking before testing completed job rejections.
+	delete(missingPaths, testJobRequest1.GetPath())
+	delete(missingPaths, submitJobResponse2.GetJob().GetRequest().GetPath())
 
 	////////////////////////////////
 	// Test deleting completed jobs:
@@ -495,7 +507,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 
 	responses = make(chan *beeremote.GetJobsResponse, 1)
 	err = jobManager.GetJobs(context.Background(), beeremote.GetJobsRequest_builder{
-		ByExactPath: proto.String("response.Job.Request.Path"),
+		ByExactPath: proto.String(response.GetJob().GetRequest().GetPath()),
 	}.Build(), responses)
 	assert.ErrorIs(t, kvstore.ErrEntryNotInDB, err)
 }
@@ -568,7 +580,10 @@ func TestManageErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	missingPaths := map[string]bool{}
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc(), withShouldDeleteCompletedJobsFunc(func(path string) (bool, error) {
+		return missingPaths[path], nil
+	}))
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be cancelled if any work
@@ -713,7 +728,10 @@ func TestUpdateJobResults(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	missingPaths := map[string]bool{}
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc(), withShouldDeleteCompletedJobsFunc(func(path string) (bool, error) {
+		return missingPaths[path], nil
+	}))
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -898,7 +916,10 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	missingPaths := map[string]bool{}
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc(), withShouldDeleteCompletedJobsFunc(func(path string) (bool, error) {
+		return missingPaths[path], nil
+	}))
 	require.NoError(t, jobManager.Start())
 
 	baseTestJobRequest := &beeremote.JobRequest{
