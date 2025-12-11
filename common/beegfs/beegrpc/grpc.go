@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
+	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"google.golang.org/grpc"
@@ -75,6 +77,16 @@ func WithProxy(enable bool) connOpt {
 // NewClientConn provides a standard method to configure TLS and BeeGFS connection authentication
 // when setting up a gRPC client connection for use with a BeeGFS gRPC client.
 func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
+	if strings.Contains(address, "://") {
+		return nil, fmt.Errorf("specifying a URI scheme in the address is not supported: %q", address)
+	}
+
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		return nil, fmt.Errorf(
+			"invalid target address %q; bare addresses must be in 'host:port' form (for IPv6, use the '[address]:port' notation): %w",
+			address, err,
+		)
+	}
 
 	config := applyConnOpts(cOpts...)
 
