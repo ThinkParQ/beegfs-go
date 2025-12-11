@@ -37,9 +37,6 @@ func newGenericStatsCmd() *cobra.Command {
 				}
 				path = cwd
 			}
-			if err := checkBeeGFSConfig(); err != nil {
-				return err
-			}
 			return runPythonExecStats(bflagSet, stat, path)
 		},
 	}
