@@ -2,8 +2,6 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
@@ -15,29 +13,30 @@ func newGenericRescanCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var recurse bool
 	var cmd = &cobra.Command{
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				args = append([]string{cwd}, args...)
-			}
 			if err := checkBeeGFSConfig(); err != nil {
 				return err
 			}
-			return runPythonRescanIndex(args, bflagSet, recurse)
+			return runRescanIndex(bflagSet, recurse)
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{
-		bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
-		bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
+		bflag.Flag("fs-path", "F", "File system path for which index will be updated.", "-F", ""),
+		bflag.Flag("index-path", "I", "File system path at which the index is stored.", "-I", ""),
+		bflag.Flag("index-xattrs", "x", "Index xattrs", "-x", false),
+		bflag.Flag("plugin", "", "Plugin library for modifying database entries", "--plugin", ""),
+		bflag.Flag("swap-prefix", "", "File name prefix for swap files", "--swap-prefix", ""),
+		bflag.Flag("compress", "", "Compress work items", "--compress", false),
+		bflag.Flag("validate-external-dbs", "q", "Check that external databases are valid before tracking during indexing", "-q", false),
 		bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
 		bflag.GlobalFlag(config.NumWorkersKey, "-n"),
-		bflag.GlobalFlag(config.DebugKey, "-V=1"),
-		bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
+		bflag.GlobalFlag(config.DebugKey, "--debug"),
 	}
 	bflagSet = bflag.NewFlagSet(rescanFlags, cmd)
+	applyIndexRootDefault(cmd)
+	cmd.MarkFlagRequired("fs-path")
+	cmd.MarkFlagRequired("index-path")
 	cmd.Flags().BoolVar(&recurse, "recurse", false, "Recursively rescan all directories beneath the specified path.")
 
 	return cmd
@@ -45,7 +44,7 @@ func newGenericRescanCmd() *cobra.Command {
 
 func newRescanCmd() *cobra.Command {
 	s := newGenericRescanCmd()
-	s.Use = "rescan <directory-path>"
+	s.Use = "rescan"
 	s.Short = "Updates the index for a specific subdirectory of a previously indexed filesystem."
 	s.Long = `The rescan command allows users to refresh the metadata for a subdirectory, ensuring that newly created files and directories are indexed, and stale entries (files or directories deleted from the filesystem but still present in the index) are removed.
 
@@ -66,63 +65,89 @@ Two modes are supported:
 
 Example: Rescan the Index for contents in a subdirectory.
 
-$ beegfs index rescan sub-dir1/ sub-dir2/
+$ beegfs index rescan --fs-path /mnt/fs/sub-dir1 --index-path /mnt/index_root --recurse
+After rescanning, a tree summary is generated for the index root.
 `
 
 	return s
 }
 
-func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool) error {
+func runRescanIndex(bflagSet *bflag.FlagSet, recurse bool) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	for _, path := range paths {
-		allArgs := make([]string, 0, len(wrappedArgs)+4)
-		allArgs = append(allArgs, createCmd, "-F", path)
-		allArgs = append(allArgs, wrappedArgs...)
-		if recurse {
-			allArgs = append(allArgs, "-U")
-		} else {
-			allArgs = append(allArgs, "-k")
-		}
-		log.Debug("Running BeeGFS Hive Index rescan command",
-			zap.String("path", path),
-			zap.Bool("recurse", recurse),
-			zap.Any("wrappedArgs", wrappedArgs),
-			zap.Any("allArgs", allArgs),
-		)
-		cmd := exec.Command(beeBinary, allArgs...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Start()
-		if err != nil {
-			return fmt.Errorf("unable to start index command: %w", err)
-		}
-		err = cmd.Wait()
-		if err != nil {
-			return fmt.Errorf("error executing index command: %w", err)
-		}
-	}
-	treeArgs := []string{createCmd, "-S"}
-	requiredFlags := map[string]bool{"-X": true, "-n": true}
+	var fsPath string
+	var indexPath string
+	filteredArgs := make([]string, 0, len(wrappedArgs))
+	treeArgs := make([]string, 0, len(wrappedArgs))
+
 	for i := 0; i < len(wrappedArgs); i++ {
-		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
+		switch wrappedArgs[i] {
+		case "-F":
+			if i+1 >= len(wrappedArgs) {
+				return fmt.Errorf("missing value for --fs-path")
+			}
+			fsPath = wrappedArgs[i+1]
+			i++
+		case "-I":
+			if i+1 >= len(wrappedArgs) {
+				return fmt.Errorf("missing value for --index-path")
+			}
+			indexPath = wrappedArgs[i+1]
+			i++
+		case "-n":
+			if i+1 >= len(wrappedArgs) {
+				return fmt.Errorf("missing value for --threads/-n")
+			}
+			filteredArgs = append(filteredArgs, wrappedArgs[i], wrappedArgs[i+1])
 			treeArgs = append(treeArgs, wrappedArgs[i], wrappedArgs[i+1])
 			i++
+		case "--debug", "-H":
+			filteredArgs = append(filteredArgs, wrappedArgs[i])
+			treeArgs = append(treeArgs, wrappedArgs[i])
+		case "-v", "--version":
+			filteredArgs = append(filteredArgs, wrappedArgs[i])
+			treeArgs = append(treeArgs, wrappedArgs[i])
+		default:
+			filteredArgs = append(filteredArgs, wrappedArgs[i])
 		}
 	}
-	log.Debug("Running BeeGFS Hive Index Tree-Summary command",
-		zap.Any("Args", treeArgs),
+
+	if fsPath == "" {
+		return fmt.Errorf("missing value for --fs-path")
+	}
+	if indexPath == "" {
+		return fmt.Errorf("missing value for --index-path")
+	}
+
+	cfg, err := loadIndexConfig()
+	if err != nil {
+		return fmt.Errorf("loading index config: %w", err)
+	}
+
+	if !recurse {
+		filteredArgs = append(filteredArgs, "--max-level", "0")
+	}
+
+	log.Debug("Running BeeGFS Hive Index rescan command",
+		zap.String("fsPath", fsPath),
+		zap.String("indexPath", indexPath),
+		zap.Bool("recurse", recurse),
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("filteredArgs", filteredArgs),
 	)
-	cmd := exec.Command(beeBinary, treeArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
+
+	if err := runDir2Index(log, filteredArgs, fsPath, indexPath, wrappedArgs); err != nil {
+		return err
 	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
+
+	var summaryPath string
+	if cfg != nil {
+		summaryPath = cfg.IndexRoot
 	}
-	return nil
+	if summaryPath == "" {
+		log.Info("Skipping tree summary because index root is not configured")
+		return nil
+	}
+
+	return runTreeSummary(log, treeArgs, summaryPath, wrappedArgs)
 }

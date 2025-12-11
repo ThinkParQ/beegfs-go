@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const queryCmd = "query-index"
-
 func newGenericQueryCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
@@ -29,6 +27,7 @@ func newGenericQueryCmd() *cobra.Command {
 	copyFlags := []bflag.FlagWrapper{
 		bflag.Flag("db-path", "I", "Path to the directory containing the database (.bdm.db file)", "-I", ""),
 		bflag.Flag("sql-query", "s", "Provide sql query", "-s", ""),
+		bflag.Flag("delim", "d", "Delimiter separating output columns (single character). Use 'x' for ASCII 0x1E", "-d", ""),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
 
@@ -58,7 +57,7 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, queryCmd)
+	allArgs = append(allArgs, sqlite3Binary)
 	allArgs = append(allArgs, wrappedArgs...)
 	outputFormat := viper.GetString(config.OutputKey)
 	if outputFormat != "" && outputFormat != config.OutputTable.String() {
@@ -66,7 +65,7 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	}
 	log.Debug("Running BeeGFS Hive Index query command",
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("queryCmd", queryCmd),
+		zap.Any("queryCmd", sqlite3Binary),
 		zap.Any("allArgs", allArgs),
 	)
 	cmd := exec.Command(beeBinary, allArgs...)
