@@ -112,7 +112,7 @@ func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
 }
 
 // GetWalk is not implemented and should never be called.
-func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 

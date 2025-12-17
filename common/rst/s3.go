@@ -3,6 +3,8 @@ package rst
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -36,8 +39,10 @@ type S3Client struct {
 	config *flex.RemoteStorageTarget
 	// TODO: https://github.com/thinkparq/gobee/issues/28
 	// Rework client into an `s3Provider` interface type.
-	client     *s3.Client
-	mountPoint filesystem.Provider
+	client                         *s3.Client
+	mountPoint                     filesystem.Provider
+	isListStartAfterKeySupported   *bool
+	isListStartAfterKeySupportedMu sync.Mutex
 }
 
 var _ Provider = &S3Client{}
@@ -80,6 +85,33 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		client:     client,
 		mountPoint: mountPoint,
 	}, nil
+}
+
+func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
+	s.isListStartAfterKeySupportedMu.Lock()
+	defer s.isListStartAfterKeySupportedMu.Unlock()
+	if s.isListStartAfterKeySupported != nil {
+		return nil
+	}
+
+	input := &s3.ListObjectsV2Input{
+		Bucket:     aws.String(s.config.GetS3().Bucket),
+		StartAfter: aws.String("-"),
+		MaxKeys:    aws.Int32(0),
+	}
+
+	if _, err := s.client.ListObjectsV2(ctx, input); err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidArgument" && strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "startafter") {
+			s.isListStartAfterKeySupported = new(bool)
+			*s.isListStartAfterKeySupported = false
+			return nil
+		}
+		return fmt.Errorf("unable to determine bucket's StartAfter option support: %w", err)
+	}
+	s.isListStartAfterKeySupported = new(bool)
+	*s.isListStartAfterKeySupported = true
+	return nil
 }
 
 func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
@@ -227,50 +259,165 @@ func (r *S3Client) GetConfig() *flex.RemoteStorageTarget {
 	return proto.Clone(r.config).(*flex.RemoteStorageTarget)
 }
 
-func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-chan *WalkResponse, error) {
+const maxWalkPageSize = 1000
+
+// GetWalk streams StreamPathResult entries for each object whose key matches the prefix; glob
+// patterns in the prefix are supported. Provide resumeToken to continue a previous walk (empty
+// string starts fresh). The maxKeys argument must be greater than zero or -1 to walk all paths.
+func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, resumeToken string, maxKeys int) (<-chan *filesystem.StreamPathResult, error) {
+	if maxKeys != -1 && maxKeys <= 0 {
+		return nil, fmt.Errorf("maxKeys must be greater than zero or -1")
+	}
+
 	prefix = r.SanitizeRemotePath(prefix)
 	if _, err := filepath.Match(prefix, ""); err != nil {
 		return nil, fmt.Errorf("invalid prefix %s: %w", prefix, err)
 	}
-	prefixWithoutPattern := StripGlobPattern(prefix)
+	prefixWithoutPattern := filesystem.StripGlobPattern(prefix)
 	isKey := prefix == prefixWithoutPattern
 
-	walkChan := make(chan *WalkResponse, chanSize)
+	rt, err := decodeResumeToken(resumeToken)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if ListObjectV2 StartAfter input is supported. This will only run once unless it fails
+	// which would most likely be the result of an unavailable remote target.
+	if r.isListStartAfterKeySupported == nil {
+		if err := r.checkStartAfterSupport(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	walkChan := make(chan *filesystem.StreamPathResult, chanSize)
+	send := func(result *filesystem.StreamPathResult) bool {
+		select {
+		case <-ctx.Done():
+			select {
+			case walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
+			default:
+			}
+			return false
+		case walkChan <- result:
+			return true
+		}
+	}
+
 	go func() {
 		defer close(walkChan)
 
-		prefixWalk := func() bool {
-			var err error
-			var output *s3.ListObjectsV2Output
-			input := &s3.ListObjectsV2Input{
-				Bucket: aws.String(r.config.GetS3().Bucket),
-				Prefix: aws.String(prefixWithoutPattern),
+		prefixWalk := func() (keysFound bool) {
+			// Size the request's MaxKeys to minimize requests. Sizing with respect to maxKeys
+			// optimizes the response size and optimizes both general-purpose and directory bucket
+			// types.
+			maxKeysPerPage := maxKeys
+			if maxKeysPerPage == -1 {
+				maxKeysPerPage = maxWalkPageSize
+			} else if maxKeysPerPage > maxWalkPageSize {
+				pages := (maxKeys + maxWalkPageSize - 1) / maxWalkPageSize
+				maxKeysPerPage = (maxKeys + pages - 1) / pages
 			}
 
-			keysFound := false
+			input := &s3.ListObjectsV2Input{
+				Bucket:  aws.String(r.config.GetS3().Bucket),
+				Prefix:  aws.String(prefixWithoutPattern),
+				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
+			}
+			if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported && rt.StartAfter != "" {
+				input.StartAfter = aws.String(rt.StartAfter)
+			} else if rt.ContinuationToken != "" {
+				input.ContinuationToken = aws.String(rt.ContinuationToken)
+			}
+
+			continuationFindStart := false
+			if rt.ContinuationStartKey != "" {
+				continuationFindStart = true
+			}
+
+			var key string
+			var lastKey string
 			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
+			keysFound = objectPaginator.HasMorePages()
 			for objectPaginator.HasMorePages() {
-				output, err = objectPaginator.NextPage(ctx)
+				output, err := objectPaginator.NextPage(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk was cancelled: %w", err)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
 					} else {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("prefix walk failed: %w", err)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
 					}
-					return keysFound
+					return
+				}
+
+				// When resuming with s3ResumeToken ContinuationToken and ContinuationStartKey,
+				// search for ContinuationStartKey on the page. If it does not exist and there's a
+				// key that's lexically greater than start with it; otherwise, try again on the next
+				// page.
+				if continuationFindStart {
+					filteredContents := output.Contents[:0]
+					nextGreaterKeyIndex := -1
+					for index, content := range output.Contents {
+						key := *content.Key
+						if key == rt.ContinuationStartKey {
+							filteredContents = append(filteredContents, output.Contents[index:]...)
+							break
+						}
+						if nextGreaterKeyIndex == -1 && key > rt.ContinuationStartKey {
+							nextGreaterKeyIndex = index
+						}
+					}
+
+					if len(filteredContents) == 0 {
+						if nextGreaterKeyIndex == -1 {
+							// There were no greater keys on the current page. So check the next page.
+							continue
+						}
+						continuationFindStart = false
+						filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
+					}
+					continuationFindStart = false
+					output.Contents = filteredContents
 				}
 
 				for _, content := range output.Contents {
+					key = aws.ToString(content.Key)
 					if !isKey {
-						if match, _ := doublestar.Match(prefix, *content.Key); !match {
+						if match, _ := doublestar.Match(prefix, key); !match {
 							continue
 						}
 					}
-					keysFound = true
-					walkChan <- &WalkResponse{Path: *content.Key}
+
+					if maxKeys == 0 {
+						if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported {
+							rt := s3ResumeToken{StartAfter: lastKey}
+							if token, err := rt.encode(); err != nil {
+								send(&filesystem.StreamPathResult{Err: err})
+							} else {
+								send(&filesystem.StreamPathResult{ResumeToken: token})
+							}
+							return
+						}
+
+						rt := s3ResumeToken{ContinuationToken: aws.ToString(output.ContinuationToken), ContinuationStartKey: key}
+						if token, err := rt.encode(); err != nil {
+							send(&filesystem.StreamPathResult{Err: err})
+						} else {
+							send(&filesystem.StreamPathResult{ResumeToken: token})
+						}
+						return
+					}
+
+					if !send(&filesystem.StreamPathResult{Path: key}) {
+						return
+					}
+
+					lastKey = key
+					if maxKeys > 0 {
+						maxKeys--
+					}
 				}
 			}
-			return keysFound
+			return
 		}
 
 		if isKey {
@@ -284,33 +431,78 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int) (<-
 					// Try walking as a prefix since there was no key. If not a valid prefix
 					// fallback to the original error.
 					if !prefixWalk() {
-						walkChan <- &WalkResponse{Err: fmt.Errorf("key not found: %s", prefix)}
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", prefix)})
 					}
 				} else {
-					walkChan <- &WalkResponse{Err: fmt.Errorf("query failed: %w", err)}
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("query failed: %w", err)})
 				}
 				return
 			}
 
-			walkChan <- &WalkResponse{Path: prefix}
+			send(&filesystem.StreamPathResult{Path: prefix})
 			return
-		} else {
-			prefixWalk()
 		}
+
+		prefixWalk()
 	}()
 
 	return walkChan, nil
 }
 
-func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
-	return r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+// s3ResumeToken holds pagination state so a walk can be resumed. When the list-object api supports
+// starting after a specific key then StartAfter will be populated; otherwise, ContinuationToken and
+// ContinuationStartKey will be.
+type s3ResumeToken struct {
+	StartAfter           string
+	ContinuationToken    string
+	ContinuationStartKey string
+}
+
+func (r s3ResumeToken) encode() (string, error) {
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+	if err := encoder.Encode(r); err != nil {
+		return "", fmt.Errorf("failed to encode s3 resume token: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(buffer.Bytes()), nil
+}
+
+func decodeResumeToken(s string) (s3ResumeToken, error) {
+	if s == "" {
+		return s3ResumeToken{}, nil
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return s3ResumeToken{}, fmt.Errorf("failed to decode s3 resume token: %w", err)
+	}
+
+	var token s3ResumeToken
+	reader := bytes.NewReader(raw)
+	decoder := gob.NewDecoder(reader)
+	if err = decoder.Decode(&token); err != nil {
+		return token, fmt.Errorf("failed to decode s3 resume token: %w", err)
+	}
+	return token, nil
+}
+
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+	remoteSize, remoteMtime, archiveStatus, err := r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+	if archiveStatus == nil {
+		return remoteSize, remoteMtime, false, false, err
+	}
+
+	isArchived := (*archiveStatus).IsArchived
+	isArchiveRestoreAllowed := (cfg.AllowRestore != nil && *cfg.AllowRestore) || (cfg.AllowRestore == nil && archiveStatus.Info.autoRestore)
+
+	return remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err
 }
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if !cfg.Download {
 		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
 		if segCount > 1 {
-			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging)
+			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.StorageClass)
 		}
 	}
 	return "", nil

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/mock"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
@@ -111,7 +112,7 @@ func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 

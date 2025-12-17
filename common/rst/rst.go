@@ -97,9 +97,15 @@ type Provider interface {
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
 	// GetWalk returns a channel that streams *WalkResponse entries for matching files or objects.
-	// If the provided path includes a file glob pattern, all matching entries will be streamed.
-	// Otherwise, only the specified file or object is returned if it exists.
-	GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error)
+	// If the provided path includes a file glob pattern, only matching entries will be return.
+	// maxRequests should trigger a WalkStoppedWithMoreError to signal to job builder to
+	// reschedule the remaining work.
+	//
+	// GetWalk must generate an externalId that can be used to resume the walk from a previous
+	// point. Pass the externalId back to job builder using WalkStoppedWithMoreError{resumeToken:
+	// externalId}; this signals job builder to schedule the job again later and allows workers to
+	// start processing any already-streamed requests.
+	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
 	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.
