@@ -221,7 +221,7 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 		if !errors.Is(err, os.ErrNotExist) {
 			return result, err
 		}
-		result.IsGlob = IsFileGlob(path)
+		result.IsGlob = filesystem.IsGlobPattern(path)
 		return result, nil
 	}
 	result.Exists = true

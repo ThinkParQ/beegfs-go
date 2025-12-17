@@ -27,7 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -75,9 +74,11 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
-	// ExecuteJobBuilderRequest is specifically designed for providers that generate subsequent job
-	// requests.
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error
+	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
+	// any new requests into jobSubmissionChan. If building jobs is long running, return
+	// rescheduled==true to reschedule the remaining work for later which allows other work time to
+	// complete.
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -700,84 +701,6 @@ func GetLockedInfo(
 	return
 }
 
-type WalkResponse struct {
-	Path string
-	Err  error
-}
-
-// WalkPath returns a *WalkResponse channel that streams the files that match the pattern. The
-// pattern may be a single file, directory, or a glob pattern. The pattern must be a path that's
-// relative to the BeeGFS mount with or without a leading forward slash.
-func WalkPath(ctx context.Context, mountPoint filesystem.Provider, pattern string, chanSize int) (<-chan *WalkResponse, error) {
-	fsys := os.DirFS(mountPoint.GetMountPath())
-	pattern = strings.TrimLeft(pattern, "/")
-	if !IsFileGlob(pattern) {
-		if stat, err := mountPoint.Lstat(pattern); err == nil && stat.IsDir() {
-			pattern = filepath.Join(pattern, "**")
-		} else if err != nil {
-			return nil, fmt.Errorf("unable walk path: %w", err)
-		}
-	}
-
-	walkChan := make(chan *WalkResponse, chanSize)
-	go func() {
-		defer close(walkChan)
-		err := doublestar.GlobWalk(fsys, pattern, func(path string, d fs.DirEntry) error {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			if d.IsDir() {
-				return nil
-			}
-			walkChan <- &WalkResponse{Path: "/" + path}
-			return nil
-		}, doublestar.WithNoFollow())
-
-		if err != nil {
-			walkChan <- &WalkResponse{Err: err}
-		}
-	}()
-
-	return walkChan, nil
-}
-
-const globCharacters = "*?["
-
-// IsFileGlob returns whether the pattern contains a glob pattern.
-func IsFileGlob(pattern string) bool {
-	return strings.ContainsAny(pattern, globCharacters)
-}
-
-// StripGlobPattern extracts the longest leading substring from the given pattern that contains
-// no glob characters (e.g., '*', '?', or '['). This base prefix is used to efficiently list
-// objects in an S3 bucket, while the original glob pattern is later applied to filter the results.
-func StripGlobPattern(pattern string) string {
-	position := 0
-	for {
-		index := strings.IndexAny(pattern[position:], globCharacters)
-		if index == -1 {
-			return pattern
-		}
-		candidate := position + index
-
-		// Check for escape characters
-		backslashCount := 0
-		for i := candidate - 1; i >= 0 && pattern[i] == '\\'; i-- {
-			backslashCount++
-		}
-		if backslashCount%2 == 0 {
-			return pattern[:candidate]
-		}
-
-		// Check whether the last character was escaped
-		position = candidate + 1
-		if position >= len(pattern) {
-			return pattern
-		}
-	}
-}
-
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
 func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
@@ -854,7 +777,7 @@ func IsValidRstId(rstId uint32) bool {
 // pattern.
 func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
 	normalizedRemotePath := NormalizePath(remotePath)
-	directory = StripGlobPattern(normalizedRemotePath)
+	directory = filesystem.StripGlobPattern(normalizedRemotePath)
 	isGlob = directory != normalizedRemotePath
 	if isGlob && !strings.HasSuffix(directory, "/") {
 		directory = filepath.Dir(directory)

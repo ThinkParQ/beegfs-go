@@ -90,8 +90,8 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
-	return ErrUnsupportedOpForRST
+func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
+	return false, ErrUnsupportedOpForRST
 }
 
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
