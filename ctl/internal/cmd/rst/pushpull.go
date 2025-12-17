@@ -23,7 +23,8 @@ type pushPullCfg struct {
 func newPushCmd() *cobra.Command {
 	frontendCfg := pushPullCfg{}
 	backendCfg := flex.JobRequestCfg{
-		Update: new(bool),
+		Update:       new(bool),
+		StorageClass: new(string),
 	}
 
 	var priority int32
@@ -90,8 +91,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
+	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
+	cmd.Flags().MarkHidden(rst.StorageClassFlag)
 
 	return cmd
 }
@@ -104,6 +107,7 @@ func newPullCmd() *cobra.Command {
 	}
 
 	var priority int32
+	var allowRestore bool
 	cmd := &cobra.Command{
 		Use:   "pull --remote-target=<id> --remote-path=<path> <path>",
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
@@ -121,6 +125,11 @@ func newPullCmd() *cobra.Command {
 					return fmt.Errorf("invalid --priority value, %d: --priority must be between 1 and 5 (inclusive)", backendCfg.Priority)
 				}
 				backendCfg.Priority = &priority
+			}
+
+			allowRestoreFlag := cmd.Flags().Lookup(rst.AllowRestoreFlag)
+			if allowRestoreFlag.Changed {
+				backendCfg.AllowRestore = &allowRestore
 			}
 
 			return nil
@@ -142,6 +151,8 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
 	cmd.Flags().BoolVar(backendCfg.Update, "update", false, "Set the file's persistent remote target. Requires --remote-target.")
+	cmd.Flags().BoolVar(&allowRestore, rst.AllowRestoreFlag, false, "Allow archived requests to be restored.")
+	cmd.Flags().Lookup(rst.AllowRestoreFlag).DefValue = "auto"
 	return cmd
 }
 
