@@ -458,7 +458,7 @@ func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo m
 	if IsValidRstId(rstID) {
 		rstIds = []uint32{rstID}
 	} else {
-		return fmt.Errorf("--update requires a valid --remote-target to be specified")
+		return fmt.Errorf("--%s requires a valid --%s to be specified", UpdateFlag, RemoteTargetFlag)
 	}
 
 	err := entry.SetFileRstIds(ctx, entryInfo, ownerNode, path, rstIds)
@@ -686,7 +686,7 @@ func GetLockedInfo(
 		}
 
 		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return lockedInfo, writeLockSet, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --remote-target does not match stub file")
+			return lockedInfo, writeLockSet, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag)
 		}
 		rstIds = []uint32{lockedInfo.StubUrlRstId}
 	}
