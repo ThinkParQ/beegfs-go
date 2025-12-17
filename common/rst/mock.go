@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/mock"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
@@ -89,8 +90,8 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) error {
-	return ErrUnsupportedOpForRST
+func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
+	return false, ErrUnsupportedOpForRST
 }
 
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
@@ -111,7 +112,7 @@ func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int) (<-chan *WalkResponse, error) {
+func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 
@@ -119,8 +120,8 @@ func (r *MockClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, error) {
-	return 0, time.Time{}, ErrUnsupportedOpForRST
+func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
 }
 
 func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {

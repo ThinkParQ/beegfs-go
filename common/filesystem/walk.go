@@ -9,10 +9,16 @@
 package filesystem
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
+	"strings"
+
+	doublestar "github.com/bmatcuk/doublestar/v4"
 )
 
 type WalkOptions struct {
@@ -70,24 +76,7 @@ func walkDirLexicographically(path string, d fs.DirEntry, walkDirFn fs.WalkDirFu
 		return err
 	}
 
-	// The way the directory is opened and the additional sorting are only changes from the standard
-	// library's filepath.walkDir function.
-
-	// Instead of using the free standing os.ReadDir() which accepts a directory name then handles
-	// sorting, open the directory ourselves and call its ReadDir method to avoid duplicate sorting.
-	fd, err := os.Open(path)
-	if err != nil {
-		// Second call to report the os.Open error.
-		err = walkDirFn(path, d, err)
-		if err != nil {
-			if err == filepath.SkipDir && d.IsDir() {
-				err = nil
-			}
-			return err
-		}
-	}
-	dirs, err := fd.ReadDir(-1)
-	fd.Close()
+	dirs, err := readDir("", path, "")
 	if err != nil {
 		// Second call, to report the ReadDir error.
 		err = walkDirFn(path, d, err)
@@ -98,23 +87,6 @@ func walkDirLexicographically(path string, d fs.DirEntry, walkDirFn fs.WalkDirFu
 			return err
 		}
 	}
-
-	slices.SortFunc(dirs, func(a, b os.DirEntry) int {
-		nameA := a.Name()
-		nameB := b.Name()
-		if a.IsDir() {
-			nameA += "/"
-		}
-		if b.IsDir() {
-			nameB += "/"
-		}
-		if nameA < nameB {
-			return -1
-		} else if nameA == nameB {
-			return 0
-		}
-		return 1
-	})
 
 	for _, d1 := range dirs {
 		path1 := filepath.Join(path, d1.Name())
@@ -127,4 +99,227 @@ func walkDirLexicographically(path string, d fs.DirEntry, walkDirFn fs.WalkDirFu
 		}
 	}
 	return nil
+}
+
+type StreamPathResult struct {
+	Path        string
+	ResumeToken string
+	Err         error
+}
+
+// StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
+// lexicographically increasing order. If startAfter != "" then only files lexically greater than
+// will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
+// paths. chanSize is the buffer size for the returned *StreamPathResult channel.
+func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int) (<-chan *StreamPathResult, error) {
+	if maxPaths != -1 && maxPaths <= 0 {
+		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
+	}
+
+	preparePath := func(path string) string {
+		path = strings.TrimLeft(path, "/")
+		path = filepath.Clean("/" + path)
+		path = strings.TrimPrefix(path, "/")
+		return strings.TrimRight(path, "/")
+	}
+	pattern = preparePath(pattern)
+	startAfter = preparePath(startAfter)
+
+	isGlob := IsGlobPattern(pattern)
+	if isGlob {
+		// Append '/**' so the glob pattern matches everything under the directories instead of just
+		// the directory itself. Without it, a pattern like 'deep/*' would match '/deep/a' but skip
+		// '/deep/a/b.txt'; adding '**' turns it into 'deep/*/**' so all descendants qualify while
+		// still matching whole directories.
+		pattern = filepath.Join(pattern, "**")
+	} else if stat, err := mountPoint.Lstat(pattern); err != nil {
+		return nil, fmt.Errorf("unable walk path: %w", err)
+	} else if !stat.IsDir() {
+		// prefix is a file path so only stream it back if it's a match.
+		walkChan := make(chan *StreamPathResult, 1)
+		go func() {
+			defer close(walkChan)
+			if pattern > startAfter {
+				select {
+				case <-ctx.Done():
+					walkChan <- &StreamPathResult{Err: ctx.Err()}
+				case walkChan <- &StreamPathResult{Path: "/" + pattern}:
+				}
+			}
+		}()
+		return walkChan, nil
+	}
+
+	root := pattern
+	if isGlob {
+		// Find the root directory of the file glob by stepping back until a directory is found.
+		for {
+			if _, err := mountPoint.Lstat(root); err != nil {
+				if !errors.Is(err, fs.ErrNotExist) {
+					return nil, fmt.Errorf("unable walk path: %w", err)
+				}
+			} else {
+				break
+			}
+			root = filepath.Dir(root)
+		}
+	}
+
+	// Recursively walk the local path and send matching paths to walkChan. Any encountered errors
+	// will terminate the walk. Paths lexicographically less than or equal to startAfter will be
+	// ignored which also avoids walking directories unnecessarily.
+	mountPath := mountPoint.GetMountPath()
+	walkChan := make(chan *StreamPathResult, chanSize)
+	go func() {
+		defer close(walkChan)
+		send := func(result *StreamPathResult) bool {
+			select {
+			case <-ctx.Done():
+				select {
+				case walkChan <- &StreamPathResult{Err: ctx.Err()}:
+				default:
+				}
+				return false
+			case walkChan <- result:
+				return true
+			}
+		}
+
+		var walkDir func(string) bool
+		walkDir = func(directory string) bool {
+			if err := ctx.Err(); err != nil {
+				select {
+				case walkChan <- &StreamPathResult{Err: err}:
+				default:
+				}
+				return false
+			}
+
+			entries, err := readDir(mountPath, directory, startAfter)
+			if err != nil {
+				send(&StreamPathResult{Err: fmt.Errorf("unable to read directory, %q: %w", directory, err)})
+				return false
+			}
+
+			lastPath := directory
+			for _, entry := range entries {
+				path := filepath.Join(directory, entry.Name())
+				if entry.IsDir() {
+					if !walkDir(path) {
+						return false
+					}
+					continue
+				} else if path <= startAfter {
+					continue
+				}
+
+				if isGlob {
+					if match, err := doublestar.Match(pattern, path); err != nil {
+						send(&StreamPathResult{Err: fmt.Errorf("failed to match path %q with pattern %q: %w", path, pattern, err)})
+						return false
+					} else if !match {
+						continue
+					}
+				}
+
+				if maxPaths == 0 {
+					send(&StreamPathResult{ResumeToken: lastPath})
+					return false
+				}
+
+				if !send(&StreamPathResult{Path: "/" + path}) {
+					return false
+				}
+				lastPath = path
+				if maxPaths > 0 {
+					maxPaths--
+				}
+			}
+
+			return true
+		}
+
+		walkDir(root)
+	}()
+
+	return walkChan, nil
+}
+
+// readDir returns a lexically sorted directory list of files that come after startAfter. It should
+// be used instead of fs.ReadDir/os.ReadDir to avoid their non-lexical path sort.
+func readDir(root string, directory string, startAfter string) (entries []os.DirEntry, err error) {
+	var f *os.File
+	if f, err = os.Open(filepath.Join(root, directory)); err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Directories receive a trailing '/' so they sort distinctly from files with the same prefix.
+	// Without the '/', a directory sortName may sort incorrectly relative to files prefixed with the
+	// same sortName.
+	sortName := func(entry os.DirEntry) string {
+		if entry.IsDir() {
+			return entry.Name() + "/"
+		}
+		return entry.Name()
+	}
+
+	if entries, err = f.ReadDir(-1); err != nil {
+		return
+	}
+
+	// Filter any entries that come after startAfter in-place so they are not part of the sorting
+	if startAfter != "" && strings.HasPrefix(startAfter, directory+"/") {
+		relative := strings.TrimPrefix(startAfter, directory)
+		relative = strings.TrimLeft(relative, "/")
+		filtered := entries[:0]
+		for _, entry := range entries {
+			name := sortName(entry)
+			if name > relative || strings.HasPrefix(relative, name) {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return sortName(entries[i]) < sortName(entries[j])
+	})
+	return
+}
+
+const globCharacters = "*?["
+
+// IsGlobPattern returns whether the pattern contains a glob pattern.
+func IsGlobPattern(pattern string) bool {
+	return strings.ContainsAny(pattern, globCharacters)
+}
+
+// StripGlobPattern extracts the longest leading substring from the given pattern that contains
+// no glob characters (e.g., '*', '?', or '['). This base prefix is used to efficiently list
+// objects in an S3 bucket, while the original glob pattern is later applied to filter the results.
+func StripGlobPattern(pattern string) string {
+	position := 0
+	for {
+		index := strings.IndexAny(pattern[position:], globCharacters)
+		if index == -1 {
+			return pattern
+		}
+		candidate := position + index
+
+		// Check for escape characters
+		backslashCount := 0
+		for i := candidate - 1; i >= 0 && pattern[i] == '\\'; i-- {
+			backslashCount++
+		}
+		if backslashCount%2 == 0 {
+			return pattern[:candidate]
+		}
+
+		// Check whether the last character was escaped
+		position = candidate + 1
+		if position >= len(pattern) {
+			return pattern
+		}
+	}
 }

@@ -66,33 +66,46 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # id = "1"
 # name = "minio"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "http://<HOSTNAME>:<PORT>"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY"
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "http://<HOSTNAME>:<PORT>"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
 
 # [[remote-storage-target]]
 # id = "2"
 # name = "aws"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "https://<BUCKET_NAME>.s3.<REGION>.amazonaws.com"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY>"
-# s3.partition-id = "<PARTITION>"
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "https://<BUCKET_NAME>.s3.<REGION>.amazonaws.com"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
+#   partition-id = "<PARTITION>"
+#
+#   [[remote-storage-target.s3.storage-class]]
+#   name = "GLACIER"
+#   archival.retrievalTier = "standard"
+#   archival.retentionDays = 7
+#   archival.checkTime = "5h"
+#   archival.recheckTime = "30m"
+#   archival.autoRestore = true
 
 # [[remote-storage-target]]
 # id = "3"
 # name = "oci"
 # policies = { FastStartMaxSize = 104857600 }
-# s3.endpoint-url = "https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com"
-# s3.region = "<REGION>"
-# s3.bucket = "<BUCKET>"
-# s3.access-key = "<ACCESS_KEY>"
-# s3.secret-key = "<SECRET_KEY>"
-
+#
+#   [remote-storage-target.s3]
+#   endpoint-url = "https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
 
 #
 # --- Section 2: [Command Line Arguments] ---
@@ -341,3 +354,31 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # s3.partitionid: Generally the partition ID does not need to specified and the default partition
 # for the S3 provider can be used. If your S3 bucket is in a specialized region such as AWS GovCloud
 # this may need to be specified/
+
+
+#
+# --- Section 6.1.1: [S3 Storage Class Settings] ---
+#
+
+# Storage class definitions should be specified under [[remote-storage-target.s3.storage-class]] to
+# control how archived tiers (for example AWS Glacier or Deep Archive) are restored. Multiple
+# storage classes can be specified by adding additional [[remote-storage-target.s3.storage-class]]
+# sections. Currently all storage class definitions must be archival.
+
+# name: The exact storage class value returned by the S3 provider (for AWS examples: GLACIER,
+# DEEP_ARCHIVE, or STANDARD_IA).
+
+# archival.retrievalTier: Retrieval tier to request when restoring an archived object. AWS examples
+# include Standard, Bulk, or Expedited depending on what the storage class supports.
+
+# archival.retentionDays: Number of days a restored object remains available before it is archived
+# again. Must be at least 1.
+
+# archival.checkTime: How long to wait after initiating a restore before checking status again.
+# Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
+
+# archival.recheckTime: How long to wait between additional status checks while a restore is already
+# in progress. Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
+
+# archival.autoRestore: Whether Remote can automatically request a restore when downloading an
+# archived object if allow-restore is not explicitly set on the job request.
