@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/scheduler"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -15,6 +16,7 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type JobResponse struct {
@@ -97,6 +99,10 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		cfg.SetRemotePath(pathInfo.Path)
 	}
 
+	if cfg.Priority == nil {
+		cfg.Priority = proto.Int32(scheduler.DefaultPriority)
+	}
+
 	jobBuilder := false
 	if pathInfo.IsGlob {
 		jobBuilder = true
@@ -126,14 +132,6 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 			return nil, fmt.Errorf("unable to send job requests: %w", ErrFileHasNoRSTs)
 		}
 		jobBuilder = true
-	}
-
-	if cfg.Priority == nil {
-		var priority int32 = 3
-		if jobBuilder {
-			priority = 4
-		}
-		cfg.Priority = &priority
 	}
 
 	if jobBuilder {

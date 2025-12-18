@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	priorityLevels = 5
-	tolerance      = 1e-6
+	DefaultPriority = 3
+	priorityLevels  = 5
+	tolerance       = 1e-6
 )
 
 var (
