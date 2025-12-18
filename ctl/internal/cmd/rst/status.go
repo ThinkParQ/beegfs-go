@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -64,7 +65,7 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
-	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
 	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	return cmd

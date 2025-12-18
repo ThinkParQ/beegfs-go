@@ -1,4 +1,4 @@
-package util
+package filesystem
 
 import (
 	"testing"
@@ -68,7 +68,7 @@ func TestCompileFilter_ValidExpressions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter, err := compileFilter(tt.expr)
+			filter, err := CompileFilter(tt.expr)
 			assert.NoError(t, err, "compileFilter(%q) returned error", tt.expr)
 			ok, err := filter(fi)
 			assert.NoError(t, err, "filter(%q) returned error", tt.expr)
@@ -78,7 +78,7 @@ func TestCompileFilter_ValidExpressions(t *testing.T) {
 }
 
 func TestCompileFilter_InvalidExpression(t *testing.T) {
-	_, err := compileFilter("not_a_valid_expr(")
+	_, err := CompileFilter("not_a_valid_expr(")
 	assert.Error(t, err)
 }
 
@@ -87,14 +87,14 @@ func TestCompileFilter_TimeAndSizeUnits(t *testing.T) {
 	fi := FileInfo{Mtime: now.Add(-48 * time.Hour), Size: 2 * 1024 * 1024}
 
 	// Time unit days
-	filter, err := compileFilter(`mtime > 1d`)
+	filter, err := CompileFilter(`mtime > 1d`)
 	assert.NoError(t, err)
 	ok, err := filter(fi)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 
 	// Size unit MiB
-	filter, err = compileFilter(`size >= 2MiB`)
+	filter, err = CompileFilter(`size >= 2MiB`)
 	assert.NoError(t, err)
 	ok, err = filter(fi)
 	assert.NoError(t, err)
