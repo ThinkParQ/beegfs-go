@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	doublestar "github.com/bmatcuk/doublestar/v4"
 )
@@ -111,7 +112,7 @@ type StreamPathResult struct {
 // lexicographically increasing order. If startAfter != "" then only files lexically greater than
 // will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
 // paths. chanSize is the buffer size for the returned *StreamPathResult channel.
-func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int) (<-chan *StreamPathResult, error) {
+func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
 	if maxPaths != -1 && maxPaths <= 0 {
 		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
 	}
@@ -135,15 +136,26 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	} else if stat, err := mountPoint.Lstat(pattern); err != nil {
 		return nil, fmt.Errorf("unable walk path: %w", err)
 	} else if !stat.IsDir() {
+
 		// prefix is a file path so only stream it back if it's a match.
 		walkChan := make(chan *StreamPathResult, 1)
 		go func() {
 			defer close(walkChan)
-			if pattern > startAfter {
+			if pattern <= startAfter {
+				return
+			}
+
+			inMountPath := "/" + pattern
+			statT, ok := stat.Sys().(*syscall.Stat_t)
+			if !ok {
+				walkChan <- &StreamPathResult{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
+			} else if keep, err := ApplyFilterByStatT(inMountPath, statT, filter); err != nil {
+				walkChan <- &StreamPathResult{Err: err}
+			} else if keep {
 				select {
 				case <-ctx.Done():
 					walkChan <- &StreamPathResult{Err: ctx.Err()}
-				case walkChan <- &StreamPathResult{Path: "/" + pattern}:
+				case walkChan <- &StreamPathResult{Path: inMountPath}:
 				}
 			}
 		}()
@@ -204,6 +216,8 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 			lastPath := directory
 			for _, entry := range entries {
 				path := filepath.Join(directory, entry.Name())
+				inMountPath := "/" + path
+
 				if entry.IsDir() {
 					if !walkDir(path) {
 						return false
@@ -222,12 +236,19 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					}
 				}
 
+				if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
+					send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
+					return false
+				} else if !keep {
+					continue
+				}
+
 				if maxPaths == 0 {
 					send(&StreamPathResult{ResumeToken: lastPath})
 					return false
 				}
 
-				if !send(&StreamPathResult{Path: "/" + path}) {
+				if !send(&StreamPathResult{Path: inMountPath}) {
 					return false
 				}
 				lastPath = path

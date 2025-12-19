@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
@@ -103,6 +104,15 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		cfg.Priority = proto.Int32(scheduler.DefaultPriority)
 	}
 
+	var filter filesystem.FileInfoFilter
+	filterExpr := cfg.GetFilterExpr()
+	if filterExpr != "" {
+		filter, err = filesystem.CompileFilter(filterExpr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+		}
+	}
+
 	jobBuilder := false
 	if pathInfo.IsGlob {
 		jobBuilder = true
@@ -138,6 +148,14 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		client := NewJobBuilderClient(ctx, nil, nil)
 		request := client.GetJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
+	}
+
+	if filter != nil {
+		if keep, err := filesystem.ApplyFilterByStatT(pathInfo.Path, pathInfo.StatT, filter); err != nil {
+			return nil, fmt.Errorf("unable to apply filter to file: %w", err)
+		} else if !keep {
+			return []*beeremote.JobRequest{}, nil
+		}
 	}
 
 	mappings, err := util.GetMappings(ctx)
@@ -204,6 +222,7 @@ type mountPathInfo struct {
 	Exists bool
 	IsDir  bool
 	IsGlob bool
+	StatT  *syscall.Stat_t
 }
 
 func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInfo, error) {
@@ -224,5 +243,11 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 	}
 	result.Exists = true
 	result.IsDir = info.IsDir()
+
+	var ok bool
+	result.StatT, ok = info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return result, fmt.Errorf("unable to retrieve stat information: unsupported platform")
+	}
 	return result, nil
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -25,6 +26,7 @@ func newPushCmd() *cobra.Command {
 	backendCfg := flex.JobRequestCfg{
 		Update:       new(bool),
 		StorageClass: new(string),
+		FilterExpr:   new(string),
 	}
 
 	var priority int32
@@ -92,6 +94,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
+	cmd.Flags().StringVar(backendCfg.FilterExpr, filesystem.FilterExprFlag, "", filesystem.FilterFilesHelp)
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
 	cmd.Flags().MarkHidden(rst.StorageClassFlag)
@@ -131,7 +134,6 @@ func newPullCmd() *cobra.Command {
 			if allowRestoreFlag.Changed {
 				backendCfg.AllowRestore = &allowRestore
 			}
-
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
