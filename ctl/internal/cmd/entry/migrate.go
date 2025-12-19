@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	fUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -117,7 +118,7 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().BoolVar(&backendCfg.UpdateDirs, "update-directories", false, "Update directories to use the specified storage pool.")
 	cmd.Flags().BoolVar(&backendCfg.SkipMirrors, "skip-mirrors", false, "Migrate only files that are not buddy mirrored.")
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
-	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
 	cmd.Flags().BoolVar(&backendCfg.UseRebalancing, "rebalance", false, "Use background data rebalancing instead of temporary files to migrate data between targets.")
 	cmd.Flags().IntVar(&backendCfg.Retries, "retries", 10, "When using background data rebalancing, the number of times a request is retried if the metadata chunk balance queue is full (-1 = infinite, 0 = no retries).")
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")

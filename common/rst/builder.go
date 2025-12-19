@@ -69,6 +69,15 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	cfg := builder.GetCfg()
 	resumeToken := workRequest.GetExternalId()
 
+	var filter filesystem.FileInfoFilter
+	filterExpr := cfg.GetFilterExpr()
+	if filterExpr != "" {
+		if filter, err = filesystem.CompileFilter(filterExpr); err != nil {
+			err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+			return
+		}
+	}
+
 	// TODO: maxRequests limits the number of requests that can be created at a time before the
 	// builder job is rescheduled. This should probably be based on the client if possible;
 	// otherwise, client based metric that are based on builder short/long-term data collection.
@@ -79,11 +88,16 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	walkChanSize := cap(jobSubmissionChan)
 	var walkChan <-chan *filesystem.StreamPathResult
 	if cfg.Download {
+
+		if filter != nil {
+			return false, fmt.Errorf("filter expressions (--%s) are not supported for downloads yet", filesystem.FilterExprFlag)
+		}
+
 		if walkLocalPathInsteadOfRemote(cfg) {
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
+			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
 				return
 			}
 		} else {
@@ -97,8 +111,11 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 				return
 			}
 		}
-	} else if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize); err != nil {
-		return
+	} else {
+		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
+		if err != nil {
+			return
+		}
 	}
 
 	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)

@@ -17,7 +17,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.8.1
 	github.com/dgraph-io/badger/v4 v4.7.0
 	github.com/dsnet/golib/unitconv v1.0.2
-	github.com/expr-lang/expr v1.17.5
+	github.com/expr-lang/expr v1.17.7
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/uuid v1.6.0
 	github.com/jedib0t/go-pretty/v6 v6.6.7
@@ -27,7 +27,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.10.0
-	github.com/thinkparq/protobuf v0.8.3-0.20251205120807-a3095cd70ae4
+	github.com/thinkparq/protobuf v0.8.3-0.20251218190704-d02993978bf2
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.17.0
 	golang.org/x/sys v0.37.0

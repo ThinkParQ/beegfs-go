@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -58,7 +59,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	// The same default used for stdin-delimiter to allow the help output to print correctly can't
 	// be used directly. If the default changes update where this is set in getDelimiterFromString.
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\n", "Change the string delimiter used to determine individual paths when read from stdin (e.g., --stdin-delimiter=\"\\x00\" for NULL).")
-	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", util.FilterFilesHelp)
+	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
 	cmd.Flags().BoolVar(&frontendCfg.retroPaths, "retro-print-paths", false, "Print paths at the top of each entry in the retro output.")
 	cmd.Flags().MarkHidden("retro-print-paths")
 	cmd.Flags().BoolVar(&backendCfg.NoIoctl, "no-ioctl", false, "Do not use an ioctl to get entry info, even if BeeGFS is mounted; instead, always use direct RPCs (requires root). This may improve performance on systems with high syscall overhead.")

@@ -408,7 +408,7 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 				maxPaths = len(commonTestPaths)
 			}
 
-			responseChan, err := StreamPathsLexicographically(ctx, provider, test.pattern, test.startAfter, maxPaths, 0)
+			responseChan, err := StreamPathsLexicographically(ctx, provider, test.pattern, test.startAfter, maxPaths, 0, nil)
 			require.NoError(t, err)
 
 			paths := []string{}
