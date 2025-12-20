@@ -102,6 +102,10 @@ Note: Because jobs can exist for paths that no longer exist in BeeGFS, recursive
 				}
 			}
 			cfg.Path = args[0]
+			if cfg.DeleteOrphaned && cfg.Force {
+				cmdfmt.Printf("warning: ignoring --force because --delete-orphaned-jobs verifies each path before deleting\n")
+				cfg.Force = false
+			}
 			return updateJobRunner(cmd.Context(), &cfg)
 		},
 	}
@@ -111,6 +115,7 @@ Note: Because jobs can exist for paths that no longer exist in BeeGFS, recursive
 	cmd.Flags().UintSliceVar(&cfg.RemoteTargets, "remote-targets", nil, "Only update jobs for the specified remote targets. By default jobs for all remote targets are updated.")
 	cmd.Flags().BoolVar(&cfg.Recurse, "recurse", false, "Treat the provided path as a prefix and update all matching paths.")
 	cmd.Flags().Bool("yes", false, "Use to acknowledge when running this command may update a large number of entries.")
+	cmd.Flags().BoolVar(&cfg.DeleteOrphaned, "delete-orphaned-jobs", false, "Delete jobs only when their BeeGFS paths no longer exist (requires a local BeeGFS mount and ignores --force).")
 	return cmd
 }
 
@@ -118,7 +123,12 @@ func updateJobRunner(ctx context.Context, cfg *rst.UpdateJobCfg) error {
 
 	log, _ := config.GetLogger()
 	responses := make(chan *rst.UpdateJobsResponse, 1024)
-	err := rst.UpdateJobsByPaths(ctx, cfg, responses)
+	var err error
+	if cfg.DeleteOrphaned {
+		err = rst.DeleteOrphanedJobs(ctx, cfg, responses)
+	} else {
+		err = rst.UpdateJobsByPaths(ctx, cfg, responses)
+	}
 	if err != nil {
 		if errors.Is(err, filesystem.ErrInitFSClient) {
 			return fmt.Errorf("%w (hint: use the --%s=none flag to interact with files that no longer exist or if BeeGFS is not mounted)", err, config.BeeGFSMountPointKey)
@@ -174,7 +184,13 @@ writeResponses:
 	}
 
 	if processedPaths == 0 {
+		if cfg.DeleteOrphaned {
+			cmdfmt.Printf("no orphaned jobs were found for the specified path\n")
+			return nil
+		}
 		cmdfmt.Printf("no jobs were found for the specified path\n")
+	} else if cfg.DeleteOrphaned {
+		cmdfmt.Printf("Success: deleted orphaned jobs for %d paths\n", processedPaths)
 	} else if !cfg.Force {
 		cmdfmt.Printf("Success: updated all jobs except ones that were already completed for %d paths\n", processedPaths)
 	} else {

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"os"
 	"path"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/aws/smithy-go/time"
@@ -16,6 +18,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -85,11 +88,13 @@ type Manager struct {
 	// A pointer to an initialized/started worker manager.
 	workerManager *workermgr.Manager
 	// function to release the file's access locks when no longer needed.
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	releaseUnusedFileLockFunc     func(path string, jobs map[string]*Job) error
+	shouldDeleteCompletedJobsFunc func(path string) (bool, error)
 }
 
 type managerOptConfig struct {
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	releaseUnusedFileLockFunc     func(path string, jobs map[string]*Job) error
+	shouldDeleteCompletedJobsFunc func(path string) (bool, error)
 }
 type managerOpt func(*managerOptConfig)
 
@@ -99,6 +104,12 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 		cfg.releaseUnusedFileLockFunc = func(path string, jobs map[string]*Job) error {
 			return nil
 		}
+	}
+}
+
+func withShouldDeleteCompletedJobsFunc(fn func(path string) (bool, error)) managerOpt {
+	return func(cfg *managerOptConfig) {
+		cfg.shouldDeleteCompletedJobsFunc = fn
 	}
 }
 
@@ -117,7 +128,7 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		opt(cfg)
 	}
 
-	return &Manager{
+	mgr := &Manager{
 		log:                       log,
 		ctx:                       ctx,
 		ctxCancel:                 cancel,
@@ -132,6 +143,12 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
 	}
+	if cfg.shouldDeleteCompletedJobsFunc != nil {
+		mgr.shouldDeleteCompletedJobsFunc = cfg.shouldDeleteCompletedJobsFunc
+	} else {
+		mgr.shouldDeleteCompletedJobsFunc = mgr.shouldDeleteCompletedJobs
+	}
+	return mgr
 }
 
 // Start handles initializing all databases and starting a goroutine that
@@ -730,6 +747,19 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		return nil, fmt.Errorf("error getting jobs for path %s: %w", jobUpdate.GetPath(), err)
 	}
 
+	allowCompletedDeletion := false
+	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && !jobUpdate.GetForceUpdate() {
+		allowCompletedDeletion, err = m.shouldDeleteCompletedJobsFunc(jobUpdate.GetPath())
+		if err != nil {
+			releaseErr := releasePath()
+			if releaseErr != nil {
+				return nil, fmt.Errorf("unable to release entry for path %s after verifying cleanup preconditions: %w (original error: %v)", jobUpdate.GetPath(), releaseErr, err)
+			}
+			return nil, fmt.Errorf("unable to verify BeeGFS entry for path %s while cleaning up jobs: %w", jobUpdate.GetPath(), err)
+		}
+	}
+	ignoreMissingLockRelease := jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && allowCompletedDeletion
+
 	// WARNING: releasePath() is not called using a defer so we can adjust how it is called below
 	// depending if the path entry should be deleted. Use caution when adding additional returns.
 
@@ -762,6 +792,9 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 
 		err := m.releaseUnusedFileLockFunc(jobUpdate.GetPath(), pathEntry.Value)
 		if err != nil {
+			if ignoreMissingLockRelease && errors.Is(err, os.ErrNotExist) {
+				return
+			}
 			response.SetOk(false)
 			message := "unable to clear lock: " + err.Error()
 			if response.Message != "" {
@@ -777,7 +810,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	// potentially be made into a standalone function if it ever needs to be reused elsewhere.
 	applyUpdate := func(job *Job) {
 		// Attempt to apply the requested update.
-		success, safeToDelete, newMessage := m.updateJobState(job, jobUpdate.GetNewState(), jobUpdate.GetForceUpdate())
+		success, safeToDelete, newMessage := m.updateJobState(job, jobUpdate.GetNewState(), jobUpdate.GetForceUpdate(), allowCompletedDeletion)
 		// If anything goes wrong the overall response should be !ok. If the response is already !ok
 		// from some other job, don't overwrite it:
 		response.SetOk(success && response.GetOk())
@@ -891,10 +924,10 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 // IMPORTANT: This should only be used when the state of a job's work requests need to be modified
 // on the assigned worker nodes. To update the job state in reaction to job results returned by a
 // worker node use updateJobResults().
-func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool) (success bool, safeToDelete bool, message string) {
+func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool, allowCompletedDeletion bool) (success bool, safeToDelete bool, message string) {
 	status := job.GetStatus()
 	state := status.GetState()
-	if (state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED) && !forceUpdate {
+	if (state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED) && !forceUpdate && !(newState == beeremote.UpdateJobsRequest_DELETED && allowCompletedDeletion) {
 		return true, false, fmt.Sprintf("rejecting update for completed job ID %s (use the force update flag to attempt anyway)", job.GetId())
 	}
 
@@ -986,6 +1019,26 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	}
 
 	return false, false, fmt.Sprintf("unable to update job %s, new state %s is not supported", job.Id, newState)
+}
+
+func (m *Manager) shouldDeleteCompletedJobs(path string) (bool, error) {
+	beegfs, err := config.BeeGFSClient(path)
+	if err != nil {
+		return false, err
+	}
+
+	relative := strings.TrimPrefix(path, "/")
+	if relative == "" {
+		relative = "."
+	}
+
+	if _, err := beegfs.Lstat(relative); err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // UpdateWork processes work results from worker nodes for outstanding work requests and handles
