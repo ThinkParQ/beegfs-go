@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -86,6 +87,10 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	maxRequests := 1000
 
 	walkChanSize := cap(jobSubmissionChan)
+	walkOpts := []filesystem.StreamPathsOption{}
+	if cfg.GetUpdate() {
+		walkOpts = append(walkOpts, filesystem.IncludeDirs(true))
+	}
 	var walkChan <-chan *filesystem.StreamPathResult
 	if cfg.Download {
 
@@ -97,7 +102,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
+			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil, walkOpts...); err != nil {
 				return
 			}
 		} else {
@@ -112,7 +117,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			}
 		}
 	} else {
-		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
+		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter, walkOpts...)
 		if err != nil {
 			return
 		}
@@ -184,6 +189,31 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
+
+	processedDirs := make(map[string]struct{})
+	var processedDirsMu sync.Mutex
+
+	updateDirectory := func(dirPath string) error {
+		if !cfg.GetUpdate() || !IsValidRstId(cfg.RemoteStorageTarget) {
+			return nil
+		}
+
+		dirPath = filepath.Clean(dirPath)
+		if dirPath == "." {
+			dirPath = "/"
+		}
+
+		processedDirsMu.Lock()
+		if _, seen := processedDirs[dirPath]; seen {
+			processedDirsMu.Unlock()
+			return nil
+		}
+		processedDirs[dirPath] = struct{}{}
+		processedDirsMu.Unlock()
+
+		return entry.SetDirectoryRstIds(ctx, dirPath, []uint32{cfg.RemoteStorageTarget})
+	}
+
 	createJobRequests := func() error {
 		var err error
 		var inMountPath string
@@ -203,6 +233,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 				if walkResp.Err != nil {
 					return walkResp.Err
+				}
+
+				if walkResp.IsDir {
+					if err := updateDirectory(walkResp.Path); err != nil {
+						return err
+					}
+					continue
 				}
 
 				if walkResp.ResumeToken != "" {
@@ -229,6 +266,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 						// Ensure the local directory structure supports the object downloads
 						if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
+							return err
+						}
+						if err := updateDirectory(filepath.Dir(inMountPath)); err != nil {
 							return err
 						}
 					}
