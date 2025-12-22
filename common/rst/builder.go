@@ -87,6 +87,10 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	maxRequests := 1000
 
 	walkChanSize := cap(jobSubmissionChan)
+	walkOpts := []filesystem.StreamPathsOption{}
+	if cfg.GetUpdate() {
+		walkOpts = append(walkOpts, filesystem.IncludeDirs(true))
+	}
 	var walkChan <-chan *filesystem.StreamPathResult
 	if cfg.Download {
 
@@ -98,7 +102,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
+			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil, walkOpts...); err != nil {
 				return
 			}
 		} else {
@@ -113,7 +117,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			}
 		}
 	} else {
-		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
+		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter, walkOpts...)
 		if err != nil {
 			return
 		}
@@ -194,6 +198,11 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			return nil
 		}
 
+		dirPath = filepath.Clean(dirPath)
+		if dirPath == "." {
+			dirPath = "/"
+		}
+
 		processedDirsMu.Lock()
 		if _, seen := processedDirs[dirPath]; seen {
 			processedDirsMu.Unlock()
@@ -227,11 +236,11 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 
 				if walkResp.IsDir {
-						if err := updateDirectory(walkResp.Path); err != nil {
-							return err
-						}
-						continue
+					if err := updateDirectory(walkResp.Path); err != nil {
+						return err
 					}
+					continue
+				}
 
 				if walkResp.ResumeToken != "" {
 					builderStateMu.Lock()
@@ -259,9 +268,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 						if err := c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755); err != nil {
 							return err
 						}
-							if err := updateDirectory(filepath.Dir(inMountPath)); err != nil {
-								return err
-							}
+						if err := updateDirectory(filepath.Dir(inMountPath)); err != nil {
+							return err
+						}
 					}
 				} else {
 					inMountPath = walkResp.Path

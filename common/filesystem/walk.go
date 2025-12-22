@@ -109,13 +109,31 @@ type StreamPathResult struct {
 	Err         error
 }
 
+type streamPathsOptions struct {
+	includeDirs bool
+}
+
+type StreamPathsOption func(*streamPathsOptions)
+
+// IncludeDirs controls whether directories are emitted in the stream.
+func IncludeDirs(include bool) StreamPathsOption {
+	return func(opts *streamPathsOptions) {
+		opts.includeDirs = include
+	}
+}
+
 // StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
 // lexicographically increasing order. If startAfter != "" then only files lexically greater than
 // will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
 // paths. chanSize is the buffer size for the returned *StreamPathResult channel.
-func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
+func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter, opts ...StreamPathsOption) (<-chan *StreamPathResult, error) {
 	if maxPaths != -1 && maxPaths <= 0 {
 		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
+	}
+
+	options := streamPathsOptions{}
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	preparePath := func(path string) string {
@@ -198,6 +216,23 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 			}
 		}
 
+		sendDir := func(path string) bool {
+			if !options.includeDirs {
+				return true
+			}
+			if path == "" {
+				if startAfter != "" {
+					return true
+				}
+				return send(&StreamPathResult{Path: "/", IsDir: true})
+			}
+			dirPath := path + "/"
+			if dirPath <= startAfter {
+				return true
+			}
+			return send(&StreamPathResult{Path: "/" + dirPath, IsDir: true})
+		}
+
 		var walkDir func(string) bool
 		walkDir = func(directory string) bool {
 			if err := ctx.Err(); err != nil {
@@ -216,10 +251,17 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 
 			lastPath := directory
 			for _, entry := range entries {
+				if maxPaths == 0 {
+					send(&StreamPathResult{ResumeToken: lastPath})
+					return false
+				}
 				path := filepath.Join(directory, entry.Name())
 				inMountPath := "/" + path
 
 				if entry.IsDir() {
+					if !sendDir(path) {
+						return false
+					}
 					if !walkDir(path) {
 						return false
 					}
@@ -244,11 +286,6 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					continue
 				}
 
-				if maxPaths == 0 {
-					send(&StreamPathResult{ResumeToken: lastPath})
-					return false
-				}
-
 				if !send(&StreamPathResult{Path: inMountPath}) {
 					return false
 				}
@@ -261,6 +298,9 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 			return true
 		}
 
+		if !sendDir(root) {
+			return
+		}
 		walkDir(root)
 	}()
 
