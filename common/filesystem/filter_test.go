@@ -77,6 +77,46 @@ func TestCompileFilter_ValidExpressions(t *testing.T) {
 	}
 }
 
+func TestCompileFilter_TypeExpressions(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		mode uint32
+		want bool
+	}{
+		{"EqualsFile", `type == file`, 0o100644, true},
+		{"EqualsFileWhitespace", `type == file, directory`, 0o100644, true},
+		{"EqualsMixedCase", `type == SyMLinK`, 0o120777, true},
+		{"NotEqualsDirectory", `type != directory`, 0o100644, true},
+		{"NotEqualsMultiple", `type != file, directory`, 0o100644, false},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := CompileFilter(tt.expr)
+			assert.NoError(t, err, "compileFilter(%q) returned error", tt.expr)
+			fi := FileInfo{
+				Path: "/tmp/test",
+				Name: "test",
+				Mode: tt.mode,
+				Perm: tt.mode & 0o7777,
+			}
+			ok, err := filter(fi)
+			assert.NoError(t, err, "filter(%q) returned error", tt.expr)
+			assert.Equal(t, tt.want, ok, "filter(%q) = %v, want %v", tt.expr, ok, tt.want)
+		})
+	}
+}
+
+func TestCompileFilter_InvalidTypeExpressions(t *testing.T) {
+	for _, expr := range []string{`type == file,wat`, `type != wat`} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := CompileFilter(expr)
+			assert.Error(t, err)
+		})
+	}
+}
+
 func TestCompileFilter_InvalidExpression(t *testing.T) {
 	_, err := CompileFilter("not_a_valid_expr(")
 	assert.Error(t, err)
