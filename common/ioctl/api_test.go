@@ -3,6 +3,7 @@
 package ioctl
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,4 +81,16 @@ func TestCreateFileStripeHints(t *testing.T) {
 	require.NoError(t, err, "error during test setup")
 	defer cleanup(t)
 	require.NoError(t, CreateFileWithStripeHints(testDir+"helloworld", 0755, 0, 0))
+}
+
+func TestSetAccessAndState(t *testing.T) {
+	testDir, cleanup, err := getTempBeeGFSPathForTesting()
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+	fd, err := os.Create(testDir + "helloworld")
+	require.NoError(t, err)
+	defer fd.Close()
+	newFileState := beegfs.NewFileState(beegfs.AccessFlagReadLock, beegfs.DataStateAutoRestore)
+	require.NoError(t, SetFileState(testDir+"helloworld", newFileState))
+	fmt.Println("test")
 }
