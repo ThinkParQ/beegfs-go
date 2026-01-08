@@ -195,3 +195,38 @@ func PingNode(mountpoint string, nodeID beegfs.LegacyId, count uint32, interval 
 
 	return &arg.Results, nil
 }
+
+func SetFileState(path string, fileState beegfs.FileState) error {
+
+	fileNameStr := filepath.Base(path)
+	// Subtract one here to account for the null byte added below.
+	if len(fileNameStr) > filenameMaxLen-1 {
+		return fmt.Errorf("path %q has a file name %q longer than the maximum allowed length %d", path, fileNameStr, filenameMaxLen-1)
+	}
+
+	parentDir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parentDir.Close()
+
+	var fileName [filenameMaxLen]byte
+	copy(fileName[:], []byte(fileNameStr+"\x00"))
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(parentDir.Fd()),
+		uintptr(iocSetFileState),
+		uintptr(unsafe.Pointer(&setFileStateArg{
+			Filename:  fileName,
+			FileState: fileState.GetRawValue(),
+		})),
+	)
+	runtime.KeepAlive(fileName)
+
+	if errno != 0 {
+		err := syscall.Errno(errno)
+		return fmt.Errorf("error setting file state: %w (errno: %d)", err, errno)
+	}
+
+	return nil
+}
