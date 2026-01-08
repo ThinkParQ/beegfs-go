@@ -337,7 +337,7 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	if info.Entry.Type == beegfs.EntryRegularFile {
 		row = append(row,
 			fmt.Sprintf("Reading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite),
-			beegfs.AccessFlagsToString(info.Entry.FileState.GetAccessFlags()), fmt.Sprintf("%d", info.Entry.FileState.GetDataState()))
+			info.Entry.FileState.GetAccessFlags(), info.Entry.FileState.GetDataState())
 	} else {
 		row = append(row, fmt.Sprintf("(%s)", info.Entry.Type.String()), "(n/a)", "(n/a)")
 	}
