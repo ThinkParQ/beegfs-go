@@ -64,6 +64,14 @@ var SupportedRSTTypes = map[string]func() (any, any){
 	// Mock could be included here if it ever made sense to allow configuration using a file.
 }
 
+type RemotePathInfo struct {
+	Size                    int64
+	Mtime                   time.Time
+	IsArchived              bool
+	IsArchiveRestoreAllowed bool
+	SortValues              []string
+}
+
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
 	GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest
@@ -109,12 +117,12 @@ type Provider interface {
 	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
-	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.
+	// GetRemotePathInfo must return the remote file or object's size and last beegfs-mtime.
 	//
 	// It is important for providers to maintain beegfs-mtime which is the file's last modification
 	// time of the prior upload operation. Beegfs-mtime is used in conjunction with the file's size
 	// to determine whether the file is sync.
-	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error)
+	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (*RemotePathInfo, error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
@@ -438,18 +446,22 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		}
 	}
 
-	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := client.GetRemotePathInfo(ctx, cfg)
+	remoteInfo, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
-	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
+	if cfg.Download && remoteInfo.IsArchived && !remoteInfo.IsArchiveRestoreAllowed {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
 	}
-	lockedInfo.SetRemoteSize(remoteSize)
-	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-	lockedInfo.SetIsArchived(isArchived)
+	lockedInfo.SetRemoteSize(remoteInfo.Size)
+	lockedInfo.SetRemoteMtime(timestamppb.New(remoteInfo.Mtime))
+	lockedInfo.SetIsArchived(remoteInfo.IsArchived)
 
-	return client.GetJobRequest(cfg)
+	request := client.GetJobRequest(cfg)
+	if len(remoteInfo.SortValues) > 0 {
+		request.SetSortValues(remoteInfo.SortValues)
+	}
+	return request
 }
 
 // updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.

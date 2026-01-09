@@ -91,7 +91,7 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 		rstMap[configId] = rst
 	}
 
-	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint)
+	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, log, rstMap, mountPoint)
 
 	nodePools := make(map[worker.Type]*Pool, 0)
 	nodes, err := worker.NewWorkerNodesFromConfig(log, workerConfigs)
