@@ -86,7 +86,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 			}
 			rstMap[config.Id] = rst
 		}
-		rstMap[JobBuilderRstId] = NewJobBuilderClient(ctx, rstMap, s.mountPoint)
+		rstMap[JobBuilderRstId] = NewJobBuilderClient(ctx, nil, rstMap, s.mountPoint)
 		s.clients = rstMap
 	}
 	return nil

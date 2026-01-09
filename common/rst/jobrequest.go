@@ -145,7 +145,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	if jobBuilder {
-		client := NewJobBuilderClient(ctx, nil, nil)
+		client := NewJobBuilderClient(ctx, nil, nil, nil)
 		request := client.GetJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
 	}
@@ -196,7 +196,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 			return []*beeremote.JobRequest{request}, nil
 		}
 
-		client := NewJobBuilderClient(ctx, nil, nil)
+		client := NewJobBuilderClient(ctx, nil, nil, nil)
 		request := client.GetJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
 	}

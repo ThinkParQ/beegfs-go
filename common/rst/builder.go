@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 )
@@ -22,15 +25,22 @@ import (
 // provided via flex.JobRequestCfg.
 type JobBuilderClient struct {
 	ctx        context.Context
+	log        *zap.Logger
 	rstMap     map[uint32]Provider
 	mountPoint filesystem.Provider
 }
 
 var _ Provider = &JobBuilderClient{}
 
-func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+func NewJobBuilderClient(ctx context.Context, log *zap.Logger, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[JobBuilderClient]().PkgPath())))
+
 	return &JobBuilderClient{
 		ctx:        ctx,
+		log:        log,
 		rstMap:     rstMap,
 		mountPoint: mountPoint,
 	}
@@ -214,6 +224,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				// Sort and flush jobRequestsBuffer when memory usage exceeds threshold. This will
 				// block other processes attempting to defer jobRequests until complete.
 				if jobRequestsBufferSize >= jobRequestsBufferSizeThreshold {
+					c.log.Warn("exceeded job request buffer memory usage threshold", zap.Int("jobRequests", len(jobRequestsBuffer)),
+						zap.Int64("bufferSizeBytes", jobRequestsBufferSize), zap.Int64("thresholdBytes", jobRequestsBufferSizeThreshold))
+
 					sortJobRequests(jobRequestsBuffer)
 					submits, errors := submitJobRequests(jobRequestsBuffer, true)
 					errorCount += errors
