@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,13 +38,19 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+type s3PlacementHint struct {
+	name     string
+	hintType s3PlacementHintType
+}
+
 type S3StorageClass struct {
-	retrievalTier types.Tier
-	archival      bool
-	retentionDays int32         // defines how long the retrieved object will be available in days.
-	checkTime     time.Duration // defines retry time after initiating the restore.
-	recheckTime   time.Duration // defines retry time when restore was previously initiated.
-	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
+	retrievalTier  types.Tier
+	archival       bool
+	retentionDays  int32             // defines how long the retrieved object will be available in days.
+	checkTime      time.Duration     // defines retry time after initiating the restore.
+	recheckTime    time.Duration     // defines retry time when restore was previously initiated.
+	autoRestore    bool              // defines whether archived objects should be permitted to be restored.
+	placementHints []s3PlacementHint // defines the metadata keys to sort by.
 }
 
 type S3Client struct {
@@ -127,13 +136,25 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
 		}
 
+		var placementHints []s3PlacementHint
+		if archive.PlacementHints != "" {
+			for hint := range strings.SplitSeq(archive.PlacementHints, ",") {
+				s3PlacementHint, err := news3PlacementHint(hint)
+				if err != nil {
+					return nil, fmt.Errorf("storage class, %s, has invalid placement hint: %w", name, err)
+				}
+				placementHints = append(placementHints, s3PlacementHint)
+			}
+		}
+
 		s3Client.storageClasses[name] = S3StorageClass{
-			retrievalTier: retrievalTier,
-			archival:      true,
-			retentionDays: retentionsDays,
-			checkTime:     checkTime,
-			recheckTime:   recheckTime,
-			autoRestore:   archive.GetAutoRestore(),
+			retrievalTier:  retrievalTier,
+			archival:       true,
+			retentionDays:  retentionsDays,
+			checkTime:      checkTime,
+			recheckTime:    recheckTime,
+			autoRestore:    archive.GetAutoRestore(),
+			placementHints: placementHints,
 		}
 	}
 
@@ -279,7 +300,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 	lockedInfo := sync.GetLockedInfo()
 	if sync.Operation == flex.SyncJob_DOWNLOAD && lockedInfo.IsArchived {
 
-		_, _, archiveStatus, err := r.getObjectMetadata(ctx, sync.RemotePath, true)
+		_, _, _, archiveStatus, err := r.getObjectMetadata(ctx, sync.RemotePath, true)
 		if err != nil {
 			return false, 0, err
 		}
@@ -586,16 +607,19 @@ func decodeResumeToken(s string) (s3ResumeToken, error) {
 	return token, nil
 }
 
-func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
-	remoteSize, remoteMtime, archiveStatus, err := r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
-	if archiveStatus == nil {
-		return remoteSize, remoteMtime, false, false, err
+func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (*RemotePathInfo, error) {
+	remoteSize, remoteMtime, sortValues, archiveStatus, err := r.getObjectMetadata(ctx, cfg.RemotePath, cfg.Download)
+	remotePathInfo := &RemotePathInfo{
+		Size:       remoteSize,
+		Mtime:      remoteMtime,
+		SortValues: sortValues,
 	}
 
-	isArchived := (*archiveStatus).IsArchived
-	isArchiveRestoreAllowed := (cfg.AllowRestore != nil && *cfg.AllowRestore) || (cfg.AllowRestore == nil && archiveStatus.Info.autoRestore)
-
-	return remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err
+	if archiveStatus != nil {
+		remotePathInfo.IsArchived = archiveStatus.IsArchived
+		remotePathInfo.IsArchiveRestoreAllowed = (cfg.AllowRestore != nil && *cfg.AllowRestore) || (cfg.AllowRestore == nil && archiveStatus.Info.autoRestore)
+	}
+	return remotePathInfo, err
 }
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
@@ -711,7 +735,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 
-	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
+	_, mtime, _, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
 		return fmt.Errorf("unable to verify the remote object has not changed: %w", err)
 	}
@@ -821,16 +845,17 @@ func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *st
 }
 
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
-func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, *s3ArchiveInfo, error) {
+func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, []string, *s3ArchiveInfo, error) {
 	if key == "" {
 		if keyMustExist {
-			return 0, time.Time{}, nil, fmt.Errorf("unable to retrieve object metadata! --%s must be specified", RemotePathFlag)
+			return 0, time.Time{}, nil, nil, fmt.Errorf("unable to retrieve object metadata! --%s must be specified", RemotePathFlag)
 		}
-		return 0, time.Time{}, nil, nil
+		return 0, time.Time{}, nil, nil, nil
 	}
 
+	config := r.config.GetS3()
 	headObjectInput := &s3.HeadObjectInput{
-		Bucket: aws.String(r.config.GetS3().Bucket),
+		Bucket: aws.String(config.Bucket),
 		Key:    aws.String(key),
 	}
 
@@ -839,25 +864,34 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
-				return 0, time.Time{}, nil, os.ErrNotExist
+				return 0, time.Time{}, nil, nil, os.ErrNotExist
 			}
 		}
-		return 0, time.Time{}, nil, err
+		return 0, time.Time{}, nil, nil, err
 	}
 
 	archivedStatus := r.archiveStatus(resp.StorageClass, resp.Restore)
 
+	var placementHintValues []string // contains the metadata values for each placement hint metadata keys.
+	for _, hint := range r.storageClasses[resp.StorageClass].placementHints {
+		value, ok := resp.Metadata[hint.name]
+		if !ok {
+			continue
+		}
+		placementHintValues = append(placementHintValues, hint.SortableKey(value))
+	}
+
 	beegfsMtime, ok := resp.Metadata["beegfs-mtime"]
 	if !ok {
-		return *resp.ContentLength, *resp.LastModified, archivedStatus, nil
+		return *resp.ContentLength, *resp.LastModified, placementHintValues, archivedStatus, nil
 	}
 
 	mtime, err := time.Parse(time.RFC3339, beegfsMtime)
 	if err != nil {
-		return *resp.ContentLength, *resp.LastModified, archivedStatus, fmt.Errorf("unable to parse remote object's beegfs-mtime")
+		return *resp.ContentLength, *resp.LastModified, placementHintValues, archivedStatus, fmt.Errorf("unable to parse remote object's beegfs-mtime")
 	}
 
-	return *resp.ContentLength, mtime, archivedStatus, nil
+	return *resp.ContentLength, mtime, placementHintValues, archivedStatus, nil
 }
 
 func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Time, metadata map[string]string, tagging *string, storageClass *string) (uploadID string, err error) {
@@ -1065,4 +1099,78 @@ func (r *S3Client) recommendedSegments(fileSize int64) (int64, int32) {
 	// Arbitrary selection for now. We should be smarter and take into
 	// consideration file size and number of workers for this RST type.
 	return 4, 1
+}
+
+type s3PlacementHintType int
+
+const (
+	s3PlacementHintString  s3PlacementHintType = 0
+	s3PlacementHintInteger s3PlacementHintType = 1
+	s3PlacementHintFloat   s3PlacementHintType = 2
+)
+
+// s3PlacementHintRe permits the common metadata key nomenclature but is stricter than S3’s
+// HTTP-token rules which are permitted which would include characters set [!#$%&'*+^`\|~].
+var s3PlacementHintRe = regexp.MustCompile(`^([a-zA-Z0-9_.-]+):(?:(str|int|float))$`)
+
+func news3PlacementHint(definition string) (s3PlacementHint, error) {
+	definition = strings.TrimSpace(definition)
+	definition = strings.ToLower(definition)
+	parts := s3PlacementHintRe.FindStringSubmatch(definition)
+	if len(parts) != 3 {
+		return s3PlacementHint{}, fmt.Errorf("invalid placement hint definition! Must be in the form <metadata-key>:[str|int|float]")
+	}
+
+	hint := s3PlacementHint{name: parts[1], hintType: s3PlacementHintString}
+	switch parts[2] {
+	case "str":
+		hint.hintType = s3PlacementHintString
+	case "int":
+		hint.hintType = s3PlacementHintInteger
+	case "float":
+		hint.hintType = s3PlacementHintFloat
+	default:
+		return s3PlacementHint{}, fmt.Errorf("invalid placement hint definition! Must be in the form <metadata-key>:[str|int|float]")
+	}
+
+	return hint, nil
+}
+
+// SortableKey returns the value in a lexicographically sortable string based on the hint's type. If there's
+// a numerical type parsing error occurs then the value will be returned. The original value will be
+// returned if there's an error.
+func (p s3PlacementHint) SortableKey(value string) string {
+	switch p.hintType {
+	case s3PlacementHintString:
+		return value
+	case s3PlacementHintInteger:
+		integer, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return value
+		}
+		// Convert the int64 into a lexicographically sortable hexadecimal based on the
+		// transformation of the unsigned 64-bit representation. The transformation simply flips the
+		// int64's sign bit to preserve the numerical order.
+		unsignedBits := uint64(integer) ^ (1 << 63)
+		return fmt.Sprintf("%016x", unsignedBits)
+
+	case s3PlacementHintFloat:
+		float, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return value
+		}
+
+		// Convert the float into a lexicographically sortable hexadecimal based on the float's
+		// unsigned 64-bit integer representation. The bitwise operations below simply invert the
+		// negative values and move the positive values above them.
+		unsignedBits := math.Float64bits(float)
+		if unsignedBits&(1<<63) != 0 {
+			unsignedBits = ^unsignedBits
+		} else {
+			unsignedBits ^= 1 << 63
+		}
+		return fmt.Sprintf("%016x", unsignedBits)
+	}
+
+	return value
 }

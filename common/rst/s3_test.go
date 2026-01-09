@@ -104,3 +104,123 @@ func TestCompleteRequests(t *testing.T) {
 	err = testS3Client.CompleteWorkRequests(context.Background(), jobSyncInvalid, workResponses, true)
 	assert.ErrorIs(t, err, ErrUnsupportedOpForRST)
 }
+
+func TestNewS3PlacementHint(t *testing.T) {
+	tests := []struct {
+		name       string
+		definition string
+		wantName   string
+		wantType   s3PlacementHintType
+		wantErr    bool
+	}{
+		{
+			name:       "StringType",
+			definition: "user:str",
+			wantName:   "user",
+			wantType:   s3PlacementHintString,
+		},
+		{
+			name:       "IntegerTypeTrimmedAndLowercased",
+			definition: "  COUNT:INT  ",
+			wantName:   "count",
+			wantType:   s3PlacementHintInteger,
+		},
+		{
+			name:       "FloatType",
+			definition: "ratio:float",
+			wantName:   "ratio",
+			wantType:   s3PlacementHintFloat,
+		},
+		{
+			name:       "InvalidDefinition",
+			definition: "missingType",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hint, err := news3PlacementHint(tt.definition)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantName, hint.name)
+			assert.Equal(t, tt.wantType, hint.hintType)
+		})
+	}
+}
+
+func TestS3PlacementHintString(t *testing.T) {
+	tests := []struct {
+		name     string
+		hintType s3PlacementHintType
+		value    string
+		expected string
+	}{
+		{
+			name:     "StringPassthrough",
+			hintType: s3PlacementHintString,
+			value:    "MiXeDCasE",
+			expected: "MiXeDCasE",
+		},
+		{
+			name:     "IntegerPositive",
+			hintType: s3PlacementHintInteger,
+			value:    "10",
+			expected: "800000000000000a",
+		},
+		{
+			name:     "IntegerZero",
+			hintType: s3PlacementHintInteger,
+			value:    "0",
+			expected: "8000000000000000",
+		},
+		{
+			name:     "IntegerNegative",
+			hintType: s3PlacementHintInteger,
+			value:    "-10",
+			expected: "7ffffffffffffff6",
+		},
+		{
+			name:     "IntegerParseError",
+			hintType: s3PlacementHintInteger,
+			value:    "not-an-int",
+			expected: "not-an-int",
+		},
+		{
+			name:     "FloatPositive",
+			hintType: s3PlacementHintFloat,
+			value:    "1.5",
+			expected: "bff8000000000000",
+		},
+		{
+			name:     "FloatZero",
+			hintType: s3PlacementHintFloat,
+			value:    "0",
+			expected: "8000000000000000",
+		},
+		{
+			name:     "FloatNegative",
+			hintType: s3PlacementHintFloat,
+			value:    "-1.5",
+			expected: "4007ffffffffffff",
+		},
+		{
+			name:     "FloatParseError",
+			hintType: s3PlacementHintFloat,
+			value:    "abc",
+			expected: "abc",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			hint := s3PlacementHint{hintType: test.hintType}
+			assert.Equal(t, test.expected, hint.SortableKey(test.value))
+		})
+	}
+}
