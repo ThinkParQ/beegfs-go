@@ -82,8 +82,11 @@ func runEntryInfoCmd(cmd *cobra.Command, args []string, frontendCfg entryInfoCfg
 	if err != nil {
 		return err
 	}
-	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets"}
-	allColumns := append(defaultColumns, "cool_down", "client_sessions", "access", "state")
+	defaultColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets", "access", "state"}
+	allColumns := []string{"path", "entry_id", "type", "meta_node", "meta_mirror", "storage_pool", "stripe_pattern", "storage_targets", "storage_mirrors", "remote_targets", "cool_down", "client_sessions", "access", "state"}
+	if viper.GetBool(config.DebugKey) {
+		defaultColumns = allColumns
+	}
 	numColumns := len(allColumns)
 	var tbl cmdfmt.Printomatic
 	if frontendCfg.retro {
