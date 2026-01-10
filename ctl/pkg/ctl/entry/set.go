@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
@@ -276,6 +280,10 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 	}, nil
 }
 
+// setFileStateIoctlNotAvailable is used to cache if the ioctl is not available with this client
+// version or if BeeGFS is not mounted. If the ioctl is not available RPCs are used instead.
+var setFileStateIoctlNotAvailable atomic.Bool
+
 func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
 	// Get current file state from entry
 	currentFileState := entry.Entry.FileState
@@ -303,12 +311,35 @@ func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *
 
 	// Create new file state by combining the access flags and data state
 	newFileState := beegfs.NewFileState(newAccessFlags, newDataState)
+
+	// Check if the ioctl is available, otherwise cache it is unavailable and fallback to rpcs.
+	if !setFileStateIoctlNotAvailable.Load() {
+		var beegfsClient filesystem.Provider
+		var err error
+		if beegfsClient, err = config.BeeGFSClient(searchPath); err == nil {
+			if beegfsClient.GetMountPath() == "" {
+				err = errors.New("beegfs is not mounted")
+			} else if err = ioctl.SetFileState(filepath.Clean(beegfsClient.GetMountPath()+searchPath), newFileState); err == nil {
+				return SetEntryResult{
+					Path:   searchPath,
+					Status: beegfs.OpsErr_SUCCESS,
+					Updates: SetEntryCfg{
+						AccessFlags: cfg.AccessFlags,
+						DataState:   cfg.DataState,
+					},
+				}, nil
+			}
+		}
+		log, _ := config.GetLogger()
+		log.Debug("unable to handle file state update using an ioctl (falling back to rpcs)", zap.Error(err))
+		setFileStateIoctlNotAvailable.Store(true)
+	}
+
+	// Assemble/send the request and handle the response.
 	request := &msg.SetFileStateRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
 		FileState: newFileState,
 	}
-
-	// send the request and handle the response
 	var resp = &msg.SetFileStateResponse{}
 	err := store.RequestTCP(ctx, entry.Entry.MetaOwnerNode.Uid, request, resp)
 	if err != nil {
