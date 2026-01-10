@@ -127,6 +127,17 @@ const (
 // DataState represents an user/application defined data state (upper 3 bits of FileState)
 type DataState uint8
 
+const (
+	DataStateAvailable = iota
+	DataStateManualRestore
+	DataStateAutoRestore
+	DataStateDelayedRestore
+	DataStateUnavailable
+	// DataStateReserved5
+	// DataStateReserved6
+	// DataStateReserved7
+)
+
 // Masks for extracting parts of the state
 const (
 	// Mask for extracting access flags (lower 5 bits)
@@ -178,14 +189,12 @@ func (fs FileState) GetRawValue() uint8 {
 
 // String returns a human-readable representation of the file state.
 func (state FileState) String() string {
-	accessFlagsStr := AccessFlagsToString(state.GetAccessFlags())
-	dataStateStr := fmt.Sprintf("%d", state.GetDataState())
-	return fmt.Sprintf("%s : %s", accessFlagsStr, dataStateStr)
+	return fmt.Sprintf("%s : %s", state.GetAccessFlags(), state.GetDataState())
 }
 
 // Helper function to convert access flags to a string.
-func AccessFlagsToString(flags AccessFlags) string {
-	switch flags {
+func (f AccessFlags) String() string {
+	switch f {
 	case AccessFlagUnlocked:
 		return "Unlocked"
 	case AccessFlagReadLock:
@@ -196,7 +205,24 @@ func AccessFlagsToString(flags AccessFlags) string {
 		return "Locked (read+write)" // All access blocked
 	default:
 		// For combinations with reserved bits
-		return fmt.Sprintf("Unknown(%d)", flags)
+		return fmt.Sprintf("Unknown(%d)", f)
+	}
+}
+
+func (s DataState) String() string {
+	switch s {
+	case DataStateAvailable:
+		return "Available"
+	case DataStateManualRestore:
+		return "ManualRestore"
+	case DataStateAutoRestore:
+		return "AutoRestore"
+	case DataStateDelayedRestore:
+		return "DelayedRestore"
+	case DataStateUnavailable:
+		return "Unavailable"
+	default:
+		return fmt.Sprintf("Unknown(%d)", s)
 	}
 }
 
