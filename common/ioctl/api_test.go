@@ -3,7 +3,6 @@
 package ioctl
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,5 +91,4 @@ func TestSetAccessAndState(t *testing.T) {
 	defer fd.Close()
 	newFileState := beegfs.NewFileState(beegfs.AccessFlagReadLock, beegfs.DataStateAutoRestore)
 	require.NoError(t, SetFileState(testDir+"helloworld", newFileState))
-	fmt.Println("test")
 }

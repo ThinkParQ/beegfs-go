@@ -215,8 +215,8 @@ func SetFileState(path string, fileState beegfs.FileState) error {
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(parentDir.Fd()),
-		uintptr(iocSetAccessAndState),
-		uintptr(unsafe.Pointer(&setAccessAndStateArg{
+		uintptr(iocSetFileState),
+		uintptr(unsafe.Pointer(&setFileStateArg{
 			Filename:  fileName,
 			FileState: fileState.GetRawValue(),
 		})),
@@ -225,7 +225,7 @@ func SetFileState(path string, fileState beegfs.FileState) error {
 
 	if errno != 0 {
 		err := syscall.Errno(errno)
-		return fmt.Errorf("error updating file access and data state: %w (errno: %d)", err, errno)
+		return fmt.Errorf("error setting file state: %w (errno: %d)", err, errno)
 	}
 
 	return nil

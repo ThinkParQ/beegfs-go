@@ -54,7 +54,7 @@ const (
 	ioctlNumGetInodeID        = 30
 	ioctlNumGetEntryInfo      = 31
 	ioctlNumPingNode          = 32
-	ioctlNumSetAccessAndState = 33
+	ioctlNumSetFileState      = 33
 )
 
 // BeeGFS ioctl command numbers used in syscalls that combine the BeeGFS type identifier ('t'),
@@ -85,7 +85,7 @@ var (
 	iocMkFileStripeHints = _iow(beegfsIOCTypeID, ioctlNumMkFileStripeHints, uintptr(unsafe.Sizeof(makeFileStripeHintsArg{})))
 	iocGetEntryInfo      = _ior(beegfsIOCTypeID, ioctlNumGetEntryInfo, uintptr(unsafe.Sizeof(getEntryInfoArg{})))
 	iocPingNode          = _ior(beegfsIOCTypeID, ioctlNumPingNode, uintptr(unsafe.Sizeof(pingNodeArg{})))
-	iocSetAccessAndState = _iow(beegfsIOCTypeID, ioctlNumSetAccessAndState, uintptr(unsafe.Sizeof(setAccessAndStateArg{})))
+	iocSetFileState      = _iow(beegfsIOCTypeID, ioctlNumSetFileState, uintptr(unsafe.Sizeof(setFileStateArg{})))
 )
 
 // Argument structures used for interacting with the BeeGFS file system via each
@@ -189,7 +189,7 @@ type pingNodeArg struct {
 	Results pingNodeArgResults
 }
 
-type setAccessAndStateArg struct {
+type setFileStateArg struct {
 	_         structs.HostLayout // Mark the struct as using the host memory layout.
 	Filename  [filenameMaxLen]byte
 	FileState uint8 // FileState is the combined AccessFlags and DataState.
