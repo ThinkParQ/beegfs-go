@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	fUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
@@ -31,7 +32,7 @@ func newMigrateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "migrate <path> [<path>] ...",
 		Short: "Migrate files and directories to the specified storage pool, targets, or groups",
-		Long: `Migrate files and directories to the specified storage pool, targets, or groups.
+		Long: fmt.Sprintf(`Migrate files and directories to the specified storage pool, targets, or groups.
 Files are only migrated if they have chunks on one or more of the specified targets. Destination 
 targets and buddy groups can be directly specified, or a pool can be specified and all targets and groups 
 in that pool are are potential candidates to migrate each file. Files cannot be migrated if the number of 
@@ -44,7 +45,7 @@ There are two available migration modes:
 
 (1) Migrate using background data rebalancing (requires an enterprise license).
 
-This mode was introduced in BeeGFS 8.2 and handles migrating data from the specified target(s) to new 
+This mode was introduced in BeeGFS %s and handles migrating data from the specified target(s) to new 
 target(s) by starting background tasks on the metadata and storage nodes that handle syncing data directly 
 between the source/destination storage nodes and updating the stripe pattern on the metadata node. Because
 data is rebalanced in the background, the migrate command may complete before files are fully migrated.
@@ -86,7 +87,7 @@ Symlinks are supported but the migrated links will look slightly different than 
   the link will always inherit its storage pool assignment from its parent directory (which may differ).
   
 These differences should never be problematic as typically the link itself is not important and most commands will
-actually redirect and return information from the linked file (i.e., stat, open, etc).`,
+actually redirect and return information from the linked file (i.e., stat, open, etc).`, msg.StartChunkBalanceMsgVersions),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -119,7 +120,7 @@ For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().BoolVar(&backendCfg.SkipMirrors, "skip-mirrors", false, "Migrate only files that are not buddy mirrored.")
 	cmd.Flags().BoolVar(&backendCfg.DryRun, "dry-run", false, "Print out what migrations would happen but don't actually migrate the files.")
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
-	cmd.Flags().BoolVar(&backendCfg.UseRebalancing, "rebalance", false, "Use background data rebalancing instead of temporary files to migrate data between targets.")
+	cmd.Flags().BoolVar(&backendCfg.UseRebalancing, "rebalance", false, fmt.Sprintf("Use background data rebalancing instead of temporary files to migrate data between targets (%s).", msg.StartChunkBalanceMsgVersions))
 	cmd.Flags().IntVar(&backendCfg.Retries, "retries", 10, "When using background data rebalancing, the number of times a request is retried if the metadata chunk balance queue is full (-1 = infinite, 0 = no retries).")
 	cmd.MarkFlagsOneRequired("from-targets", "from-nodes", "from-pools")
 	cmd.MarkFlagsOneRequired("pool", "targets", "groups")
@@ -175,13 +176,16 @@ run:
 			} else if printVerbosely {
 				tbl.AddItem(result.Path, result.EntryID, result.Status, result.StartingIDs, result.IDType, result.SourceIDs, result.DestinationIDs, result.Message)
 			}
-			migrateStats.Update(result.Status)
+			migrateStats.Update(result)
 		}
 	}
 	if migrateErr || printVerbosely {
 		tbl.PrintRemaining()
 	}
 	cmdfmt.Printf("Summary: %+v\n", *migrateStats)
+	if backendCfg.UseRebalancing && migrateStats.StartedRebalancingFiles > 0 {
+		cmdfmt.Printf("Hint: Files are being migrated in the background, to monitor progress run 'beegfs stats rebalance'.\n")
+	}
 
 	if err = errWait(); err != nil {
 		return err

@@ -8,6 +8,11 @@ import (
 	pb "github.com/thinkparq/protobuf/go/beewatch"
 )
 
+const (
+	StartChunkBalanceMsgVersions       = "8.2+"
+	GetChunkBalanceJobStatsMsgVersions = "8.3+"
+)
+
 // StartChunkBalanceMsg represents a message for chunk balancing
 type StartChunkBalanceMsg struct {
 	IdType         RebalanceIDType
@@ -90,4 +95,77 @@ func (m *StartChunkBalanceRespMsg) Serialize(s *beeserde.Serializer) {
 // MsgId returns the message ID for StartChunkBalanceRespMsg
 func (m *StartChunkBalanceRespMsg) MsgId() uint16 {
 	return 2128
+}
+
+type GetChunkBalanceJobStatsMsg struct {
+}
+
+func (m *GetChunkBalanceJobStatsMsg) MsgId() uint16 {
+	return 2133
+}
+
+func (m *GetChunkBalanceJobStatsMsg) Serialize(s *beeserde.Serializer) {
+	// Nothing to do.
+}
+
+type ChunkBalancerJobState int32
+
+const (
+	ChunkBalancerJobStateNotStarted = iota
+	ChunkBalancerJobStateStarting
+	ChunkBalancerJobStateRunning
+	ChunkBalancerJobStateSuccess
+	ChunkBalancerJobStateInterrupted
+	ChunkBalancerJobStateFailure
+	ChunkBalancerJobStateErrors
+	ChunkBalancerJobStateIdle
+)
+
+func (s ChunkBalancerJobState) String() string {
+	switch s {
+	case ChunkBalancerJobStateNotStarted:
+		return "NotStarted"
+	case ChunkBalancerJobStateStarting:
+		return "Starting"
+	case ChunkBalancerJobStateRunning:
+		return "Running"
+	case ChunkBalancerJobStateSuccess:
+		return "Success"
+	case ChunkBalancerJobStateInterrupted:
+		return "Interrupted"
+	case ChunkBalancerJobStateFailure:
+		return "Failure"
+	case ChunkBalancerJobStateErrors:
+		return "Errors"
+	case ChunkBalancerJobStateIdle:
+		return "Idle"
+	default:
+		return "Invalid"
+	}
+}
+
+type GetChunkBalanceJobStatsRespMsg struct {
+	Status         ChunkBalancerJobState
+	StartTime      int64
+	EndTime        int64
+	WorkQueue      uint64
+	ErrorCount     uint64
+	LockedInodes   uint64
+	MigratedChunks uint64
+	WorkerNum      uint64
+}
+
+func (m *GetChunkBalanceJobStatsRespMsg) MsgId() uint16 {
+	return 2134
+}
+
+func (m *GetChunkBalanceJobStatsRespMsg) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.Status)
+	beeserde.DeserializeInt(d, &m.StartTime)
+	beeserde.DeserializeInt(d, &m.EndTime)
+	beeserde.DeserializeInt(d, &m.MigratedChunks)
+	beeserde.DeserializeInt(d, &m.ErrorCount)
+	beeserde.DeserializeInt(d, &m.WorkQueue)
+	beeserde.DeserializeInt(d, &m.LockedInodes)
+	beeserde.DeserializeInt(d, &m.WorkerNum)
 }
