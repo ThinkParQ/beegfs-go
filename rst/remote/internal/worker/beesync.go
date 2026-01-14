@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -81,6 +82,13 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		remoteAddr := net.JoinHostPort(host, port)
 		n.log.Info("automatically determined address for sync node to communicate with remote", zap.String("remoteAddr", remoteAddr))
 		config.BeeRemote.SetAddress(remoteAddr)
+	}
+
+	// Verify the sync node capabilities support remote.
+	if capabilities, err := n.client.GetCapabilities(n.rpcCtx, &flex.GetCapabilitiesRequest{}); err != nil {
+		return true, fmt.Errorf("failed to determine sync node capabilities: %w", err)
+	} else if err = registry.EnsureCapabilitiesSupportRegistry(capabilities); err != nil {
+		return false, fmt.Errorf("incompatible sync node: %w", err)
 	}
 
 	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)
