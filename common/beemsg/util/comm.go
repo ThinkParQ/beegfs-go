@@ -70,12 +70,9 @@ func RequestUDP(ctx context.Context, addrs []string,
 			return fmt.Errorf("reading UDP response failed: %w", err)
 		}
 
-		msgLen, err := msg.ExtractMsgLen(respBuf[0:msg.HeaderLen])
-		if err != nil {
-			return err
-		}
+		msgLen := msg.ExtractMsgLen(respBuf[0:msg.HeaderLen])
 
-		err = DisassembleBeeMsg(respBuf[0:msg.HeaderLen], respBuf[msg.HeaderLen:msgLen], resp)
+		err = DisassembleBeeMsg(respBuf[0:msgLen], resp)
 		if err != nil {
 			return err
 		}

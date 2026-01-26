@@ -10,24 +10,26 @@ import (
 )
 
 const (
-	HeaderLen = 40
-	// Fixed value for identifying BeeMsges. In theory, this has some kind of version modifier (thus
-	// the + 0), but it is unused
-	MsgPrefix = (0x42474653 << 32) + 0
+	HeaderLen               = 48
+	HeaderEncryptionInfoLen = 20
+	MsgPrefix               = 0x53464742
 )
 
 // The BeeMsg header
 type Header struct {
+	// Fixed value that identifies BeeMsges (see const MsgPrefix)
+	MsgPrefix uint32
 	// The total message length, including the header
 	MsgLen uint32
+	// Aes initialization vector (12 bytes) - not included as a field as it is only interacted with
+	// in the serialized header. Still keep it here as it is part of the serialized header.
+	// MsgAesIv []byte // 12 bytes
 	// Controls (de-)serialization in some messages. Usage depends on the concrete message.
 	MsgFeatureFlags uint16
 	// Unused
 	MsgCompatFeatureFlags uint8
 	// Mainly mirroring related use
 	MsgFlags uint8
-	// Fixed value that identifies BeeMsges (see const MsgPrefix)
-	MsgPrefix uint64
 	// The unique ID of the BeeMsg as defined in NetMessageTypes.h
 	MsgID uint16
 	// Contains the storage target ID in (some?) file system operations
@@ -44,21 +46,22 @@ type Header struct {
 // are filled with 0xFF as a placeholder and meant to be overwritten after serialization using the provided methods.
 func NewHeader(msgID uint16) Header {
 	return Header{
+		MsgPrefix: MsgPrefix,
 		// MsgLen and MsgFeatureFlags are supposed to be overwritten after the body of the message
 		// has been serialized using the functions below.
 		MsgLen:          0xFFFFFFFF,
 		MsgFeatureFlags: 0xFFFF,
-		MsgPrefix:       MsgPrefix,
 		MsgID:           msgID,
 	}
 }
 
 func (t *Header) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, t.MsgPrefix)
 	beeserde.SerializeInt(s, t.MsgLen)
+	beeserde.Zeroes(s, 12) // This is filled after encryption, thus not of interest here
 	beeserde.SerializeInt(s, t.MsgFeatureFlags)
 	beeserde.SerializeInt(s, t.MsgCompatFeatureFlags)
 	beeserde.SerializeInt(s, t.MsgFlags)
-	beeserde.SerializeInt(s, t.MsgPrefix)
 	beeserde.SerializeInt(s, t.MsgID)
 	beeserde.SerializeInt(s, t.MsgTargetID)
 	beeserde.SerializeInt(s, t.MsgUserID)
@@ -67,11 +70,12 @@ func (t *Header) Serialize(s *beeserde.Serializer) {
 }
 
 func (t *Header) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &t.MsgPrefix)
 	beeserde.DeserializeInt(d, &t.MsgLen)
+	beeserde.Skip(d, 12) // This is read before decryption, thus not of interest here
 	beeserde.DeserializeInt(d, &t.MsgFeatureFlags)
 	beeserde.DeserializeInt(d, &t.MsgCompatFeatureFlags)
 	beeserde.DeserializeInt(d, &t.MsgFlags)
-	beeserde.DeserializeInt(d, &t.MsgPrefix)
 	beeserde.DeserializeInt(d, &t.MsgID)
 	beeserde.DeserializeInt(d, &t.MsgTargetID)
 	beeserde.DeserializeInt(d, &t.MsgUserID)
@@ -81,17 +85,16 @@ func (t *Header) Deserialize(d *beeserde.Deserializer) {
 
 // Checks the given slice for being a serialized BeeMsg header
 func IsSerializedHeader(serHeader []byte) bool {
-	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint64(serHeader[8:16]) == MsgPrefix
+	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint32(serHeader[0:4]) == MsgPrefix
 }
 
-// Retrieves the MsgLen field from a serialized header. Returns an error if the byte slice
-// is not a valid BeeMsg header.
-func ExtractMsgLen(serHeader []byte) (uint32, error) {
-	if !IsSerializedHeader(serHeader) {
-		return 0, fmt.Errorf("invalid header")
-	}
+// Retrieves the MsgLen field from a serialized header
+func ExtractMsgLen(serHeader []byte) uint32 {
+	return binary.LittleEndian.Uint32(serHeader[4:8])
+}
 
-	return binary.LittleEndian.Uint32(serHeader[0:4]), nil
+func ExtractMsgAesIv(buf []byte) []byte {
+	return buf[8:20]
 }
 
 // Sets the MsgLen fields value in the serialized header. Necessary because the actual size of the
@@ -102,7 +105,7 @@ func OverwriteMsgLen(serHeader []byte, msgLen uint32) error {
 		return fmt.Errorf("invalid header")
 	}
 
-	binary.LittleEndian.PutUint32(serHeader[0:4], msgLen)
+	binary.LittleEndian.PutUint32(serHeader[4:8], msgLen)
 
 	return nil
 }
@@ -115,7 +118,11 @@ func OverwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
 		return fmt.Errorf("invalid header")
 	}
 
-	binary.LittleEndian.PutUint16(serHeader[4:6], msgFeatureFlags)
+	binary.LittleEndian.PutUint16(serHeader[20:22], msgFeatureFlags)
 
 	return nil
+}
+
+func OverwriteAesIv(ser []byte, aesIv []byte) {
+	copy(ser[8:20], aesIv)
 }
