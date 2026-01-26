@@ -15,7 +15,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, len(plain), len(buf))
 
-	err = Aes256Decrypt(info, buf)
+	buf, err = Aes256Decrypt(info, buf)
 	assert.NoError(t, err)
 	assert.Equal(t, plain, buf)
 }
@@ -30,6 +30,6 @@ func TestEncryptDecryptTampering(t *testing.T) {
 
 	buf[0] ^= buf[0]
 
-	err = Aes256Decrypt(info, buf)
+	buf, err = Aes256Decrypt(info, buf)
 	assert.Error(t, err)
 }

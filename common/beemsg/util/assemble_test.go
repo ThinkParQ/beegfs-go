@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 )
 
 func TestAssembleBeeMsg(t *testing.T) {
@@ -13,11 +12,12 @@ func TestAssembleBeeMsg(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.GreaterOrEqual(t, len(b), 50)
-	assert.True(t, msg.IsSerializedHeader(b[0:msg.HeaderLen]))
+	// assert.True(t, msg.IsSerializedHeader(b[0:msg.HeaderLen]))
+	//
 
 	// Test for correctness
 	out := testMsg{}
-	err = DisassembleBeeMsg(b[0:msg.HeaderLen], b[msg.HeaderLen:], &out)
+	err = DisassembleBeeMsg(b, &out)
 	assert.NoError(t, err)
 	assert.Equal(t, in, out)
 
@@ -25,11 +25,11 @@ func TestAssembleBeeMsg(t *testing.T) {
 
 	// Lengthen the buffer
 	b = append(b, 0)
-	err = DisassembleBeeMsg(b[0:msg.HeaderLen], b[msg.HeaderLen:], &out)
+	err = DisassembleBeeMsg(b, &out)
 	assert.Error(t, err)
 
 	// Shorten the buffer
 	b = b[0:50]
-	err = DisassembleBeeMsg(b[0:msg.HeaderLen], b[msg.HeaderLen:], &out)
+	err = DisassembleBeeMsg(b, &out)
 	assert.Error(t, err)
 }

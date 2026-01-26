@@ -50,11 +50,11 @@ func WriteTo(ctx context.Context, w io.Writer, in msg.SerializableMsg) error {
 // Reads and disassembles a complete on-the-wire BeeMsg (header + body) from an io.Reader, usually a
 // stream or socket.
 func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error {
-	bufHeader := make([]byte, msg.HeaderLen)
+	buf := make([]byte, msg.HeaderLen)
 
 	// Read in the header
 	err := goWithContext(ctx, func() error {
-		_, err := io.ReadFull(r, bufHeader)
+		_, err := io.ReadFull(r, buf)
 		return err
 	})
 	if err != nil {
@@ -62,23 +62,20 @@ func ReadFrom(ctx context.Context, r io.Reader, out msg.DeserializableMsg) error
 	}
 
 	// Extract the whole message length from the serialized header
-	msgLen, err := msg.ExtractMsgLen(bufHeader)
-	if err != nil {
-		return fmt.Errorf("extracting msgLen failed: %w", err)
-	}
+	msgLen := msg.ExtractMsgLen(buf)
 
-	bufBody := make([]byte, msgLen-msg.HeaderLen)
+	buf = append(buf, make([]byte, msgLen-msg.HeaderLen)...)
 
 	// Read in the body
 	err = goWithContext(ctx, func() error {
-		_, err := io.ReadFull(r, bufBody)
+		_, err := io.ReadFull(r, buf[msg.HeaderLen:])
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBeeMsgRead, err)
 	}
 
-	return DisassembleBeeMsg(bufHeader, bufBody, out)
+	return DisassembleBeeMsg(buf, out)
 }
 
 // Assembles a complete on-the-wire BeeMsg (header + body) and writes it to an io.ReadWriter,

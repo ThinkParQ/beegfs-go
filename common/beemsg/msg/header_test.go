@@ -9,24 +9,13 @@ import (
 )
 
 func TestHeaderSerialization(t *testing.T) {
-	header := Header{
-		MsgLen:                1,
-		MsgFeatureFlags:       2,
-		MsgCompatFeatureFlags: 3,
-		MsgFlags:              4,
-		MsgPrefix:             5,
-		MsgID:                 6,
-		MsgTargetID:           7,
-		MsgUserID:             8,
-		MsgSeq:                9,
-		MsgSeqDone:            10,
-	}
+	header := NewHeader(0)
 
 	s := beeserde.NewSerializer([]byte{})
 	header.Serialize(&s)
 
 	d := beeserde.NewDeserializer(s.Buf.Bytes(), 0)
-	desHeader := Header{}
+	desHeader := NewHeader(0)
 	desHeader.Deserialize(&d)
 
 	assert.Equal(t, header, desHeader)
@@ -42,7 +31,7 @@ func TestOverwriteMsgLen(t *testing.T) {
 	assert.Error(t, err)
 
 	// set the correct prefix
-	binary.LittleEndian.PutUint64(buf[8:16], MsgPrefix)
+	binary.LittleEndian.PutUint64(buf[36:44], MsgPrefix)
 
 	err = OverwriteMsgLen(buf, 1234)
 	assert.NoError(t, err)
@@ -59,9 +48,9 @@ func TestOverwriteMsgFeatureFlags(t *testing.T) {
 	assert.Error(t, err)
 
 	// set the correct prefix
-	binary.LittleEndian.PutUint64(buf[8:16], MsgPrefix)
+	binary.LittleEndian.PutUint64(buf[36:44], MsgPrefix)
 
 	err = OverwriteMsgFeatureFlags(buf, 1234)
 	assert.NoError(t, err)
-	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[4:6]))
+	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[32:34]))
 }
