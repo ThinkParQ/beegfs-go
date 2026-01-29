@@ -491,7 +491,7 @@ func getPathStatusFromTarget(
 			continue
 		}
 
-		remoteSize, remoteMtime, _, _, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
+		remoteInfo, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				result.SyncStatus = NotAttempted
@@ -500,8 +500,8 @@ func getPathStatusFromTarget(
 			}
 			return nil, fmt.Errorf("unable to get remote resource info: %w", err)
 		}
-		lockedInfo.SetRemoteSize(remoteSize)
-		lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+		lockedInfo.SetRemoteSize(remoteInfo.Size)
+		lockedInfo.SetRemoteMtime(timestamppb.New(remoteInfo.Mtime))
 
 		if rst.IsFileAlreadySynced(lockedInfo) {
 			syncReason.WriteString(fmt.Sprintf("Target %d: File is synced based on the remote storage target.\n", tgt))
