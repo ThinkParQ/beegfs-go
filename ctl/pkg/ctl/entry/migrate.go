@@ -61,19 +61,25 @@ func (s MigrateStatus) String() string {
 }
 
 type MigrateStats struct {
-	MigrationStatusUnknown int
-	MigrationErrors        int
-	MigrationNotSupported  int
-	MigrationSkippedDirs   int
-	MigrationNotNeeded     int
-	MigrationNeeded        int
-	MigratedFiles          int
-	MigrationUpdatedDirs   int
-	MigrationStarted       int
+	MigrationStatusUnknown   int
+	MigrationErrors          int
+	MigrationNotSupported    int
+	MigrationSkippedDirs     int
+	MigrationNotNeeded       int
+	MigrationNeeded          int
+	MigratedFiles            int
+	MigrationUpdatedDirs     int
+	StartedRebalancingFiles  int
+	StartedRebalancingChunks int
 }
 
-func (s *MigrateStats) Update(status MigrateStatus) {
-	switch status {
+func (s *MigrateStats) Update(result MigrateResult) {
+
+	// Currently MigratedChunks is zero unless the status is MigratedStarted. However it is captured
+	// here in case that changes in the future as migrated chunks is not technically tied to status.
+	s.StartedRebalancingChunks += result.StartedRebalancingChunks
+
+	switch result.Status {
 	case MigrateError:
 		s.MigrationErrors++
 	case MigrateNotSupported:
@@ -89,7 +95,7 @@ func (s *MigrateStats) Update(status MigrateStatus) {
 	case MigrateUpdatedDir:
 		s.MigrationUpdatedDirs++
 	case MigrateStarted:
-		s.MigrationStarted++
+		s.StartedRebalancingFiles++
 	default:
 		s.MigrationStatusUnknown++
 	}
@@ -125,6 +131,8 @@ type MigrateResult struct {
 	// IDType indicates if the source/destination IDs are targets or buddy groups.
 	IDType  string
 	Message string
+	// StartedRebalancingChunks is the number of sourceIDs being migrated away from.
+	StartedRebalancingChunks int
 }
 
 // migration represents the internal configuration and state of a migration.
@@ -457,6 +465,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 			return result, nil
 		}
 		result.Status = MigrateStarted
+		result.StartedRebalancingChunks = len(srcIDs)
 		return result, nil
 	} else {
 		// Only regular files and symbolic links supported by temp file migrations.
