@@ -161,11 +161,14 @@ targets:
 	// already been assigned to a buddy group.
 	taken := []int{}
 	findSuitableTarget := func(notNode *beegfs.EntityIdSet, storagePool *beegfs.EntityIdSet) (*target.GetTargets_Result, error) {
-		for i := 0; i < len(targets); i++ {
+		for i := range targets {
 			if slices.Contains(taken, i) {
 				continue
 			}
 			t := targets[i]
+			if t.Node == nil {
+				continue
+			}
 			if t.NodeType == beegfs.Storage && storagePool != nil && t.StoragePool.Uid != storagePool.Uid {
 				log.Debug(fmt.Sprintf("Ignoring target %v because it is not in Pool %v", t.Target, storagePool))
 				continue
@@ -204,7 +207,7 @@ targets:
 		} else {
 			storagePool = nil
 		}
-		sTarget, err := findSuitableTarget(&pTarget.Node, storagePool)
+		sTarget, err := findSuitableTarget(pTarget.Node, storagePool)
 		if err != nil {
 			sTarget, err = findSuitableTarget(nil, storagePool)
 			if err != nil {

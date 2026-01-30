@@ -187,15 +187,15 @@ func TestGetMappingsForEntityIDSet(t *testing.T) {
 	mappings := &Mappings{
 		TargetToNode: MapTargetToNode([]target.GetTargets_Result{
 			{
-				Node:   storage01,
+				Node:   &storage01,
 				Target: sTarget101,
 			},
 			{
-				Node:   storage01,
+				Node:   &storage01,
 				Target: sTarget102,
 			},
 			{
-				Node:   meta01,
+				Node:   &meta01,
 				Target: mTarget101,
 			},
 		}),

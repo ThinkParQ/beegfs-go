@@ -334,6 +334,9 @@ func MapNodeToTargets(targets []target.GetTargets_Result) Mapper[[]beegfs.Entity
 	nodeToTargetsMapper.byAlias = make(map[beegfs.Alias][]beegfs.EntityIdSet)
 	nodeToTargetsMapper.byLegacyID = make(map[beegfs.LegacyId][]beegfs.EntityIdSet)
 	for _, target := range targets {
+		if target.Node == nil {
+			continue
+		}
 		nodeToTargetsMapper.byUID[target.Node.Uid] = append(nodeToTargetsMapper.byUID[target.Node.Uid], target.Target)
 		nodeToTargetsMapper.byAlias[target.Node.Alias] = append(nodeToTargetsMapper.byAlias[target.Node.Alias], target.Target)
 		nodeToTargetsMapper.byLegacyID[target.Node.LegacyId] = append(nodeToTargetsMapper.byLegacyID[target.Node.LegacyId], target.Target)
@@ -348,9 +351,12 @@ func MapTargetToNode(targets []target.GetTargets_Result) Mapper[beegfs.EntityIdS
 	targetToNodeMapper.byAlias = make(map[beegfs.Alias]beegfs.EntityIdSet)
 	targetToNodeMapper.byLegacyID = make(map[beegfs.LegacyId]beegfs.EntityIdSet)
 	for _, tgt := range targets {
-		targetToNodeMapper.byUID[tgt.Target.Uid] = tgt.Node
-		targetToNodeMapper.byAlias[tgt.Target.Alias] = tgt.Node
-		targetToNodeMapper.byLegacyID[tgt.Target.LegacyId] = tgt.Node
+		if tgt.Node == nil {
+			continue
+		}
+		targetToNodeMapper.byUID[tgt.Target.Uid] = *tgt.Node
+		targetToNodeMapper.byAlias[tgt.Target.Alias] = *tgt.Node
+		targetToNodeMapper.byLegacyID[tgt.Target.LegacyId] = *tgt.Node
 	}
 	return targetToNodeMapper
 }
