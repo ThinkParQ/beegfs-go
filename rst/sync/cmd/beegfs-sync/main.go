@@ -14,12 +14,14 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
+	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )
 
@@ -34,6 +36,8 @@ var (
 	commit     = "unknown"
 	buildTime  = "unknown"
 )
+
+var capabilities = map[string]*flex.Feature{}
 
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
@@ -86,6 +90,11 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	if err := registry.InitComponentRegistry(buildInfo, capabilities, false); err != nil {
+		log.Fatalf("failed to initialize remote registry: %s", err)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.

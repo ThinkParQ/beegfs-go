@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -85,6 +86,7 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+	var remoteCapabilityRegistry *registry.ComponentRegistry
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
@@ -107,6 +109,9 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	var filter filesystem.FileInfoFilter
 	filterExpr := cfg.GetFilterExpr()
 	if filterExpr != "" {
+		if err := registry.RequireRemoteFeature(ctx, remote, &remoteCapabilityRegistry, registry.FeatureFilterFiles); err != nil {
+			return nil, err
+		}
 		filter, err = filesystem.CompileFilter(filterExpr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter %q: %w", filterExpr, err)

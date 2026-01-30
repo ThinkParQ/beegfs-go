@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -227,4 +228,11 @@ func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremot
 		return &beeremote.GetStubContentsResponse{}, err
 	}
 	return &beeremote.GetStubContentsResponse{RstId: &id, Url: &url}, nil
+}
+
+func (s *BeeRemoteServer) GetCapabilities(ctx context.Context, request *beeremote.GetCapabilitiesRequest) (*beeremote.GetCapabilitiesResponse, error) {
+	return &beeremote.GetCapabilitiesResponse{
+		BuildInfo: registry.GetComponentBuildInfo(),
+		Features:  registry.GetComponentCapabilities(),
+	}, nil
 }

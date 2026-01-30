@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
@@ -147,4 +148,11 @@ func (s *WorkerNodeServer) Heartbeat(ctx context.Context, request *flex.Heartbea
 	return flex.HeartbeatResponse_builder{
 		IsReady: s.workMgr.IsReady(),
 	}.Build(), nil
+}
+
+func (s *WorkerNodeServer) GetCapabilities(ctx context.Context, request *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
+	return &flex.GetCapabilitiesResponse{
+		BuildInfo: registry.GetComponentBuildInfo(),
+		Features:  registry.GetComponentCapabilities(),
+	}, nil
 }

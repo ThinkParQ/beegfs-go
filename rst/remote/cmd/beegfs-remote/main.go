@@ -15,6 +15,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
@@ -39,6 +40,8 @@ var (
 	commit     = "unknown"
 	buildTime  = "unknown"
 )
+
+var capabilities = map[string]*flex.Feature{}
 
 func main() {
 	// All application configuration (AppConfig) can be set using flags. The
@@ -103,6 +106,11 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	if err := registry.InitComponentRegistry(buildInfo, capabilities, false); err != nil {
+		log.Fatalf("failed to initialize remote registry: %s", err)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
