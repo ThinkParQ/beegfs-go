@@ -25,6 +25,21 @@ type FileInfo struct {
 	Gid   uint32    // Group ID
 }
 
+// File type filter expressions and definitions
+var (
+	fileTypeMask  = 0o170000
+	fileTypes     = map[string]uint32{"file": 0o100000, "directory": 0o040000, "symlink": 0o120000, "block": 0o060000, "char": 0o020000, "fifo": 0o010000, "socket": 0o140000}
+	fileTypeNames = func() []string {
+		names := make([]string, 0, len(fileTypes))
+		for name := range fileTypes {
+			names = append(names, name)
+		}
+		return names
+	}()
+	fileTypeGroupRe = "(?:" + strings.Join(fileTypeNames, "|") + ")"
+	fileTypeRe      = regexp.MustCompile(`\b(?i)type\s*(==|!=)\s*(` + fileTypeGroupRe + `(?:\s*,\s*` + fileTypeGroupRe + `)*)\b`)
+)
+
 var (
 	// modeOctRe insists on a leading 0 with 5-6 octal digits. This targets classic stat-style
 	// literals like 0100644 without touching plain decimal values like 33188. The rewrite is scoped
@@ -51,9 +66,10 @@ var (
 
 const FilterFilesHelp = "Filter files by expression: fields(name/path <string>, uid/gid <int>, " +
 	"mode <octal[like 0100644, 0o0100644] | decimal[like 33188]>, perm <octal[like 644, 0644, 0o0644]>, " +
+	"type <file|directory|symlink|block|char|fifo|socket>, " +
 	"mtime/atime/ctime <duration[like 1s, 2m, 3h, 4d, 5M, 10y]>, size <bytes[like 1B, 2KB, 3MiB, 4GiB]>); " +
 	"operators(==,!=,<,>,<=,>=); helpers(glob([name|path], pattern), regex([name|path], pattern)); " +
-	"logic(and|or|not); Example: --filter-files=\"mtime > 365d and glob(name, '*.txt')\""
+	"logic(and|or|not); Example: --filter-files=\"mtime > 365d and type == file,symlink and glob(name, '*.txt')\""
 
 type FileInfoFilter func(FileInfo) (bool, error)
 
@@ -93,6 +109,8 @@ func preprocessDSL(q string) string {
 	// octal to decimal
 	q = normalizeOctal(q, permOctRe)
 	q = normalizeOctal(q, modeOctRe)
+	// file types
+	q = setFileType(q)
 	// time shifts
 	q = timeRe.ReplaceAllStringFunc(q, func(m string) string {
 		parts := timeRe.FindStringSubmatch(m)
@@ -122,6 +140,35 @@ func preprocessDSL(q string) string {
 		return s
 	})
 	return q
+}
+
+// setFileType transform a type expressions one or more into mode filters to include or exclude
+// specific file types.
+func setFileType(q string) string {
+	return fileTypeRe.ReplaceAllStringFunc(q, func(expr string) string {
+		parts := fileTypeRe.FindStringSubmatch(expr)
+		op, types := parts[1], parts[2]
+
+		used := make(map[string]struct{})
+		clauses := []string{}
+		for name := range strings.SplitSeq(types, ",") {
+			name = strings.TrimSpace(strings.ToLower(name))
+			if _, ok := used[name]; ok {
+				continue
+			}
+			if _, ok := fileTypes[name]; !ok {
+				return expr
+			}
+			used[name] = struct{}{}
+			clauses = append(clauses, fmt.Sprintf("bitand(int(Mode), %d) == %d", fileTypeMask, fileTypes[name]))
+		}
+
+		expr = "(" + strings.Join(clauses, " or ") + ")"
+		if op == "!=" {
+			return fmt.Sprintf("not %s", expr)
+		}
+		return expr
+	})
 }
 
 // normalizeOctal takes a string and parses it to a base8 integer after stripping an optional 0o
