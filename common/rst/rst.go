@@ -470,6 +470,21 @@ func updateRstConfig(ctx context.Context, rstID uint32, path string, entryInfo m
 	return nil
 }
 
+// updateDirRstConfig applies the RST configuration to a directory entry by calling SetDirPattern.
+func updateDirRstConfig(ctx context.Context, rstID uint32, path string) error {
+	var rstIds []uint32
+	if IsValidRstId(rstID) {
+		rstIds = []uint32{rstID}
+	} else {
+		return fmt.Errorf("--%s requires a valid --%s to be specified", UpdateFlag, RemoteTargetFlag)
+	}
+
+	if err := entry.SetDirRstIds(ctx, path, rstIds); err != nil {
+		return fmt.Errorf("failed to apply persistent RST configuration: %w", err)
+	}
+	return nil
+}
+
 // PrepareFileStateForWorkRequests handles preflight checks and common tasks based on collected
 // lockedInfo. Sentinel errors are returned when the file is already in the expected synced or
 // offloaded state. Sentinel errors can be checked using IsErrJobTerminalSentinel.
