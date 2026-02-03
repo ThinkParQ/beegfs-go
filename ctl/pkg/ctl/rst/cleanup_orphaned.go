@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -122,33 +120,31 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 	}
 	result.Missing = true
 
-	updatePath := filepath.Join(mountPoint.GetMountPath(), strings.TrimPrefix(dbPath, "/"))
-	respChan := make(chan *UpdateJobsResponse, 1)
-	updateCfg := &UpdateJobCfg{
-		Path:     updatePath,
-		Force:    true,
-		NewState: beeremote.UpdateJobsRequest_DELETED,
-	}
-	if err := UpdateJobsByPaths(ctx, updateCfg, respChan); err != nil {
+	beeRemote, err := config.BeeRemoteClient()
+	if err != nil {
 		result.Err = err
 		return result
 	}
-	for resp := range respChan {
-		if resp.Err != nil {
-			if isNotFoundErr(resp.Err) || errors.Is(resp.Err, rst.ErrEntryNotFound) {
-				result.Deleted = true
-				result.Message = "entry already removed"
-				continue
-			}
-			result.Err = resp.Err
-			continue
-		}
-		result.Message = resp.Result.GetMessage()
-		if resp.Result.GetOk() {
+
+	resp, err := beeRemote.UpdateJobs(ctx, beeremote.UpdateJobsRequest_builder{
+		Path:        dbPath,
+		NewState:    beeremote.UpdateJobsRequest_DELETED,
+		ForceUpdate: true,
+	}.Build())
+	if err != nil {
+		if isNotFoundErr(err) || errors.Is(err, rst.ErrEntryNotFound) {
 			result.Deleted = true
-		} else {
-			result.Skipped = true
+			result.Message = "entry already removed"
+			return result
 		}
+		result.Err = err
+		return result
+	}
+	result.Message = resp.GetMessage()
+	if resp.GetOk() {
+		result.Deleted = true
+	} else {
+		result.Skipped = true
 	}
 	return result
 }
