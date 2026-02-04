@@ -4,30 +4,43 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 )
 
 // JobBuilderClient is a special RST client that builders new job requests based on the information
 // provided via flex.JobRequestCfg.
 type JobBuilderClient struct {
 	ctx        context.Context
+	log        *zap.Logger
 	rstMap     map[uint32]Provider
 	mountPoint filesystem.Provider
 }
 
 var _ Provider = &JobBuilderClient{}
 
-func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+func NewJobBuilderClient(ctx context.Context, log *zap.Logger, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[JobBuilderClient]().PkgPath())))
+
 	return &JobBuilderClient{
 		ctx:        ctx,
+		log:        log,
 		rstMap:     rstMap,
 		mountPoint: mountPoint,
 	}
@@ -150,8 +163,8 @@ func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
 }
 
 // GetRemotePathInfo is not implemented and should never be called.
-func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
-	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
+func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (*RemotePathInfo, error) {
+	return nil, ErrUnsupportedOpForRST
 }
 
 // GenerateExternalId is not implemented and should never be called.
@@ -179,8 +192,69 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		isPathDir = err == nil && stat.IsDir()
 	}
 
-	reschedule := false
+	var (
+		// jobRequestsBuffer holds job requests that need to be sorted before streaming to the caller.
+		// In practice, a thousand job requests occupy tens to a few hundred megabytes contingent on
+		// string lengths.
+		jobRequestsBuffer []*beeremote.JobRequest
+		// jobRequestsBufferSize maintains the estimated byte size of buffered job requests.
+		jobRequestsBufferSize int64
+		// jobRequestsBufferSizeThreshold forces the jobRequestsBuffer to be flushed; this is
+		// intended as a safety valve to ensure memory utilization remains controlled. This value
+		// should large enough to never be reached.
+		jobRequestsBufferSizeThreshold = int64(100 * 1024 * 1024)
+		// jobRequestsBufferMu mutex guards jobRequestsBuffer updates.
+		jobRequestsBufferMu = sync.Mutex{}
+	)
+
+	// submitJobRequests sends jobRequests to jobSubmissionChan unless skipBuffering is true. When
+	// buffering, requests with SortValues go into jobRequestsBuffer, which is sorted and flushed
+	// after all requests have been received.
+	//
+	// Only the parent context should be used to ensure the job requests are submitted and only failed
+	// when the caller's context is cancelled.
+	var submitJobRequests func(jobRequests []*beeremote.JobRequest, skipBuffering bool) (submitCount int, errorCount int)
+	submitJobRequests = func(jobRequests []*beeremote.JobRequest, skipBuffering bool) (submitCount int, errorCount int) {
+		for _, jobRequest := range jobRequests {
+			if !skipBuffering && len(jobRequest.SortValues) > 0 {
+				jobRequestsBufferMu.Lock()
+				jobRequestsBuffer = append(jobRequestsBuffer, jobRequest)
+				jobRequestsBufferSize += sizeOfJobRequest(jobRequest)
+
+				// Sort and flush jobRequestsBuffer when memory usage exceeds threshold. This will
+				// block other processes attempting to defer jobRequests until complete.
+				if jobRequestsBufferSize >= jobRequestsBufferSizeThreshold {
+					c.log.Warn("exceeded job request buffer memory usage threshold", zap.Int("jobRequests", len(jobRequestsBuffer)),
+						zap.Int64("bufferSizeBytes", jobRequestsBufferSize), zap.Int64("thresholdBytes", jobRequestsBufferSizeThreshold))
+
+					sortJobRequests(jobRequestsBuffer)
+					submits, errors := submitJobRequests(jobRequestsBuffer, true)
+					errorCount += errors
+					submitCount += submits
+					jobRequestsBuffer = []*beeremote.JobRequest{}
+					jobRequestsBufferSize = 0
+				}
+				jobRequestsBufferMu.Unlock()
+				continue
+			}
+
+			status := jobRequest.GetGenerationStatus()
+			if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
+				errorCount++
+			}
+			select {
+			case <-ctx.Done():
+			case jobSubmissionChan <- jobRequest:
+				submitCount++
+			}
+		}
+		return
+	}
+
+	g, gCtx := errgroup.WithContext(ctx)
 	builderStateMu := sync.Mutex{}
+	reschedule := false
+
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
@@ -188,10 +262,11 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		var err error
 		var inMountPath string
 		var remotePath string
+
 		for {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-gCtx.Done():
+				return gCtx.Err()
 			case walkResp, ok := <-walkChan:
 				if !ok {
 					select {
@@ -238,7 +313,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 			}
 
-			jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
+			jobRequests, err := BuildJobRequests(gCtx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
 			if err != nil {
 				// BuildJobRequest should only return fatal errors, or if there are no RSTs
 				// specified/configured on an entry and there is no other way to return the
@@ -246,20 +321,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				return err
 			}
 
-			errorCount := 0
-			for _, jobRequest := range jobRequests {
-				status := jobRequest.GetGenerationStatus()
-				if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
-					errorCount++
-				}
-				select {
-				case <-ctx.Done():
-				case jobSubmissionChan <- jobRequest:
-				}
-			}
-
+			submitCount, errorCount := submitJobRequests(jobRequests, false)
 			builderStateMu.Lock()
-			builder.Submitted += int32(len(jobRequests))
+			builder.Submitted += int32(submitCount)
 			builder.Errors += int32(errorCount)
 			builderStateMu.Unlock()
 		}
@@ -269,14 +333,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	// (up to GOMAXPROCS) when the job submission channel stays near empty, indicating the consumer is
 	// draining faster than we can fill it. This keeps throughput balanced without over saturating
 	// the system.
-	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		workers := 1
 		lowThresholdTicks := 0
 		g.Go(createJobRequests)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-gCtx.Done():
 				return nil
 			case <-walkDoneChan:
 				return nil
@@ -300,9 +363,21 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			}
 		}
 	})
-	if err := g.Wait(); err != nil {
+	err := g.Wait()
+
+	// Sort and submit any remaining job requests. These requests need to be submitted regardless of
+	// any errors that may have occurred since the job request was successfully created.
+	if len(jobRequestsBuffer) > 0 {
+		sortJobRequests(jobRequestsBuffer)
+		submitCount, errorCount := submitJobRequests(jobRequestsBuffer, true)
+		builder.Submitted += int32(submitCount)
+		builder.Errors += int32(errorCount)
+	}
+
+	if err != nil {
 		return false, fmt.Errorf("job builder request was aborted: %w", err)
 	}
+
 	if reschedule {
 		return true, nil
 	}
@@ -331,6 +406,29 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		return false, errors.New(errMessage)
 	}
 	return false, nil
+}
+
+func sortJobRequests(buffer []*beeremote.JobRequest) {
+	sort.SliceStable(buffer, func(i, j int) bool {
+		a := buffer[i].SortValues
+		b := buffer[j].SortValues
+		for k := 0; k < len(a) && k < len(b); k++ {
+			if a[k] == b[k] {
+				continue
+			}
+			return a[k] < b[k]
+		}
+		return len(a) < len(b)
+	})
+}
+
+// sizeOfJobRequest approximates the size of jobRequest. The actual heap usage may end up higher or
+// lower than the estimate based on runtime overhead and whether heap usages were reused.
+func sizeOfJobRequest(jobRequests *beeremote.JobRequest) int64 {
+	size := int64(proto.Size(jobRequests))
+	size += int64(unsafe.Sizeof(*jobRequests))
+	size += int64(len(jobRequests.SortValues)) * int64(unsafe.Sizeof(""))
+	return size
 }
 
 func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
