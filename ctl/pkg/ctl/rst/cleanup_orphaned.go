@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -144,7 +145,12 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 	if resp.GetOk() {
 		result.Deleted = true
 	} else {
-		result.Skipped = true
+		if result.Missing && strings.Contains(result.Message, "no such file or directory") {
+			result.Deleted = true
+			result.Message = "lock clear skipped (file missing)"
+		} else {
+			result.Skipped = true
+		}
 	}
 	return result
 }
