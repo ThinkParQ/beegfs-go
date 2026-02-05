@@ -141,10 +141,10 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 		result.Err = err
 		return result
 	}
-	result.Message = resp.GetMessage()
 	if resp.GetOk() {
 		result.Deleted = true
 	} else {
+		result.Message = resp.GetMessage()
 		if result.Missing && strings.Contains(result.Message, "no such file or directory") {
 			result.Deleted = true
 			result.Message = "lock clear skipped (file missing)"
