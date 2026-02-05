@@ -24,6 +24,7 @@ var (
 	statBinary        = "/usr/local/bin/gufi_stat"
 	findBinary        = "/usr/local/bin/gufi_find"
 	sqlite3Binary     = "/usr/local/bin/gufi_sqlite3"
+	queryBinary       = "/usr/local/bin/gufi_query"
 )
 
 var path string
@@ -33,6 +34,8 @@ type gufiConfig struct {
 	QueryPath    string
 	Sqlite3Path  string
 	StatPath     string
+	Server       string
+	Port         int
 	OutputBuffer int
 	Threads      int
 }
@@ -91,6 +94,9 @@ func loadIndexConfig() (*gufiConfig, error) {
 		if cfg.StatPath != "" {
 			statBinary = cfg.StatPath
 		}
+		if cfg.QueryPath != "" {
+			queryBinary = cfg.QueryPath
+		}
 	})
 
 	return cfg, cfgErr
@@ -124,16 +130,16 @@ func parseIndexConfigFile(configPath string) (*gufiConfig, error) {
 	for scanner.Scan() {
 		lineNum++
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
 		if val == "" {
 			errs = append(errs, fmt.Errorf("%s: empty value for %s on line %d", configPath, key, lineNum))
 			continue
@@ -161,6 +167,15 @@ func parseIndexConfigFile(configPath string) (*gufiConfig, error) {
 			out.Sqlite3Path = val
 		case "Stat":
 			out.StatPath = val
+		case "Server":
+			out.Server = val
+		case "Port":
+			port, parseErr := strconv.Atoi(val)
+			if parseErr != nil || port < 0 {
+				errs = append(errs, fmt.Errorf("%s: invalid Port on line %d: %s", configPath, lineNum, val))
+				continue
+			}
+			out.Port = port
 		case "OutputBuffer":
 			size, parseErr := strconv.Atoi(val)
 			if parseErr != nil || size < 0 {

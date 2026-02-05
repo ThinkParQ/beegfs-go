@@ -55,6 +55,9 @@ beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 
 func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	log, _ := config.GetLogger()
+	if _, err := loadIndexConfig(); err != nil {
+		log.Debug("unable to load BeeGFS index config", zap.Error(err))
+	}
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, sqlite3Binary)
@@ -65,10 +68,10 @@ func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
 	}
 	log.Debug("Running BeeGFS Hive Index query command",
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("queryCmd", sqlite3Binary),
+		zap.Any("queryCmd", queryBinary),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
+	cmd := exec.Command(queryBinary, allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
