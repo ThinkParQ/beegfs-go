@@ -11,15 +11,15 @@ import (
 )
 
 const (
-	HeaderLen               = 68
-	HeaderEncryptionInfoLen = 32
-	// Fixed value for identifying BeeMsges. In theory, this has some kind of version modifier (thus
-	// the + 0), but it is unused
-	MsgPrefix = (0x42474653 << 32) + 0
+	HeaderLen               = 64
+	HeaderEncryptionInfoLen = 36
+	MsgPrefix = 0x42474653
 )
 
 // The BeeMsg header
 type Header struct {
+	// Fixed value that identifies BeeMsges (see const MsgPrefix)
+	MsgPrefix uint32
 	// The total message length, including the header
 	MsgLen uint32
 	// Encryption info
@@ -30,8 +30,6 @@ type Header struct {
 	MsgCompatFeatureFlags uint8
 	// Mainly mirroring related use
 	MsgFlags uint8
-	// Fixed value that identifies BeeMsges (see const MsgPrefix)
-	MsgPrefix uint64
 	// The unique ID of the BeeMsg as defined in NetMessageTypes.h
 	MsgID uint16
 	// Contains the storage target ID in (some?) file system operations
@@ -48,23 +46,23 @@ type Header struct {
 // are filled with 0xFF as a placeholder and meant to be overwritten after serialization using the provided methods.
 func NewHeader(msgID uint16) Header {
 	return Header{
+		MsgPrefix:         MsgPrefix,
 		// MsgLen and MsgFeatureFlags are supposed to be overwritten after the body of the message
 		// has been serialized using the functions below.
 		MsgLen:            0xFFFFFFFF,
 		MsgEncryptionInfo: crypto.NewAesEncryptionInfo(),
 		MsgFeatureFlags:   0xFFFF,
-		MsgPrefix:         MsgPrefix,
 		MsgID:             msgID,
 	}
 }
 
 func (t *Header) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, t.MsgPrefix)
 	beeserde.SerializeInt(s, t.MsgLen)
 	t.MsgEncryptionInfo.Serialize(s)
 	beeserde.SerializeInt(s, t.MsgFeatureFlags)
 	beeserde.SerializeInt(s, t.MsgCompatFeatureFlags)
 	beeserde.SerializeInt(s, t.MsgFlags)
-	beeserde.SerializeInt(s, t.MsgPrefix)
 	beeserde.SerializeInt(s, t.MsgID)
 	beeserde.SerializeInt(s, t.MsgTargetID)
 	beeserde.SerializeInt(s, t.MsgUserID)
@@ -73,12 +71,12 @@ func (t *Header) Serialize(s *beeserde.Serializer) {
 }
 
 func (t *Header) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &t.MsgPrefix)
 	beeserde.DeserializeInt(d, &t.MsgLen)
 	t.MsgEncryptionInfo.Deserialize(d)
 	beeserde.DeserializeInt(d, &t.MsgFeatureFlags)
 	beeserde.DeserializeInt(d, &t.MsgCompatFeatureFlags)
 	beeserde.DeserializeInt(d, &t.MsgFlags)
-	beeserde.DeserializeInt(d, &t.MsgPrefix)
 	beeserde.DeserializeInt(d, &t.MsgID)
 	beeserde.DeserializeInt(d, &t.MsgTargetID)
 	beeserde.DeserializeInt(d, &t.MsgUserID)
@@ -88,19 +86,19 @@ func (t *Header) Deserialize(d *beeserde.Deserializer) {
 
 // Checks the given slice for being a serialized BeeMsg header
 func IsSerializedHeader(serHeader []byte) bool {
-	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint64(serHeader[36:44]) == MsgPrefix
+	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint32(serHeader[0:4]) == MsgPrefix
 }
 
 // Retrieves the MsgLen field from a serialized header
 func ExtractMsgLen(serHeader []byte) uint32 {
-	return binary.LittleEndian.Uint32(serHeader[0:4])
+	return binary.LittleEndian.Uint32(serHeader[4:8])
 }
 
 func ExtractMsgEncryptionInfo(buf []byte) (crypto.AesEncryptionInfo, error) {
 	// TODO this is a mess
 	res := crypto.NewAesEncryptionInfo()
-	copy(res.Iv, buf[4:16])
-	copy(res.Tag, buf[16:32])
+	copy(res.Iv, buf[8:20])
+	copy(res.Tag, buf[20:36])
 
 	return res, nil
 }
@@ -113,7 +111,7 @@ func OverwriteMsgLen(serHeader []byte, msgLen uint32) error {
 		return fmt.Errorf("invalid header")
 	}
 
-	binary.LittleEndian.PutUint32(serHeader[0:4], msgLen)
+	binary.LittleEndian.PutUint32(serHeader[4:8], msgLen)
 
 	return nil
 }
@@ -126,15 +124,15 @@ func OverwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
 		return fmt.Errorf("invalid header")
 	}
 
-	binary.LittleEndian.PutUint16(serHeader[32:34], msgFeatureFlags)
+	binary.LittleEndian.PutUint16(serHeader[36:38], msgFeatureFlags)
 
 	return nil
 }
 
 func OverwriteMsgEncryptionInfo(ser []byte, info crypto.AesEncryptionInfo) error {
 	// TODO this is a mess
-	copy(ser[4:16], info.Iv)
-	copy(ser[16:32], info.Tag)
+	copy(ser[8:20], info.Iv)
+	copy(ser[20:36], info.Tag)
 
 	return nil
 }

@@ -31,7 +31,7 @@ func TestOverwriteMsgLen(t *testing.T) {
 	assert.Error(t, err)
 
 	// set the correct prefix
-	binary.LittleEndian.PutUint64(buf[36:44], MsgPrefix)
+	binary.LittleEndian.PutUint64(buf[0:4], MsgPrefix)
 
 	err = OverwriteMsgLen(buf, 1234)
 	assert.NoError(t, err)
@@ -48,9 +48,9 @@ func TestOverwriteMsgFeatureFlags(t *testing.T) {
 	assert.Error(t, err)
 
 	// set the correct prefix
-	binary.LittleEndian.PutUint64(buf[36:44], MsgPrefix)
+	binary.LittleEndian.PutUint64(buf[0:4], MsgPrefix)
 
 	err = OverwriteMsgFeatureFlags(buf, 1234)
 	assert.NoError(t, err)
-	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[32:34]))
+	assert.EqualValues(t, 1234, binary.LittleEndian.Uint16(buf[36:38]))
 }
