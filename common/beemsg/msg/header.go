@@ -13,7 +13,7 @@ import (
 const (
 	HeaderLen               = 64
 	HeaderEncryptionInfoLen = 36
-	MsgPrefix = 0x42474653
+	MsgPrefix = 0x53464742
 )
 
 // The BeeMsg header
