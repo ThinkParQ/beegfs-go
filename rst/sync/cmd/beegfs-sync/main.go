@@ -37,7 +37,9 @@ var (
 	buildTime  = "unknown"
 )
 
-var capabilities = map[string]*flex.Feature{}
+var capabilities = map[string]*flex.Feature{
+	registry.FeatureFilterFiles: nil,
+}
 
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
@@ -90,11 +92,6 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
-	}
-
-	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	if err := registry.InitComponentRegistry(buildInfo, capabilities, false); err != nil {
-		log.Fatalf("failed to initialize remote registry: %s", err)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
@@ -184,7 +181,8 @@ Using environment variables:
 		logger.Fatal("failed to initialize work manager", zap.Error(err))
 	}
 
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, workMgr)
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	jobServer, err := server.New(logger.Logger, initialCfg.Server, workMgr, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Sync gRPC server", zap.Error(err))
 	}

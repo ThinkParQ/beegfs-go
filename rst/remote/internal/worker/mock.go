@@ -24,7 +24,7 @@ func newMockNode(baseNode *baseNode) Worker {
 	return mockNode
 }
 
-func (n *MockNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest) (bool, error) {
+func (n *MockNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
 	args := n.Called()
 	return args.Bool(0), args.Error(1)
 }

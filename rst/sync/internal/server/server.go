@@ -7,6 +7,7 @@ import (
 	"path"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Config struct {
@@ -32,18 +34,22 @@ type WorkerNodeServer struct {
 	Config
 	grpcServer *grpc.Server
 	workMgr    *workmgr.Manager
+	registry   *registry.ComponentRegistry
+	startTime  time.Time
 }
 
 // New() creates a new WorkerNodeServer that can be used with ListenAndServe().
-func New(log *zap.Logger, config Config, workMgr *workmgr.Manager) (*WorkerNodeServer, error) {
+func New(log *zap.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeOf(WorkerNodeServer{}).PkgPath())))
 
 	s := WorkerNodeServer{
-		log:     log,
-		wg:      new(sync.WaitGroup),
-		Config:  config,
-		workMgr: workMgr,
+		log:       log,
+		wg:        new(sync.WaitGroup),
+		Config:    config,
+		workMgr:   workMgr,
+		registry:  registry.NewComponentRegistry(buildInfo, features),
+		startTime: time.Now(),
 	}
 
 	var grpcServerOpts []grpc.ServerOption
@@ -152,7 +158,8 @@ func (s *WorkerNodeServer) Heartbeat(ctx context.Context, request *flex.Heartbea
 
 func (s *WorkerNodeServer) GetCapabilities(ctx context.Context, request *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
 	return &flex.GetCapabilitiesResponse{
-		BuildInfo: registry.GetComponentBuildInfo(),
-		Features:  registry.GetComponentCapabilities(),
+		BuildInfo:      s.registry.GetBuildInfo(),
+		Features:       s.registry.GetCapabilities(),
+		StartTimestamp: timestamppb.New(s.startTime),
 	}, nil
 }

@@ -86,7 +86,6 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 // cfg.rstId, stub file url, or the file's rstIds will be used to generate rst specific job
 // requests.
 func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	var remoteCapabilityRegistry *registry.ComponentRegistry
 	mountPoint, err := config.BeeGFSClient(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
@@ -109,9 +108,18 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	var filter filesystem.FileInfoFilter
 	filterExpr := cfg.GetFilterExpr()
 	if filterExpr != "" {
-		if err := registry.RequireRemoteFeature(ctx, remote, &remoteCapabilityRegistry, registry.FeatureFilterFiles); err != nil {
+		remoteRegistry, _, err := registry.GetComponentRegistry(ctx, remote)
+		if err != nil {
+			if status.Code(err) == codes.Unimplemented {
+				return nil, fmt.Errorf("remote node does not support %s", registry.FeatureFilterFiles)
+			}
 			return nil, err
 		}
+
+		if err := remoteRegistry.RequireFeature(registry.FeatureFilterFiles); err != nil {
+			return nil, err
+		}
+
 		filter, err = filesystem.CompileFilter(filterExpr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter %q: %w", filterExpr, err)

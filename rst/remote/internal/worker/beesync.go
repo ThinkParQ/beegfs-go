@@ -28,13 +28,12 @@ var _ Worker = &BeeSyncNode{}
 var _ grpcClientHandler = &BeeSyncNode{}
 
 func newBeeSyncNode(baseNode *baseNode) Worker {
-
 	beeSyncNode := &BeeSyncNode{baseNode: baseNode}
 	beeSyncNode.baseNode.grpcClientHandler = beeSyncNode
 	return beeSyncNode
 }
 
-func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest) (bool, error) {
+func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
 	var cert []byte
 	var err error
 	if !n.config.TlsDisable && n.config.TlsCertFile != "" {
@@ -85,9 +84,12 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	}
 
 	// Verify the sync node capabilities support remote.
-	if capabilities, err := n.client.GetCapabilities(n.rpcCtx, &flex.GetCapabilitiesRequest{}); err != nil {
+	if clientRegistry, _, err := registry.GetComponentRegistry(n.rpcCtx, n.client); err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			return false, fmt.Errorf("incompatible sync node: GetCapabilities is not supported: %w", err)
+		}
 		return true, fmt.Errorf("failed to determine sync node capabilities: %w", err)
-	} else if err = registry.EnsureCapabilitiesSupportRegistry(capabilities); err != nil {
+	} else if err = clientRegistry.RequireFeatures(requiredFeatures); err != nil {
 		return false, fmt.Errorf("incompatible sync node: %w", err)
 	}
 

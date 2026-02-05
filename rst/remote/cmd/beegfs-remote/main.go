@@ -41,7 +41,9 @@ var (
 	buildTime  = "unknown"
 )
 
-var capabilities = map[string]*flex.Feature{}
+var capabilities = map[string]*flex.Feature{
+	registry.FeatureFilterFiles: nil,
+}
 
 func main() {
 	// All application configuration (AppConfig) can be set using flags. The
@@ -106,11 +108,6 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
-	}
-
-	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	if err := registry.InitComponentRegistry(buildInfo, capabilities, false); err != nil {
-		log.Fatalf("failed to initialize remote registry: %s", err)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
@@ -270,7 +267,7 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint)
+	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}
@@ -286,7 +283,8 @@ Using environment variables:
 		logger.Fatal("unable to start job manager", zap.Error(err))
 	}
 
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager)
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
 	}
