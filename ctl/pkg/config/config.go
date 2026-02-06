@@ -21,6 +21,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -375,6 +376,58 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 	beeRemoteClient = beeremote.NewBeeRemoteClient(conn)
 
 	return beeRemoteClient, err
+}
+
+// BeeRemoteComponentRegistry returns a cached registry for BeeRemote capabilities and immediately
+// retrieves the client registry information. If remote is nil, the client is resolved using
+// BeeRemoteClient. For lazy initialization, use BeeRemoteComponentRegistryLazy.
+//
+//	reg, err := BeeRemoteComponentRegistryLazy(ctx, nil)
+//	if err != nil {
+//	    return nil, err
+//	}
+//	if err := reg.RequireFeature(ctx, registry.FeatureFilterFiles); err != nil {
+//	    return nil, err
+//	}
+func BeeRemoteComponentRegistry(ctx context.Context, remote *beeremote.BeeRemoteClient) (*registry.CachedComponentRegistry, error) {
+	opts := []registry.CachedComponentRegistryOpt{}
+	if remote == nil {
+		opts = append(opts, registry.WithGetClientFunc(beeRemoteRegistryClient))
+		return registry.NewCachedComponentRegistry(ctx, nil, opts...)
+	}
+
+	var client registry.RegistryComponent = *remote
+	return registry.NewCachedComponentRegistry(ctx, &client, opts...)
+}
+
+// BeeRemoteComponentRegistryLazy returns a cached registry without fetching capabilities up front.
+// If remote is nil, the client is resolved using BeeRemoteClient on first use.
+//
+//	reg, err := BeeRemoteComponentRegistryLazy(ctx, nil)
+//	if err != nil {
+//	    return nil, err
+//	}
+//	if err := reg.RequireFeature(ctx, registry.FeatureFilterFiles); err != nil {
+//	    return nil, err
+//	}
+func BeeRemoteComponentRegistryLazy(ctx context.Context, remote *beeremote.BeeRemoteClient) (*registry.CachedComponentRegistry, error) {
+	opts := []registry.CachedComponentRegistryOpt{registry.WithSkipInit()}
+	if remote == nil {
+		opts = append(opts, registry.WithGetClientFunc(beeRemoteRegistryClient))
+		return registry.NewCachedComponentRegistry(ctx, nil, opts...)
+	}
+
+	var client registry.RegistryComponent = *remote
+	return registry.NewCachedComponentRegistry(ctx, &client, opts...)
+}
+
+func beeRemoteRegistryClient() (*registry.RegistryComponent, error) {
+	client, err := BeeRemoteClient()
+	if err != nil {
+		return nil, err
+	}
+	var regClient registry.RegistryComponent = client
+	return &regClient, nil
 }
 
 // BeeGFSClient provides a standardize way to interact with a mounted or unmounted BeeGFS instance

@@ -43,6 +43,7 @@ type Manager struct {
 	// are existing jobs for a changed/removed RST.
 	RemoteStorageTargets map[uint32]rst.Provider
 	mountPoint           filesystem.Provider
+	requiredFeatures     map[string]*flex.Feature
 }
 
 // JobSubmission is used to submit a Job and its associated work requests to be
@@ -69,7 +70,16 @@ type JobUpdate struct {
 // operations it accepts a context that can be cancelled if it should stop trying to configure the
 // manager. It does not (nor should it) use this context for anything else, and Stop() must be
 // called to shutdown worker nodes.
-func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, workerConfigs []worker.Config, rstConfigs []*flex.RemoteStorageTarget, beeRmtConfig *flex.BeeRemoteNode, mountPoint filesystem.Provider) (*Manager, error) {
+func NewManager(
+	ctx context.Context,
+	log *zap.Logger,
+	managerConfig Config,
+	workerConfigs []worker.Config,
+	rstConfigs []*flex.RemoteStorageTarget,
+	beeRmtConfig *flex.BeeRemoteNode,
+	mountPoint filesystem.Provider,
+	requiredFeatures map[string]*flex.Feature,
+) (*Manager, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeOf(Manager{}).PkgPath())))
 
 	rstMap := make(map[uint32]rst.Provider)
@@ -125,6 +135,7 @@ func NewManager(ctx context.Context, log *zap.Logger, managerConfig Config, work
 		config:               managerConfig,
 		RemoteStorageTargets: rstMap,
 		mountPoint:           mountPoint,
+		requiredFeatures:     requiredFeatures,
 	}
 
 	return workerManager, nil
@@ -139,7 +150,7 @@ func (m *Manager) Start() error {
 	}
 	// Bring all node pools online:
 	for _, pool := range m.nodePools {
-		pool.HandleAll(m.nodeWG)
+		pool.HandleAll(m.nodeWG, m.requiredFeatures)
 	}
 	return nil
 }

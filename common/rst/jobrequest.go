@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -104,9 +105,18 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		cfg.Priority = proto.Int32(scheduler.DefaultPriority)
 	}
 
+	remoteRegistry, err := config.BeeRemoteComponentRegistryLazy(ctx, &remote)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve BeeGFS remote registry: %w", err)
+	}
+
 	var filter filesystem.FileInfoFilter
 	filterExpr := cfg.GetFilterExpr()
 	if filterExpr != "" {
+		if err := remoteRegistry.RequireFeature(ctx, registry.FeatureFilterFiles); err != nil {
+			return nil, err
+		}
+
 		filter, err = filesystem.CompileFilter(filterExpr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter %q: %w", filterExpr, err)

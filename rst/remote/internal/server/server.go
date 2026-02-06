@@ -8,16 +8,20 @@ import (
 	"path"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Config struct {
@@ -37,19 +41,23 @@ type BeeRemoteServer struct {
 	Config
 	grpcServer *grpc.Server
 	jobMgr     *job.Manager
+	registry   *registry.ComponentRegistry
+	startTime  time.Time
 }
 
 // New() creates a new BeeRemoteServer that can be used with ListenAndServe().
 // It requires a channel where it can send job requests to JobMgr.
-func New(log *zap.Logger, config Config, jobMgr *job.Manager) (*BeeRemoteServer, error) {
+func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*BeeRemoteServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeOf(BeeRemoteServer{}).PkgPath())))
 
 	s := BeeRemoteServer{
-		log:    log,
-		Config: config,
-		wg:     new(sync.WaitGroup),
-		jobMgr: jobMgr,
+		log:       log,
+		Config:    config,
+		wg:        new(sync.WaitGroup),
+		jobMgr:    jobMgr,
+		registry:  registry.NewComponentRegistry(buildInfo, features),
+		startTime: time.Now(),
 	}
 
 	var grpcServerOpts []grpc.ServerOption
@@ -227,4 +235,12 @@ func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremot
 		return &beeremote.GetStubContentsResponse{}, err
 	}
 	return &beeremote.GetStubContentsResponse{RstId: &id, Url: &url}, nil
+}
+
+func (s *BeeRemoteServer) GetCapabilities(ctx context.Context, request *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
+	return &flex.GetCapabilitiesResponse{
+		BuildInfo:      s.registry.GetBuildInfo(),
+		Features:       s.registry.GetCapabilities(),
+		StartTimestamp: timestamppb.New(s.startTime),
+	}, nil
 }

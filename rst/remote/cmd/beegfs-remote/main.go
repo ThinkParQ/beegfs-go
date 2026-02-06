@@ -15,6 +15,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
@@ -39,6 +40,10 @@ var (
 	commit     = "unknown"
 	buildTime  = "unknown"
 )
+
+var capabilities = map[string]*flex.Feature{
+	registry.FeatureFilterFiles: nil,
+}
 
 func main() {
 	// All application configuration (AppConfig) can be set using flags. The
@@ -262,7 +267,7 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint)
+	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}
@@ -278,7 +283,8 @@ Using environment variables:
 		logger.Fatal("unable to start job manager", zap.Error(err))
 	}
 
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager)
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
 	}
