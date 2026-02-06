@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -19,11 +18,11 @@ import (
 
 type CleanupOrphanedCfg struct {
 	PathPrefix string
+	Recurse    bool
 }
 
 type CleanupOrphanedResult struct {
 	Path    string
-	Missing bool
 	Deleted bool
 	Skipped bool
 	Message string
@@ -43,7 +42,7 @@ func CleanupOrphaned(ctx context.Context, cfg CleanupOrphanedCfg) (<-chan *Clean
 
 	// Walk the Remote DB once using a streaming GetJobs call.
 	dbChan := make(chan *GetJobsResponse, 1024)
-	if err := GetJobs(ctx, GetJobsConfig{Path: cfg.PathPrefix, Recurse: true}, dbChan); err != nil {
+	if err := GetJobs(ctx, GetJobsConfig{Path: cfg.PathPrefix, Recurse: cfg.Recurse}, dbChan); err != nil {
 		return nil, nil, err
 	}
 
@@ -113,13 +112,14 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 
 	_, err := mountPoint.Lstat(dbPath)
 	if err == nil {
+		result.Skipped = true
+		result.Message = "path exists"
 		return result
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		result.Err = err
 		return result
 	}
-	result.Missing = true
 
 	beeRemote, err := config.BeeRemoteClient()
 	if err != nil {
@@ -134,23 +134,18 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 	}.Build())
 	if err != nil {
 		if isNotFoundErr(err) || errors.Is(err, rst.ErrEntryNotFound) {
-			result.Deleted = true
+			result.Skipped = true
 			result.Message = "entry already removed"
 			return result
 		}
 		result.Err = err
 		return result
 	}
+	result.Message = resp.GetMessage()
 	if resp.GetOk() {
 		result.Deleted = true
 	} else {
-		result.Message = resp.GetMessage()
-		if result.Missing && strings.Contains(result.Message, "no such file or directory") {
-			result.Deleted = true
-			result.Message = "lock clear skipped (file missing)"
-		} else {
-			result.Skipped = true
-		}
+		result.Skipped = true
 	}
 	return result
 }
