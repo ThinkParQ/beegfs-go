@@ -207,6 +207,19 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				return true
 			}
 		}
+		emitPath := func(path string, resumeToken string) bool {
+			if maxPaths == 0 {
+				send(&StreamPathResult{ResumeToken: resumeToken})
+				return false
+			}
+			if !send(&StreamPathResult{Path: path}) {
+				return false
+			}
+			if maxPaths > 0 {
+				maxPaths--
+			}
+			return true
+		}
 
 		var walkDir func(string) bool
 		walkDir = func(directory string) bool {
@@ -246,18 +259,10 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 								send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 								return false
 							} else if keep {
-								if maxPaths == 0 {
-									send(&StreamPathResult{ResumeToken: lastPath})
-									return false
-								}
-
-								if !send(&StreamPathResult{Path: inMountPath}) {
+								if !emitPath(inMountPath, lastPath) {
 									return false
 								}
 								lastPath = path
-								if maxPaths > 0 {
-									maxPaths--
-								}
 							}
 						}
 					}
@@ -286,41 +291,25 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					continue
 				}
 
-				if maxPaths == 0 {
-					send(&StreamPathResult{ResumeToken: lastPath})
-					return false
-				}
-
-				if !send(&StreamPathResult{Path: inMountPath}) {
+				if !emitPath(inMountPath, lastPath) {
 					return false
 				}
 				lastPath = path
-				if maxPaths > 0 {
-					maxPaths--
-				}
 			}
 
 			return true
 		}
 
 		if includeDirs && !isGlob && root != "" {
-			emitRoot := false
-			emitRoot = root > startAfter
+			emitRoot := root > startAfter
 			if emitRoot {
 				inMountPath := "/" + root
 				if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
 					send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 					return
 				} else if keep {
-					if maxPaths == 0 {
-						send(&StreamPathResult{ResumeToken: root})
+					if !emitPath(inMountPath, root) {
 						return
-					}
-					if !send(&StreamPathResult{Path: inMountPath}) {
-						return
-					}
-					if maxPaths > 0 {
-						maxPaths--
 					}
 				}
 			}
