@@ -113,6 +113,17 @@ type StreamPathResult struct {
 // will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
 // paths. chanSize is the buffer size for the returned *StreamPathResult channel.
 func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxPaths, chanSize, filter, false)
+}
+
+// StreamPathsLexicographicallyWithDirs behaves like StreamPathsLexicographically but also emits
+// directories that match the filter (if provided). Directories are still traversed even if they
+// don't match the filter.
+func StreamPathsLexicographicallyWithDirs(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxPaths, chanSize, filter, true)
+}
+
+func streamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter, includeDirs bool) (<-chan *StreamPathResult, error) {
 	if maxPaths != -1 && maxPaths <= 0 {
 		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
 	}
@@ -196,6 +207,19 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				return true
 			}
 		}
+		emitPath := func(path string, resumeToken string) bool {
+			if maxPaths == 0 {
+				send(&StreamPathResult{ResumeToken: resumeToken})
+				return false
+			}
+			if !send(&StreamPathResult{Path: path}) {
+				return false
+			}
+			if maxPaths > 0 {
+				maxPaths--
+			}
+			return true
+		}
 
 		var walkDir func(string) bool
 		walkDir = func(directory string) bool {
@@ -219,6 +243,30 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				inMountPath := "/" + path
 
 				if entry.IsDir() {
+					if includeDirs {
+						emitDir := false
+						if !isGlob {
+							emitDir = path > startAfter
+						} else if match, err := doublestar.Match(pattern, path); err != nil {
+							send(&StreamPathResult{Err: fmt.Errorf("failed to match path %q with pattern %q: %w", path, pattern, err)})
+							return false
+						} else if match {
+							emitDir = path > startAfter
+						}
+
+						if emitDir {
+							if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
+								send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
+								return false
+							} else if keep {
+								if !emitPath(inMountPath, lastPath) {
+									return false
+								}
+								lastPath = path
+							}
+						}
+					}
+
 					if !walkDir(path) {
 						return false
 					}
@@ -243,21 +291,28 @@ func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					continue
 				}
 
-				if maxPaths == 0 {
-					send(&StreamPathResult{ResumeToken: lastPath})
-					return false
-				}
-
-				if !send(&StreamPathResult{Path: inMountPath}) {
+				if !emitPath(inMountPath, lastPath) {
 					return false
 				}
 				lastPath = path
-				if maxPaths > 0 {
-					maxPaths--
-				}
 			}
 
 			return true
+		}
+
+		if includeDirs && !isGlob && root != "" {
+			emitRoot := root > startAfter
+			if emitRoot {
+				inMountPath := "/" + root
+				if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
+					send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
+					return
+				} else if keep {
+					if !emitPath(inMountPath, root) {
+						return
+					}
+				}
+			}
 		}
 
 		walkDir(root)

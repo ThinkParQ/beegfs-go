@@ -87,6 +87,10 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 
 	walkChanSize := cap(jobSubmissionChan)
 	var walkChan <-chan *filesystem.StreamPathResult
+	walkPaths := filesystem.StreamPathsLexicographically
+	if cfg.GetUpdate() {
+		walkPaths = filesystem.StreamPathsLexicographicallyWithDirs
+	}
 	if cfg.Download {
 
 		if filter != nil {
@@ -97,7 +101,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
+			if walkChan, err = walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
 				return
 			}
 		} else {
@@ -112,7 +116,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 			}
 		}
 	} else {
-		walkChan, err = filesystem.StreamPathsLexicographically(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
+		walkChan, err = walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
 		if err != nil {
 			return
 		}
@@ -235,6 +239,19 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				} else {
 					inMountPath = walkResp.Path
 					remotePath = inMountPath
+				}
+			}
+
+			if cfg.GetUpdate() {
+				if stat, statErr := c.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
+					dirErr := updateDirRstConfig(ctx, cfg.RemoteStorageTarget, inMountPath)
+					builderStateMu.Lock()
+					builder.Submitted++
+					if dirErr != nil {
+						builder.Errors++
+					}
+					builderStateMu.Unlock()
+					continue
 				}
 			}
 
