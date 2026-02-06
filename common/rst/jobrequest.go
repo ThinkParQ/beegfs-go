@@ -105,18 +105,15 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		cfg.Priority = proto.Int32(scheduler.DefaultPriority)
 	}
 
+	remoteRegistry, err := config.BeeRemoteComponentRegistryLazy(ctx, &remote)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve BeeGFS remote registry: %w", err)
+	}
+
 	var filter filesystem.FileInfoFilter
 	filterExpr := cfg.GetFilterExpr()
 	if filterExpr != "" {
-		remoteRegistry, _, err := registry.GetComponentRegistry(ctx, remote)
-		if err != nil {
-			if status.Code(err) == codes.Unimplemented {
-				return nil, fmt.Errorf("remote node does not support %s", registry.FeatureFilterFiles)
-			}
-			return nil, err
-		}
-
-		if err := remoteRegistry.RequireFeature(registry.FeatureFilterFiles); err != nil {
+		if err := remoteRegistry.RequireFeature(ctx, registry.FeatureFilterFiles); err != nil {
 			return nil, err
 		}
 
