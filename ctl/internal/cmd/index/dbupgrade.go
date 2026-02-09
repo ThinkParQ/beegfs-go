@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
+//TODO: NOT REFACTORED WITH GUFI
 const dbUpgradeCmd = "db"
 
 func newGenericUpgradeCmd() *cobra.Command {

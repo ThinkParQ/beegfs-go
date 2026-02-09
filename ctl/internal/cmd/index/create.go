@@ -135,7 +135,13 @@ func runPythonCreateIndex(bflagSet *bflag.FlagSet, backend indexBackend, opts cr
 }
 
 func buildDir2IndexArgs(fsPath, indexPath string, wrappedArgs []string) ([]string, error) {
-	args := make([]string, 0, len(wrappedArgs)+4)
+	args := buildDir2IndexBaseArgs(wrappedArgs)
+	args = append(args, fsPath, indexPath)
+	return args, nil
+}
+
+func buildDir2IndexBaseArgs(wrappedArgs []string) []string {
+	args := make([]string, 0, len(wrappedArgs)+2)
 	noMetadata := false
 	for i := 0; i < len(wrappedArgs); i++ {
 		arg := wrappedArgs[i]
@@ -156,8 +162,7 @@ func buildDir2IndexArgs(fsPath, indexPath string, wrappedArgs []string) ([]strin
 	if !noMetadata {
 		args = append(args, "--plugin", dir2IndexPluginPath)
 	}
-	args = append(args, fsPath, indexPath)
-	return args, nil
+	return args
 }
 
 func buildTreeSummaryArgs(indexPath string, opts treeSummaryOptions) ([]string, error) {

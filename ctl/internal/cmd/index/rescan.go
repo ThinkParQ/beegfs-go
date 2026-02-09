@@ -1,7 +1,10 @@
 package index
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -11,19 +14,23 @@ func newGenericRescanCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var recurse bool
 	var cmd = &cobra.Command{
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			backend, err := parseIndexAddr(indexAddr)
-			if err != nil {
-				return err
-			}
-			paths, err := defaultIndexPaths(backend, args)
 			if err != nil {
 				return err
 			}
 			if err := checkIndexConfig(backend, beeBinary); err != nil {
 				return err
 			}
-			return runPythonRescanIndex(paths, bflagSet, recurse, backend)
+			if err := checkIndexConfig(backend, treeSummaryBinary); err != nil {
+				return err
+			}
+			indexPath, ok := getGUFIConfigValue("IndexRoot")
+			if !ok || indexPath == "" {
+				return fmt.Errorf("IndexRoot not found in %s", indexConfig)
+			}
+			return runPythonRescanIndex(args, bflagSet, recurse, backend, indexPath)
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{
@@ -69,37 +76,35 @@ $ beegfs index rescan sub-dir1/ sub-dir2/
 	return s
 }
 
-func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool, backend indexBackend) error {
+func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool, backend indexBackend, indexPath string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	tbl := newIndexLinePrintomatic("line")
-	for _, path := range paths {
-		allArgs := make([]string, 0, len(wrappedArgs)+3)
-		allArgs = append(allArgs, "-F", path)
-		allArgs = append(allArgs, wrappedArgs...)
-		if recurse {
-			allArgs = append(allArgs, "-U")
-		} else {
-			allArgs = append(allArgs, "-k")
-		}
-		log.Debug("Running GUFI rescan command",
-			zap.String("path", path),
-			zap.Bool("recurse", recurse),
-			zap.String("indexAddr", indexAddr),
-			zap.Any("wrappedArgs", wrappedArgs),
-			zap.Any("allArgs", allArgs),
-		)
-		if err := runIndexCommandPrintLines(backend, beeBinary, allArgs, &tbl); err != nil {
-			return err
-		}
+	baseArgs := buildDir2IndexBaseArgs(wrappedArgs)
+	if !recurse {
+		baseArgs = append(baseArgs, "--max-level", "1")
 	}
-	treeArgs := []string{}
-	requiredFlags := map[string]bool{"-n": true}
-	for i := 0; i < len(wrappedArgs); i++ {
-		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
-			treeArgs = append(treeArgs, wrappedArgs[i], wrappedArgs[i+1])
-			i++
-		}
+	tbl := newIndexLinePrintomatic("line")
+	allArgs := make([]string, 0, len(baseArgs)+len(paths)+1)
+	allArgs = append(allArgs, baseArgs...)
+	allArgs = append(allArgs, paths...)
+	allArgs = append(allArgs, indexPath)
+	log.Debug("Running GUFI dir2index command",
+		zap.Bool("recurse", recurse),
+		zap.String("indexAddr", indexAddr),
+		zap.String("indexPath", indexPath),
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("paths", paths),
+		zap.Any("allArgs", allArgs),
+	)
+	if err := runIndexCommandPrintLines(backend, beeBinary, allArgs, &tbl); err != nil {
+		return err
+	}
+	treeArgs, err := buildTreeSummaryArgs(indexPath, treeSummaryOptions{
+		threads: viper.GetInt(config.NumWorkersKey),
+		debug:   viper.GetBool(config.DebugKey),
+	})
+	if err != nil {
+		return err
 	}
 	log.Debug("Running GUFI tree summary command",
 		zap.String("indexAddr", indexAddr),
