@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -816,6 +817,50 @@ func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.No
 	}
 	if rstIDResp.Result != beegfs.OpsErr_SUCCESS {
 		return fmt.Errorf("server returned an error configuring file targets, %s: %w", path, rstIDResp.Result)
+	}
+
+	return nil
+}
+
+func SetDirRstIds(ctx context.Context, path string, rstIds []uint32) error {
+	if rstIds == nil {
+		return nil
+	}
+
+	entryInfo, err := GetEntry(ctx, nil, GetEntriesCfg{
+		Verbose:        false,
+		IncludeOrigMsg: true,
+	}, path)
+	if err != nil {
+		return err
+	}
+	if entryInfo.Entry.Type != beegfs.EntryDirectory {
+		return fmt.Errorf("entry is not a directory: %s", path)
+	}
+	euid := syscall.Geteuid()
+	if euid < 0 || euid > math.MaxUint32 {
+		return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", euid)
+	}
+
+	request := &msg.SetDirPatternRequest{
+		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
+		Pattern:   entryInfo.Entry.Pattern.StripePattern,
+		RST:       entryInfo.Entry.Remote.RemoteStorageTarget,
+	}
+	request.SetUID(uint32(euid))
+	request.RST.RSTIDs = rstIds
+
+	store, err := config.NodeStore(ctx)
+	if err != nil {
+		return err
+	}
+
+	resp := &msg.SetDirPatternResponse{}
+	if err := store.RequestTCP(ctx, entryInfo.Entry.MetaOwnerNode.Uid, request, resp); err != nil {
+		return err
+	}
+	if resp.Result != beegfs.OpsErr_SUCCESS && resp.Result != beegfs.OpsErr_NOTADIR {
+		return fmt.Errorf("server returned an error configuring directory targets, %s: %w", path, resp.Result)
 	}
 
 	return nil
