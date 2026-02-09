@@ -27,11 +27,11 @@ func newGenericRescanCmd() *cobra.Command {
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{
-		bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
+		bflag.Flag("max-memory", "X", "Target memory utilization (soft limit)", "--target-memory", ""),
 		bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
 		bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
 		bflag.GlobalFlag(config.NumWorkersKey, "-n"),
-		bflag.GlobalFlag(config.DebugKey, "-V=1"),
+		bflag.GlobalFlag(config.DebugKey, "-H"),
 		bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
 	}
 	bflagSet = bflag.NewFlagSet(rescanFlags, cmd)
@@ -94,7 +94,7 @@ func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool,
 		}
 	}
 	treeArgs := []string{}
-	requiredFlags := map[string]bool{"-X": true, "-n": true}
+	requiredFlags := map[string]bool{"-n": true}
 	for i := 0; i < len(wrappedArgs); i++ {
 		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
 			treeArgs = append(treeArgs, wrappedArgs[i], wrappedArgs[i+1])

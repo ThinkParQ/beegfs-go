@@ -26,21 +26,21 @@ var (
 var indexAddr string
 
 var commonIndexFlags = []bflag.FlagWrapper{
-	bflag.Flag("fs-path", "F",
-		"File system path for which index will be created.", "-F", ""),
-	bflag.Flag("index-path", "I",
-		"File system path at which the index will be stored.", "-I", ""),
-	bflag.GlobalFlag(config.BeeGFSMountPointKey, "-M"),
-	bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
 	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
-	bflag.Flag("summary", "s", "Create tree summary table along with other tables", "-s", false),
-	bflag.Flag("only-summary", "S", "Create only tree summary table", "-S", false),
-	bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
-	bflag.Flag("max-level", "z", "Max level to go down", "-z", ""),
-	bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
-	bflag.Flag("version", "v", "BeeGFS Hive Index Version", "-v", false),
-	bflag.GlobalFlag(config.DebugKey, "-V=1"),
+	bflag.Flag("min-level", "", "Minimum level to go down", "--min-level", ""),
+	bflag.Flag("max-level", "z", "Maximum level to go down", "--max-level", ""),
+	bflag.Flag("path-list", "", "File containing paths at single level to walk (not including starting path). If --min-level > 0, prepend each line of the file with the index path.", "--path-list", ""),
+	bflag.Flag("xattrs", "x", "Index xattrs", "-x", false),
+	bflag.Flag("skip-file", "", "File containing directory names to skip", "--skip-file", ""),
+	bflag.Flag("check-external-dbs", "q", "Check that external databases are valid before tracking during indexing", "-q", false),
+	bflag.Flag("plugin", "", "Plugin library for modifying db entries", "--plugin", ""),
+	bflag.Flag("max-memory", "X", "Target memory utilization (soft limit)", "--target-memory", ""),
+	bflag.Flag("swap-prefix", "", "File name prefix for swap files", "--swap-prefix", ""),
+	bflag.Flag("subdir-limit", "", "Number of subdirectories allowed to be enqueued for parallel processing. Any remainders will be processed serially", "--subdir-limit", ""),
+	bflag.Flag("compress", "", "Compress work items", "--compress", false),
+	bflag.Flag("version", "v", "Print version and exit", "-v", false),
 	bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
+	bflag.GlobalFlag(config.DebugKey, "-H"),
 }
 
 func checkIndexConfig(backend indexBackend, binaryPath string) error {
