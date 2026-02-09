@@ -1,18 +1,10 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const queryCmd = "query-index"
 
 func newGenericQueryCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -20,10 +12,14 @@ func newGenericQueryCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			return runPythonQueryIndex(bflagSet)
+			if err := checkIndexConfig(backend, sqlite3Binary); err != nil {
+				return err
+			}
+			return runPythonQueryIndex(bflagSet, backend)
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
@@ -54,31 +50,13 @@ beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
 	return s
 }
 
-func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
+func runPythonQueryIndex(bflagSet *bflag.FlagSet, backend indexBackend) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, queryCmd)
+	allArgs := make([]string, 0, len(wrappedArgs))
 	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index query command",
+	return runIndexCommandWithPrint(backend, sqlite3Binary, allArgs, "Running GUFI query command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("queryCmd", queryCmd),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }

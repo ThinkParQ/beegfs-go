@@ -1,10 +1,6 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -16,17 +12,18 @@ func newGenericRescanCmd() *cobra.Command {
 	var recurse bool
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				args = append([]string{cwd}, args...)
-			}
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			return runPythonRescanIndex(args, bflagSet, recurse)
+			paths, err := defaultIndexPaths(backend, args)
+			if err != nil {
+				return err
+			}
+			if err := checkIndexConfig(backend, beeBinary); err != nil {
+				return err
+			}
+			return runPythonRescanIndex(paths, bflagSet, recurse, backend)
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{
@@ -72,37 +69,31 @@ $ beegfs index rescan sub-dir1/ sub-dir2/
 	return s
 }
 
-func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool) error {
+func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool, backend indexBackend) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
+	tbl := newIndexLinePrintomatic("line")
 	for _, path := range paths {
-		allArgs := make([]string, 0, len(wrappedArgs)+4)
-		allArgs = append(allArgs, createCmd, "-F", path)
+		allArgs := make([]string, 0, len(wrappedArgs)+3)
+		allArgs = append(allArgs, "-F", path)
 		allArgs = append(allArgs, wrappedArgs...)
 		if recurse {
 			allArgs = append(allArgs, "-U")
 		} else {
 			allArgs = append(allArgs, "-k")
 		}
-		log.Debug("Running BeeGFS Hive Index rescan command",
+		log.Debug("Running GUFI rescan command",
 			zap.String("path", path),
 			zap.Bool("recurse", recurse),
+			zap.String("indexAddr", indexAddr),
 			zap.Any("wrappedArgs", wrappedArgs),
 			zap.Any("allArgs", allArgs),
 		)
-		cmd := exec.Command(beeBinary, allArgs...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Start()
-		if err != nil {
-			return fmt.Errorf("unable to start index command: %w", err)
-		}
-		err = cmd.Wait()
-		if err != nil {
-			return fmt.Errorf("error executing index command: %w", err)
+		if err := runIndexCommandPrintLines(backend, beeBinary, allArgs, &tbl); err != nil {
+			return err
 		}
 	}
-	treeArgs := []string{createCmd, "-S"}
+	treeArgs := []string{}
 	requiredFlags := map[string]bool{"-X": true, "-n": true}
 	for i := 0; i < len(wrappedArgs); i++ {
 		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
@@ -110,19 +101,9 @@ func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool)
 			i++
 		}
 	}
-	log.Debug("Running BeeGFS Hive Index Tree-Summary command",
+	log.Debug("Running GUFI tree summary command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("Args", treeArgs),
 	)
-	cmd := exec.Command(beeBinary, treeArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
+	return runIndexCommandPrintLines(backend, treeSummaryBinary, treeArgs, &tbl)
 }

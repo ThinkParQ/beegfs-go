@@ -1,27 +1,24 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const createCmd = "index"
 
 func newGenericCreateCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			return runPythonCreateIndex(bflagSet)
+			if err := checkIndexConfig(backend, beeBinary); err != nil {
+				return err
+			}
+			return runPythonCreateIndex(bflagSet, backend)
 		},
 	}
 
@@ -50,27 +47,13 @@ $ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
 	return s
 }
 
-func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
+func runPythonCreateIndex(bflagSet *bflag.FlagSet, backend indexBackend) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, createCmd)
+	allArgs := make([]string, 0, len(wrappedArgs))
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("Running BeeGFS Hive Index create command",
+	return runIndexCommandWithPrint(backend, beeBinary, allArgs, "Running GUFI dir2index command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("createCmd", createCmd),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }

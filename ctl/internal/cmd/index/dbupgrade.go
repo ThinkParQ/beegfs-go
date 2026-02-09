@@ -2,8 +2,6 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -19,10 +17,14 @@ func newGenericUpgradeCmd() *cobra.Command {
 
 	var cmd = &cobra.Command{
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			return runPythonUpgradeIndex(bflagSet)
+			if err := checkIndexConfig(backend, beeBinary); err != nil {
+				return err
+			}
+			return runPythonUpgradeIndex(bflagSet, backend)
 		},
 	}
 
@@ -61,30 +63,18 @@ Upgrade to BeeGFS Hive Index specific database version 3:
 	return s
 }
 
-func runPythonUpgradeIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
+func runPythonUpgradeIndex(bflagSet *bflag.FlagSet, backend indexBackend) error {
 	wrappedArgs := bflagSet.WrappedArgs()
 	allArgs := make([]string, 0, len(wrappedArgs)+3)
 	allArgs = append(allArgs, dbUpgradeCmd, "-n", fmt.Sprint(viper.GetInt(config.NumWorkersKey)))
 	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("Running BeeGFS Hive Index db command",
+	return runIndexCommandWithPrint(backend, beeBinary, allArgs, "Running GUFI index db command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
 		zap.Any("dbUpgradeCmd", dbUpgradeCmd),
 		zap.Int("numWorkers", viper.GetInt(config.NumWorkersKey)),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }
 
 // Can be removed once db Flag is enabled

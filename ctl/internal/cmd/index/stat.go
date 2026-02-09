@@ -1,18 +1,10 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const statCmd = "stat"
 
 func newGenericStatCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -20,19 +12,18 @@ func newGenericStatCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			if len(args) > 0 {
-				path = args[0]
-			} else {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				path = cwd
+			if err := checkIndexConfig(backend, statBinary); err != nil {
+				return err
 			}
-			return runPythonStatIndex(bflagSet, path)
+			path, err := defaultIndexPath(backend, args)
+			if err != nil {
+				return err
+			}
+			return runPythonStatIndex(bflagSet, backend, path)
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
@@ -68,33 +59,15 @@ $ beegfs index stat --beegfs README
 	return s
 }
 
-func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
-	log, _ := config.GetLogger()
+func runPythonStatIndex(bflagSet *bflag.FlagSet, backend indexBackend, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+3)
-	allArgs = append(allArgs, statCmd)
+	allArgs := make([]string, 0, len(wrappedArgs)+2)
 	allArgs = append(allArgs, wrappedArgs...)
 	allArgs = append(allArgs, path)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index stat command",
+	return runIndexCommandWithPrint(backend, statBinary, allArgs, "Running GUFI stat command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("statCmd", statCmd),
 		zap.String("path", path),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }

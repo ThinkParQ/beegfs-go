@@ -1,18 +1,10 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const findCmd = "find"
 
 func newGenericFindCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -20,20 +12,18 @@ func newGenericFindCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			var paths []string
-			if len(args) > 0 {
-				paths = args
-			} else {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				paths = []string{cwd}
+			if err := checkIndexConfig(backend, findBinary); err != nil {
+				return err
 			}
-			return runPythonFindIndex(bflagSet, paths)
+			paths, err := defaultIndexPaths(backend, args)
+			if err != nil {
+				return err
+			}
+			return runPythonFindIndex(bflagSet, backend, paths)
 		},
 	}
 
@@ -103,33 +93,15 @@ $ beegfs index find --size +1G
 	return s
 }
 
-func runPythonFindIndex(bflagSet *bflag.FlagSet, paths []string) error {
-	log, _ := config.GetLogger()
+func runPythonFindIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+2)
-	allArgs = append(allArgs, findCmd)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths))
 	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index find command",
+	return runIndexCommandWithPrint(backend, findBinary, allArgs, "Running GUFI find command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("findCmd", findCmd),
 		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing command: %v", err)
-	}
-	return nil
 }

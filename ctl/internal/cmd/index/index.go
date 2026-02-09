@@ -10,6 +10,7 @@ func NewCmd() *cobra.Command {
 		Short: "Create/update and run operations on the the file system index",
 		Long:  "Create/update and run different metadata operations against the the file system index.",
 	}
+	cmd.PersistentFlags().StringVar(&indexAddr, "index-addr", indexAddrDefault, "Index backend address. Use \"local\" or \"ssh:<host>[:port]\".")
 
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newFindCmd())

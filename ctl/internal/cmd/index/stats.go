@@ -2,19 +2,11 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const statsCmd = "stats"
-
-var stat string
 
 func newGenericStatsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -23,26 +15,26 @@ func newGenericStatsCmd() *cobra.Command {
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args:        cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
+				return err
+			}
+			if err := checkIndexConfig(backend, statsBinary); err != nil {
 				return err
 			}
 			if len(args) < 1 {
 				return fmt.Errorf("stat argument is required")
 			}
-			stat = args[0]
+			statArg := args[0]
+			var pathArgs []string
 			if len(args) > 1 {
-				path = args[1]
-			} else {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				path = cwd
+				pathArgs = []string{args[1]}
 			}
-			if err := checkBeeGFSConfig(); err != nil {
+			path, err := defaultIndexPath(backend, pathArgs)
+			if err != nil {
 				return err
 			}
-			return runPythonExecStats(bflagSet, stat, path)
+			return runPythonExecStats(bflagSet, backend, statArg, path)
 		},
 	}
 
@@ -90,33 +82,16 @@ Positional arguments:
 	return s
 }
 
-func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
-	log, _ := config.GetLogger()
+func runPythonExecStats(bflagSet *bflag.FlagSet, backend indexBackend, stat, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+4)
-	allArgs = append(allArgs, statsCmd, stat, path)
+	allArgs := make([]string, 0, len(wrappedArgs)+3)
+	allArgs = append(allArgs, stat, path)
 	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index stats command",
+	return runIndexCommandWithPrint(backend, statsBinary, allArgs, "Running GUFI stats command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("statsCmd", statsCmd),
 		zap.Any("stat", stat),
 		zap.String("path", path),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }
