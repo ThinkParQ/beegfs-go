@@ -163,6 +163,8 @@ This only works if supported and enabled on the source file system.`, "-a", fals
 Default chunk size: 128 MB.`, "-c", 128),
 		bflag.Flag("keep-mtime", "k", `Keep the original modification time from the source in the destination. 
 This only works if supported and enabled on the destination file system.`, "-k", false),
+		bflag.Flag("preserve-ownership", "O", "Preserve ownership (user/group) from source (requires root permissions). By default ownership of files in the destination is determined by the effective user/group ID of the Copy process (8.3+).", "-O", false),
+		bflag.Flag("preserve-permissions", "P", "Preserve permission bits when updating existing entries. By default only new entries will inherit their permission bits from the source (8.3+).", "-P", false),
 		bflag.Flag("partition-threshold", "p", `Partition copy threshold (in MB).
 To accelerate the copy operation, large files are partitioned and copied using multiple threads.
 Files with a size below the partition-threshold are processed by a single thread.
