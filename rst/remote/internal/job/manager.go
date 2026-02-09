@@ -6,6 +6,7 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"io/fs"
 	"path"
 	"reflect"
 	"sort"
@@ -1129,12 +1130,15 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 		}
 
 		if dataState, err := entry.GetFileDataState(ctx, path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		} else if dataState == rst.DataStateOffloaded {
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil {
+		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil
