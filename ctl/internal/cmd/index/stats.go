@@ -39,18 +39,24 @@ func newGenericStatsCmd() *cobra.Command {
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("recursive", "r", "Run command recursively", "-r", false),
-		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
-		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
-		bflag.Flag("num-results", "n", "Limit the number of results", "--num-results", 0),
-		bflag.Flag("uid", "", "Restrict to a user uid", "--uid", ""),
-		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
-		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
-		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
+		bflag.Flag("version", "v", "Show program's version number and exit.", "--version", false),
+		bflag.Flag("recursive", "r", "Run command recursively.", "-r", false),
+		bflag.Flag("cumulative", "c", "Return cumulative values.", "-c", false),
+		bflag.Flag("order", "", "Sort output (if applicable).", "--order", "ASC"),
+		bflag.Flag("num-results", "", "First n results.", "--num-results", 0),
+		bflag.Flag("uid", "", "Restrict to user.", "--uid", ""),
+		bflag.Flag("delim", "", "Delimiter separating output columns.", "--delim", " "),
+		bflag.Flag("in-memory-name", "", "Name of in-memory database when aggregation is performed.", "--in-memory-name", "out"),
+		bflag.Flag("aggregate-name", "", "Name of final database when aggregation is performed.", "--aggregate-name", ""),
+		bflag.Flag("skip-file", "", "Name of file containing directory basenames to skip.", "--skip-file", ""),
+		bflag.Flag("verbose", "V", "Show the gufi_query being executed.", "--verbose", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
-	err := cmd.Flags().MarkHidden("in-memory-name")
-	if err != nil {
+	cmd.MarkFlagsMutuallyExclusive("recursive", "cumulative")
+	if err := cmd.Flags().MarkHidden("in-memory-name"); err != nil {
+		return nil
+	}
+	if err := cmd.Flags().MarkHidden("aggregate-name"); err != nil {
 		return nil
 	}
 
@@ -73,11 +79,24 @@ Example: Get the total file count in a directory
 $ beegfs index stats total-filecount
 
 Positional arguments:
-  {depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth, 
-   leaf-files, leaf-links, total-filesize, total-filecount, total-linkcount, 
-   total-dircount, total-leaf-files, total-leaf-links, files-per-level, 
-   links-per-level, dirs-per-level, average-leaf-files, average-leaf-links, 
-   median-leaf-files, duplicate-names}
+  {depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth,
+   leaf-files, leaf-links, extensions, total-filesize, total-filecount,
+   total-linkcount, total-dircount, total-leaf-files, total-leaf-links,
+   files-per-level, links-per-level, dirs-per-level, filesize-log2-bins,
+   filesize-log1024-bins, dirfilecount-log2-bins, dirfilecount-log1024-bins,
+   average-leaf-files, average-leaf-links, average-leaf-size, median-leaf-files,
+   median-leaf-links, median-leaf-size, duplicate-names, uid-size, gid-size}
+
+Recursive stats (use --recursive):
+  depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth,
+  leaf-files, leaf-links, extensions, filesize-log2-bins, filesize-log1024-bins,
+  dirfilecount-log2-bins, dirfilecount-log1024-bins
+
+Cumulative stats (use --cumulative):
+  total-filesize, total-filecount, total-linkcount, total-dircount,
+  total-leaf-files, total-leaf-links, files-per-level, links-per-level,
+  dirs-per-level, filesize-log2-bins, filesize-log1024-bins,
+  dirfilecount-log2-bins, dirfilecount-log1024-bins
 `
 	return s
 }
