@@ -37,11 +37,15 @@ func newBeeGFSMetadataIndex() *beegfsMetaIndex {
 	}
 }
 
-func fetchBeeGFSMetadata(backend indexBackend, paths []string, delim string, recursive bool) (*beegfsMetaIndex, error) {
+func fetchBeeGFSMetadata(backend indexBackend, paths []string, indexPaths []string, delim string, recursive bool) (*beegfsMetaIndex, error) {
+	if len(paths) != len(indexPaths) {
+		return nil, fmt.Errorf("index path count mismatch")
+	}
 	meta := newBeeGFSMetadataIndex()
-	for _, path := range paths {
+	for i, path := range paths {
+		indexPath := indexPaths[i]
 		if recursive {
-			args := []string{"-d", delim, "-E", "SELECT path() AS dir, * FROM beegfs_entryinfo", path}
+			args := []string{"-d", delim, "-E", "SELECT path() AS dir, * FROM beegfs_entryinfo", indexPath}
 			if err := runIndexCommand(backend, queryBinary, args, func(r io.Reader) error {
 				return parseBeeGFSMetadataReader(r, delim, meta, "", true)
 			}); err != nil {
@@ -49,7 +53,7 @@ func fetchBeeGFSMetadata(backend indexBackend, paths []string, delim string, rec
 			}
 			continue
 		}
-		args := []string{"-d", delim, "--max-level", "0", "-E", "SELECT * FROM beegfs_entryinfo", path}
+		args := []string{"-d", delim, "--max-level", "0", "-E", "SELECT * FROM beegfs_entryinfo", indexPath}
 		if err := runIndexCommand(backend, queryBinary, args, func(r io.Reader) error {
 			return parseBeeGFSMetadataReader(r, delim, meta, path, false)
 		}); err != nil {

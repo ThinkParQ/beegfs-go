@@ -16,23 +16,37 @@ func newGenericStatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := checkIndexConfig(backend, statBinary); err != nil {
-				return err
-			}
-			path, err := defaultIndexPath(backend, args)
+			beegfsEnabled, err := cmd.Flags().GetBool("beegfs")
 			if err != nil {
 				return err
 			}
-			return runPythonStatIndex(bflagSet, backend, path)
+			paths, err := defaultIndexPaths(backend, args)
+			if err != nil {
+				return err
+			}
+			if beegfsEnabled {
+				if err := checkIndexConfig(backend, queryBinary); err != nil {
+					return err
+				}
+				verbose, err := cmd.Flags().GetBool("verbose")
+				if err != nil {
+					return err
+				}
+				return runBeeGFSStatIndex(backend, paths, verbose)
+			}
+			if err := checkIndexConfig(backend, statBinary); err != nil {
+				return err
+			}
+			return runPythonStatIndex(bflagSet, backend, paths)
 		},
 	}
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("beegfs", "b", "Print BeeGFS Metadata for the File", "--beegfs", false),
-		bflag.Flag("debug-values", "H", "Show assigned input values (for debugging)", "-H", false),
-		bflag.Flag("terse", "j", "Print the information in terse form", "-j", false),
-		bflag.Flag("format", "f", "Use the specified FORMAT instead of the default; output a newline after each use of FORMAT", "-f", ""),
+		bflag.Flag("version", "v", "Show program's version number and exit.", "--version", false),
+		bflag.Flag("verbose", "V", "Show the actual command being run.", "--verbose", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+	cmd.Flags().BoolP("beegfs", "b", false, "Print BeeGFS metadata for the file(s)")
+	cmd.MarkFlagsMutuallyExclusive("beegfs", "version")
 
 	return cmd
 }
@@ -59,15 +73,15 @@ $ beegfs index stat --beegfs README
 	return s
 }
 
-func runPythonStatIndex(bflagSet *bflag.FlagSet, backend indexBackend, path string) error {
+func runPythonStatIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths))
 	allArgs = append(allArgs, wrappedArgs...)
-	allArgs = append(allArgs, path)
+	allArgs = append(allArgs, paths...)
 	return runIndexCommandWithPrint(backend, statBinary, allArgs, "Running GUFI stat command",
 		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.String("path", path),
+		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
 }

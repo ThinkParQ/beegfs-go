@@ -30,7 +30,11 @@ func newGenericRescanCmd() *cobra.Command {
 			if !ok || indexPath == "" {
 				return fmt.Errorf("IndexRoot not found in %s", indexConfig)
 			}
-			return runPythonRescanIndex(args, bflagSet, recurse, backend, indexPath)
+			paths, err := resolvePaths(args)
+			if err != nil {
+				return err
+			}
+			return runPythonRescanIndex(paths, bflagSet, recurse, backend, indexPath)
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{

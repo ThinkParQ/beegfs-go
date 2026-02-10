@@ -65,19 +65,16 @@ func checkIndexConfig(backend indexBackend, binaryPath string) error {
 
 func defaultIndexPaths(backend indexBackend, args []string) ([]string, error) {
 	if len(args) > 0 {
-		return args, nil
+		return resolvePaths(args)
 	}
 	if !backend.isLocal() {
 		return nil, fmt.Errorf("remote index-addr requires explicit path arguments")
-	}
-	if indexRoot, ok := getGUFIConfigValue("IndexRoot"); ok && indexRoot != "" {
-		return []string{indexRoot}, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
-	return []string{cwd}, nil
+	return resolvePaths([]string{cwd})
 }
 
 func defaultIndexPath(backend indexBackend, args []string) (string, error) {

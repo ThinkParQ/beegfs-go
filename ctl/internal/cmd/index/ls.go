@@ -117,9 +117,17 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []str
 	if err := checkIndexConfig(backend, queryBinary); err != nil {
 		return err
 	}
+	indexPaths := make([]string, len(paths))
+	for i, path := range paths {
+		indexPath, err := indexPathFromRelative(path)
+		if err != nil {
+			return err
+		}
+		indexPaths[i] = indexPath
+	}
 	tbl := newIndexLinePrintomatic("ls_line")
 	queryStart := time.Now()
-	meta, err := fetchBeeGFSMetadata(backend, paths, delim, recursive)
+	meta, err := fetchBeeGFSMetadata(backend, paths, indexPaths, delim, recursive)
 	if err != nil {
 		return err
 	}
