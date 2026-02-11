@@ -21,6 +21,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -375,6 +376,47 @@ func BeeRemoteClient() (beeremote.BeeRemoteClient, error) {
 	beeRemoteClient = beeremote.NewBeeRemoteClient(conn)
 
 	return beeRemoteClient, err
+}
+
+var beeRemoteRegistry *registry.CachedComponentRegistry
+
+// BeeRemoteRegistry returns the process-wide cached registry for BeeRemote capabilities. The
+// registry is created on first call using BeeRemoteClient(). If lazy is true, the capabilities are
+// deferred until first use.
+//
+//	reg, err := BeeRemoteRegistry(ctx, true)
+//	if err != nil {
+//	    return nil, err
+//	}
+//	if err := reg.RequireFeature(ctx, registry.FeatureFilterFiles); err != nil {
+//	    return nil, err
+//	}
+func BeeRemoteRegistry(ctx context.Context, lazy bool) (*registry.CachedComponentRegistry, error) {
+	if beeRemoteRegistry != nil {
+		return beeRemoteRegistry, nil
+	}
+
+	opts := []registry.CachedComponentRegistryOpt{}
+	if lazy {
+		opts = append(opts, registry.WithSkipInit())
+	}
+
+	registry, err := registry.NewCachedComponentRegistry(ctx, beeRemoteRegistryClient, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	beeRemoteRegistry = registry
+	return beeRemoteRegistry, err
+}
+
+func beeRemoteRegistryClient() (*registry.RegistryGetter, error) {
+	client, err := BeeRemoteClient()
+	if err != nil {
+		return nil, err
+	}
+	var regClient registry.RegistryGetter = client
+	return &regClient, nil
 }
 
 // BeeGFSClient provides a standardize way to interact with a mounted or unmounted BeeGFS instance
