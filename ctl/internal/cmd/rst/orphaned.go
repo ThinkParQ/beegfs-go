@@ -46,7 +46,7 @@ Use --recurse to treat <path-prefix> as a prefix and update all matching entries
 
 	cmd.Flags().BoolVar(&frontendCfg.yes, "yes", false, "Required when using --recurse.")
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "Treat the provided path as a prefix and update all matching paths.")
-	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print results for each deleted or skipped path.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print results for each deleted or skipped path (errors are always printed).")
 	return cmd
 }
 
@@ -64,13 +64,13 @@ func runCleanupOrphanedCmd(cmd *cobra.Command, frontendCfg cleanupOrphanedConfig
 	var skipped int
 	var errs int
 
+	tbl := cmdfmt.NewPrintomatic([]string{"result", "path", "message"}, []string{"result", "path", "message"})
+
 	for res := range results {
 		total++
 		if res.Err != nil {
 			errs++
-			if frontendCfg.verbose {
-				cmdfmt.Printf("error: %s: %s\n", res.Path, res.Err)
-			}
+			tbl.AddItem("error", res.Path, res.Err.Error())
 			continue
 		}
 		if res.Deleted {
@@ -83,9 +83,11 @@ func runCleanupOrphanedCmd(cmd *cobra.Command, frontendCfg cleanupOrphanedConfig
 			if res.Deleted {
 				action = "deleted"
 			}
-			cmdfmt.Printf("%s: %s (%s)\n", action, res.Path, res.Message)
+			tbl.AddItem(action, res.Path, res.Message)
 		}
 	}
+
+	tbl.PrintRemaining()
 
 	cmdfmt.Printf("Summary: scanned %d entries | %d deleted | %d skipped | %d errors\n", total, deleted, skipped, errs)
 	if total == 0 {

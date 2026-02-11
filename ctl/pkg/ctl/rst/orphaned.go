@@ -40,6 +40,11 @@ func CleanupOrphaned(ctx context.Context, cfg CleanupOrphanedCfg) (<-chan *Clean
 		return nil, nil, err
 	}
 
+	beeRemote, err := config.BeeRemoteClient()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Walk the Remote DB once using a streaming GetJobs call.
 	dbChan := make(chan *GetJobsResponse, 1024)
 	if err := GetJobs(ctx, GetJobsConfig{Path: cfg.PathPrefix, Recurse: cfg.Recurse}, dbChan); err != nil {
@@ -83,7 +88,7 @@ func CleanupOrphaned(ctx context.Context, cfg CleanupOrphanedCfg) (<-chan *Clean
 					if !ok {
 						return nil
 					}
-					result := cleanupOrphanedPath(gCtx, mountPoint, path)
+					result := cleanupOrphanedPath(gCtx, mountPoint, beeRemote, path)
 					select {
 					case <-gCtx.Done():
 						return gCtx.Err()
@@ -107,7 +112,7 @@ func CleanupOrphaned(ctx context.Context, cfg CleanupOrphanedCfg) (<-chan *Clean
 	return results, wait, nil
 }
 
-func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, dbPath string) *CleanupOrphanedResult {
+func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, beeRemote beeremote.BeeRemoteClient, dbPath string) *CleanupOrphanedResult {
 	result := &CleanupOrphanedResult{Path: dbPath}
 
 	_, err := mountPoint.Lstat(dbPath)
@@ -117,12 +122,6 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, db
 		return result
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		result.Err = err
-		return result
-	}
-
-	beeRemote, err := config.BeeRemoteClient()
-	if err != nil {
 		result.Err = err
 		return result
 	}

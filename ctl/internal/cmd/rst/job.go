@@ -23,7 +23,7 @@ func newJobCmd() *cobra.Command {
 		Use:   "job",
 		Short: "Interact with existing job(s)",
 	}
-	cmd.AddCommand(newCancelCmd(), newCleanupCmd(), newListJobsCmd())
+	cmd.AddCommand(newCancelCmd(), newCleanupCmd(), newCleanupOrphanedCmd(), newListJobsCmd())
 	return cmd
 }
 

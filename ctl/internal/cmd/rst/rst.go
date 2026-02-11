@@ -10,7 +10,7 @@ func NewRSTCmd() *cobra.Command {
 		Args:    cobra.NoArgs,
 	}
 
-	cmd.AddCommand(newPushCmd(), newPullCmd(), newJobCmd(), newListCmd(), newStatusCmd(), newCleanupOrphanedCmd())
+	cmd.AddCommand(newPushCmd(), newPullCmd(), newJobCmd(), newListCmd(), newStatusCmd())
 
 	return cmd
 }
