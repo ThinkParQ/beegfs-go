@@ -14,7 +14,7 @@ import (
 )
 
 func newIndexLinePrintomatic(column string) cmdfmt.Printomatic {
-	return cmdfmt.NewPrintomatic([]string{column}, []string{column})
+	return cmdfmt.NewPrintomatic([]string{column}, []string{column}, cmdfmt.WithSuppressHeader(true))
 }
 
 func runIndexCommandWithPrint(backend indexBackend, binary string, args []string, logMsg string, logFields ...zap.Field) error {
