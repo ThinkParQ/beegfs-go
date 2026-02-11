@@ -14,12 +14,14 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
+	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )
 
@@ -34,6 +36,10 @@ var (
 	commit     = "unknown"
 	buildTime  = "unknown"
 )
+
+var capabilities = map[string]*flex.Feature{
+	registry.FeatureFilterFiles: nil,
+}
 
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
@@ -175,7 +181,8 @@ Using environment variables:
 		logger.Fatal("failed to initialize work manager", zap.Error(err))
 	}
 
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, workMgr)
+	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
+	jobServer, err := server.New(logger.Logger, initialCfg.Server, workMgr, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Sync gRPC server", zap.Error(err))
 	}

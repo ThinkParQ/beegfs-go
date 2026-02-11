@@ -20,7 +20,7 @@ type Worker interface {
 	GetID() string
 	GetState() State
 	GetNodeType() Type
-	Handle(*sync.WaitGroup, *flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest)
+	Handle(*sync.WaitGroup, *flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature)
 	Stop()
 	// Implemented by specific node types:
 	//
@@ -53,7 +53,7 @@ type Worker interface {
 // Note: Connect and disconnect operations should be idempotent and safe to call
 // multiple times.
 type grpcClientHandler interface {
-	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest) (retry bool, err error)
+	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) (retry bool, err error)
 	heartbeat(*flex.HeartbeatRequest) (*flex.HeartbeatResponse, error)
 	disconnect() error
 }
@@ -152,7 +152,7 @@ func (n *baseNode) GetID() string {
 // time to complete before forcibly disconnecting them. To allow this to happen
 // it also requires a wait group that should be used to ensure nodes are
 // disconnected cleanly when the application is shutting down.
-func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest) {
+func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) {
 
 	wg.Add(1)
 	defer wg.Done()
@@ -166,7 +166,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 	done := false
 	for {
 		if n.GetState() == OFFLINE {
-			if n.connectLoop(config, wrUpdates) {
+			if n.connectLoop(config, wrUpdates, requiredFeatures) {
 				n.setState(ONLINE)
 			connectedLoop:
 				for {
@@ -247,7 +247,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 // or there is an error it will attempt to reconnect with an exponential
 // backoff. If it returns false there was an unrecoverable error and the caller
 // should first call doDisconnect() before reconnecting.
-func (n *baseNode) connectLoop(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest) bool {
+func (n *baseNode) connectLoop(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) bool {
 	n.log.Info("connecting to node")
 	var reconnectBackOff float64 = 1
 
@@ -261,7 +261,7 @@ func (n *baseNode) connectLoop(config *flex.UpdateConfigRequest, wrUpdates *flex
 			n.log.Info("not attempting to connect to node because its context was cancelled")
 			return false
 		case <-time.After(time.Second * time.Duration(reconnectBackOff)):
-			retry, err := n.connect(config, wrUpdates)
+			retry, err := n.connect(config, wrUpdates, requiredFeatures)
 			if err != nil {
 				if !retry {
 					n.log.Error("unable to connect to node (unable to retry)", zap.Error(err))
