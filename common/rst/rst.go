@@ -609,8 +609,8 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
+		lockedInfo.SetExists(false) // Setting to false since the file did not previously exist.
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		lockedInfo.SetExists(info.Exists)
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)
@@ -667,7 +667,7 @@ func GetLockedInfo(
 		}
 		return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, fmt.Errorf("%w: %w", ErrGetLockedInfoFatal, err)
 	}
-	lockedInfo.Exists = true
+	lockedInfo.SetExists(true)
 
 	if rstIds == nil {
 		rstIds = entryInfo.Entry.Remote.RSTIDs
