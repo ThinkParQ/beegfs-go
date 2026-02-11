@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -27,13 +28,12 @@ var _ Worker = &BeeSyncNode{}
 var _ grpcClientHandler = &BeeSyncNode{}
 
 func newBeeSyncNode(baseNode *baseNode) Worker {
-
 	beeSyncNode := &BeeSyncNode{baseNode: baseNode}
 	beeSyncNode.baseNode.grpcClientHandler = beeSyncNode
 	return beeSyncNode
 }
 
-func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest) (bool, error) {
+func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
 	var cert []byte
 	var err error
 	if !n.config.TlsDisable && n.config.TlsCertFile != "" {
@@ -81,6 +81,13 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		remoteAddr := net.JoinHostPort(host, port)
 		n.log.Info("automatically determined address for sync node to communicate with remote", zap.String("remoteAddr", remoteAddr))
 		config.BeeRemote.SetAddress(remoteAddr)
+	}
+
+	// Verify the sync node capabilities support remote.
+	if clientRegistry, _, err := registry.GetComponentRegistry(n.rpcCtx, n.client); err != nil {
+		return true, fmt.Errorf("failed to determine sync node capabilities: %w", err)
+	} else if err = clientRegistry.RequireFeatures(requiredFeatures); err != nil {
+		return true, fmt.Errorf("incompatible sync node: %w", err)
 	}
 
 	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)

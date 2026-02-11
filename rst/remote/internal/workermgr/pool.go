@@ -32,7 +32,7 @@ type Pool struct {
 	workerConfig *flex.UpdateConfigRequest
 }
 
-func (p *Pool) HandleAll(wg *sync.WaitGroup) {
+func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.Feature) {
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/12
 	// When initially connecting to a node we need to tell it what to do
@@ -44,7 +44,7 @@ func (p *Pool) HandleAll(wg *sync.WaitGroup) {
 	}.Build()
 
 	for _, node := range p.nodes {
-		go node.Handle(wg, p.workerConfig, wrUpdates)
+		go node.Handle(wg, p.workerConfig, wrUpdates, requiredFeatures)
 	}
 }
 
