@@ -19,6 +19,19 @@ func newGenericQueryCmd() *cobra.Command {
 			if err := checkIndexConfig(backend, sqlite3Binary); err != nil {
 				return err
 			}
+			dbPath, err := cmd.Flags().GetString("db-path")
+			if err != nil {
+				return err
+			}
+			if dbPath != "" {
+				resolved, err := resolveIndexPath(dbPath)
+				if err != nil {
+					return err
+				}
+				if err := cmd.Flags().Set("db-path", resolved); err != nil {
+					return err
+				}
+			}
 			return runPythonQueryIndex(bflagSet, backend)
 		},
 	}

@@ -1,8 +1,6 @@
 package index
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
@@ -20,17 +18,14 @@ func newGenericRescanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := checkIndexConfig(backend, beeBinary); err != nil {
+			if err := checkIndexConfig(backend, beeBinary, treeSummaryBinary); err != nil {
 				return err
 			}
-			if err := checkIndexConfig(backend, treeSummaryBinary); err != nil {
+			indexPath, _, err := resolveIndexRoot(true)
+			if err != nil {
 				return err
 			}
-			indexPath, ok := getGUFIConfigValue("IndexRoot")
-			if !ok || indexPath == "" {
-				return fmt.Errorf("IndexRoot not found in %s", indexConfig)
-			}
-			paths, err := resolvePaths(args)
+			paths, err := resolveBeeGFSAbsolutePaths(backend, args)
 			if err != nil {
 				return err
 			}
@@ -103,13 +98,10 @@ func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool,
 	if err := runIndexCommandPrintLines(backend, beeBinary, allArgs, &tbl); err != nil {
 		return err
 	}
-	treeArgs, err := buildTreeSummaryArgs(indexPath, treeSummaryOptions{
+	treeArgs := buildTreeSummaryArgs(indexPath, treeSummaryOptions{
 		threads: viper.GetInt(config.NumWorkersKey),
 		debug:   viper.GetBool(config.DebugKey),
 	})
-	if err != nil {
-		return err
-	}
 	log.Debug("Running GUFI tree summary command",
 		zap.String("indexAddr", indexAddr),
 		zap.Any("Args", treeArgs),

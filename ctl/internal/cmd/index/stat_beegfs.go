@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -166,9 +165,10 @@ func runBeeGFSStatQuery(backend indexBackend, args []string, verbose bool, handl
 		cmd, err := buildIndexCommand(backend, queryBinary, args)
 		if err != nil {
 			cmdfmt.Printf("%s %s\n", queryBinary, strings.Join(args, " "))
-		} else {
-			cmdfmt.Printf("%s\n", strings.Join(cmd.Args, " "))
+			return runIndexCommand(backend, queryBinary, args, handle)
 		}
+		cmdfmt.Printf("%s\n", strings.Join(cmd.Args, " "))
+		return runIndexCommandWithCmd(cmd, handle)
 	}
 	return runIndexCommand(backend, queryBinary, args, handle)
 }
@@ -208,9 +208,6 @@ func parseBeeGFSStripesReader(r io.Reader, delim string) ([]beegfsStripeInfo, er
 	if parseErr != nil {
 		return stripes, parseErr
 	}
-	sort.Slice(stripes, func(i, j int) bool {
-		return stripes[i].Ordinal < stripes[j].Ordinal
-	})
 	return stripes, nil
 }
 

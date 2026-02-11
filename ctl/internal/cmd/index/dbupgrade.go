@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-//TODO: NOT REFACTORED WITH GUFI
+// TODO: NOT REFACTORED WITH GUFI
 const dbUpgradeCmd = "db"
 
 func newGenericUpgradeCmd() *cobra.Command {
@@ -77,8 +77,3 @@ func runPythonUpgradeIndex(bflagSet *bflag.FlagSet, backend indexBackend) error 
 		zap.Any("allArgs", allArgs),
 	)
 }
-
-// Can be removed once db Flag is enabled
-var _ = newGenericUpgradeCmd
-var _ = newUpgradeCmd
-var _ = runPythonUpgradeIndex

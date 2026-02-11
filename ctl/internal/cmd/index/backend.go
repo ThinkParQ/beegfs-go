@@ -122,6 +122,10 @@ func runIndexCommand(backend indexBackend, binary string, args []string, handle 
 	if err != nil {
 		return err
 	}
+	return runIndexCommandWithCmd(cmd, handle)
+}
+
+func runIndexCommandWithCmd(cmd *exec.Cmd, handle func(io.Reader) error) error {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

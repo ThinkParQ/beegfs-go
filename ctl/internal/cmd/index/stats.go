@@ -1,8 +1,6 @@
 package index
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"go.uber.org/zap"
@@ -22,15 +20,12 @@ func newGenericStatsCmd() *cobra.Command {
 			if err := checkIndexConfig(backend, statsBinary); err != nil {
 				return err
 			}
-			if len(args) < 1 {
-				return fmt.Errorf("stat argument is required")
-			}
 			statArg := args[0]
 			var pathArgs []string
 			if len(args) > 1 {
 				pathArgs = []string{args[1]}
 			}
-			path, err := defaultIndexPath(backend, pathArgs)
+			path, err := defaultBeeGFSPath(backend, pathArgs)
 			if err != nil {
 				return err
 			}

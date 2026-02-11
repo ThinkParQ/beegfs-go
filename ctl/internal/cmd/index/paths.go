@@ -8,29 +8,61 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
-func resolvePaths(args []string) ([]string, error) {
+func resolveIndexRoot(required bool) (string, bool, error) {
+	override := strings.TrimSpace(indexRoot)
+	if override != "" {
+		root := filepath.Clean(override)
+		if !filepath.IsAbs(root) {
+			return "", false, fmt.Errorf("--index-root must be an absolute path")
+		}
+		return root, true, nil
+	}
+	root, ok := getGUFIConfigValue("IndexRoot")
+	if !ok || root == "" {
+		if required {
+			return "", false, fmt.Errorf("IndexRoot not found in %s (set --index-root to override)", indexConfig)
+		}
+		return "", false, nil
+	}
+	root = filepath.Clean(root)
+	if !filepath.IsAbs(root) {
+		if required {
+			return "", false, fmt.Errorf("IndexRoot in %s must be an absolute path", indexConfig)
+		}
+		return "", false, nil
+	}
+	return root, true, nil
+}
+
+func resolvePaths(args []string, resolve func(string) (string, error)) ([]string, error) {
 	resolved := make([]string, 0, len(args))
 	for _, arg := range args {
 		if strings.TrimSpace(arg) == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		cleanPath := filepath.Clean(arg)
-		relative, err := resolveBeeGFSRelativePath(cleanPath)
+		path, err := resolve(arg)
 		if err != nil {
 			return nil, fmt.Errorf("invalid path %q: %w", arg, err)
 		}
-		resolved = append(resolved, relative)
+		resolved = append(resolved, path)
 	}
 	return resolved, nil
 }
 
+func resolveBeeGFSRelativePaths(args []string) ([]string, error) {
+	return resolvePaths(args, resolveBeeGFSRelativePath)
+}
+
 func resolveIndexPath(path string) (string, error) {
 	cleanPath := filepath.Clean(path)
-	indexRoot, ok := getGUFIConfigValue("IndexRoot")
-	if !ok || indexRoot == "" {
-		return "", fmt.Errorf("IndexRoot not found in %s", indexConfig)
+	indexRoot, ok, err := resolveIndexRoot(false)
+	if err != nil {
+		return "", err
 	}
 	if filepath.IsAbs(cleanPath) {
+		if !ok {
+			return cleanPath, nil
+		}
 		within, err := pathWithin(indexRoot, cleanPath)
 		if err != nil {
 			return "", err
@@ -38,48 +70,54 @@ func resolveIndexPath(path string) (string, error) {
 		if within {
 			return cleanPath, nil
 		}
+		return "", fmt.Errorf("path %q is outside IndexRoot %q", cleanPath, indexRoot)
 	}
-	relative, err := resolveBeeGFSRelativePath(cleanPath)
-	if err != nil {
-		return "", err
+	if !ok {
+		return "", fmt.Errorf("IndexRoot not found in %s (set --index-root to override)", indexConfig)
 	}
-	return indexPathFromRelativeWithRoot(indexRoot, relative), nil
+	return indexPathFromRelativeWithRoot(indexRoot, cleanPath), nil
 }
 
 func resolveBeeGFSRelativePath(path string) (string, error) {
-	absPath, err := filepath.Abs(path)
+	cleanPath := filepath.Clean(path)
+	absPath, err := filepath.Abs(cleanPath)
 	if err != nil {
 		return "", err
 	}
-	if indexRoot, ok := getGUFIConfigValue("IndexRoot"); ok && indexRoot != "" {
+	if indexRoot, ok, err := resolveIndexRoot(false); err != nil {
+		return "", err
+	} else if ok {
 		within, err := pathWithin(indexRoot, absPath)
 		if err != nil {
 			return "", err
 		}
 		if within {
-			rel, err := filepath.Rel(indexRoot, absPath)
-			if err != nil {
-				return "", err
-			}
 			client, err := config.BeeGFSClient(".")
 			if err != nil {
 				return "", err
 			}
-			absPath = filepath.Join(client.GetMountPath(), rel)
-			inMountPath, err := client.GetRelativePathWithinMount(absPath)
-			if err != nil {
-				return "", err
-			}
-			relative := strings.TrimPrefix(inMountPath, string(filepath.Separator))
-			if relative == "" {
-				return ".", nil
-			}
-			return relative, nil
+			return resolveBeeGFSRelativePathWithClient(absPath, indexRoot, client)
 		}
 	}
-	client, err := config.BeeGFSClient(path)
+	client, err := config.BeeGFSClient(cleanPath)
 	if err != nil {
 		return "", err
+	}
+	return resolveBeeGFSRelativePathWithClient(absPath, "", client)
+}
+
+type beegfsRelativePathClient interface {
+	GetMountPath() string
+	GetRelativePathWithinMount(path string) (string, error)
+}
+
+func resolveBeeGFSRelativePathWithClient(absPath, indexRoot string, client beegfsRelativePathClient) (string, error) {
+	if indexRoot != "" {
+		rel, err := filepath.Rel(indexRoot, absPath)
+		if err != nil {
+			return "", err
+		}
+		absPath = filepath.Join(client.GetMountPath(), rel)
 	}
 	inMountPath, err := client.GetRelativePathWithinMount(absPath)
 	if err != nil {
@@ -92,20 +130,77 @@ func resolveBeeGFSRelativePath(path string) (string, error) {
 	return relative, nil
 }
 
+func resolveBeeGFSAbsolutePath(backend indexBackend, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	cleanPath := filepath.Clean(path)
+	if !backend.isLocal() {
+		if !filepath.IsAbs(cleanPath) {
+			return "", fmt.Errorf("remote index-addr requires an absolute path: %q", path)
+		}
+		return cleanPath, nil
+	}
+	relative, err := resolveBeeGFSRelativePath(cleanPath)
+	if err != nil {
+		return "", err
+	}
+	client, err := config.BeeGFSClient(cleanPath)
+	if err != nil {
+		return "", err
+	}
+	mountPath := client.GetMountPath()
+	if mountPath == "" {
+		return "", fmt.Errorf("BeeGFS mount path is required to resolve %q", path)
+	}
+	return filepath.Join(mountPath, relative), nil
+}
+
+func resolveBeeGFSAbsolutePaths(backend indexBackend, args []string) ([]string, error) {
+	resolved := make([]string, 0, len(args))
+	for _, arg := range args {
+		path, err := resolveBeeGFSAbsolutePath(backend, arg)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, path)
+	}
+	return resolved, nil
+}
+
+func resolveIndexPathInput(backend indexBackend, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("index path is required")
+	}
+	cleanPath := filepath.Clean(path)
+	if filepath.IsAbs(cleanPath) {
+		return cleanPath, nil
+	}
+	if !backend.isLocal() {
+		indexRoot, _, err := resolveIndexRoot(true)
+		if err != nil {
+			return "", err
+		}
+		return indexPathFromRelativeWithRoot(indexRoot, cleanPath), nil
+	}
+	return resolveIndexPath(cleanPath)
+}
+
 func indexPathFromRelative(relative string) (string, error) {
-	indexRoot, ok := getGUFIConfigValue("IndexRoot")
-	if !ok || indexRoot == "" {
-		return "", fmt.Errorf("IndexRoot not found in %s", indexConfig)
+	indexRoot, _, err := resolveIndexRoot(true)
+	if err != nil {
+		return "", err
 	}
 	return indexPathFromRelativeWithRoot(indexRoot, relative), nil
 }
 
 func indexPathFromRelativeWithRoot(indexRoot, relative string) string {
 	trimmed := strings.TrimPrefix(relative, string(filepath.Separator))
+	cleanRoot := filepath.Clean(indexRoot)
 	if trimmed == "" || trimmed == "." {
-		return filepath.Clean(indexRoot)
+		return cleanRoot
 	}
-	return filepath.Join(filepath.Clean(indexRoot), trimmed)
+	return filepath.Join(cleanRoot, trimmed)
 }
 
 func pathWithin(base, target string) (bool, error) {

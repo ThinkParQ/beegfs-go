@@ -24,6 +24,7 @@ var (
 )
 
 var indexAddr string
+var indexRoot string
 
 var commonIndexFlags = []bflag.FlagWrapper{
 	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
@@ -43,14 +44,16 @@ var commonIndexFlags = []bflag.FlagWrapper{
 	bflag.GlobalFlag(config.DebugKey, "-H"),
 }
 
-func checkIndexConfig(backend indexBackend, binaryPath string) error {
+func checkIndexConfig(backend indexBackend, binaries ...string) error {
 	if !backend.isLocal() {
 		return nil
 	}
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
-		return fmt.Errorf("GUFI index mode requires %s to be installed", binaryPath)
-	} else if err != nil {
-		return err
+	for _, binaryPath := range binaries {
+		if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+			return fmt.Errorf("GUFI index mode requires %s to be installed", binaryPath)
+		} else if err != nil {
+			return err
+		}
 	}
 
 	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
@@ -63,9 +66,9 @@ func checkIndexConfig(backend indexBackend, binaryPath string) error {
 	return nil
 }
 
-func defaultIndexPaths(backend indexBackend, args []string) ([]string, error) {
+func defaultBeeGFSPaths(backend indexBackend, args []string) ([]string, error) {
 	if len(args) > 0 {
-		return resolvePaths(args)
+		return resolveBeeGFSRelativePaths(args)
 	}
 	if !backend.isLocal() {
 		return nil, fmt.Errorf("remote index-addr requires explicit path arguments")
@@ -74,11 +77,11 @@ func defaultIndexPaths(backend indexBackend, args []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return resolvePaths([]string{cwd})
+	return resolveBeeGFSRelativePaths([]string{cwd})
 }
 
-func defaultIndexPath(backend indexBackend, args []string) (string, error) {
-	paths, err := defaultIndexPaths(backend, args)
+func defaultBeeGFSPath(backend indexBackend, args []string) (string, error) {
+	paths, err := defaultBeeGFSPaths(backend, args)
 	if err != nil {
 		return "", err
 	}

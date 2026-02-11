@@ -26,19 +26,27 @@ func newGenericCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var binaries []string
 			if !onlySummary {
-				if err := checkIndexConfig(backend, beeBinary); err != nil {
-					return err
-				}
+				binaries = append(binaries, beeBinary)
 			}
 			if summary || onlySummary {
-				if err := checkIndexConfig(backend, treeSummaryBinary); err != nil {
-					return err
-				}
+				binaries = append(binaries, treeSummaryBinary)
+			}
+			if err := checkIndexConfig(backend, binaries...); err != nil {
+				return err
+			}
+			resolvedFsPath, err := resolveBeeGFSAbsolutePath(backend, fsPath)
+			if err != nil {
+				return err
+			}
+			resolvedIndexPath, err := resolveIndexPathInput(backend, indexPath)
+			if err != nil {
+				return err
 			}
 			runOpts := createRunOptions{
-				fsPath:      fsPath,
-				indexPath:   indexPath,
+				fsPath:      resolvedFsPath,
+				indexPath:   resolvedIndexPath,
 				summary:     summary,
 				onlySummary: onlySummary,
 				summaryOpts: treeSummaryOptions{
@@ -106,10 +114,7 @@ type createRunOptions struct {
 func runPythonCreateIndex(bflagSet *bflag.FlagSet, backend indexBackend, opts createRunOptions) error {
 	if !opts.onlySummary {
 		wrappedArgs := bflagSet.WrappedArgs()
-		dirArgs, err := buildDir2IndexArgs(opts.fsPath, opts.indexPath, wrappedArgs)
-		if err != nil {
-			return err
-		}
+		dirArgs := buildDir2IndexArgs(opts.fsPath, opts.indexPath, wrappedArgs)
 		if err := runIndexCommandWithPrint(backend, beeBinary, dirArgs, "Running GUFI dir2index command",
 			zap.String("indexAddr", indexAddr),
 			zap.String("fsPath", opts.fsPath),
@@ -121,10 +126,7 @@ func runPythonCreateIndex(bflagSet *bflag.FlagSet, backend indexBackend, opts cr
 		}
 	}
 	if opts.summary || opts.onlySummary {
-		treeArgs, err := buildTreeSummaryArgs(opts.indexPath, opts.summaryOpts)
-		if err != nil {
-			return err
-		}
+		treeArgs := buildTreeSummaryArgs(opts.indexPath, opts.summaryOpts)
 		return runIndexCommandWithPrint(backend, treeSummaryBinary, treeArgs, "Running GUFI treesummary command",
 			zap.String("indexAddr", indexAddr),
 			zap.String("indexPath", opts.indexPath),
@@ -134,10 +136,10 @@ func runPythonCreateIndex(bflagSet *bflag.FlagSet, backend indexBackend, opts cr
 	return nil
 }
 
-func buildDir2IndexArgs(fsPath, indexPath string, wrappedArgs []string) ([]string, error) {
+func buildDir2IndexArgs(fsPath, indexPath string, wrappedArgs []string) []string {
 	args := buildDir2IndexBaseArgs(wrappedArgs)
 	args = append(args, fsPath, indexPath)
-	return args, nil
+	return args
 }
 
 func buildDir2IndexBaseArgs(wrappedArgs []string) []string {
@@ -165,7 +167,7 @@ func buildDir2IndexBaseArgs(wrappedArgs []string) []string {
 	return args
 }
 
-func buildTreeSummaryArgs(indexPath string, opts treeSummaryOptions) ([]string, error) {
+func buildTreeSummaryArgs(indexPath string, opts treeSummaryOptions) []string {
 	args := make([]string, 0, 12)
 	if opts.debug {
 		args = append(args, "-H")
@@ -174,5 +176,5 @@ func buildTreeSummaryArgs(indexPath string, opts treeSummaryOptions) ([]string, 
 		args = append(args, "-n", strconv.Itoa(opts.threads))
 	}
 	args = append(args, indexPath)
-	return args, nil
+	return args
 }

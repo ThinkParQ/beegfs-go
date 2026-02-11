@@ -7,8 +7,7 @@ import (
 )
 
 func TestBuildDir2IndexArgs_AppendsPaths(t *testing.T) {
-	args, err := buildDir2IndexArgs("fs", "idx", []string{"-n", "4", "--max-level", "2"})
-	assert.NoError(t, err)
+	args := buildDir2IndexArgs("fs", "idx", []string{"-n", "4", "--max-level", "2"})
 	assert.Equal(t, []string{
 		"-n", "4",
 		"--max-level", "2",
@@ -18,8 +17,7 @@ func TestBuildDir2IndexArgs_AppendsPaths(t *testing.T) {
 }
 
 func TestBuildDir2IndexArgs_ForcesPluginPath(t *testing.T) {
-	args, err := buildDir2IndexArgs("fs", "idx", []string{"--plugin", "/tmp/plugin.so", "-n", "4"})
-	assert.NoError(t, err)
+	args := buildDir2IndexArgs("fs", "idx", []string{"--plugin", "/tmp/plugin.so", "-n", "4"})
 	assert.Equal(t, []string{
 		"-n", "4",
 		"--plugin", dir2IndexPluginPath,
@@ -28,8 +26,7 @@ func TestBuildDir2IndexArgs_ForcesPluginPath(t *testing.T) {
 }
 
 func TestBuildDir2IndexArgs_NoMetadataSkipsPlugin(t *testing.T) {
-	args, err := buildDir2IndexArgs("fs", "idx", []string{"-B", "--plugin", "/tmp/plugin.so"})
-	assert.NoError(t, err)
+	args := buildDir2IndexArgs("fs", "idx", []string{"-B", "--plugin", "/tmp/plugin.so"})
 	assert.Equal(t, []string{
 		"-B",
 		"fs", "idx",
@@ -41,8 +38,7 @@ func TestBuildTreeSummaryArgs_BuildsArgs(t *testing.T) {
 		threads: 8,
 		debug:   true,
 	}
-	args, err := buildTreeSummaryArgs("index", opts)
-	assert.NoError(t, err)
+	args := buildTreeSummaryArgs("index", opts)
 	assert.Equal(t, []string{
 		"-H",
 		"-n", "8",

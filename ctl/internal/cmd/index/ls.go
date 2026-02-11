@@ -22,11 +22,15 @@ func newGenericLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := checkIndexConfig(backend, lsBinary); err != nil {
-				return err
-			}
 			beegfsEnabled, err := cmd.Flags().GetBool("beegfs")
 			if err != nil {
+				return err
+			}
+			binaries := []string{lsBinary}
+			if beegfsEnabled {
+				binaries = append(binaries, queryBinary)
+			}
+			if err := checkIndexConfig(backend, binaries...); err != nil {
 				return err
 			}
 			delim, err := cmd.Flags().GetString("delim")
@@ -43,7 +47,7 @@ func newGenericLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			paths, err := defaultIndexPaths(backend, args)
+			paths, err := defaultBeeGFSPaths(backend, args)
 			if err != nil {
 				return err
 			}
@@ -114,20 +118,10 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []str
 			return streamIndexLines(r, &tbl)
 		})
 	}
-	if err := checkIndexConfig(backend, queryBinary); err != nil {
-		return err
-	}
-	indexPaths := make([]string, len(paths))
-	for i, path := range paths {
-		indexPath, err := indexPathFromRelative(path)
-		if err != nil {
-			return err
-		}
-		indexPaths[i] = indexPath
-	}
+	indexPaths := paths
 	tbl := newIndexLinePrintomatic("ls_line")
 	queryStart := time.Now()
-	meta, err := fetchBeeGFSMetadata(backend, paths, indexPaths, delim, recursive)
+	meta, err := fetchBeeGFSMetadata(backend, indexPaths, indexPaths, delim, recursive)
 	if err != nil {
 		return err
 	}
@@ -135,7 +129,7 @@ func runPythonLsIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []str
 
 	processStart := time.Now()
 	err = runIndexCommand(backend, lsBinary, allArgs, func(r io.Reader) error {
-		return mergeBeeGFSLsOutput(r, meta, delim, paths, &tbl)
+		return mergeBeeGFSLsOutput(r, meta, delim, indexPaths, &tbl)
 	})
 	if err != nil {
 		return err

@@ -19,7 +19,7 @@ func newGenericFindCmd() *cobra.Command {
 			if err := checkIndexConfig(backend, findBinary); err != nil {
 				return err
 			}
-			paths, err := defaultIndexPaths(backend, args)
+			paths, err := defaultBeeGFSPaths(backend, args)
 			if err != nil {
 				return err
 			}

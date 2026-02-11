@@ -20,10 +20,6 @@ func newGenericStatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			paths, err := defaultIndexPaths(backend, args)
-			if err != nil {
-				return err
-			}
 			if beegfsEnabled {
 				if err := checkIndexConfig(backend, queryBinary); err != nil {
 					return err
@@ -32,7 +28,15 @@ func newGenericStatCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				paths, err := defaultBeeGFSPaths(backend, args)
+				if err != nil {
+					return err
+				}
 				return runBeeGFSStatIndex(backend, paths, verbose)
+			}
+			paths, err := defaultBeeGFSPaths(backend, args)
+			if err != nil {
+				return err
 			}
 			if err := checkIndexConfig(backend, statBinary); err != nil {
 				return err

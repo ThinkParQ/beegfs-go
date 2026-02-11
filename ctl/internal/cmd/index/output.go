@@ -2,6 +2,8 @@ package index
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -22,16 +24,21 @@ func runIndexCommandWithPrint(backend indexBackend, binary string, args []string
 	return runIndexCommandPrintLines(backend, binary, args, &tbl)
 }
 
+const maxIndexLineBytes = 16 * 1024 * 1024
+
 func streamIndexLines(r io.Reader, tbl *cmdfmt.Printomatic) error {
 	sanitize := shouldSanitizeIndexJSON()
 	scanner := bufio.NewScanner(r)
 	scanner.Split(scanCRLF)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxIndexLineBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		tbl.AddItem(sanitizeIndexLine(line, sanitize))
 	}
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return fmt.Errorf("index output line exceeded %d bytes", maxIndexLineBytes)
+		}
 		return err
 	}
 	tbl.PrintRemaining()
