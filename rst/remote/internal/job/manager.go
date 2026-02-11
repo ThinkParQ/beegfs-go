@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"syscall"
 
 	"github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
@@ -1130,7 +1131,7 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 		}
 
 		if dataState, err := entry.GetFileDataState(ctx, path); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 				return nil
 			}
 			return err
@@ -1138,7 +1139,7 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil

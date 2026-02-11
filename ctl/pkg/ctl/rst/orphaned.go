@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io/fs"
+	"syscall"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -121,7 +122,7 @@ func cleanupOrphanedPath(ctx context.Context, mountPoint filesystem.Provider, be
 		result.Message = "path exists"
 		return result
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 		result.Err = err
 		return result
 	}

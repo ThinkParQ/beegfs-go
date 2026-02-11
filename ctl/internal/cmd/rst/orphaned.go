@@ -83,7 +83,11 @@ func runCleanupOrphanedCmd(cmd *cobra.Command, frontendCfg cleanupOrphanedConfig
 			if res.Deleted {
 				action = "deleted"
 			}
-			tbl.AddItem(action, res.Path, res.Message)
+			message := res.Message
+			if message == "" {
+				message = "none"
+			}
+			tbl.AddItem(action, res.Path, message)
 		}
 	}
 
