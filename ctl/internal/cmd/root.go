@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mitchellh/go-wordwrap"
 	"github.com/spf13/cobra"
@@ -29,9 +30,12 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/rst"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/stats"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	cmdConfig "github.com/thinkparq/beegfs-go/ctl/internal/config"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	lic "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
+	pl "github.com/thinkparq/protobuf/go/license"
 	"golang.org/x/term"
 )
 
@@ -70,10 +74,13 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		`, longHelpHeader, strings.Repeat("=", len(longHelpHeader))),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		// This is inherited by ALL commands even if they also define there own PersistentPreRunE.
-		// See attachPersistentPreRunE() for more details.
+		// These are inherited by ALL commands even if they also define there own PersistentPreRunE
+		// or PersistentPostRunE. See attachPersistentPreRunE() for more details.
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			return globalPersistentPreRunE(c)
+		},
+		PersistentPostRunE: func(c *cobra.Command, args []string) error {
+			return globalPersistentPostRunE(c)
 		},
 	}
 
@@ -156,6 +163,7 @@ func wrapAllCommands(cmd *cobra.Command) {
 		cmd.Args = attachCustomArgsErr(origArgs)
 	}
 	attachPersistentPreRunE(cmd)
+	attachPersistentPostRunE(cmd)
 	for _, subCmd := range cmd.Commands() {
 		wrapAllCommands(subCmd) // Recursively wrap subcommands
 	}
@@ -179,6 +187,12 @@ func attachCustomArgsErr(argsFn cobra.PositionalArgs) cobra.PositionalArgs {
 // would be overridden if a command defined its own PersistentPreRunE. This approach ensures the
 // globalPersistentPreRunE always runs before the PersistentPreRunE defined by any sub-command.
 func attachPersistentPreRunE(cmd *cobra.Command) {
+	// Do not wrap the root command. It already calls globalPersistentPreRunE and wrapping it would
+	// invoke the global handler twice when executing the root command or any command that inherits
+	// its PersistentPreRunE.
+	if cmd.Parent() == nil {
+		return
+	}
 	if cmd.PersistentPreRunE != nil {
 		origFunc := cmd.PersistentPreRunE
 		newFunc := func(c *cobra.Command, args []string) error {
@@ -193,6 +207,23 @@ func attachPersistentPreRunE(cmd *cobra.Command) {
 	// (if any) via Cobra's lazy inheritance. We do not assign a new function to these commands to
 	// preserve that behavior, otherwise sub-commands of a command with a PersistentPreRunE defined
 	// would only use the globalPersistentPreRunE, not their parents wrapped PersistentPreRunE func.
+}
+
+// attachPersistentPostRunE does the same as attachPersistentPreRunE for PersistentPostRunE.
+func attachPersistentPostRunE(cmd *cobra.Command) {
+	if cmd.Parent() == nil {
+		return
+	}
+	if cmd.PersistentPostRunE != nil {
+		origFunc := cmd.PersistentPostRunE
+		newFunc := func(c *cobra.Command, args []string) error {
+			if err := globalPersistentPostRunE(c); err != nil {
+				return err
+			}
+			return origFunc(c, args)
+		}
+		cmd.PersistentPostRunE = newFunc
+	}
 }
 
 // pprofStarted ensures pprof only starts once as globalPersistentPreRunE is executed for all
@@ -219,6 +250,44 @@ func globalPersistentPreRunE(cmd *cobra.Command) error {
 		return fmt.Errorf("the number of workers must be at least 1")
 	}
 	return isCommandAuthorized(cmd)
+}
+
+func globalPersistentPostRunE(cmd *cobra.Command) error {
+	// Printing license warnings on the license command results in redundant output.
+	if cmd.Name() != "license" {
+		license, err := lic.GetLicense(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+
+		if license.Result != pl.VerifyResult_VERIFY_VALID {
+			cmdfmt.Printf("WARNING: this system does not have a valid license installed.\n")
+			cmdfmt.Printf("To avoid disruptions, run 'beegfs license' and follow the required steps.\n")
+			cmdfmt.Printf("Reason: %s\n", license.Message)
+			return nil
+		}
+
+		remaining, message := lic.GetTimeToExpiration(license)
+		// Warn by default 90 days before expiry.
+		renewalWindow := 90 * 24 * time.Hour
+		if license.Data.Type == pl.CertType_CERT_TYPE_TEMPORARY {
+			// For temp licenses only warn 14 days before.
+			renewalWindow = 14 * 24 * time.Hour
+		}
+		if remaining <= renewalWindow {
+			cmdfmt.Printf("WARNING: License %s, run 'beegfs license' for more details.\n", message)
+		}
+
+		for _, f := range license.Data.DnsNames {
+			if after, ok := strings.CutPrefix(f, lic.PrefixCapacity); ok {
+				if err := lic.CheckIfOverStorageCapacityLimit(cmd.Context(), after); err != nil {
+					cmdfmt.Printf("WARNING: The %s.\n", err)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // isCommandAuthorized enforces "opt-out" user authorization requiring commands to explicitly
