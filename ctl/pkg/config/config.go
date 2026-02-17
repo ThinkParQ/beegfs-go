@@ -249,7 +249,7 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
 		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
-			return nil, fmt.Errorf("reading certificate file failed: %w", err)
+			return nil, fmt.Errorf("reading certificate file failed: %w (hint: run 'beegfs --help' and review the options to configure TLS)", err)
 		}
 	}
 

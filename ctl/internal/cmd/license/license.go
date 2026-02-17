@@ -68,6 +68,9 @@ func NewCmd() *cobra.Command {
 		Use:   "license",
 		Short: "Query license information",
 		Args:  cobra.NoArgs,
+		Annotations: map[string]string{
+			"license.SkipWarnings": "",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.Get {
 				return printGenerateLicenseHelp(cmd.Context(), "To obtain and install a new license:")
