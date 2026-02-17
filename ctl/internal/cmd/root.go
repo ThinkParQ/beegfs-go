@@ -253,11 +253,20 @@ func globalPersistentPreRunE(cmd *cobra.Command) error {
 }
 
 func globalPersistentPostRunE(cmd *cobra.Command) error {
+	// The completion and help commands are auto generated so we cannot easily add an annotation,
+	// but they shouldn't ever require license checks (otherwise we would require TLS configuration
+	// to generate packages). However in case we add sub-commands with the same names ensure this
+	// only applies to the top level commands.
+	if (cmd.Parent().Name() == "completion" && cmd.Parent().Parent().Name() == BinaryName) ||
+		(cmd.Name() == "help" && cmd.Parent().Name() == BinaryName) {
+		return nil
+	}
+
 	// Printing license warnings on the license command results in redundant output.
-	if cmd.Name() != "license" {
+	if _, ok := cmd.Annotations["license.SkipWarnings"]; !ok {
 		license, err := lic.GetLicense(cmd.Context(), false)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to verify licensed status: %w", err)
 		}
 
 		if license.Result != pl.VerifyResult_VERIFY_VALID {
@@ -293,10 +302,11 @@ func globalPersistentPostRunE(cmd *cobra.Command) error {
 // isCommandAuthorized enforces "opt-out" user authorization requiring commands to explicitly
 // declare using an annotation they can be run by users that do not have root privileges.
 func isCommandAuthorized(cmd *cobra.Command) error {
-	// The completion commands are auto generated so we cannot easily add an annotation, but they
-	// should be runnable by all users. However in case we add a command called completion this need
-	// to only apply to the top-level completion command.
-	if cmd.Parent().Name() == "completion" && cmd.Parent().Parent().Name() == BinaryName {
+	// The completion and help commands are auto generated so we cannot easily add an annotation,
+	// but they should be runnable by all users. However in case we add sub-commands with the same
+	// names ensure this only applies to the top level commands.
+	if (cmd.Parent().Name() == "completion" && cmd.Parent().Parent().Name() == BinaryName) ||
+		(cmd.Name() == "help" && cmd.Parent().Name() == BinaryName) {
 		return nil
 	}
 
