@@ -1,11 +1,8 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
@@ -15,26 +12,32 @@ func newGenericRescanCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 	var recurse bool
 	var cmd = &cobra.Command{
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				args = append([]string{cwd}, args...)
-			}
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			return runPythonRescanIndex(args, bflagSet, recurse)
+			if err := checkIndexConfig(backend, beeBinary, treeSummaryBinary); err != nil {
+				return err
+			}
+			indexPath, _, err := resolveIndexRoot(true)
+			if err != nil {
+				return err
+			}
+			paths, err := resolveBeeGFSAbsolutePaths(backend, args)
+			if err != nil {
+				return err
+			}
+			return runPythonRescanIndex(paths, bflagSet, recurse, backend, indexPath)
 		},
 	}
 	rescanFlags := []bflag.FlagWrapper{
-		bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
+		bflag.Flag("max-memory", "X", "Target memory utilization (soft limit)", "--target-memory", ""),
 		bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
 		bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
 		bflag.GlobalFlag(config.NumWorkersKey, "-n"),
-		bflag.GlobalFlag(config.DebugKey, "-V=1"),
+		bflag.GlobalFlag(config.DebugKey, "-H"),
 		bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
 	}
 	bflagSet = bflag.NewFlagSet(rescanFlags, cmd)
@@ -72,57 +75,36 @@ $ beegfs index rescan sub-dir1/ sub-dir2/
 	return s
 }
 
-func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool) error {
+func runPythonRescanIndex(paths []string, bflagSet *bflag.FlagSet, recurse bool, backend indexBackend, indexPath string) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	for _, path := range paths {
-		allArgs := make([]string, 0, len(wrappedArgs)+4)
-		allArgs = append(allArgs, createCmd, "-F", path)
-		allArgs = append(allArgs, wrappedArgs...)
-		if recurse {
-			allArgs = append(allArgs, "-U")
-		} else {
-			allArgs = append(allArgs, "-k")
-		}
-		log.Debug("Running BeeGFS Hive Index rescan command",
-			zap.String("path", path),
-			zap.Bool("recurse", recurse),
-			zap.Any("wrappedArgs", wrappedArgs),
-			zap.Any("allArgs", allArgs),
-		)
-		cmd := exec.Command(beeBinary, allArgs...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Start()
-		if err != nil {
-			return fmt.Errorf("unable to start index command: %w", err)
-		}
-		err = cmd.Wait()
-		if err != nil {
-			return fmt.Errorf("error executing index command: %w", err)
-		}
+	baseArgs := buildDir2IndexBaseArgs(wrappedArgs)
+	if !recurse {
+		baseArgs = append(baseArgs, "--max-level", "1")
 	}
-	treeArgs := []string{createCmd, "-S"}
-	requiredFlags := map[string]bool{"-X": true, "-n": true}
-	for i := 0; i < len(wrappedArgs); i++ {
-		if requiredFlags[wrappedArgs[i]] && i+1 < len(wrappedArgs) {
-			treeArgs = append(treeArgs, wrappedArgs[i], wrappedArgs[i+1])
-			i++
-		}
+	tbl := newIndexLinePrintomatic("line")
+	allArgs := make([]string, 0, len(baseArgs)+len(paths)+1)
+	allArgs = append(allArgs, baseArgs...)
+	allArgs = append(allArgs, paths...)
+	allArgs = append(allArgs, indexPath)
+	log.Debug("Running GUFI dir2index command",
+		zap.Bool("recurse", recurse),
+		zap.String("indexAddr", indexAddr),
+		zap.String("indexPath", indexPath),
+		zap.Any("wrappedArgs", wrappedArgs),
+		zap.Any("paths", paths),
+		zap.Any("allArgs", allArgs),
+	)
+	if err := runIndexCommandPrintLines(backend, beeBinary, allArgs, &tbl); err != nil {
+		return err
 	}
-	log.Debug("Running BeeGFS Hive Index Tree-Summary command",
+	treeArgs := buildTreeSummaryArgs(indexPath, treeSummaryOptions{
+		threads: viper.GetInt(config.NumWorkersKey),
+		debug:   viper.GetBool(config.DebugKey),
+	})
+	log.Debug("Running GUFI tree summary command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("Args", treeArgs),
 	)
-	cmd := exec.Command(beeBinary, treeArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
+	return runIndexCommandPrintLines(backend, treeSummaryBinary, treeArgs, &tbl)
 }

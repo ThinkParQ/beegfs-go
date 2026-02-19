@@ -2,17 +2,15 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
+	"io"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const lsCmd = "ls"
 
 func newGenericLsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -20,24 +18,44 @@ func newGenericLsCmd() *cobra.Command {
 	var cmd = &cobra.Command{
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			paths := args
-			if len(paths) == 0 {
-				cwd, err := os.Getwd()
+			beegfsEnabled, err := cmd.Flags().GetBool("beegfs")
+			if err != nil {
+				return err
+			}
+			binaries := []string{lsBinary}
+			if beegfsEnabled {
+				binaries = append(binaries, queryBinary)
+			}
+			if err := checkIndexConfig(backend, binaries...); err != nil {
+				return err
+			}
+			delim, err := cmd.Flags().GetString("delim")
+			if err != nil {
+				return err
+			}
+			if beegfsEnabled {
+				delim, err = normalizeBeeGFSLsDelim(delim)
 				if err != nil {
 					return err
 				}
-				paths = []string{cwd}
 			}
-
-			return runPythonLsIndex(bflagSet, paths)
+			recursive, err := cmd.Flags().GetBool("recursive")
+			if err != nil {
+				return err
+			}
+			paths, err := defaultBeeGFSPaths(backend, args)
+			if err != nil {
+				return err
+			}
+			return runPythonLsIndex(bflagSet, backend, paths, beegfsEnabled, delim, recursive)
 		},
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("beegfs", "b", "Print BeeGFS metadata for the file(s)", "--beegfs", false),
 		bflag.Flag("all", "a", "Do not ignore entries starting with .", "-a", false),
 		bflag.Flag("almost-all", "A", "Do not list implied . and ..", "-A", false),
 		bflag.Flag("block-size", "", "{K,KB,KiB,M,MB,MiB,G,GB,GiB,T,TB,TiB,P,PB,PiB,E,EB,EiB,Z,ZB,ZiB,Y,YB,YiB}, With -l, scale sizes by SIZE when printing them", "--block-size", ""),
@@ -55,14 +73,11 @@ func newGenericLsCmd() *cobra.Command {
 		bflag.Flag("time-style", "", "Time/date format with -l", "--time-style", ""),
 		bflag.Flag("mtime", "t", "Sort by modification time, newest first", "-t", false),
 		bflag.Flag("no-sort", "U", "Do not sort; list entries in directory order", "-U", false),
-		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
+		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", "\t"),
 		bflag.Flag("in-memory-name", "", "In-memory name", "--in-memory-name", "out"),
-		bflag.Flag("nlink-width", "", "Width of nlink column", "--nlink-width", 2),
-		bflag.Flag("size-width", "", "Width of size column", "--size-width", 10),
-		bflag.Flag("user-width", "", "Width of user column", "--user-width", 5),
-		bflag.Flag("group-width", "", "Width of group column", "--group-width", 5),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+	cmd.Flags().BoolP("beegfs", "b", false, "Print BeeGFS metadata for the file(s)")
 	cmd.PersistentFlags().BoolP("help", "", false, "Help for ls")
 	cmd.Flags().MarkHidden("in-memory-name")
 	return cmd
@@ -85,34 +100,57 @@ $ beegfs index ls /mnt/index
 	return s
 }
 
-func runPythonLsIndex(bflagSet *bflag.FlagSet, paths []string) error {
+func runPythonLsIndex(bflagSet *bflag.FlagSet, backend indexBackend, paths []string, beegfsEnabled bool, delim string, recursive bool) error {
 	log, _ := config.GetLogger()
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+len(paths)+2)
-	allArgs = append(allArgs, lsCmd)
+	allArgs := make([]string, 0, len(wrappedArgs)+len(paths))
 	allArgs = append(allArgs, paths...)
 	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index ls command",
+	log.Debug("Running GUFI ls command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("lsCmd", lsCmd),
 		zap.Any("paths", paths),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
+	if !beegfsEnabled {
+		tbl := newIndexLinePrintomatic("ls_line")
+		return runIndexCommand(backend, lsBinary, allArgs, func(r io.Reader) error {
+			return streamIndexLines(r, &tbl)
+		})
+	}
+	indexPaths := paths
+	tbl := newIndexLinePrintomatic("ls_line")
+	queryStart := time.Now()
+	meta, err := fetchBeeGFSMetadata(backend, indexPaths, indexPaths, delim, recursive)
+	if err != nil {
+		return err
+	}
+	queryDur := time.Since(queryStart)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
+	processStart := time.Now()
+	err = runIndexCommand(backend, lsBinary, allArgs, func(r io.Reader) error {
+		return mergeBeeGFSLsOutput(r, meta, delim, indexPaths, &tbl)
+	})
 	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
+		return err
 	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
+	processDur := time.Since(processStart)
+	log.Debug("BeeGFS metadata timings",
+		zap.Duration("queryDuration", queryDur),
+		zap.Duration("mergeDuration", processDur),
+	)
 	return nil
+}
+
+func normalizeBeeGFSLsDelim(delim string) (string, error) {
+	if delim == "" {
+		return "", fmt.Errorf("--delim cannot be empty when --beegfs is set")
+	}
+	if delim == "\t" {
+		return delim, nil
+	}
+	if strings.ContainsAny(delim, " \t\r\n") {
+		return "", fmt.Errorf("--delim must not contain whitespace when --beegfs is set")
+	}
+	return delim, nil
 }
