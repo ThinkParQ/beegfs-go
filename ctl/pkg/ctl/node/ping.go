@@ -18,7 +18,7 @@ import (
 
 type PingConfig struct {
 	Mountpoint string
-	NodeType   beegfs.NodeType
+	NodeTypes  []beegfs.NodeType
 	NodeIDs    []beegfs.EntityId
 	Count      uint32
 	Interval   time.Duration
@@ -78,7 +78,6 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 	}
 	client := clients[0] // By now, all clients should be equivalent
 
-	toPing := []beegfs.Node{}
 	nodes, err := config.NodeStore(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to download nodes: %w", err)
@@ -90,12 +89,22 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 		defer close(results)
 		defer close(errs)
 
+		if len(cfg.NodeIDs) == 0 && len(cfg.NodeTypes) == 0 {
+			cfg.NodeTypes = []beegfs.NodeType{beegfs.Meta, beegfs.Storage, beegfs.Management}
+		}
+
+		nodeUids := make(map[beegfs.Uid]struct{})
+		toPing := []beegfs.Node{}
+
+		// Add all specified nodes to ping list
 		if len(cfg.NodeIDs) > 0 {
-			// nodeIDs explicitly configured
 			for _, id := range cfg.NodeIDs {
-				if n, err := nodes.GetNode(id); err == nil {
-					toPing = append(toPing, n)
-					log.Debug("Found configured node. Pinging", zap.Any("node", n))
+				if node, err := nodes.GetNode(id); err == nil {
+					if _, ok := nodeUids[node.Uid]; !ok {
+						nodeUids[node.Uid] = struct{}{}
+						toPing = append(toPing, node)
+						log.Debug("Found configured node. Pinging", zap.Any("node", node))
+					}
 					continue
 				} else {
 					errs <- &PingError{
@@ -104,21 +113,22 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 					}
 				}
 			}
-		} else {
-			// No nodeIDs supplied, get and ping all nodes of either explicitly configured type
-			// or any type if none configured
-			for _, n := range nodes.GetNodes() {
-				log.Debug("Considering to ping", zap.Any("node", n))
-				nodeType := beegfs.NodeType(n.Id.NodeType)
-				if nodeType != beegfs.Meta && nodeType != beegfs.Storage && nodeType != beegfs.Management {
-					// We only ever ping management, meta or storage nodes
-					log.Debug("Can not ping node of this type:", zap.Any("node", n))
-					continue
-				}
+		}
 
-				if nodeType == cfg.NodeType || cfg.NodeType == beegfs.InvalidNodeType {
-					toPing = append(toPing, n)
-					log.Debug("Node queued for pinging:", zap.Any("node", n))
+		// Add all node of specified types to ping list
+		if len(cfg.NodeTypes) > 0 {
+			for _, node := range nodes.GetNodes() {
+				nodeType := beegfs.NodeType(node.Id.NodeType)
+				for _, cfgNodeType := range cfg.NodeTypes {
+					if cfgNodeType == nodeType || cfgNodeType == beegfs.InvalidNodeType {
+						if _, ok := nodeUids[node.Uid]; !ok {
+							nodeUids[node.Uid] = struct{}{}
+							toPing = append(toPing, node)
+							log.Debug("Node queued for pinging:", zap.Any("node", node))
+
+						}
+						break
+					}
 				}
 			}
 		}
@@ -138,6 +148,16 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 					if !ok {
 						return
 					}
+
+					if n.Id.NodeType == beegfs.InvalidNodeType || n.Id.NodeType == beegfs.Client {
+						log.Debug("Can not ping node of this type:", zap.Any("node", n))
+						errs <- &PingError{
+							NodeID: n.Id,
+							Inner:  fmt.Errorf("cannot ping this node type: %s (ignoring)", n.Id.NodeType),
+						}
+						continue
+					}
+
 					res, err := ioctl.PingNode(client.Mount.Path, n.Id, cfg.Count, cfg.Interval)
 					if err != nil {
 						errs <- &PingError{
