@@ -19,6 +19,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
+	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
@@ -572,6 +573,34 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		}
 	}
 	return nodeStore, nil
+}
+
+// AuthSecret returns the configured BeeMsg authentication secret.
+// If authentication is disabled this returns 0 and no error.
+func AuthSecret() (uint64, error) {
+	if viper.GetBool(AuthDisableKey) {
+		return 0, nil
+	}
+
+	authPath := viper.GetString(AuthFileKey)
+	authBytes, err := os.ReadFile(authPath)
+	if err == nil {
+		return util.GenerateAuthSecret(authBytes), nil
+	}
+
+	// Create ManagementClient only to call GetAuthSecret(); no management RPC is sent here.
+	if authPath == BeeGFSAuthDefaultPath {
+		mgmtd, mgmtdErr := ManagementClient()
+		if mgmtdErr == nil {
+			return mgmtd.GetAuthSecret(), nil
+		}
+		return 0, fmt.Errorf(
+			"couldn't read default auth file at %q: %w; auto-configuring auth via management failed: %w (if --auth-file is not set and mgmtd is down, auth-secret resolution fails)",
+			authPath, err, mgmtdErr,
+		)
+	}
+
+	return 0, fmt.Errorf("couldn't read auth file at %q (non-default path): %w", authPath, err)
 }
 
 // Resets the global state and frees resources

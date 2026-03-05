@@ -11,12 +11,16 @@ import (
 // Creates new "node" command
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "debug <node> <command>",
+		Use:    "debug <node|host:port> <command>",
 		Hidden: true,
 		Short:  "Send various debug commands to meta or storage nodes",
 		Long: `Send various debug commands to meta or storage nodes.
 
 THIS MODE IS MEANT FOR DEBUGGING PURPOSES ONLY! IMPROPER USE CAN HAVE UNINTENDED EFFECTS AND EVEN CAUSE DAMAGE TO THE FILE SYSTEM. USE AT YOUR OWN RISK!
+
+The first argument is parsed as a meta/storage entity ID (or alias) when possible.
+If parsing fails, it is interpreted as a direct node TCP address (host:port) and the command is sent
+without fetching node information from management.
 
 Known commands for both meta and storage nodes:
   - "version": Print the node's service release version
@@ -62,18 +66,18 @@ Known storage node commands:
 These lists are not guaranteed to be exhaustive and some commands might not be available under all circumstances and can change any time.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			node, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
-			if err != nil {
-				return err
-			}
-
-			// Combine positionals after the node argument into one string so no "" are needed
+			// Combine positionals after the node/address argument into one string so no "" are needed.
 			command := ""
 			for _, a := range args[1:] {
 				command += a + " "
 			}
+			nodeOrAddr := args[0]
 
-			return runGenericDebugCmd(cmd, node, command)
+			node, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(nodeOrAddr)
+			if err == nil {
+				return runGenericDebugCmd(cmd, node, command)
+			}
+			return runGenericDebugCmdByAddr(cmd, nodeOrAddr, command)
 		},
 	}
 
@@ -82,6 +86,17 @@ These lists are not guaranteed to be exhaustive and some commands might not be a
 
 func runGenericDebugCmd(cmd *cobra.Command, node beegfs.EntityId, command string) error {
 	resp, err := dbg.GenericDebugCmd(cmd.Context(), node, command)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(resp)
+
+	return nil
+}
+
+func runGenericDebugCmdByAddr(cmd *cobra.Command, nodeAddr, command string) error {
+	resp, err := dbg.GenericDebugCmdByAddr(cmd.Context(), nodeAddr, command)
 	if err != nil {
 		return err
 	}
