@@ -196,6 +196,7 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		}
 
 		// Check if any license conditions are violated and that the license is valid.
+		// IMPORTANT: Ensure to keep license.Check() updated with any changes to these checks.
 		if err := licenseCmd.CheckIfOverStorageCapacityLimit(cmd.Context(), capacityLimit); err != nil {
 			color = "\033[31m" // Red if there is a license violation.
 			defer cmdfmt.Printf("\nWARNING: The %s.\n", err)
