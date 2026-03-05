@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dsnet/golib/unitconv"
@@ -21,6 +22,66 @@ const (
 	PrefixNumServers = "io.beegfs.numservers."
 	PrefixScope      = "io.beegfs.scope."
 )
+
+type CheckResult struct {
+	// Err is set if there was an error fetching the license status from the mgmtd. When there is an
+	// error, no other license messages will be set.
+	Err error
+	// InvalidMsg is set if the license is expired or not installed. When a license is invalid, no
+	// other messages will be set.
+	InvalidMsg string
+	// ExpirationMsg is set if the license is within the warning period (but not expired).
+	ExpirationMsg string
+	// ViolationsMsg is set if there are any license violations detected, such as being over
+	// capacity limits defined by the license.
+	ViolationsMsg string
+}
+
+func (r *CheckResult) IsHealthy() bool {
+	return r.InvalidMsg == "" && r.ExpirationMsg == "" && r.ViolationsMsg == "" && r.Err == nil
+}
+
+// Check returns a CheckResult which can be used to verify the licensed status of a system is
+// healthy, and communicate specific details when it is unhealthy.
+//
+// IMPORTANT: This is not currently used for runLicenseCmd() which uses GetLicense directly as it
+// has an opinionated way it prints out the license details. Ensure to keep that function in sync
+// with any updates made to this one.
+func Check(ctx context.Context) (result CheckResult) {
+	license, err := GetLicense(ctx, false)
+	if err != nil {
+		return CheckResult{
+			Err: fmt.Errorf("unable to verify licensed status: %w", err),
+		}
+	}
+
+	if license.Result != pl.VerifyResult_VERIFY_VALID {
+		return CheckResult{
+			InvalidMsg: license.Message,
+		}
+	}
+
+	remaining, message := GetTimeToExpiration(license)
+	// Warn by default 90 days before expiry.
+	renewalWindow := 90 * 24 * time.Hour
+	if license.Data.Type == pl.CertType_CERT_TYPE_TEMPORARY {
+		// For temp licenses only warn 14 days before.
+		renewalWindow = 14 * 24 * time.Hour
+	}
+
+	if remaining <= renewalWindow {
+		result.ExpirationMsg = message
+	}
+
+	for _, f := range license.Data.DnsNames {
+		if after, ok := strings.CutPrefix(f, PrefixCapacity); ok {
+			if err := CheckIfOverStorageCapacityLimit(ctx, after); err != nil {
+				result.ViolationsMsg = err.Error()
+			}
+		}
+	}
+	return result
+}
 
 // Get license information the management
 func GetLicense(ctx context.Context, reload bool) (*pl.GetCertDataResult, error) {
