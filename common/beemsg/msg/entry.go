@@ -278,10 +278,10 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 // The Go equivalent of a BeeGFS StripePattern. Deserializing stripe patterns in the C++ code is
 // fairly complicated. The StripePattern has a deserialize() method that first deserializes the
 // StripePatternHeader using its serialize method, then uses this to determine the actual pattern
-// type, and initialize either a Raid0Pattern, Raid10Pattern, or BuddyMirrorPattern. Each of these
-// extend the StripePattern class to implement the semantics of a specific striping pattern. Here we
-// aren't interested in recreating all the logic associated with different stripe patterns, so we
-// just deserialize into a common StripePattern struct.
+// type, and initialize either a Raid0Pattern or BuddyMirrorPattern. Each of these extend the
+// StripePattern class to implement the semantics of a specific striping pattern. Here we aren't
+// interested in recreating all the logic associated with different stripe patterns, so we just
+// deserialize into a common StripePattern struct.
 type StripePattern struct {
 	Length            uint32
 	Type              beegfs.StripePatternType
@@ -294,7 +294,7 @@ type StripePattern struct {
 	// distinguish between stripe targets and buddy group IDs, this distinction is less important
 	// externally because they are usually accessed using a common getStripeTargetIDs getter anyway.
 	// This is why there aren't separate fields depending if the type is RAID0 or buddy mirror.
-	// The only time this appears to matter is for the now defunct RAID10 stripe pattern type.
+	// The only time this appeared to matter is for the now removed RAID10 stripe pattern type.
 	TargetIDs []uint16
 }
 
@@ -320,8 +320,6 @@ func (m *StripePattern) Serialize(s *beeserde.Serializer) {
 		beeserde.SerializeSeq(s, m.TargetIDs, true, func(out uint16) {
 			beeserde.SerializeInt(s, out)
 		})
-	case beegfs.StripePatternRaid10:
-		s.Fail(fmt.Errorf("unsupported stripe pattern found: %s", beegfs.StripePatternRaid10))
 	default:
 		s.Fail(fmt.Errorf("unknown stripe pattern: %s", m.Type))
 	}
@@ -356,11 +354,6 @@ func (m *StripePattern) Deserialize(d *beeserde.Deserializer) {
 		beeserde.DeserializeSeq(d, &m.TargetIDs, true, func(out *uint16) {
 			beeserde.DeserializeInt(d, out)
 		})
-	case beegfs.StripePatternRaid10:
-		// RAID10 is deprecated and CTL prevents setting RAID10 as the pattern type. If there is a
-		// message with this pattern type we should fail because it is likely something went wrong,
-		// or someone is trying to use CTL with an unsupported version of BeeGFS.
-		d.Fail(fmt.Errorf("unsupported stripe pattern found: %s", beegfs.StripePatternRaid10))
 	default:
 		d.Fail(fmt.Errorf("unknown stripe pattern: %d", m.Type))
 	}
