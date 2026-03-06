@@ -275,10 +275,10 @@ func globalPersistentPostRunE(cmd *cobra.Command) error {
 				cmdfmt.Printf("Reason: %s\n", result.InvalidMsg)
 			}
 			if result.ExpirationMsg != "" {
-				cmdfmt.Printf("WARNING: License %s, run 'beegfs license' for more details.\n", result.ExpirationMsg)
+				cmdfmt.Printf("WARNING: License is nearing expiration (%s). Run 'beegfs license' for more details.\n", result.ExpirationMsg)
 			}
 			if result.ViolationsMsg != "" {
-				cmdfmt.Printf("WARNING: The %s.\n", result.ViolationsMsg)
+				cmdfmt.Printf("WARNING: License violations found (%s). Run 'beegfs license' for more details.\n", result.ViolationsMsg)
 			}
 		}
 	}

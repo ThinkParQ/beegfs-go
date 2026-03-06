@@ -140,10 +140,9 @@ func CheckIfOverStorageCapacityLimit(ctx context.Context, capacityLimit string) 
 
 	if totalStorageCapacity > cl {
 		// Note casting a uint64 to a float64 will lose precision with large numbers.
-		return fmt.Errorf("system capacity (%s) exceeds licensed capacity (%s), contact %s for options to increase licensed capacity",
+		return fmt.Errorf("system capacity of %s exceeds licensed capacity of %s",
 			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(totalStorageCapacity), unitconv.IEC, 1)),
-			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(cl), unitconv.IEC, 1)),
-			ContactEmail)
+			fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(cl), unitconv.IEC, 1)))
 	}
 	return nil
 }
