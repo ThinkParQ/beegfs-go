@@ -64,8 +64,8 @@ type MockConfig struct {
 // worker nodes from other packages which cannot directly modify worker nodes.
 type MockExpectation struct {
 	MethodName string
-	Args       []interface{}
-	ReturnArgs []interface{}
+	Args       []any
+	ReturnArgs []any
 }
 
 // newWorkerNodesFromConfig is the standard way for initializing worker nodes.

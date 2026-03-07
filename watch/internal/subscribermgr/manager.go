@@ -32,7 +32,7 @@ var _ configmgr.Listener = &Manager{}
 
 func New(log *zap.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup) *Manager {
 
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(Manager{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	return &Manager{
 		log:             log,
 		handlers:        make([]*Handler, 0),

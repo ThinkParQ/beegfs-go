@@ -18,7 +18,6 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 type JobResponse struct {
@@ -102,7 +101,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	if cfg.Priority == nil {
-		cfg.Priority = proto.Int32(scheduler.DefaultPriority)
+		cfg.Priority = new(int32(scheduler.DefaultPriority))
 	}
 
 	var filter filesystem.FileInfoFilter

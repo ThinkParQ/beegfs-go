@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
@@ -90,12 +91,9 @@ func (m *Mgmtd) VerifyLicense(ctx context.Context, requestedFeature string) ([]z
 	}
 
 	featureLicensed := false
-	for _, gotFeature := range license.Data.DnsNames {
-		if gotFeature == requestedFeature {
-			os.Setenv("BEEGFS_LICENSED_FEATURE", requestedFeature)
-			featureLicensed = true
-			break
-		}
+	if slices.Contains(license.Data.DnsNames, requestedFeature) {
+		os.Setenv("BEEGFS_LICENSED_FEATURE", requestedFeature)
+		featureLicensed = true
 	}
 	if !featureLicensed {
 		if featureIntroduced, ok := grandfatheredFeatures[requestedFeature]; ok {

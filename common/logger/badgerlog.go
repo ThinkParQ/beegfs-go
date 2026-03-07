@@ -27,18 +27,18 @@ func NewBadgerLoggerBridge(subComponent string, logger *zap.Logger) *BadgerLogge
 	}
 }
 
-func (z *BadgerLoggerBridge) Errorf(format string, args ...interface{}) {
+func (z *BadgerLoggerBridge) Errorf(format string, args ...any) {
 	z.logger.Error(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
-func (z *BadgerLoggerBridge) Warningf(format string, args ...interface{}) {
+func (z *BadgerLoggerBridge) Warningf(format string, args ...any) {
 	z.logger.Warn(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
-func (z *BadgerLoggerBridge) Infof(format string, args ...interface{}) {
+func (z *BadgerLoggerBridge) Infof(format string, args ...any) {
 	z.logger.Info(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }
 
-func (z *BadgerLoggerBridge) Debugf(format string, args ...interface{}) {
+func (z *BadgerLoggerBridge) Debugf(format string, args ...any) {
 	z.logger.Debug(fmt.Sprintf(strings.TrimSuffix(format, "\n"), args...))
 }

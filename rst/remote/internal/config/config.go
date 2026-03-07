@@ -117,14 +117,14 @@ func SetRSTTypeHook() mapstructure.DecodeHookFuncType {
 	return func(
 		f reflect.Type, // data type
 		t reflect.Type, // target data type
-		data interface{}, // raw data
-	) (interface{}, error) {
+		data any, // raw data
+	) (any, error) {
 
 		// If the name of the flex package ever changes this will need to be updated.
 		if t.String() == "flex.RemoteStorageTarget" {
 			switch f.Kind() {
 			case reflect.Map:
-				if tmpData, ok := data.(map[string]interface{}); ok {
+				if tmpData, ok := data.(map[string]any); ok {
 					for key, config := range tmpData {
 						if constructor, exists := rst.SupportedRSTTypes[key]; exists {
 							newType, newTypeField := constructor()

@@ -54,7 +54,7 @@ func TestRemoteStorageTargetSerialize(t *testing.T) {
 	var RST RemoteStorageTarget
 	val := reflect.ValueOf(RST)
 	assert.Equal(t, 6, val.NumField(), "The RemoteStorageTargets struct has changed. Update its Serialize() and Deserialize() methods to support the new major/minor version.")
-	typ := reflect.TypeOf(RST)
+	typ := reflect.TypeFor[RemoteStorageTarget]()
 
 	assert.Equal(t, reflect.Uint8, typ.Field(0).Type.Kind(), "Field type changed (was the order or type of fields in the struct changed?)")
 	assert.Equal(t, reflect.Uint8, typ.Field(1).Type.Kind(), "Field type changed (was the order or type of fields in the struct changed?)")

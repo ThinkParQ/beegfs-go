@@ -49,7 +49,7 @@ type BeeRemoteServer struct {
 // It requires a channel where it can send job requests to JobMgr.
 func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*BeeRemoteServer, error) {
 
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(BeeRemoteServer{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[BeeRemoteServer]().PkgPath())))
 
 	s := BeeRemoteServer{
 		log:       log,
@@ -137,9 +137,7 @@ func (s *BeeRemoteServer) GetJobs(request *beeremote.GetJobsRequest, stream beer
 
 	responses := make(chan *beeremote.GetJobsResponse, 1024)
 	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 	sendResponses:
 		for {
 			resp, ok := <-responses
@@ -152,7 +150,7 @@ func (s *BeeRemoteServer) GetJobs(request *beeremote.GetJobsRequest, stream beer
 			// never get a chance to check if the context is cancelled.
 			stream.Send(resp)
 		}
-	}()
+	})
 
 	err := s.jobMgr.GetJobs(stream.Context(), request, responses)
 	wg.Wait()
@@ -171,9 +169,7 @@ func (s *BeeRemoteServer) UpdatePaths(request *beeremote.UpdatePathsRequest, str
 
 	responses := make(chan *beeremote.UpdatePathsResponse, 1024)
 	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 	sendResponses:
 		for {
 			select {
@@ -186,7 +182,7 @@ func (s *BeeRemoteServer) UpdatePaths(request *beeremote.UpdatePathsRequest, str
 				stream.Send(resp)
 			}
 		}
-	}()
+	})
 
 	err := s.jobMgr.UpdatePaths(stream.Context(), request, responses)
 	wg.Wait()

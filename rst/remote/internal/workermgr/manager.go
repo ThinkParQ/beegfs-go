@@ -80,7 +80,7 @@ func NewManager(
 	mountPoint filesystem.Provider,
 	requiredFeatures map[string]*flex.Feature,
 ) (*Manager, error) {
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(Manager{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 
 	rstMap := make(map[uint32]rst.Provider)
 	for _, config := range rstConfigs {
