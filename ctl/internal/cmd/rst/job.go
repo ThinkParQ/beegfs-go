@@ -335,10 +335,10 @@ writeResponses:
 					if withDebug {
 						if len(job.WorkRequests) == len(job.WorkResults) {
 							sort.Slice(job.WorkRequests, func(i, j int) bool {
-								return job.WorkRequests[i].RequestId <= job.WorkRequests[j].RequestId
+								return job.WorkRequests[i].RequestId < job.WorkRequests[j].RequestId
 							})
 							sort.Slice(job.WorkResults, func(i, j int) bool {
-								return job.WorkResults[i].Work.RequestId <= job.WorkResults[j].Work.RequestId
+								return job.WorkResults[i].Work.RequestId < job.WorkResults[j].Work.RequestId
 							})
 							for i, wr := range job.GetWorkResults() {
 								fmt.Fprintf(&strBuilder, "    %s Work ID: %s\n", convertWorkStateToEmoji(wr.Work.Status.State), wr.Work.RequestId)
