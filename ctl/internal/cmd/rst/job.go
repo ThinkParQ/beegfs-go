@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -278,9 +279,7 @@ writeResponses:
 				jobsPerRST[job.Job.Request.RemoteStorageTarget] = append(jobsPerRST[job.Job.Request.RemoteStorageTarget], job)
 			}
 			// Sort by RST ID:
-			sort.Slice(rstsForPath, func(i, j int) bool {
-				return rstsForPath[i] < rstsForPath[j]
-			})
+			slices.Sort(rstsForPath)
 
 			totalPaths++
 

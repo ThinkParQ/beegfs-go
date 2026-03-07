@@ -101,7 +101,7 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	// https://github.com/grpc/grpc-go/tree/master/examples/features/metadata_interceptor and
 	// https://github.com/grpc/grpc-go/blob/master/examples/features/interceptor/README.md#client-side
 	if config.AuthSecret != nil {
-		connAuthUnaryInterceptor := func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		connAuthUnaryInterceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			newCtx := metadata.AppendToOutgoingContext(ctx, "auth-secret", fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret)))
 			return invoker(newCtx, method, req, reply, cc, opts...)
 		}

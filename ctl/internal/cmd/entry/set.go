@@ -182,7 +182,7 @@ run:
 // separated string. This is meant for printing what configuration updates were applied.
 func sprintfNewEntryConfig(newConfig entry.SetEntryCfg) string {
 	val := reflect.ValueOf(newConfig)
-	typ := reflect.TypeOf(newConfig)
+	typ := reflect.TypeFor[entry.SetEntryCfg]()
 	// We can't specify the size of the slice upfront because we don't know how many fields
 	// actually changed until we loop over the updates. The only reason we do it this way is to
 	// join the resulting strings with commas. If we didn't care to do that we could just print
@@ -192,7 +192,7 @@ func sprintfNewEntryConfig(newConfig entry.SetEntryCfg) string {
 		field := val.Field(i)
 		fieldType := typ.Field(i)
 		// Only include if the field is a pointer and not nil
-		if field.Kind() == reflect.Ptr && !field.IsNil() && fieldType.Name != "actorEUID" {
+		if field.Kind() == reflect.Pointer && !field.IsNil() && fieldType.Name != "actorEUID" {
 			line = append(line, fmt.Sprintf("%s (%v)", fieldType.Name, field.Elem()))
 		}
 		// Only include non-empty slices:

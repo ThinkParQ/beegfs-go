@@ -179,10 +179,7 @@ func multiNodeAggregated(ctx context.Context, cfg *serverStats_Config, w *cmdfmt
 	}
 
 	// Only show the latest entries from the user specified history length
-	l := len(totalStats) - int(cfg.History.Seconds())
-	if l < 0 {
-		l = 0
-	}
+	l := max(len(totalStats)-int(cfg.History.Seconds()), 0)
 	totalStats = totalStats[l:]
 
 	fmt.Printf("Total results for nodes: %d\n", numberOfNodes)

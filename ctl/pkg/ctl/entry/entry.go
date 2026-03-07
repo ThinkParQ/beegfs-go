@@ -526,8 +526,8 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	// Start search at root metadata node:
 	currentNode := *metaRoot
 	var searchDepth uint32
-	pathComponents := strings.Split(searchPath, string(filepath.Separator))
-	for _, c := range pathComponents {
+	pathComponents := strings.SplitSeq(searchPath, string(filepath.Separator))
+	for c := range pathComponents {
 		if c != "" {
 			searchDepth++
 		}
@@ -559,7 +559,7 @@ func getEntryAndOwnerFromPathViaRPC(ctx context.Context, mappings *util.Mappings
 	// Then walk through each of the path components (taking shortcuts when possible). Shortcuts are
 	// possible when the same meta owns multiple adjacent directories in the path, the meta server
 	// will search as far as possible before returning a response (see FindOwnerMsgEx::findOwner()).
-	for numSearchSteps := 0; numSearchSteps < 128; numSearchSteps++ {
+	for range 128 {
 
 		err = store.RequestTCP(ctx, currentNode.Uid, request, resp)
 		if err != nil {

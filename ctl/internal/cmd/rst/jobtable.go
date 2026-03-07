@@ -260,10 +260,7 @@ func wrapTextAtWidth(text string, width int) string {
 	}
 	l := len(text)
 	for i := 0; i < l; i += width {
-		end := i + width
-		if end > len(text) {
-			end = len(text)
-		}
+		end := min(i+width, len(text))
 		if i == 0 {
 			// Handle printing the first line.
 			if l == end {

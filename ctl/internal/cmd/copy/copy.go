@@ -260,7 +260,7 @@ func copyUsingStdin(ctx context.Context, frontendCfg frontendCfg, bflagSet *bfla
 
 func readBatchFromStdin(ctx context.Context, pathsChan <-chan string, errChan <-chan error, batchSize int) ([]string, error) {
 	paths := make([]string, 0)
-	for i := 0; i < batchSize; i++ {
+	for range batchSize {
 		select {
 		case <-ctx.Done():
 			return nil, context.Canceled

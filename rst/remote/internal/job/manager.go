@@ -106,7 +106,7 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 
 // NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
 func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(Manager{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	ctx, cancel := context.WithCancel(context.Background())
 	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
 	jobUpdatesChan := make(chan *beeremote.UpdateJobsRequest, config.RequestQueueDepth)

@@ -273,7 +273,7 @@ func Zeroes(ser *Serializer, n uint) {
 		return
 	}
 
-	for i := uint(0); i < n; i++ {
+	for range n {
 		if err := ser.Buf.WriteByte(0); err != nil {
 			ser.err = err
 			return
@@ -526,7 +526,7 @@ func Skip(des *Deserializer, n uint) {
 		return
 	}
 
-	for i := uint(0); i < n; i++ {
+	for range n {
 		if _, err := des.Buf.ReadByte(); err != nil {
 			des.err = err
 			return

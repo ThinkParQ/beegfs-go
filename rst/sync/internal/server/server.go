@@ -41,7 +41,7 @@ type WorkerNodeServer struct {
 // New() creates a new WorkerNodeServer that can be used with ListenAndServe().
 func New(log *zap.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
 
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(WorkerNodeServer{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[WorkerNodeServer]().PkgPath())))
 
 	s := WorkerNodeServer{
 		log:       log,

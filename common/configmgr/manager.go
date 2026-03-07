@@ -207,7 +207,7 @@ func (cm *ConfigManager) Get() Configurable {
 // is also responsible for handling log configuration.
 func (cm *ConfigManager) Manage(ctx context.Context, log *zap.Logger) {
 
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(ConfigManager{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[ConfigManager]().PkgPath())))
 
 	for {
 		// When we first start make sure all the managers have the latest configuration.
@@ -284,8 +284,8 @@ func (cm *ConfigManager) updateConfiguration() error {
 		pair := strings.SplitN(envVar, "=", 2)
 		key := pair[0]
 
-		if strings.HasPrefix(key, cm.envVarPrefix) {
-			viperKey := strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(key, cm.envVarPrefix)), "__", ".")
+		if after, ok := strings.CutPrefix(key, cm.envVarPrefix); ok {
+			viperKey := strings.ReplaceAll(strings.ToLower(after), "__", ".")
 			viperKey = strings.ReplaceAll(viperKey, "_", "-")
 			if err := v.BindEnv(viperKey, strings.ToUpper(key)); err != nil {
 				return err
