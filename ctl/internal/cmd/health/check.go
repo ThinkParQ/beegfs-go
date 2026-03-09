@@ -13,6 +13,7 @@ import (
 	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
@@ -90,6 +91,9 @@ The file system that is checked is determined by the --%s parameter.
 If this file system is mounted multiple times, network connections will be checked for each mount point. 
 Optionally specify one or more <mount-paths> to limit the connection checks.
 		`, config.ManagementAddrKey),
+		Annotations: map[string]string{
+			"license.SkipWarnings": "",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed(watchFlag) {
 				ticker := time.NewTicker(frontendCfg.watchInterval)
@@ -147,6 +151,28 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		return fmt.Errorf("unable to proceed without a working management node: %w", err)
 	}
 	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s", mgmtd.GetAddress()), "#")
+	printHeader(">>>>> General Checks <<<<<", "#")
+	result := license.Check(ctx)
+	if result.IsHealthy() {
+		fmt.Printf("\n%s License Status %s", Healthy, hint("-> No issues detected. Run 'beegfs license' for more details."))
+	} else {
+		failedCheck = true
+		if result.Err != nil {
+			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Error checking status (%s).", err)))
+		} else if result.InvalidMsg != "" {
+			fmt.Printf("\n%s License Status %s", Critical, hint("-> No valid license found. Run 'beegfs license' for more details."))
+		} else if result.ViolationsMsg != "" {
+			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Violations found (%s). Run 'beegfs license' for more details.", result.ViolationsMsg)))
+		} else if result.ExpirationMsg != "" {
+			fmt.Printf("\n%s License Status %s", Degraded, hint(fmt.Sprintf("-> Nearing expiration (%s). Run 'beegfs license' for more details.", result.ExpirationMsg)))
+		} else {
+			// If a check failed but we couldn't map it to a known message string, a new result was
+			// probably added and the check needs to be updated.
+			fmt.Printf("\n%s License Status %s", Critical, hint("-> Unknown (run 'beegfs license' for details)."))
+		}
+	}
+	fmt.Print("\n\n")
+
 	printHeader(">>>>> Checking for Busy Nodes <<<<<", "#")
 	log.Debug("collecting meta stats")
 	metaNodes, err := stats.MultiServerNodes(ctx, beegfs.Meta)
