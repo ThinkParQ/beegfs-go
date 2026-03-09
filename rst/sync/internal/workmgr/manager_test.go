@@ -57,7 +57,7 @@ var baseTestRequest = flex.WorkRequest_builder{
 
 // matchJobAndRequest ID allows setting different expectations for different requests.
 // It is commonly used as an arg to Mock.On().
-func matchJobAndRequestID(expectedJobID string, expectedRequestID string) interface{} {
+func matchJobAndRequestID(expectedJobID string, expectedRequestID string) any {
 	return mock.MatchedBy(func(actual *flex.WorkRequest) bool {
 		return actual.GetJobId() == expectedJobID && actual.GetRequestId() == expectedRequestID
 	})
@@ -65,7 +65,7 @@ func matchJobAndRequestID(expectedJobID string, expectedRequestID string) interf
 
 // matchRespIDsAndStatus allows setting different response state expectations for unique requests.
 // It is commonly used as either a an arg to Mock.On() or returnArg to Mock.On().Return().
-func matchRespIDsAndStatus(expectedJobID string, expectedRequestID string, expectedState flex.Work_State) interface{} {
+func matchRespIDsAndStatus(expectedJobID string, expectedRequestID string, expectedState flex.Work_State) any {
 	return mock.MatchedBy(func(actual *flex.Work) bool {
 		return actual.GetJobId() == expectedJobID && actual.GetRequestId() == expectedRequestID && actual.GetStatus().GetState() == expectedState
 	})
@@ -139,7 +139,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 	logger := zaptest.NewLogger(tb, zaptest.Level(config.logLevel))
 
 	if config.rstConfigs == nil {
-		config.rstConfigs = []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build()}
+		config.rstConfigs = []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	}
 
 	beeRemoteClient, err := beeremote.New(beeremote.Config{})

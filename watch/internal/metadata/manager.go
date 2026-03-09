@@ -94,7 +94,7 @@ type Config struct {
 // some other component was misconfigured.
 func New(ctx context.Context, log *zap.Logger, metaConfigs []Config) (*Manager, func(), error) {
 
-	log = log.With(zap.String("component", path.Base(reflect.TypeOf(Manager{}).PkgPath())))
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 
 	// TODO (https://github.com/ThinkParQ/bee-watch/issues/24): Support multiple metadata services.
 	// This is also checked in ValidateConfig() but we should also check here to avoid an index out

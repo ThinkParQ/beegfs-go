@@ -432,9 +432,9 @@ func getParagraphsForHelp(input string) []string {
 		} else if strings.HasPrefix(lines[0], " ") {
 			// Handle code/example blocks indicated by indentation:
 			paragraphs[i] = strings.Join(lines, "\n")
-		} else if strings.HasSuffix(lines[0], "\\") {
+		} else if before, ok := strings.CutSuffix(lines[0], "\\"); ok {
 			// Handle preserving line breaks when lines end in a backslash:
-			lines[0] = strings.TrimSuffix(lines[0], "\\")
+			lines[0] = before
 			paragraphs[i] = strings.Join(lines, "\n")
 		} else {
 			// Otherwise collapse the block into a single line with spaces:

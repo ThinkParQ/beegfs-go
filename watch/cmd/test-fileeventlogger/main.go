@@ -103,7 +103,7 @@ func main() {
 func getLogger() (*zap.Logger, error) {
 
 	var config zap.Config
-	config.InitialFields = map[string]interface{}{"serviceName": "bee-watch"}
+	config.InitialFields = map[string]any{"serviceName": "bee-watch"}
 
 	if *logDebug {
 		config = zap.NewDevelopmentConfig()

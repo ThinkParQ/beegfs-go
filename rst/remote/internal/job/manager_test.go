@@ -60,12 +60,12 @@ func TestManage(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []interface{}{false, nil},
+						ReturnArgs: []any{false, nil},
 					},
 					{
 						MethodName: "SubmitWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_SCHEDULED,
 								Message: "test expects a scheduled request",
@@ -75,8 +75,8 @@ func TestManage(t *testing.T) {
 					},
 					{
 						MethodName: "UpdateWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_CANCELLED,
 								Message: "test expects a cancelled request",
@@ -86,7 +86,7 @@ func TestManage(t *testing.T) {
 					},
 					{
 						MethodName: "disconnect",
-						ReturnArgs: []interface{}{nil},
+						ReturnArgs: []any{nil},
 					},
 				},
 			},
@@ -96,7 +96,7 @@ func TestManage(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
-	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: proto.String("test")}.Build()}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
 	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
@@ -121,7 +121,7 @@ func TestManage(t *testing.T) {
 	require.NoError(t, err)
 
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
-		ByPathPrefix:        proto.String("/"),
+		ByPathPrefix:        new("/"),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
@@ -146,7 +146,7 @@ func TestManage(t *testing.T) {
 
 	// No job should be created:
 	getJobRequestsByPath := beeremote.GetJobsRequest_builder{
-		ByExactPath: proto.String("/test/myfile"),
+		ByExactPath: new("/test/myfile"),
 	}.Build()
 	responses = make(chan *beeremote.GetJobsResponse, 1)
 	err = jobManager.GetJobs(context.Background(), getJobRequestsByPath, responses)
@@ -220,12 +220,12 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []interface{}{false, nil},
+						ReturnArgs: []any{false, nil},
 					},
 					{
 						MethodName: "SubmitWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_SCHEDULED,
 								Message: "test expects a scheduled request",
@@ -235,8 +235,8 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 					},
 					{
 						MethodName: "UpdateWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_CANCELLED,
 								Message: "test expects a cancelled request",
@@ -246,7 +246,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 					},
 					{
 						MethodName: "disconnect",
-						ReturnArgs: []interface{}{nil},
+						ReturnArgs: []any{nil},
 					},
 				},
 			},
@@ -256,7 +256,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
-	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: proto.String("test")}.Build()}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
 	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
@@ -347,7 +347,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 
 	// Verify the job was fully deleted:
 	getJobRequestsByPath := beeremote.GetJobsRequest_builder{
-		ByExactPath:         proto.String(testJobRequest1.GetPath()),
+		ByExactPath:         new(testJobRequest1.GetPath()),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
@@ -361,7 +361,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 
 	// If we delete a job that has not yet reached a terminal state, nothing should happen:
 	deleteJobByIDRequest := beeremote.UpdateJobsRequest_builder{
-		JobId:    proto.String(submitJobResponse2.GetJob().GetId()),
+		JobId:    new(submitJobResponse2.GetJob().GetId()),
 		Path:     submitJobResponse2.GetJob().GetRequest().GetPath(),
 		NewState: beeremote.UpdateJobsRequest_DELETED,
 	}.Build()
@@ -382,7 +382,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	// If the cancellation query includes a remote target other than the one for this job ID, there
 	// should be no error, but response should be !ok and there should be no results:
 	cancelJobByIDRequest := beeremote.UpdateJobsRequest_builder{
-		JobId:    proto.String(submitJobResponse2.GetJob().GetId()),
+		JobId:    new(submitJobResponse2.GetJob().GetId()),
 		Path:     submitJobResponse2.GetJob().GetRequest().GetPath(),
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 		// The wrong remote target!
@@ -448,7 +448,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 
 	// Refuse to cancel completed jobs:
 	updateJobByIDRequest := beeremote.UpdateJobsRequest_builder{
-		JobId:    proto.String(response.GetJob().GetId()),
+		JobId:    new(response.GetJob().GetId()),
 		Path:     response.GetJob().GetRequest().GetPath(),
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 	}.Build()
@@ -495,7 +495,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 
 	responses = make(chan *beeremote.GetJobsResponse, 1)
 	err = jobManager.GetJobs(context.Background(), beeremote.GetJobsRequest_builder{
-		ByExactPath: proto.String("response.Job.Request.Path"),
+		ByExactPath: new("response.Job.Request.Path"),
 	}.Build(), responses)
 	assert.ErrorIs(t, kvstore.ErrEntryNotInDB, err)
 }
@@ -529,27 +529,27 @@ func TestManageErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []interface{}{false, nil},
+						ReturnArgs: []any{false, nil},
 					},
 					{
 						MethodName: "SubmitWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							expectedStatus,
 							nil,
 						},
 					},
 					{
 						MethodName: "UpdateWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							expectedStatus,
 							nil,
 						},
 					},
 					{
 						MethodName: "disconnect",
-						ReturnArgs: []interface{}{nil},
+						ReturnArgs: []any{nil},
 					},
 				},
 			},
@@ -559,7 +559,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
-	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build()}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
@@ -583,7 +583,7 @@ func TestManageErrorHandling(t *testing.T) {
 	jobManager.JobRequests <- testJobRequest
 	time.Sleep(2 * time.Second)
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
-		ByPathPrefix:        proto.String("/"),
+		ByPathPrefix:        new("/"),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
@@ -611,7 +611,7 @@ func TestManageErrorHandling(t *testing.T) {
 
 	// We should not be able to delete jobs in an unknown state:
 	updateJobRequest := beeremote.UpdateJobsRequest_builder{
-		JobId:    proto.String(jobID),
+		JobId:    new(jobID),
 		Path:     testJobRequest.GetPath(),
 		NewState: beeremote.UpdateJobsRequest_DELETED,
 	}.Build()
@@ -629,7 +629,7 @@ func TestManageErrorHandling(t *testing.T) {
 	expectedStatus.SetMessage("test expects a cancelled request")
 
 	updateJobRequest = beeremote.UpdateJobsRequest_builder{
-		JobId:    proto.String(jobID),
+		JobId:    new(jobID),
 		Path:     testJobRequest.GetPath(),
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 	}.Build()
@@ -650,7 +650,7 @@ func TestManageErrorHandling(t *testing.T) {
 	// Even if we cannot contact the worker nodes to determine the WR statuses, we can still force
 	// the job to be cancelled:
 	updateJobRequest = beeremote.UpdateJobsRequest_builder{
-		JobId:       proto.String(jobID),
+		JobId:       new(jobID),
 		Path:        testJobRequest.GetPath(),
 		NewState:    beeremote.UpdateJobsRequest_CANCELLED,
 		ForceUpdate: true,
@@ -669,7 +669,7 @@ func TestUpdateJobResults(t *testing.T) {
 
 	logger := zaptest.NewLogger(t)
 	workerMgrConfig := workermgr.Config{}
-	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build()}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	workerConfigs := []worker.Config{
 		{
 			ID:                  "0",
@@ -680,12 +680,12 @@ func TestUpdateJobResults(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []interface{}{false, nil},
+						ReturnArgs: []any{false, nil},
 					},
 					{
 						MethodName: "SubmitWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_SCHEDULED,
 								Message: "test expects a scheduled request",
@@ -695,7 +695,7 @@ func TestUpdateJobResults(t *testing.T) {
 					},
 					{
 						MethodName: "disconnect",
-						ReturnArgs: []interface{}{nil},
+						ReturnArgs: []any{nil},
 					},
 				},
 			},
@@ -866,12 +866,12 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []interface{}{false, nil},
+						ReturnArgs: []any{false, nil},
 					},
 					{
 						MethodName: "SubmitWork",
-						Args:       []interface{}{mock.Anything},
-						ReturnArgs: []interface{}{
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
 							flex.Work_Status_builder{
 								State:   flex.Work_SCHEDULED,
 								Message: "test expects a scheduled request",
@@ -881,7 +881,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 					},
 					{
 						MethodName: "disconnect",
-						ReturnArgs: []interface{}{nil},
+						ReturnArgs: []any{nil},
 					},
 				},
 			},
@@ -889,7 +889,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	}
 
 	mountPoint := filesystem.NewMockFS()
-	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: proto.String("test")}.Build()}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())

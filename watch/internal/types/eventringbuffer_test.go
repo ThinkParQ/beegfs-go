@@ -67,7 +67,7 @@ func TestRemoveUntil(t *testing.T) {
 	b.RemoveUntil(5)
 
 	// We should have exactly five items remaining:
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.NotNil(t, b.Pop())
 	}
 

@@ -263,8 +263,8 @@ func parseNodes(input io.Reader) ([]Node, error) {
 		} else if strings.HasPrefix(line, "Root:") {
 			current.Root = true
 		} else if strings.HasPrefix(line, "Connections:") {
-			parts := strings.Split(line[len("Connections: "):], ";")
-			for _, part := range parts {
+			parts := strings.SplitSeq(line[len("Connections: "):], ";")
+			for part := range parts {
 				part = strings.TrimSpace(part)
 				if part == "<none>" || part == "" {
 					continue
@@ -332,7 +332,7 @@ func parseMounts(input io.Reader) (map[string]MountPoint, []string, error) {
 		if strings.HasPrefix(fsType, "beegfs") {
 			cfgFile := ""
 			opts := make(map[string]string)
-			for _, config := range strings.Split(fields[3], ",") {
+			for config := range strings.SplitSeq(fields[3], ",") {
 				kv := strings.SplitN(config, "=", 2)
 				if len(kv) == 2 {
 					opts[kv[0]] = kv[1]

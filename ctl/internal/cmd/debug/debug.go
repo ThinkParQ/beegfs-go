@@ -2,6 +2,7 @@ package debug
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -68,12 +69,12 @@ These lists are not guaranteed to be exhaustive and some commands might not be a
 			}
 
 			// Combine positionals after the node argument into one string so no "" are needed
-			command := ""
+			var command strings.Builder
 			for _, a := range args[1:] {
-				command += a + " "
+				command.WriteString(a + " ")
 			}
 
-			return runGenericDebugCmd(cmd, node, command)
+			return runGenericDebugCmd(cmd, node, command.String())
 		},
 	}
 

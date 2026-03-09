@@ -75,7 +75,7 @@ func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest) (string, *flex.Work
 	for i := 0; i <= 3; i++ {
 		// Don't retry more times than the number of workers in the pool. It could
 		// be all workers are disconnected.
-		for j := 0; j < poolSize; j++ {
+		for range poolSize {
 			if p.nodes[p.next].GetState() == worker.ONLINE {
 				assignedWorker := p.nodes[p.next].GetID()
 				work, err := p.nodes[p.next].SubmitWork(wr)

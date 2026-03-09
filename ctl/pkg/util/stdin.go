@@ -27,7 +27,7 @@ func GetStdinDelimiterFromString(s string) (byte, error) {
 func GetWalkStdinScanner(delimiter byte) *bufio.Scanner {
 	scanner := bufio.NewScanner(os.Stdin)
 	splitFunc := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		for i := 0; i < len(data); i++ {
+		for i := range data {
 			if data[i] == delimiter {
 				return i + 1, data[:i], nil
 			}

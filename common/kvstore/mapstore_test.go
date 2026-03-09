@@ -1141,8 +1141,8 @@ func TestIsSystemLoadHigh(t *testing.T) {
 		expected    bool
 		expectedMsg string
 	}{
-		{"Low system load", []byte(fmt.Sprintf("%.2f 100.0 100.0 2/2612 354372", cpus-0.1)), nil, false, ""},
-		{"High system load", []byte(fmt.Sprintf("%.2f 100.0 100.0 2/2612", cpus)), nil, true, ""},
+		{"Low system load", fmt.Appendf(nil, "%.2f 100.0 100.0 2/2612 354372", cpus-0.1), nil, false, ""},
+		{"High system load", fmt.Appendf(nil, "%.2f 100.0 100.0 2/2612", cpus), nil, true, ""},
 		{"Missing system load information", []byte{}, nil, false, "failed to retrieve system load information"},
 	}
 

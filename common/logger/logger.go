@@ -177,7 +177,7 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 	// We don't set the component on the logging struct because then it would be
 	// included in every log message. So instead set it up whenever we need to
 	// log from the logging package.
-	log := lm.Logger.With(zap.String("component", path.Base(reflect.TypeOf(Logger{}).PkgPath())))
+	log := lm.Logger.With(zap.String("component", path.Base(reflect.TypeFor[Logger]().PkgPath())))
 
 	newLevel, err := getLevel(newLogConfig.Level)
 	if err != nil {

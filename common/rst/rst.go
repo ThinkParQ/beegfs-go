@@ -186,7 +186,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             nil,
 			RemoteStorageTarget: 0,
 			Type:                &flex.WorkRequest_Builder{Builder: proto.Clone(request.GetBuilder()).(*flex.BuilderJob)},
-			Priority:            proto.Int32(request.GetPriority()),
+			Priority:            new(request.GetPriority()),
 		}
 		return []*flex.WorkRequest{jobBuilderWorkRequest}
 	}
@@ -204,7 +204,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
-			Priority:            proto.Int32(request.GetPriority()),
+			Priority:            new(request.GetPriority()),
 		}
 
 		switch request.WhichType() {

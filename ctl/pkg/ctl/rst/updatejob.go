@@ -10,7 +10,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
-	"google.golang.org/protobuf/proto"
 )
 
 type UpdateJobCfg struct {
@@ -58,7 +57,7 @@ func UpdateJobsByPaths(ctx context.Context, cfg *UpdateJobCfg, respChan chan<- *
 	}.Build()
 
 	if cfg.JobID != "" {
-		request.SetJobId(*proto.String(cfg.JobID))
+		request.SetJobId(*new(cfg.JobID))
 	}
 	if cfg.RemoteTargets != nil {
 		remoteTargets := map[uint32]bool{}

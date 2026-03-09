@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -111,13 +112,13 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	// Print and process node list
 	for _, node := range nodes {
 
-		nics := ""
-		reachableNics := ""
+		var nics strings.Builder
+		var reachableNics strings.Builder
 		hasReachableNic := false
 		for i, nic := range node.Nics {
 			if i != 0 {
-				nics += "\n"
-				reachableNics += "\n"
+				nics.WriteString("\n")
+				reachableNics.WriteString("\n")
 			}
 			if node.Node.Id.NodeType == beegfs.Management {
 				// This is a little hacky because it assumes the gRPC management server is listening
@@ -126,18 +127,18 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 				// might forget to update this logic. However there isn't currently a good way to
 				// get this information from the management so its better to include it like this
 				// until things change and other services are also using gRPC.
-				nics += fmt.Sprintf("%s:%s (%s,%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr, grpcPort)
+				nics.WriteString(fmt.Sprintf("%s:%s (%s,%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr, grpcPort))
 			} else {
-				nics += fmt.Sprintf("%s:%s (%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr)
+				nics.WriteString(fmt.Sprintf("%s:%s (%s)", nic.Nic.Type, nic.Nic.Name, nic.Nic.Addr))
 			}
 			if nic.Reachable {
 				hasReachableNic = hasReachableNic || nic.Reachable
-				reachableNics += "yes"
+				reachableNics.WriteString("yes")
 			} else {
 				if cfg.ReachabilityCheck {
-					reachableNics += "no"
+					reachableNics.WriteString("no")
 				} else {
-					reachableNics += "?"
+					reachableNics.WriteString("?")
 				}
 			}
 		}
@@ -148,8 +149,8 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 			node.Node.Id,
 			node.Node.Id.NodeType,
 			node.Node.Alias,
-			nics,
-			reachableNics,
+			nics.String(),
+			reachableNics.String(),
 		)
 	}
 
