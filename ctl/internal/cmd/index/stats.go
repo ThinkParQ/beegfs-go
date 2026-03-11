@@ -1,20 +1,10 @@
 package index
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
 )
-
-const statsCmd = "stats"
-
-var stat string
 
 func newGenericStatsCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
@@ -23,42 +13,45 @@ func newGenericStatsCmd() *cobra.Command {
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args:        cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			backend, err := parseIndexAddr(indexAddr)
+			if err != nil {
 				return err
 			}
-			if len(args) < 1 {
-				return fmt.Errorf("stat argument is required")
+			if err := checkIndexConfig(backend, statsBinary); err != nil {
+				return err
 			}
-			stat = args[0]
+			statArg := args[0]
+			var pathArgs []string
 			if len(args) > 1 {
-				path = args[1]
-			} else {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				path = cwd
+				pathArgs = []string{args[1]}
 			}
-			if err := checkBeeGFSConfig(); err != nil {
+			path, err := defaultBeeGFSPath(backend, pathArgs)
+			if err != nil {
 				return err
 			}
-			return runPythonExecStats(bflagSet, stat, path)
+			return runPythonExecStats(bflagSet, backend, statArg, path)
 		},
 	}
 
 	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("recursive", "r", "Run command recursively", "-r", false),
-		bflag.Flag("cumulative", "c", "Return cumulative values", "-c", false),
-		bflag.Flag("order", "", "Sort output (if applicable)", "--order", "ASC"),
-		bflag.Flag("num-results", "n", "Limit the number of results", "--num-results", 0),
-		bflag.Flag("uid", "", "Restrict to a user uid", "--uid", ""),
-		bflag.Flag("version", "v", "Version of the find command.", "--version", false),
-		bflag.Flag("in-memory-name", "", "In-memory name for processing.", "--in-memory-name", "out"),
-		bflag.Flag("delim", "", "Delimiter separating output columns", "--delim", " "),
+		bflag.Flag("version", "v", "Show program's version number and exit.", "--version", false),
+		bflag.Flag("recursive", "r", "Run command recursively.", "-r", false),
+		bflag.Flag("cumulative", "c", "Return cumulative values.", "-c", false),
+		bflag.Flag("order", "", "Sort output (if applicable).", "--order", "ASC"),
+		bflag.Flag("num-results", "", "First n results.", "--num-results", 0),
+		bflag.Flag("uid", "", "Restrict to user.", "--uid", ""),
+		bflag.Flag("delim", "", "Delimiter separating output columns.", "--delim", " "),
+		bflag.Flag("in-memory-name", "", "Name of in-memory database when aggregation is performed.", "--in-memory-name", "out"),
+		bflag.Flag("aggregate-name", "", "Name of final database when aggregation is performed.", "--aggregate-name", ""),
+		bflag.Flag("skip-file", "", "Name of file containing directory basenames to skip.", "--skip-file", ""),
+		bflag.Flag("verbose", "V", "Show the gufi_query being executed.", "--verbose", false),
 	}
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
-	err := cmd.Flags().MarkHidden("in-memory-name")
-	if err != nil {
+	cmd.MarkFlagsMutuallyExclusive("recursive", "cumulative")
+	if err := cmd.Flags().MarkHidden("in-memory-name"); err != nil {
+		return nil
+	}
+	if err := cmd.Flags().MarkHidden("aggregate-name"); err != nil {
 		return nil
 	}
 
@@ -81,42 +74,38 @@ Example: Get the total file count in a directory
 $ beegfs index stats total-filecount
 
 Positional arguments:
-  {depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth, 
-   leaf-files, leaf-links, total-filesize, total-filecount, total-linkcount, 
-   total-dircount, total-leaf-files, total-leaf-links, files-per-level, 
-   links-per-level, dirs-per-level, average-leaf-files, average-leaf-links, 
-   median-leaf-files, duplicate-names}
+  {depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth,
+   leaf-files, leaf-links, extensions, total-filesize, total-filecount,
+   total-linkcount, total-dircount, total-leaf-files, total-leaf-links,
+   files-per-level, links-per-level, dirs-per-level, filesize-log2-bins,
+   filesize-log1024-bins, dirfilecount-log2-bins, dirfilecount-log1024-bins,
+   average-leaf-files, average-leaf-links, average-leaf-size, median-leaf-files,
+   median-leaf-links, median-leaf-size, duplicate-names, uid-size, gid-size}
+
+Recursive stats (use --recursive):
+  depth, filesize, filecount, linkcount, dircount, leaf-dirs, leaf-depth,
+  leaf-files, leaf-links, extensions, filesize-log2-bins, filesize-log1024-bins,
+  dirfilecount-log2-bins, dirfilecount-log1024-bins
+
+Cumulative stats (use --cumulative):
+  total-filesize, total-filecount, total-linkcount, total-dircount,
+  total-leaf-files, total-leaf-links, files-per-level, links-per-level,
+  dirs-per-level, filesize-log2-bins, filesize-log1024-bins,
+  dirfilecount-log2-bins, dirfilecount-log1024-bins
 `
 	return s
 }
 
-func runPythonExecStats(bflagSet *bflag.FlagSet, stat, path string) error {
-	log, _ := config.GetLogger()
+func runPythonExecStats(bflagSet *bflag.FlagSet, backend indexBackend, stat, path string) error {
 	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+4)
-	allArgs = append(allArgs, statsCmd, stat, path)
+	allArgs := make([]string, 0, len(wrappedArgs)+3)
+	allArgs = append(allArgs, stat, path)
 	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index stats command",
+	return runIndexCommandWithPrint(backend, statsBinary, allArgs, "Running GUFI stats command",
+		zap.String("indexAddr", indexAddr),
 		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("statsCmd", statsCmd),
 		zap.Any("stat", stat),
 		zap.String("path", path),
 		zap.Any("allArgs", allArgs),
 	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }

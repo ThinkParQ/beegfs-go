@@ -38,6 +38,7 @@ type Printomatic struct {
 
 type PrinterOptions struct {
 	WithEmptyColumns bool
+	SuppressHeader   bool
 }
 
 type PrinterOption func(*PrinterOptions)
@@ -45,6 +46,12 @@ type PrinterOption func(*PrinterOptions)
 func WithEmptyColumns(withEmpty bool) PrinterOption {
 	return func(args *PrinterOptions) {
 		args.WithEmptyColumns = withEmpty
+	}
+}
+
+func WithSuppressHeader(suppress bool) PrinterOption {
+	return func(args *PrinterOptions) {
+		args.SuppressHeader = suppress
 	}
 }
 
@@ -63,6 +70,7 @@ func WithEmptyColumns(withEmpty bool) PrinterOption {
 func NewPrintomatic(columns []string, defaultColumns []string, opts ...PrinterOption) Printomatic {
 	cfg := PrinterOptions{
 		WithEmptyColumns: true,
+		SuppressHeader:   false,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -142,8 +150,8 @@ func (p *Printomatic) replacePrinter() {
 			tbl.SuppressEmptyColumns()
 		}
 
-		// Don't print a header if the page size is zero:
-		if p.pageSize > 0 {
+		// Don't print a header if the page size is zero or the header is suppressed.
+		if p.pageSize > 0 && !p.config.SuppressHeader {
 			// Build the header
 			row := table.Row{}
 			for _, h := range p.columns {
@@ -160,7 +168,8 @@ func (p *Printomatic) replacePrinter() {
 	// Hide all columns not to be printed
 	for i, name := range p.columns {
 		// The column number is used here because Name does not work if there is no header (as is
-		// the case when pageSize=0). The ColumnConfig also recommends using this instead of name.
+		// the case when pageSize=0 or headers are suppressed). The ColumnConfig also recommends
+		// using this instead of name.
 		// The name is still included here because it is required when printing JSON.
 		colCfg = append(colCfg, table.ColumnConfig{Number: i + 1, Hidden: true, Name: name, Align: text.AlignLeft, AlignHeader: text.AlignLeft})
 		for _, cName := range p.printCols {
