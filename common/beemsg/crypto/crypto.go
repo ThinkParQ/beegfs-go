@@ -11,6 +11,7 @@ import (
 var dummyKey = []byte{'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 0}
 
 const AesTagLen = 16
+const Encrypt = false
 
 // Returns (iv, encrypted buf, error)
 func Aes256Encrypt(buf []byte) ([]byte, []byte, error) {
@@ -29,7 +30,11 @@ func Aes256Encrypt(buf []byte) ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 
-	buf = gcm.Seal(buf[:0], iv, buf, nil)
+	if Encrypt {
+		buf = gcm.Seal(buf[:0], iv, buf, nil)
+	} else {
+		buf = gcm.Seal(buf, iv, nil, buf)
+	}
 	return iv, buf, nil
 }
 
@@ -49,7 +54,11 @@ func Aes256Decrypt(iv []byte, buf []byte) error {
 		return fmt.Errorf("ciphertext too short")
 	}
 
-	_, err = gcm.Open(buf[:0], iv, buf, nil)
+	if Encrypt {
+		_, err = gcm.Open(buf[:0], iv, buf, nil)
+	} else {
+		_, err = gcm.Open(buf, iv, buf[len(buf)-AesTagLen:], buf[:len(buf)-AesTagLen])
+	}
 	if err != nil {
 		return err
 	}
