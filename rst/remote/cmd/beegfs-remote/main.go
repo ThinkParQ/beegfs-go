@@ -19,9 +19,12 @@ import (
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/dispatch"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )
@@ -283,8 +286,14 @@ Using environment variables:
 		logger.Fatal("unable to start job manager", zap.Error(err))
 	}
 
+	// Setup the event dispatcher. This is fed by the event subscriber wired into the job server.
+	events := make(chan *beewatch.Event, 1024)
+	acks := make(chan subscriber.Ack, 1024)
+	dispatchManager := dispatch.New(logger.Logger, jobManager, events, acks)
+	dispatchManager.Start()
+
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	remoteServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
 	}
@@ -293,7 +302,7 @@ Using environment variables:
 	// might should return an error on this channel signalling the application to shutdown. Increase
 	// the channel size as needed if other components may also use this channel to log errors.
 	errChan := make(chan error, 2)
-	jobServer.ListenAndServe(errChan)
+	remoteServer.ListenAndServe(events, acks, errChan)
 
 	// Block and wait for a shutdown signal:
 	select {
@@ -302,7 +311,8 @@ Using environment variables:
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-	jobServer.Stop()
+	remoteServer.Stop()
+	dispatchManager.Stop()
 	jobManager.Stop()
 	workerManager.Stop()
 
