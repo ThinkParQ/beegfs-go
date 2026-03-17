@@ -230,3 +230,128 @@ func SetFileState(path string, fileState beegfs.FileState) error {
 
 	return nil
 }
+
+// GetEntryInfoV2 is an improved version of GetEntryInfo that works on a path instead of a file
+// descriptor. Notable improvements include:
+//
+//   - It returns the EntryInfo and detailed EntryInfoResponse, avoiding the need for the caller to
+//     collect the latter separately using an RPC.
+//   - If the specified path is a file, it does not open the file directly but instead opens the
+//     parent directory and passes the file name as an argument to the ioctl. This allows it to work on
+//     files that are locked, either by DMAPI access flags or files in the inode lock store (e.g., if
+//     they are being rebalanced). This also ensures it does not trigger OPEN_BLOCKED events which could
+//     trigger an automatic file restore by some consumers of the data management API. It also allows it
+//     to work on special file types that cannot be opened directly (a limitation of the old ioctl).
+//
+// It automatically trims null bytes from entry IDs meaning the output is not safe to use directly
+// with other ioctls, however it is always safe to use with RPCs. See TrimEntryInfoNullBytes() on
+// the original GetEntryInfo() for more details.
+//
+// It also does not populate the StripePattern "length" field which serves no purpose in the Go
+// code. A StripePattern returned by the ioctl is still safe to use when serializing BeeMsges
+// because the Length field in the GetEntryInfoResponse struct is only populated during
+// deserialization and ignored for serialization as the length is calculated by the serializer.
+func GetEntryInfoV2(path string) (msg.EntryInfo, msg.GetEntryInfoResponse, error) {
+
+	var arg = &getEntryInfoV2Arg{}
+	var fileName [filenameMaxLen]byte
+	var dir *os.File
+	lstat, err := os.Lstat(path)
+	if err != nil {
+		return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("unable to get entry info for %q via ioctl: %w", path, err)
+	}
+	if !lstat.IsDir() {
+		// If this is a file open the parent directory then include the filename in the ioctl args.
+		fileNameStr := filepath.Base(path)
+		// Subtract one here to account for the null byte added below.
+		if len(fileNameStr) > filenameMaxLen-1 {
+			return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("path %q has a file name %q longer than the maximum allowed length %d", path, fileNameStr, filenameMaxLen-1)
+		}
+		copy(fileName[:], []byte(fileNameStr+"\x00"))
+		arg.Filename = fileName
+		dir, err = os.Open(filepath.Dir(path))
+		if err != nil {
+			return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, err
+		}
+	} else {
+		// If this is a directory open it directly.
+		dir, err = os.Open(path)
+		if err != nil {
+			return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, err
+		}
+	}
+	defer dir.Close()
+
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, dir.Fd(), uintptr(iocGetEntryInfoV2), uintptr(unsafe.Pointer(arg)))
+	runtime.KeepAlive(fileName)
+	if errno != 0 {
+		err := syscall.Errno(errno)
+		return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("unable to get entry info for %q via ioctl: %w (errno: %d)", path, err, errno)
+	}
+
+	// Use bitwise AND operations to check if feature flags are set:
+	var featFlags beegfs.EntryFeatureFlags
+	// "1" comes from ENTRYINFO_FEATURE_INLINED in BeeGFS.
+	if arg.FeatureFlags&1>>0 == 1 {
+		featFlags.SetInlined()
+	}
+	// "2" comes from ENTRYINFO_FEATURE_BUDDYMIRRORED in BeeGFS.
+	if arg.FeatureFlags&2>>1 == 1 {
+		featFlags.SetBuddyMirrored()
+	}
+
+	entryInfo := msg.EntryInfo{
+		OwnerID:       arg.OwnerID,
+		ParentEntryID: bytes.TrimRight(arg.ParentEntryID[:], "\x00"),
+		EntryID:       bytes.TrimRight(arg.EntryID[:], "\x00"),
+		// TODO: The equivalent IoctlTk::getEntryInfo() in the C++ does not set the FileName.
+		// Do we want to do it for the new ioctl?
+		FileName:     []byte{},
+		EntryType:    beegfs.EntryType(arg.EntryType),
+		FeatureFlags: featFlags,
+	}
+
+	// This matches the same checks done in common/beemsg/msg/entry.go if we were assembling
+	// GetEntryInfoResponse from an RPC response.
+	if arg.RSTMajorVersion > 1 || arg.RSTMinorVersion != 0 {
+		return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("unsupported RST format (major: %d, minor: %d)", arg.RSTMajorVersion, arg.RSTMinorVersion)
+	}
+
+	entryInfoResp := msg.GetEntryInfoResponse{
+		Result: beegfs.OpsErr_SUCCESS,
+		Pattern: msg.StripePattern{
+			Length:            0, // Intentionally unset, see common on the function description.
+			Type:              beegfs.StripePatternType(arg.PatternType),
+			HasPoolID:         true, // TODO: Confirm we actually populate the pool ID.
+			Chunksize:         arg.ChunkSize,
+			StoragePoolID:     uint16(arg.StoragePoolID),
+			DefaultNumTargets: 0, // TODO: Wire up once added to the ioctl.
+			TargetIDs:         arg.StripeTargetIDs[0:arg.NumTargets],
+		},
+		Path: msg.PathInfo{
+			// Flags in the PathInfo set with the GetEntryInfoMsgEx is defined as an int32_t in the
+			// C++ server code, however in the client code it is defined and deserialized as a
+			// unsigned integer (PathInfo_deserialize). Casting back to an int32 here.
+			Flags:             int32(arg.PathInfoFlags),
+			OrigParentUID:     arg.OrigParentUID,
+			OrigParentEntryID: bytes.TrimRight(arg.OrigParentEntryID[:], "\x00"),
+		},
+		RST: msg.RemoteStorageTarget{
+			CoolDownPeriod: arg.RSTCooldown,
+			FilePolicies:   arg.RSTFilePolicies,
+			RSTIDs:         nil,
+			// RSTIDs defaults to nil and is set below only if there are RST IDs configured. This
+			// preserves legacy behavior when RST IDs were returned by a server GetEntryInfo RPC.
+			// Notably in case any clients rely on a nil check to detect presence of RST config.
+		},
+		MirrorNodeID:     0, // No longer in use and always set to 0.
+		NumSessionsRead:  arg.NumSessionsRead,
+		NumSessionsWrite: arg.NumSessionsWrite,
+		FileState:        beegfs.FileState(arg.FileDataState),
+	}
+	if arg.NumRSTIDs != 0 {
+		entryInfoResp.RST.RSTIDs = arg.RSTIDs[0:arg.NumRSTIDs]
+	}
+	return entryInfo, entryInfoResp, nil
+
+}

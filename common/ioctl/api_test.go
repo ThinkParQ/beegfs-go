@@ -73,6 +73,17 @@ func TestGetEntryInfo(t *testing.T) {
 	fileEntryInfo, err := GetEntryInfo(testRegFD.Fd())
 	require.NoError(t, err)
 	assert.Equal(t, beegfs.EntryRegularFile, fileEntryInfo.EntryType)
+
+	dirEntryInfo2, dirEntryInfoResp2, err := GetEntryInfoV2(filepath.Dir(testDir))
+	require.NoError(t, err)
+	assert.Equal(t, beegfs.EntryDirectory, dirEntryInfo2.EntryType)
+	assert.NotEqual(t, beegfs.StripePatternInvalid, dirEntryInfoResp2.Pattern.Type)
+
+	fileEntryInfo2, fileEntryInfoResp2, err := GetEntryInfoV2(testPath)
+	require.NoError(t, err)
+	assert.Equal(t, beegfs.EntryRegularFile, fileEntryInfo2.EntryType)
+	assert.NotEqual(t, beegfs.StripePatternInvalid, fileEntryInfoResp2.Pattern.Type)
+
 }
 
 func TestCreateFileStripeHints(t *testing.T) {
