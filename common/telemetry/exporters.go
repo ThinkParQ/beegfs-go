@@ -1,0 +1,138 @@
+package telemetry
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+
+	otlpmetricgrpc "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+// prometheusReader wraps the Prometheus exporter and its registry so we can
+// serve its HTTP handler separately.
+type prometheusReader struct {
+	exporter *prometheusexporter.Exporter
+	registry *prometheus.Registry
+}
+
+// buildReaders constructs metric readers based on configuration.
+// Multiple readers can be active simultaneously — the OTel MeterProvider
+// supports this natively. Returns the readers and an optional prometheusReader
+// (non-nil when Prometheus is enabled).
+func buildReaders(cfg Config) ([]sdkmetric.Reader, *prometheusReader, error) {
+	var readers []sdkmetric.Reader
+	var promRdr *prometheusReader
+
+	if cfg.OTLP.Enabled {
+		reader, err := buildOTLPReader(cfg.OTLP)
+		if err != nil {
+			return nil, nil, err
+		}
+		readers = append(readers, reader)
+	}
+
+	if cfg.Prometheus.Enabled {
+		rdr, err := buildPrometheusReader()
+		if err != nil {
+			return nil, nil, err
+		}
+		readers = append(readers, rdr.exporter)
+		promRdr = rdr
+	}
+
+	return readers, promRdr, nil
+}
+
+func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
+	var exporter sdkmetric.Exporter
+	var err error
+
+	switch cfg.Protocol {
+	case "grpc":
+		grpcOpts := []otlpmetricgrpc.Option{
+			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+		}
+		if cfg.Insecure {
+			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
+		}
+		if len(cfg.Headers) > 0 {
+			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithHeaders(cfg.Headers))
+		}
+		exporter, err = otlpmetricgrpc.New(context.Background(), grpcOpts...)
+
+	case "http":
+		httpOpts := []otlpmetrichttp.Option{
+			otlpmetrichttp.WithEndpoint(cfg.Endpoint),
+		}
+		if cfg.Insecure {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithInsecure())
+		}
+		if len(cfg.Headers) > 0 {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithHeaders(cfg.Headers))
+		}
+		exporter, err = otlpmetrichttp.New(context.Background(), httpOpts...)
+
+	default:
+		return nil, fmt.Errorf("unsupported OTLP protocol: %q (must be 'grpc' or 'http')", cfg.Protocol)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP %s exporter: %w", cfg.Protocol, err)
+	}
+
+	return sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(cfg.Interval)), nil
+}
+
+func buildPrometheusReader() (*prometheusReader, error) {
+	// Use a custom registry so we can serve its handler independently of the
+	// process-wide default Prometheus registry.
+	reg := prometheus.NewRegistry()
+	exp, err := prometheusexporter.New(prometheusexporter.WithRegisterer(reg))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
+	}
+	return &prometheusReader{exporter: exp, registry: reg}, nil
+}
+
+// startPrometheusServer starts the Prometheus HTTP server on the configured port
+// and registers the metrics handler at the configured path.
+func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
+	if p.promReader == nil {
+		return fmt.Errorf("prometheus reader not initialized")
+	}
+
+	// Pre-bind the port synchronously so any bind error (e.g. port already in
+	// use) is returned immediately to the caller rather than being lost in a
+	// goroutine.
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("prometheus server failed to bind on %s: %w", addr, err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(cfg.Path, promhttp.HandlerFor(p.promReader.registry, promhttp.HandlerOpts{}))
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+	p.promServer = srv
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			// Nothing useful to do here other than note the unexpected failure;
+			// the service will continue running without a Prometheus endpoint.
+			_ = err
+		}
+	}()
+
+	return nil
+}
