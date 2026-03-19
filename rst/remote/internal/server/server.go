@@ -14,7 +14,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
+	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -39,10 +41,11 @@ type BeeRemoteServer struct {
 	log *zap.Logger
 	wg  *sync.WaitGroup
 	Config
-	grpcServer *grpc.Server
-	jobMgr     *job.Manager
-	registry   *registry.ComponentRegistry
-	startTime  time.Time
+	grpcServer      *grpc.Server
+	jobMgr          *job.Manager
+	registry        *registry.ComponentRegistry
+	startTime       time.Time
+	eventSubscriber *subscriber.Service
 }
 
 // New() creates a new BeeRemoteServer that can be used with ListenAndServe().
@@ -72,7 +75,7 @@ func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.Bu
 	}
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	beeremote.RegisterBeeRemoteServer(s.grpcServer, &s)
-
+	s.eventSubscriber = subscriber.NewService(log, 1*time.Second, s.wg, s.grpcServer)
 	return &s, nil
 }
 
@@ -80,7 +83,8 @@ func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.Bu
 // goroutine to handle serving requests until an an error occurs or Stop() is called against the
 // BeeRemoteServer. It accepts an errChan where any errors will be returned if the gRPC server
 // terminates early unexpectedly.
-func (s *BeeRemoteServer) ListenAndServe(errChan chan<- error) {
+func (s *BeeRemoteServer) ListenAndServe(events chan<- *beewatch.Event, acks <-chan subscriber.Ack, errChan chan<- error) {
+	s.eventSubscriber.Start(events, acks)
 	go func() {
 		s.log.Info("listening on local network address", zap.Any("address", s.Address))
 		lis, err := net.Listen("tcp", s.Address)
