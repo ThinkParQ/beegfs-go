@@ -3,7 +3,6 @@ package workmgr
 import (
 	"context"
 	"errors"
-	"expvar"
 	"fmt"
 	"path"
 	"reflect"
@@ -17,8 +16,10 @@ import (
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,15 +31,25 @@ var (
 	// from 1–5. Priority 0 is included only for backward compatibility with work requests from
 	// earlier versions, which may still exist in the work journal. These legacy requests already
 	// have submissionIds assigned to the highest priority.
-	priorityIdMap      = map[int32]string{0: "1", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
-	beeSyncNewRequests = expvar.NewMap("beesync_work_requests_new")         // Counts new work requests submitted.
-	beeSyncQueued      = expvar.NewMap("beesync_work_requests_queued")      // Counts work requests added to the active queue for worker processing.
-	beeSyncProcessed   = expvar.NewMap("beesync_work_requests_processed")   // Counts work requests removed from the active queue by a worker to begin processing.
-	beeSyncRescheduled = expvar.NewMap("beesync_work_requests_rescheduled") // Counts work requests rescheduled for later processing.
-	beeSyncComplete    = expvar.NewMap("beesync_work_requests_completed")   // Counts work requests that were processed and removed from the work journal.
+	priorityIdMap = map[int32]string{0: "1", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
 
 	workJournalRetryTime = 5 * time.Second
 )
+
+// managerMetrics holds the OTel instruments used to report work manager metrics.
+type managerMetrics struct {
+	workRequests metric.Int64Counter
+}
+
+// normalizedPriority returns the OTel priority attribute value for a work request priority.
+// Priority 0 is a legacy value that maps to the highest priority (1) for backward compatibility,
+// matching the behavior of priorityIdMap which maps both 0 and 1 to "1".
+func normalizedPriority(p int32) int {
+	if p <= 0 {
+		return 1
+	}
+	return int(p)
+}
 
 type Config struct {
 	WorkJournalPath string `mapstructure:"journal-db"`
@@ -125,9 +136,10 @@ type Manager struct {
 	// activeWorkQueue to drain quickly enough to minimize priority inversion (long delays for
 	// high-priority work caused by a backlog of lower-priority tasks).
 	scheduler *scheduler.Scheduler
+	metrics   managerMetrics
 }
 
-func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
+func NewAndStart(log *zap.Logger, config Config, meter metric.Meter, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	workerCtx, workerCancel := context.WithCancel(context.Background())
@@ -149,14 +161,13 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 		activeWorkQueue:      make(chan workAssignment, config.ActiveWorkQueueSize),
 	}
 
-	for i := range m.scheduler.GetPriorityLevels() {
-		priority := priorityIdMap[int32(i+1)]
-		beeSyncNewRequests.Set(priority, new(expvar.Int))
-		beeSyncQueued.Set(priority, new(expvar.Int))
-		beeSyncProcessed.Set(priority, new(expvar.Int))
-		beeSyncComplete.Set(priority, new(expvar.Int))
-		beeSyncRescheduled.Set(priority, new(expvar.Int))
+	workRequests, err := meter.Int64Counter("beesync.work.requests",
+		metric.WithDescription("Work request lifecycle transitions"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create work requests counter: %w", err)
 	}
+	m.metrics = managerMetrics{workRequests: workRequests}
 
 	// If anything goes wrong we want to execute all deferred functions
 	// immediately to cleanup anything that did get initialized correctly. If we
@@ -196,7 +207,7 @@ func NewAndStart(log *zap.Logger, config Config, beeRemoteClient *beeremote.Clie
 	m.jobStore = jobStore
 
 	// Setup and initialize scheduler:
-	workScheduler, closeWorkScheduler := scheduler.NewScheduler(m.mgrCtx, log, m.activeWorkQueue, scheduler.WithNodeName("beesync"))
+	workScheduler, closeWorkScheduler := scheduler.NewScheduler(m.mgrCtx, log, m.activeWorkQueue, scheduler.WithNodeName("beesync"), scheduler.WithMeter(meter))
 	deferredFuncs = append(deferredFuncs, closeWorkScheduler)
 	m.scheduler = workScheduler
 
@@ -289,6 +300,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
 			rescheduleWork:       m.scheduler.AddRescheduleWorkToken,
+			metrics:              m.metrics,
 		}
 		m.workerWG.Add(1)
 		go w.run(m.workerCtx, m.workerWG)
@@ -420,8 +432,12 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			m.activeWorkQueue <- activeWork
 			*availableTokens -= 1
 			m.scheduler.RemoveWorkToken(submissionId)
-			priority := priorityIdMap[entry.WorkRequest.GetPriority()]
-			beeSyncQueued.Add(priority, 1)
+			m.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					telemetry.AttrState.String("queued"),
+					telemetry.AttrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
+				),
+			)
 		}
 
 		item, err = nextItem()
@@ -495,8 +511,12 @@ func (m *Manager) pullInRescheduledWork(start string, stop string, availableToke
 					m.activeWorkQueue <- activeWork
 					*availableTokens -= 1
 					m.scheduler.RemoveRescheduledWorkToken(submissionId)
-					priority := priorityIdMap[entry.WorkRequest.GetPriority()]
-					beeSyncQueued.Add(priority, 1)
+					m.metrics.workRequests.Add(context.Background(), 1,
+						metric.WithAttributes(
+							telemetry.AttrState.String("queued"),
+							telemetry.AttrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
+						),
+					)
 				} else {
 					nextExecuteAfter = time.Now().Add(workJournalRetryTime)
 				}
@@ -555,11 +575,21 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 				isNextSubmissionIdSet = true
 			}
 			scheduledCount++
-			beeSyncNewRequests.Add(workRequestPriority, 1)
+			m.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					telemetry.AttrState.String("new"),
+					telemetry.AttrPriority.Int(priority+1),
+				),
+			)
 		} else {
 			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
 			rescheduledCount++
-			beeSyncRescheduled.Add(workRequestPriority, 1)
+			m.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					telemetry.AttrState.String("rescheduled"),
+					telemetry.AttrPriority.Int(priority+1),
+				),
+			)
 		}
 		entriesFound++
 
@@ -637,7 +667,12 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
 		m.scheduler.AddWorkToken(submissionId)
-		beeSyncNewRequests.Add(priorityIdMap[priority], 1)
+		m.metrics.workRequests.Add(context.Background(), 1,
+			metric.WithAttributes(
+				telemetry.AttrState.String("new"),
+				telemetry.AttrPriority.Int(normalizedPriority(priority)),
+			),
+		)
 	}()
 
 	wr.SetPriority(priority)

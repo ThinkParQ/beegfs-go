@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
@@ -51,6 +53,16 @@ func main() {
 	pflag.Int("log.max-size", 1000, "When log.type is 'logfile' the maximum size of the log.file in megabytes before it is rotated.")
 	pflag.Int("log.num-rotated-files", 5, "When log.type is 'logfile' the maximum number old log.file(s) to keep when log.max-size is reached and the log is rotated.")
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
+	pflag.Bool("telemetry.enabled", false, "Enable telemetry metrics export.")
+	pflag.String("telemetry.service-name", "beegfs-sync", "Service name for metric identification.")
+	pflag.Bool("telemetry.otlp.enabled", false, "Enable pushing metrics via OTLP.")
+	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
+	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
+	pflag.Duration("telemetry.otlp.interval", 30*time.Second, "OTLP export interval.")
+	pflag.Bool("telemetry.otlp.insecure", false, "Disable TLS for OTLP connection.")
+	pflag.Bool("telemetry.prometheus.enabled", false, "Enable Prometheus /metrics endpoint.")
+	pflag.Int("telemetry.prometheus.port", 9090, "Prometheus metrics HTTP port.")
+	pflag.String("telemetry.prometheus.path", "/metrics", "Prometheus metrics HTTP path.")
 	pflag.String("server.address", "127.0.0.1:9011", "The hostname:port where this Sync node should listen for work requests.")
 	pflag.String("server.tls-cert-file", "/etc/beegfs/cert.pem", "Path to a certificate file that provides the identify of this Sync node's gRPC server.")
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Sync node's gRPC server.")
@@ -128,6 +140,16 @@ Using environment variables:
 		logger.Fatal("unable to initialize ctl logging", zap.Error(err))
 	}
 
+	tp, err := telemetry.New(initialCfg.Telemetry,
+		telemetry.WithInstanceID(initialCfg.Server.Address),
+		telemetry.WithVersion(version),
+	)
+	if err != nil {
+		logger.Fatal("unable to initialize telemetry", zap.Error(err))
+	}
+	defer tp.Shutdown(context.Background()) //nolint:errcheck
+	cfgMgr.AddListener(tp)
+
 	logger.Info("<=== BeeSync Initialized ===>")
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
 	// Initialize and fetch the global CTL mount point. This ensures ctl.BeeGFSClient() can be used
@@ -176,7 +198,7 @@ Using environment variables:
 		logger.Fatal("failed to initialize Remote gRPC client", zap.Error(err))
 	}
 
-	workMgr, err := workmgr.NewAndStart(logger.Logger, initialCfg.WorkMgr, beeRemoteClient, mountPoint)
+	workMgr, err := workmgr.NewAndStart(logger.Logger, initialCfg.WorkMgr, tp.Meter("workmgr"), beeRemoteClient, mountPoint)
 	if err != nil {
 		logger.Fatal("failed to initialize work manager", zap.Error(err))
 	}
