@@ -233,9 +233,6 @@ func (p *Provider) UpdateConfiguration(newConfig any) error {
 	// All telemetry config changes take effect only after a restart. Warn
 	// whenever the live provider exists (sdkProvider != nil) or the enabled
 	// state is being toggled, so operators are not surprised by a no-op reload.
-	// All telemetry config changes take effect only after a restart. Warn
-	// whenever the live provider exists (sdkProvider != nil) or the enabled
-	// state is being toggled, so operators are not surprised by a no-op reload.
 	if p.sdkProvider != nil || newCfg.Enabled != p.config.Enabled {
 		if !reflect.DeepEqual(newCfg, p.config) {
 			zap.L().Warn("telemetry configuration changes require a restart to take effect")
