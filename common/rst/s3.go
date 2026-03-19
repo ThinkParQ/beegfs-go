@@ -35,15 +35,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type S3StorageClass struct {
-	retrievalTier types.Tier
-	archival      bool
-	retentionDays int32         // defines how long the retrieved object will be available in days.
-	checkTime     time.Duration // defines retry time after initiating the restore.
-	recheckTime   time.Duration // defines retry time when restore was previously initiated.
-	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
-}
-
 type s3Provider interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error
@@ -57,19 +48,19 @@ type s3Provider interface {
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
-type s3ProviderFactory func(client *awsS3Provider) s3Provider
+type s3ProviderFactory func(client *defaultS3Provider) s3Provider
 
-type awsS3Provider struct {
+type defaultS3Provider struct {
 	client *s3.Client
 }
 
-var _ s3Provider = &awsS3Provider{}
+var _ s3Provider = &defaultS3Provider{}
 
-func (a *awsS3Provider) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+func (a *defaultS3Provider) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	return a.client.ListObjectsV2(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error {
+func (a *defaultS3Provider) ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error {
 	paginator := s3.NewListObjectsV2Paginator(a.client, params)
 	for paginator.HasMorePages() {
 		output, err := paginator.NextPage(ctx)
@@ -87,36 +78,45 @@ func (a *awsS3Provider) ListObjectsV2Pages(ctx context.Context, params *s3.ListO
 	return nil
 }
 
-func (a *awsS3Provider) RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error) {
+func (a *defaultS3Provider) RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error) {
 	return a.client.RestoreObject(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+func (a *defaultS3Provider) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
 	return a.client.HeadObject(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+func (a *defaultS3Provider) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
 	return a.client.CreateMultipartUpload(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+func (a *defaultS3Provider) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	return a.client.AbortMultipartUpload(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+func (a *defaultS3Provider) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
 	return a.client.CompleteMultipartUpload(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+func (a *defaultS3Provider) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	return a.client.PutObject(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+func (a *defaultS3Provider) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
 	return a.client.UploadPart(ctx, params, optFns...)
 }
 
-func (a *awsS3Provider) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+func (a *defaultS3Provider) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 	return a.client.GetObject(ctx, params, optFns...)
+}
+
+type S3StorageClass struct {
+	retrievalTier types.Tier
+	archival      bool
+	retentionDays int32         // defines how long the retrieved object will be available in days.
+	checkTime     time.Duration // defines retry time after initiating the restore.
+	recheckTime   time.Duration // defines retry time when restore was previously initiated.
+	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
 }
 
 type S3Client struct {
@@ -137,7 +137,13 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	return newS3WithProvider(ctx, rstConfig, rstConfig.GetS3(), mountPoint, nil)
 }
 
-func newS3WithProvider(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, providerFactory s3ProviderFactory) (Provider, error) {
+func newS3WithProvider(
+	ctx context.Context,
+	rstConfig *flex.RemoteStorageTarget,
+	s3Config *flex.RemoteStorageTarget_S3,
+	mountPoint filesystem.Provider,
+	providerFactory s3ProviderFactory,
+) (Provider, error) {
 	if s3Config == nil {
 		return nil, fmt.Errorf("s3 configuration must be specified")
 	}
@@ -172,10 +178,10 @@ func newS3WithProvider(ctx context.Context, rstConfig *flex.RemoteStorageTarget,
 	awsClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = usePathStyle
 	})
-	awsProvider := &awsS3Provider{client: awsClient}
-	provider := s3Provider(awsProvider)
+	defaultProvider := &defaultS3Provider{client: awsClient}
+	provider := s3Provider(defaultProvider)
 	if providerFactory != nil {
-		provider = providerFactory(awsProvider)
+		provider = providerFactory(defaultProvider)
 		if provider == nil {
 			return nil, fmt.Errorf("s3 provider factory returned nil")
 		}
@@ -528,7 +534,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 			var key string
 			var lastKey string
-			err := r.client.ListObjectsV2Pages(ctx, input, func(output *s3.ListObjectsV2Output) (bool, error) {
+			pageFn := func(output *s3.ListObjectsV2Output) (bool, error) {
 				keysFound = true
 
 				// When resuming with s3ResumeToken ContinuationToken and ContinuationStartKey,
@@ -600,7 +606,9 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				}
 
 				return true, nil
-			})
+			}
+
+			err := r.client.ListObjectsV2Pages(ctx, input, pageFn)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})

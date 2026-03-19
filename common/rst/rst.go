@@ -59,6 +59,11 @@ const (
 // initialized but empty struct of the correct type.
 var SupportedRSTTypes = map[string]func() (any, any){
 	"s3": func() (any, any) { t := new(flex.RemoteStorageTarget_S3_); return t, &t.S3 },
+	// XtreemStore is S3-compatible and uses the existing S3 implementation.
+	"xtreemstore": func() (any, any) {
+		t := &flex.RemoteStorageTarget_Xtreemstore{Xtreemstore: &flex.RemoteStorageTarget_XtreemStore{}}
+		return t, &t.Xtreemstore.S3
+	},
 	// Azure is not currently supported, but this is how an Azure type could be added:
 	// "azure": func() (any, any) { t := new(flex.RemoteStorageTarget_Azure_); return t, &t.Azure },
 	// Mock could be included here if it ever made sense to allow configuration using a file.
@@ -135,6 +140,8 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 	switch config.Type.(type) {
 	case *flex.RemoteStorageTarget_S3_:
 		return newS3(ctx, config, mountPoint)
+	case *flex.RemoteStorageTarget_Xtreemstore:
+		return newXtreemstore(ctx, config, mountPoint)
 	case *flex.RemoteStorageTarget_Mock:
 		// This handles setting up a Mock RST for testing from external packages like WorkerMgr. See
 		// the documentation ion `MockClient` in mock.go for how to setup expectations.
