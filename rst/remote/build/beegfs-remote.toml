@@ -36,6 +36,25 @@ tls-disable = false
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
 
+[dispatch]
+enabled = false
+workers = 0
+checkpoint-path = "/var/lib/beegfs/remote/dispatch/events.ckpt"
+checkpoint-frequency = "1s"
+rate-limit-window = "10m"
+rate-limit-max-events = 0
+rate-limit-event-types = ["*"]
+
+# [[dispatch.rate-limit-override]]
+# user-ids="0"
+# max-events=100000
+# event-types = ["OPEN_BLOCKED"]
+
+# [[dispatch.rate-limit-override]]
+# user-ids="1000-2000,3000,4000"
+# max-events=1000
+# event-types = ["OPEN_BLOCKED"]
+
 #
 # --- Section 1.2: [Worker Settings] ---
 #
@@ -218,6 +237,59 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # max-job-entries-per-rst: Once this threshold is exceeded, older jobs will be deleted
 # (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.
 
+#
+# --- Section 3.5: [Dispatch Settings] ---
+#
+
+# Optionally Remote can automatically trigger jobs in response to certain file system modification
+# events sent by the Watch service on behalf of a BeeGFS metadata node.
+
+# enabled: By default event dispatch is disabled. When first enabling event dispatch historical
+# events are ignored and only future file system modifications will trigger jobs.
+
+# workers: The number of worker threads used to process events and dispatch job requests. By default
+# this is the number of CPUs available to the Remote process.
+
+# checkpoint-path: This allows Remote to be restarted and resume dispatching events from where it
+# left off. The checkpoint file can be deleted to cause Remote to discard all historical events and
+# start dispatching from the next file system modification event from each metadata node.
+
+# checkpoint-frequency: This controls how often Remote acknowledges what events it has processed to
+# Watch, and writes out the local event checkpoint file. More frequent checkpoints reduce the number
+# of duplicate events Remote has to process after an unexpected restart. Duplicate events do not
+# cause duplicate job submissions, as Remote will detect if there is already an existing equivalent
+# job (in progress or completed) and ignore the duplicate event.
+
+# rate-limit-window: The number of events that trigger jobs is tracked on a per user ID and event
+# type basis for this rolling time window and limited based on rate-limit-max-events.
+
+# rate-limit-max-events: The default max number of events for a particular user ID during the
+# rate-limit-window that can trigger jobs. Only events that trigger jobs count against the max. If
+# set to "0" or omitted then by default no events for users without an override will be dispatched.
+
+# rate-limit-event-types: Specifies which event types should be subject to rate-limit-max-events.
+# Use ["*"] or omit to rate limit all event types. Event types not in this list are ignored and
+# never dispatched. Currently only the OPEN_BLOCKED event type is used by Remote, and rate limiting
+# this event determines how many file restores a user can trigger when a file's contents is
+# offloaded and the file's data state is set to `AutomaticRestore`.
+
+#
+# --- Section 3.5.1: [Dispatch Rate Limit Override Settings] ---
+#
+
+# One or more more rate limit overrides can be specified under [[dispatch.rate-limit-override]]
+# headers. If a range includes a user ID that is also specified individually in a different
+# override, the individual override will take precedence for that user ID.
+
+# user-ids: One or more comma separated ranges or individual user IDs the override applies to. For
+# example "1000,2000-3000,4000".
+
+# max-events: Override the default rate-limit-max-events for the specified user-ids. If set to "0"
+# or omitted then no event-types for these user-ids will be dispatched.
+
+# event-types: Optionally override which event types are subject to rate limiting for the specified
+# user-ids. Use ["*"] or omit to rate limit all event types. Accepts the same event type names as
+# rate-limit-event-types.
 
 #
 # --- Section 4: [Worker Settings] ---
