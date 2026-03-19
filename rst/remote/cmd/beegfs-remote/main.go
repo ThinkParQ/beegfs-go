@@ -10,12 +10,14 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
@@ -60,6 +62,16 @@ func main() {
 	pflag.Int("log.max-size", 1000, "When log.type is 'logfile' the maximum size of the log.file in megabytes before it is rotated.")
 	pflag.Int("log.num-rotated-files", 5, "When log.type is 'logfile' the maximum number old log.file(s) to keep when log.max-size is reached and the log is rotated.")
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
+	pflag.Bool("telemetry.enabled", false, "Enable telemetry metrics export.")
+	pflag.String("telemetry.service-name", "beegfs-remote", "Service name for metric identification.")
+	pflag.Bool("telemetry.otlp.enabled", false, "Enable pushing metrics via OTLP.")
+	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
+	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
+	pflag.Duration("telemetry.otlp.interval", 30*time.Second, "OTLP export interval.")
+	pflag.Bool("telemetry.otlp.insecure", false, "Disable TLS for OTLP connection.")
+	pflag.Bool("telemetry.prometheus.enabled", false, "Enable Prometheus /metrics endpoint.")
+	pflag.Int("telemetry.prometheus.port", 9091, "Prometheus metrics HTTP port.")
+	pflag.String("telemetry.prometheus.path", "/metrics", "Prometheus metrics HTTP path.")
 	pflag.String("management.address", "127.0.0.1:8010", "The hostname:port of the BeeGFS management node.")
 	pflag.String("management.tls-cert-file", "/etc/beegfs/cert.pem", "Use the specified certificate to verify and encrypt gRPC traffic to the Management node. Leave empty to only use the system's default certificate pool.")
 	pflag.Bool("management.tls-disable-verification", false, "Disable TLS verification for gRPC communication to the Management node.")
@@ -146,6 +158,16 @@ Using environment variables:
 	if err != nil {
 		logger.Fatal("unable to initialize ctl logging", zap.Error(err))
 	}
+
+	tp, err := telemetry.New(initialCfg.Telemetry,
+		telemetry.WithInstanceID(initialCfg.Server.Address),
+		telemetry.WithVersion(version),
+	)
+	if err != nil {
+		logger.Fatal("unable to initialize telemetry", zap.Error(err))
+	}
+	defer tp.Shutdown(context.Background()) //nolint:errcheck
+	cfgMgr.AddListener(tp)
 
 	err = ctl.InitViperFromExternal(
 		ctl.GlobalConfig{
@@ -277,7 +299,7 @@ Using environment variables:
 		logger.Fatal("unable to start worker manager", zap.Error(err))
 	}
 
-	jobManager := job.NewManager(logger.Logger, initialCfg.Job, workerManager)
+	jobManager := job.NewManager(logger.Logger, initialCfg.Job, tp.Meter("job"), workerManager)
 	err = jobManager.Start()
 	if err != nil {
 		logger.Fatal("unable to start job manager", zap.Error(err))

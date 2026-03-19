@@ -5,6 +5,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
@@ -13,6 +14,7 @@ import (
 // We use ConfigManager to handle configuration updates.
 // Verify all interfaces that depend on AppConfig are satisfied.
 var _ configmgr.Configurable = &AppConfig{}
+var _ telemetry.Configurer = &AppConfig{}
 
 type AppConfig struct {
 	MountPoint string           `mapstructure:"mount-point"`
@@ -20,10 +22,15 @@ type AppConfig struct {
 	BeeRemote  beeremote.Config `mapstructure:"remote"`
 	Server     server.Config    `mapstructure:"server"`
 	Log        logger.Config    `mapstructure:"log"`
+	Telemetry  telemetry.Config `mapstructure:"telemetry"`
 	Developer  struct {
 		PerfProfilingPort int  `mapstructure:"perf-profiling-port"`
 		DumpConfig        bool `mapstructure:"dump-config"`
 	}
+}
+
+func (c *AppConfig) GetTelemetryConfig() telemetry.Config {
+	return c.Telemetry
 }
 
 // NewEmptyInstance() returns an empty AppConfig for ConfigManager to use with
@@ -43,6 +50,9 @@ func (c *AppConfig) ValidateConfig() error {
 	}
 	if c.WorkMgr.ActiveWorkQueueSize <= 0 {
 		return fmt.Errorf("the active work queue size must at least be one (specified size: %d)", c.WorkMgr.ActiveWorkQueueSize)
+	}
+	if err := c.Telemetry.ValidateConfig(); err != nil {
+		return err
 	}
 	return nil
 }

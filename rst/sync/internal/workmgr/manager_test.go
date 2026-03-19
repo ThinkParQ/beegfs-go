@@ -17,6 +17,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/proto"
@@ -149,7 +150,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 
 	mountPoint := filesystem.NewMockFS()
 
-	mgr, err := NewAndStart(logger, config.Config, beeRemoteClient, mountPoint)
+	mgr, err := NewAndStart(logger, config.Config, noop.NewMeterProvider().Meter("test"), beeRemoteClient, mountPoint)
 	if err != nil {
 		return nil, deferredFuncs, err
 	}

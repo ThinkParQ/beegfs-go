@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
-	"expvar"
 	"fmt"
 	"io/fs"
 	"path"
@@ -18,18 +17,23 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var beeRemoteJobRequest = expvar.NewInt("beeremote_job_requests")
-var beeRemoteWorkRequest = expvar.NewInt("beeremote_work_requests")
+// managerMetrics holds the OTel instruments used to report job manager metrics.
+type managerMetrics struct {
+	jobRequests  metric.Int64Counter
+	workRequests metric.Int64Counter
+}
 
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
@@ -88,6 +92,7 @@ type Manager struct {
 	workerManager *workermgr.Manager
 	// function to release the file's access locks when no longer needed.
 	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	metrics                   managerMetrics
 }
 
 type managerOptConfig struct {
@@ -105,7 +110,7 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 }
 
 // NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
-func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
+func NewManager(log *zap.Logger, config Config, meter metric.Meter, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	ctx, cancel := context.WithCancel(context.Background())
 	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
@@ -118,6 +123,13 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 	for _, opt := range managerOpts {
 		opt(cfg)
 	}
+
+	jobRequests, _ := meter.Int64Counter("beeremote.job.requests",
+		metric.WithDescription("Total job requests received"),
+	)
+	workRequests, _ := meter.Int64Counter("beeremote.work.requests",
+		metric.WithDescription("Total work requests generated"),
+	)
 
 	return &Manager{
 		log:                       log,
@@ -133,6 +145,10 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		WorkResults:               workResultsChan,
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
+		metrics: managerMetrics{
+			jobRequests:  jobRequests,
+			workRequests: workRequests,
+		},
 	}
 }
 
@@ -621,8 +637,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	m.log.Debug("created job", zap.Any("job", job))
 
 	workRequests := rst.RecreateWorkRequests(job.Get(), job.GetSegments())
-	beeRemoteJobRequest.Add(1)
-	beeRemoteWorkRequest.Add(int64(len(workRequests)))
+	m.metrics.jobRequests.Add(context.Background(), 1)
+	m.metrics.workRequests.Add(context.Background(), int64(len(workRequests)),
+		metric.WithAttributes(telemetry.AttrStatus.String("created")),
+	)
 	return beeremote.JobResult_builder{
 		Job:          job.Get(),
 		WorkRequests: workRequests,

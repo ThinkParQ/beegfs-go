@@ -118,6 +118,22 @@ tls-disable = false
 # --- Section 3.4: [Remote Settings] ---
 #
 
+# [telemetry]
+# enabled = false
+# service-name = "beegfs-sync"
+#
+# [telemetry.otlp]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# interval = "30s"
+# insecure = false
+#
+# [telemetry.prometheus]
+# enabled = false
+# port = 9090
+# path = "/metrics"
+
 # Configuration for the BeeGFS Remote node must be specified under [remote]. Most configuration such
 # as the address/port are synced automatically from the Remote node (see Worker node settings on the
 # Remote node), however some per-worker configuration such as TLS settings may need to be specified.

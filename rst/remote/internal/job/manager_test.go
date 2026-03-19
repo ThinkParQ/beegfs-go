@@ -17,6 +17,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/proto"
 )
@@ -105,7 +106,7 @@ func TestManage(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be scheduled:
@@ -265,7 +266,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// Submit two jobs for testing:
@@ -568,7 +569,7 @@ func TestManageErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be cancelled if any work
@@ -713,7 +714,7 @@ func TestUpdateJobResults(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -898,7 +899,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	baseTestJobRequest := &beeremote.JobRequest{
