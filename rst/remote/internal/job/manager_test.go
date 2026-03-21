@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -17,9 +18,13 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -964,4 +969,258 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	result, err = jobManager.SubmitJobRequest(testFailedJobRequest)
 	require.NotNil(t, err)
 	require.Equal(t, result.Job.Status.State, beeremote.Job_FAILED)
+}
+
+// terminalMetricInfo holds the extracted data from a single beeremote.job.terminal data point.
+type terminalMetricInfo struct {
+	state string
+	rstID int64
+	count int64
+}
+
+// collectTerminalStateCounts returns a map of state-string → total count for the
+// beeremote.job.terminal counter collected in rm.
+func collectTerminalStateCounts(t *testing.T, rm metricdata.ResourceMetrics) map[string]int64 {
+	t.Helper()
+	counts := map[string]int64{}
+	for _, info := range collectTerminalMetricDetails(t, rm) {
+		counts[info.state] += info.count
+	}
+	return counts
+}
+
+// collectTerminalMetricDetails returns per-data-point details (state, rst.id, count)
+// for the beeremote.job.terminal counter.
+func collectTerminalMetricDetails(t *testing.T, rm metricdata.ResourceMetrics) []terminalMetricInfo {
+	t.Helper()
+	var infos []terminalMetricInfo
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.job.terminal" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "beeremote.job.terminal is not a Sum counter")
+			for _, dp := range data.DataPoints {
+				var info terminalMetricInfo
+				info.count = dp.Value
+				if v, ok := dp.Attributes.Value(attribute.Key("state")); ok {
+					info.state = v.AsString()
+				}
+				if v, ok := dp.Attributes.Value(attribute.Key("rst.id")); ok {
+					info.rstID = v.AsInt64()
+				}
+				infos = append(infos, info)
+			}
+		}
+	}
+	return infos
+}
+
+// durationSampleCount returns the histogram sample count for the beeremote.job.duration
+// data point matching the given state and rst.id, or -1 if no matching data point exists.
+func durationSampleCount(t *testing.T, rm metricdata.ResourceMetrics, wantState string, wantRSTID int64) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.job.duration" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Histogram[float64])
+			require.True(t, ok, "beeremote.job.duration is not a Histogram")
+			for _, dp := range data.DataPoints {
+				stateVal, hasState := dp.Attributes.Value(attribute.Key("state"))
+				rstVal, hasRST := dp.Attributes.Value(attribute.Key("rst.id"))
+				if hasState && stateVal.AsString() == wantState &&
+					hasRST && rstVal.AsInt64() == wantRSTID {
+					return int64(dp.Count)
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// TestJobTerminalMetricLockFailureRecordsFailed verifies that when the deferred
+// lock-release function fails after a COMPLETED transition, the recorded metric
+// state is "failed" (not "completed") because the deferred function reads the
+// final job state after the cleanup attempt.
+func TestJobTerminalMetricLockFailureRecordsFailed(t *testing.T) {
+	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err, "error setting up for test")
+	defer cleanupPathDBPath(t)
+
+	logger := zaptest.NewLogger(t)
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+
+	workerConfigs := []worker.Config{
+		{
+			ID:                  "0",
+			Name:                "test-node-0",
+			Type:                worker.Mock,
+			MaxReconnectBackOff: 5,
+			MockConfig: worker.MockConfig{
+				Expectations: []worker.MockExpectation{
+					{MethodName: "connect", ReturnArgs: []any{false, nil}},
+					{
+						MethodName: "SubmitWork",
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
+							flex.Work_Status_builder{
+								State:   flex.Work_SCHEDULED,
+								Message: "scheduled",
+							}.Build(),
+							nil,
+						},
+					},
+					{MethodName: "disconnect", ReturnArgs: []any{nil}},
+				},
+			},
+		},
+	}
+
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}
+	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer mp.Shutdown(context.Background()) //nolint:errcheck
+
+	jobManager := NewManager(logger, Config{PathDBPath: tmpPathDBPath}, mp.Meter("test"), workerManager,
+		func(cfg *managerOptConfig) {
+			cfg.releaseUnusedFileLockFunc = func(path string, jobs map[string]*Job) error {
+				return errors.New("simulated lock release failure")
+			}
+		},
+	)
+	require.NoError(t, jobManager.Start())
+
+	response, err := jobManager.SubmitJobRequest(beeremote.JobRequest_builder{
+		Path:                "/test/myfile",
+		Name:                "lock-failure-test",
+		Priority:            3,
+		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build())
+	require.NoError(t, err)
+
+	// Complete both work requests directly (bypassing the worker transport).
+	for i := range 2 {
+		err = jobManager.UpdateWork(flex.Work_builder{
+			Path:      response.GetJob().GetRequest().GetPath(),
+			JobId:     response.GetJob().GetId(),
+			RequestId: strconv.Itoa(i),
+			Status: flex.Work_Status_builder{
+				State:   flex.Work_COMPLETED,
+				Message: "complete",
+			}.Build(),
+			Parts: []*flex.Work_Part{},
+		}.Build())
+		require.NoError(t, err)
+	}
+
+	// The deferred function ran the failing lock func and overwrote the state to FAILED.
+	// We expect a single "failed" terminal metric — not "completed".
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	counts := collectTerminalStateCounts(t, rm)
+	assert.Equal(t, int64(1), counts["failed"], "expected 1 failed metric when lock release fails")
+	assert.Equal(t, int64(0), counts["completed"], "expected 0 completed metric when lock release fails")
+
+	// Verify rst.id attribute is set correctly (RST 1 was used in the job request).
+	details := collectTerminalMetricDetails(t, rm)
+	require.Len(t, details, 1)
+	assert.Equal(t, int64(1), details[0].rstID, "rst.id attribute should match the job's RST")
+
+	// Verify beeremote.job.duration histogram was recorded with matching attributes.
+	assert.Equal(t, int64(1), durationSampleCount(t, rm, "failed", 1),
+		"expected exactly 1 beeremote.job.duration sample with state=failed and rst.id=1")
+}
+
+// TestJobTerminalMetricNoDuplicateOnTerminalStateRetry verifies that the
+// prevStateWasTerminal guard in updateJobState prevents a second terminal metric
+// from being emitted when the same job is processed again after it has already
+// reached a terminal state.
+func TestJobTerminalMetricNoDuplicateOnTerminalStateRetry(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	mountPoint := filesystem.NewMockFS()
+
+	// Minimal workerManager: one mock worker (required by NewManager) but no RSTs.
+	// UpdateJob with empty WorkResults succeeds trivially; the RST lookup then fails,
+	// exercising the recording path without reaching any worker transport.
+	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{},
+		[]worker.Config{
+			{
+				ID:                  "0",
+				Name:                "test-node-0",
+				Type:                worker.Mock,
+				MaxReconnectBackOff: 5,
+				MockConfig: worker.MockConfig{
+					Expectations: []worker.MockExpectation{
+						{MethodName: "connect", ReturnArgs: []any{false, nil}},
+						{MethodName: "disconnect", ReturnArgs: []any{nil}},
+					},
+				},
+			},
+		},
+		[]*flex.RemoteStorageTarget{}, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer mp.Shutdown(context.Background()) //nolint:errcheck
+
+	// Config.PathDBPath is empty because Start() is never called on this manager;
+	// updateJobState does not access the path store.
+	jobManager := NewManager(logger, Config{}, mp.Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+
+	// A job in UNKNOWN state is not terminal (prevStateWasTerminal=false). With empty
+	// WorkResults, UpdateJob succeeds trivially; then RST 99 is not found, which sets
+	// the state to FAILED and fires the terminal metric.
+	job := &Job{
+		Job: beeremote.Job_builder{
+			Id: "test-job-guard",
+			Request: beeremote.JobRequest_builder{
+				RemoteStorageTarget: 99, // intentionally absent from workerManager
+			}.Build(),
+			Status: beeremote.Job_Status_builder{
+				State: beeremote.Job_UNKNOWN,
+			}.Build(),
+			Created: timestamppb.Now(),
+		}.Build(),
+		WorkResults: map[string]worker.WorkResult{},
+	}
+
+	// First call: non-terminal prior state → records one "failed" metric.
+	_, _, _ = jobManager.updateJobState(job, beeremote.UpdateJobsRequest_CANCELLED, false)
+
+	var rm1 metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm1))
+	counts1 := collectTerminalStateCounts(t, rm1)
+	assert.Equal(t, int64(1), counts1["failed"], "expected 1 terminal metric on first call")
+
+	// Verify rst.id=99 is attached and duration histogram is recorded.
+	details1 := collectTerminalMetricDetails(t, rm1)
+	require.Len(t, details1, 1)
+	assert.Equal(t, int64(99), details1[0].rstID, "rst.id attribute should match the job's RST")
+	assert.Equal(t, int64(1), durationSampleCount(t, rm1, "failed", 99),
+		"expected exactly 1 beeremote.job.duration sample with state=failed and rst.id=99")
+
+	// Second call: job is now FAILED (prevStateWasTerminal=true) → guard skips recording.
+	_, _, _ = jobManager.updateJobState(job, beeremote.UpdateJobsRequest_CANCELLED, false)
+
+	var rm2 metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm2))
+	counts2 := collectTerminalStateCounts(t, rm2)
+	assert.Equal(t, int64(1), counts2["failed"], "expected no duplicate metric on second call from terminal state")
+
+	// Duration histogram should also still have exactly 1 sample (no duplicate).
+	assert.Equal(t, int64(1), durationSampleCount(t, rm2, "failed", 99),
+		"expected no duplicate beeremote.job.duration sample after second call")
 }

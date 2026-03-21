@@ -252,4 +252,5 @@ var (
 	AttrStatus    = attribute.Key("status")
 	AttrErrorType = attribute.Key("error.type")
 	AttrRSTType   = attribute.Key("rst.type")
+	AttrRSTID     = attribute.Key("rst.id")
 )
