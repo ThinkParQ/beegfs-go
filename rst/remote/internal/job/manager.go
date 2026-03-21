@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+	stdtime "time"
 
 	"github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
@@ -33,6 +34,8 @@ import (
 type managerMetrics struct {
 	jobRequests  metric.Int64Counter
 	workRequests metric.Int64Counter
+	jobTerminal  metric.Int64Counter
+	jobDuration  metric.Float64Histogram
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -130,6 +133,13 @@ func NewManager(log *zap.Logger, config Config, meter metric.Meter, workerManage
 	workRequests, _ := meter.Int64Counter("beeremote.work.requests",
 		metric.WithDescription("Total work requests generated"),
 	)
+	jobTerminal, _ := meter.Int64Counter("beeremote.job.terminal",
+		metric.WithDescription("Jobs that reached a terminal state"),
+	)
+	jobDuration, _ := meter.Float64Histogram("beeremote.job.duration",
+		metric.WithDescription("Time from job creation to terminal state"),
+		metric.WithUnit("s"),
+	)
 
 	return &Manager{
 		log:                       log,
@@ -148,7 +158,22 @@ func NewManager(log *zap.Logger, config Config, meter metric.Meter, workerManage
 		metrics: managerMetrics{
 			jobRequests:  jobRequests,
 			workRequests: workRequests,
+			jobTerminal:  jobTerminal,
+			jobDuration:  jobDuration,
 		},
+	}
+}
+
+// recordJobTerminal records metrics when a job reaches a terminal state.
+func (m *Manager) recordJobTerminal(job *Job, terminalState string) {
+	attrs := metric.WithAttributes(
+		telemetry.AttrState.String(terminalState),
+		telemetry.AttrRSTID.Int(int(job.Request.GetRemoteStorageTarget())),
+	)
+	m.metrics.jobTerminal.Add(context.Background(), 1, attrs)
+	if created := job.GetCreated(); created != nil && created.IsValid() {
+		duration := stdtime.Since(created.AsTime()).Seconds()
+		m.metrics.jobDuration.Record(context.Background(), duration, attrs)
 	}
 }
 
@@ -952,6 +977,13 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			status.SetUpdated(timestamppb.Now())
 		}()
 
+		// Only record a terminal metric if the job was not already in a terminal state;
+		// force-updates on already-terminal jobs must not double-count or distort durations.
+		prevStateWasTerminal := state == beeremote.Job_COMPLETED ||
+			state == beeremote.Job_OFFLOADED ||
+			state == beeremote.Job_CANCELLED ||
+			state == beeremote.Job_FAILED
+
 		// If the job is already failed we don't need to update the work requests unless the update was forced:
 		if state != beeremote.Job_FAILED || forceUpdate {
 			// If we're unable to definitively cancel on any node, success is set to false and the
@@ -980,10 +1012,16 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
 				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
+				if !prevStateWasTerminal {
+					m.recordJobTerminal(job, "cancelled")
+				}
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
+			if !prevStateWasTerminal {
+				m.recordJobTerminal(job, "failed")
+			}
 			return false, false, ""
 		}
 
@@ -992,16 +1030,25 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
 				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (ignoring because this is a forced update): " + err.Error()))
+				if !prevStateWasTerminal {
+					m.recordJobTerminal(job, "cancelled")
+				}
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (try again or force the update to cancel the job anyway): " + err.Error()))
+			if !prevStateWasTerminal {
+				m.recordJobTerminal(job, "failed")
+			}
 			return false, false, ""
 		}
 
 		status.SetState(beeremote.Job_CANCELLED)
 		status.SetMessage(status.GetMessage() + "; successfully requested the RST abort this job")
 		m.log.Debug("successfully updated job", zap.Any("job", job))
+		if !prevStateWasTerminal {
+			m.recordJobTerminal(job, "cancelled")
+		}
 		return true, true, ""
 	}
 
@@ -1070,6 +1117,15 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 					status.SetMessage(message)
 				}
 			}
+			// Record the final state after lock cleanup — it may have been overwritten to FAILED.
+			switch status.GetState() {
+			case beeremote.Job_COMPLETED:
+				m.recordJobTerminal(job, "completed")
+			case beeremote.Job_CANCELLED:
+				m.recordJobTerminal(job, "cancelled")
+			default:
+				m.recordJobTerminal(job, "failed")
+			}
 		}
 	}()
 
@@ -1079,6 +1135,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	if !allSameState {
 		status.SetState(beeremote.Job_UNKNOWN)
 		status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
+		m.recordJobTerminal(job, "unknown")
 		return nil
 	}
 
@@ -1089,6 +1146,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		// nothing we can do unless they were to add it back.
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage(fmt.Sprintf("unable to complete job because the RST no longer exists: %d (add it back or manually cleanup any artifacts from this job)", job.Request.GetRemoteStorageTarget()))
+		m.recordJobTerminal(job, "failed")
 		return nil
 	}
 
@@ -1098,6 +1156,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		if err := job.Complete(m.ctx, rst, true); err != nil {
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage("error cancelling job: " + err.Error())
+			m.recordJobTerminal(job, "failed")
 		} else if job.Request.HasBuilder() {
 			// Builder job was cancelled. Update status message with more info...
 			status.SetState(beeremote.Job_CANCELLED)
@@ -1107,6 +1166,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			} else {
 				status.SetMessage("successfully cancelled job: failed to acquire builder-job status! This is a bug")
 			}
+			m.recordJobTerminal(job, "cancelled")
 		} else {
 			status.SetState(beeremote.Job_CANCELLED)
 			status.SetMessage("successfully cancelled job")
@@ -1116,8 +1176,10 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		if err := job.Complete(m.ctx, rst, false); err != nil {
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage("error completing job: " + err.Error())
+			m.recordJobTerminal(job, "failed")
 		} else if status.GetState() == beeremote.Job_OFFLOADED {
 			status.SetMessage("successfully offloaded")
+			m.recordJobTerminal(job, "offloaded")
 		} else {
 			status.SetState(beeremote.Job_COMPLETED)
 			status.SetMessage("successfully completed job")
@@ -1128,9 +1190,11 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		// try to complete or abort the request as it may make it more difficult to recover.
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage("job cannot continue without user intervention (see work results for details)")
+		m.recordJobTerminal(job, "failed")
 	default:
 		status.SetState(beeremote.Job_UNKNOWN)
 		status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
+		m.recordJobTerminal(job, "unknown")
 		// We return an error here because this is an internal problem that shouldn't happen and
 		// hopefully a test will catch it. Most likely some new terminal states were added and this
 		// function needs to be updated.
