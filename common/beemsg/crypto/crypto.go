@@ -11,7 +11,7 @@ import (
 var dummyKey = []byte{'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 0}
 
 const AesTagLen = 16
-const Encrypt = false
+const Encrypt = true
 
 // Returns (iv, encrypted buf, error)
 func Aes256Encrypt(buf []byte) ([]byte, []byte, error) {
