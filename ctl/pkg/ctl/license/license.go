@@ -9,6 +9,7 @@ import (
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/strfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	pl "github.com/thinkparq/protobuf/go/license"
@@ -150,45 +151,5 @@ func CheckIfOverStorageCapacityLimit(ctx context.Context, capacityLimit string) 
 func GetTimeToExpiration(license *pl.GetCertDataResult) (remaining time.Duration, expireMsg string) {
 	expireTimeWithoutGrace := license.Data.ValidUntil.AsTime().Add(-12 * time.Hour)
 	remaining = time.Until(expireTimeWithoutGrace)
-	return getTimeToExpirationString(remaining)
-}
-
-// getTimeToExpirationString is mostly needed for testing so the remaining time can be injected to
-// avoid time-sensitive flaky tests if we worked with an actual license and calculated time.Until.
-func getTimeToExpirationString(remaining time.Duration) (time.Duration, string) {
-	expireMsg := ""
-	switch {
-	case remaining > 0 && remaining < time.Hour:
-		expireMsg = "expires in less than an hour"
-	case remaining > 0:
-		expireMsg = fmt.Sprintf("expires in %s", roundToHoursOrDays(remaining))
-	case remaining <= 0 && remaining > -time.Hour:
-		expireMsg = "expired less than an hour ago"
-	default:
-		expireMsg = fmt.Sprintf("expired %s ago", roundToHoursOrDays(remaining))
-	}
-	return remaining, expireMsg
-}
-
-func roundToHoursOrDays(d time.Duration) (rounded string) {
-	if d >= 24*time.Hour || d <= -24*time.Hour {
-		count := int(d.Round(24*time.Hour) / (24 * time.Hour))
-		if count < 0 {
-			count = -count
-		}
-		unit := "days"
-		if count == 1 {
-			unit = "day"
-		}
-		return fmt.Sprintf("%d %s", count, unit)
-	}
-	count := int(d.Round(time.Hour) / time.Hour)
-	if count < 0 {
-		count = -count
-	}
-	unit := "hours"
-	if count == 1 {
-		unit = "hour"
-	}
-	return fmt.Sprintf("%d %s", count, unit)
+	return remaining, strfmt.ExpirationString(remaining)
 }
