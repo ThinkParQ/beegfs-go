@@ -1,6 +1,7 @@
 package workmgr
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -15,9 +16,13 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/proto"
@@ -76,6 +81,7 @@ type testConfig struct {
 	Config
 	logLevel   zapcore.LevelEnabler
 	rstConfigs []*flex.RemoteStorageTarget
+	meter      metric.Meter
 }
 
 type getTestMgrOpt func(*testConfig)
@@ -98,6 +104,12 @@ func WithNumWorkers(n int) getTestMgrOpt {
 func WithLogLevel(l zapcore.LevelEnabler) getTestMgrOpt {
 	return func(cfg *testConfig) {
 		cfg.logLevel = l
+	}
+}
+
+func WithMeter(m metric.Meter) getTestMgrOpt {
+	return func(cfg *testConfig) {
+		cfg.meter = m
 	}
 }
 
@@ -150,7 +162,11 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 
 	mountPoint := filesystem.NewMockFS()
 
-	mgr, err := NewAndStart(logger, config.Config, noop.NewMeterProvider().Meter("test"), beeRemoteClient, mountPoint)
+	meter := config.meter
+	if meter == nil {
+		meter = noop.NewMeterProvider().Meter("test")
+	}
+	mgr, err := NewAndStart(logger, config.Config, meter, beeRemoteClient, mountPoint)
 	if err != nil {
 		return nil, deferredFuncs, err
 	}
@@ -393,6 +409,85 @@ func TestUpdateRequests(t *testing.T) {
 	require.Len(t, jobEntry.Value, 1)
 
 	// Assert all expectations set for the entire test were met.
+	mockRST.AssertExpectations(t)
+	mockBeeRemote.AssertExpectations(t)
+}
+
+// TestWorkRequestMetrics verifies that submitting a work request records state transitions
+// in the beesync.work.requests counter with the correct attributes.
+func TestWorkRequestMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { require.NoError(t, mp.Shutdown(context.Background())) }()
+
+	mgr, deferredFuncs, err := getTestManager(t, WithMeter(mp.Meter("test")))
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("0", "0"), mock.Anything).Return(nil).Times(2)
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_COMPLETED)).Return(nil).Times(1)
+
+	testRequest := proto.Clone(baseTestRequest).(*flex.WorkRequest)
+	resp, err := mgr.SubmitWorkRequest(testRequest)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// Poll until the full request lifecycle completes (worker goroutine is async).
+	// Polling eliminates the fixed sleep and ensures a deterministic failure if the worker stalls.
+	// "new" and "queued" are emitted synchronously inside SubmitWorkRequest and the scheduler
+	// dispatch loop before "completed" is ever possible, so all four counts are stable once
+	// stateCounts["completed"] == 1.
+	// Use 5×defaultSleepTime as timeout to give slow CI runners headroom beyond the internal ticks.
+	stateCounts := make(map[string]int64)
+	require.Eventually(t, func() bool {
+		stateCounts = make(map[string]int64)
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			return false
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name != "beesync.work.requests" {
+					continue
+				}
+				data, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					return false
+				}
+				// Guard against a future SDK change that switches temporality to delta,
+				// which would make the accumulated counts incorrect.
+				if data.Temporality != metricdata.CumulativeTemporality {
+					t.Fatalf("beesync.work.requests has temporality %v, expected CumulativeTemporality", data.Temporality)
+				}
+				for _, dp := range data.DataPoints {
+					stateVal, hasState := dp.Attributes.Value(telemetry.AttrState)
+					if hasState {
+						stateCounts[stateVal.AsString()] += dp.Value
+					}
+				}
+			}
+		}
+		return stateCounts["completed"] == 1
+	}, 5*defaultSleepTime*time.Second, 50*time.Millisecond, "timed out waiting for beesync.work.requests 'completed' metric")
+
+	// Verify the full happy-path lifecycle: new -> queued -> processed -> completed.
+	// Asserting exact counts (not just > 0) catches duplicate emissions and missing transitions.
+	assert.Equal(t, int64(1), stateCounts["new"], "expected exactly 1 'new' state transition")
+	assert.Equal(t, int64(1), stateCounts["queued"], "expected exactly 1 'queued' state transition")
+	assert.Equal(t, int64(1), stateCounts["processed"], "expected exactly 1 'processed' state transition")
+	assert.Equal(t, int64(1), stateCounts["completed"], "expected exactly 1 'completed' state transition")
+	assert.Equal(t, int64(0), stateCounts["rescheduled"], "expected no rescheduling on the happy path")
+
 	mockRST.AssertExpectations(t)
 	mockBeeRemote.AssertExpectations(t)
 }
