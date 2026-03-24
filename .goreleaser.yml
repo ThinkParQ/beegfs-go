@@ -81,7 +81,7 @@ nfpms:
     homepage: https://www.beegfs.io
     maintainer: BeeGFS Maintainers <packages@beegfs.com>
     description: A collection of tools for managing BeeGFS.
-    license: BeeGFS EULA
+    license: BeeGFS License Agreement
     formats:
       - rpm
       - deb
@@ -112,7 +112,7 @@ nfpms:
     homepage: https://www.beegfs.io
     maintainer: BeeGFS Maintainers <packages@beegfs.com>
     description: BeeGFS Remote (Remote Storage Targets Coordinator)
-    license: BeeGFS EULA
+    license: BeeGFS License Agreement
     formats:
       - rpm
       - deb
@@ -140,7 +140,7 @@ nfpms:
     homepage: https://www.beegfs.io
     maintainer: BeeGFS Maintainers <packages@beegfs.com>
     description: BeeGFS Sync (Remote Storage Targets Syncer)
-    license: BeeGFS EULA
+    license: BeeGFS License Agreement
     formats:
       - rpm
       - deb
@@ -169,7 +169,7 @@ nfpms:
     homepage: https://www.beegfs.io
     maintainer: BeeGFS Maintainers <packages@beegfs.com>
     description: BeeGFS Watch
-    license: BeeGFS EULA
+    license: BeeGFS License Agreement
     formats:
       - rpm
       - deb
