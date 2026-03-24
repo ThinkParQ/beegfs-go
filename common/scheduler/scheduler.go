@@ -20,6 +20,10 @@ const (
 	DefaultPriority = 3
 	priorityLevels  = 5
 	tolerance       = 1e-6
+
+	// Metric names for OTel observable gauges registered by the scheduler.
+	metricCompletedWorkRate = "beesync.scheduler.completed.work.rate"
+	metricTokensAllowedRate = "beesync.scheduler.tokens.allowed.rate"
 )
 
 type schedulerConfig struct {
@@ -171,11 +175,11 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 
 	// Register OTel observable gauges for scheduler throughput metrics.
 	completedWorkGauge, _ := cfg.meter.Float64ObservableGauge(
-		"beesync.scheduler.completed.work.rate",
+		metricCompletedWorkRate,
 		metric.WithDescription("Work completion rate (Hz)"),
 	)
 	tokensAllowedGauge, _ := cfg.meter.Float64ObservableGauge(
-		"beesync.scheduler.tokens.allowed.rate",
+		metricTokensAllowedRate,
 		metric.WithDescription("Token release rate (Hz)"),
 	)
 	_, _ = cfg.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
