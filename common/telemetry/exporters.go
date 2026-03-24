@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
 )
 
 // prometheusReader wraps the Prometheus exporter and its registry so we can
@@ -128,9 +129,7 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			// Nothing useful to do here other than note the unexpected failure;
-			// the service will continue running without a Prometheus endpoint.
-			_ = err
+			zap.L().Error("prometheus metrics server terminated unexpectedly", zap.Error(err))
 		}
 	}()
 
