@@ -1,10 +1,16 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
 )
 
@@ -111,6 +117,100 @@ func TestGetNextPriority(t *testing.T) {
 			assert.Equal(t, counts[priority], priorityLevels)
 		}
 	}
+}
+
+// TestSchedulerMetricGaugeCallback verifies that the OTel observable gauge callback reads
+// directly from the scheduler's atomic fields and reports the stored values faithfully.
+// It does NOT test that the scheduler's internal updateStats loop writes to those atomics —
+// see TestGetUpdateStatsFuncWritesAtomics for that.
+func TestSchedulerMetricGaugeCallback(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { require.NoError(t, mp.Shutdown(context.Background())) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	queue := make(chan int, 10)
+	s, closeFn := NewScheduler(ctx, zap.NewNop(), queue,
+		WithMeter(mp.Meter("test")),
+		// Use a 24h tick so the internal goroutine never fires updateStats during the test,
+		// preventing it from overwriting the atomic values we store below.
+		WithAverageWindow(24*time.Hour, 1, 1),
+		WithAllowedTokensMin(1),
+	)
+	defer func() { require.NoError(t, closeFn()) }()
+
+	// Store values directly to simulate processed work without timing dependencies.
+	s.completedWorkHz.Store(math.Float64bits(42.0))
+	s.tokensAllowedHz.Store(math.Float64bits(10.0))
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	var foundCompletedWork, foundTokensAllowed bool
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch m.Name {
+			case metricCompletedWorkRate:
+				foundCompletedWork = true
+				data, ok := m.Data.(metricdata.Gauge[float64])
+				require.True(t, ok, "metricCompletedWorkRate data must be a Gauge[float64]")
+				require.Len(t, data.DataPoints, 1, "metricCompletedWorkRate must have exactly 1 data point")
+				assert.Equal(t, 42.0, data.DataPoints[0].Value)
+				assert.Equal(t, "Work completion rate (Hz)", m.Description,
+					"metricCompletedWorkRate description mismatch — gauges may be swapped")
+			case metricTokensAllowedRate:
+				foundTokensAllowed = true
+				data, ok := m.Data.(metricdata.Gauge[float64])
+				require.True(t, ok, "metricTokensAllowedRate data must be a Gauge[float64]")
+				require.Len(t, data.DataPoints, 1, "metricTokensAllowedRate must have exactly 1 data point")
+				assert.Equal(t, 10.0, data.DataPoints[0].Value)
+				assert.Equal(t, "Token release rate (Hz)", m.Description,
+					"metricTokensAllowedRate description mismatch — gauges may be swapped")
+			}
+		}
+	}
+	assert.True(t, foundCompletedWork, "completed work rate gauge not found in collected metrics")
+	assert.True(t, foundTokensAllowed, "tokens allowed rate gauge not found in collected metrics")
+}
+
+// TestGetUpdateStatsFuncWritesAtomics verifies that the scheduler's updateStats function —
+// the production path that populates completedWorkHz and tokensAllowedHz — writes non-zero
+// values to those atomics after processing work.
+func TestGetUpdateStatsFuncWritesAtomics(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	queue := make(chan int, 10)
+	s, closeFn := NewScheduler(ctx, zap.NewNop(), queue,
+		WithAverageWindow(24*time.Hour, 1, 1),
+		WithAllowedTokensMin(1),
+	)
+	defer func() { require.NoError(t, closeFn()) }()
+
+	// getUpdateStatsFunc captures internal state; alpha=0.1 gives stable convergence.
+	updateStats := s.getUpdateStatsFunc(1.0, 1, 0.5, 0.1)
+
+	t0 := time.Now()
+	// First call initializes previousTime; atomics are not written.
+	updateStats(t0, 0, 0)
+
+	// Second call: averageCompletedWorkPerMs starts at zero (≤ tolerance), so the function
+	// takes the early-return path setting the average but not writing the atomics.
+	t1 := t0.Add(100 * time.Millisecond)
+	updateStats(t1, 0, 5)
+
+	// Third call: averageCompletedWorkPerMs > tolerance now, so the function computes
+	// tokensAllowedPerMs and writes both atomics.
+	t2 := t1.Add(100 * time.Millisecond)
+	updateStats(t2, 0, 5)
+
+	completedWorkHz := math.Float64frombits(s.completedWorkHz.Load())
+	tokensAllowedHz := math.Float64frombits(s.tokensAllowedHz.Load())
+
+	assert.Greater(t, completedWorkHz, 0.0, "completedWorkHz should be positive after processing work")
+	assert.Greater(t, tokensAllowedHz, 0.0, "tokensAllowedHz should be positive after processing work")
 }
 
 func BenchmarkDistributeTokensEvenWork(b *testing.B) {
