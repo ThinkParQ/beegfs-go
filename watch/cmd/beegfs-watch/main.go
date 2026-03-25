@@ -115,11 +115,11 @@ Using environment variables:
 		os.Exit(0)
 	}
 
-	logger, err := logger.New(initialCfg.Log)
+	logger, err := logger.New(initialCfg.Log, nil)
 	if err != nil {
 		log.Fatalf("Unable to initialize logger: %s", err)
 	}
-	defer logger.Sync() // Flush any final messages before exiting.
+	defer logger.Shutdown(context.Background())
 	logger.Info("<=== #### ===>")
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
 	cfgMgr.AddListener(logger)
@@ -196,14 +196,14 @@ Using environment variables:
 	metaCtx, metaCancel := context.WithCancel(context.Background())
 	defer metaCancel()
 
-	metaMgr, metaCleanup, err := metadata.New(metaCtx, logger.Logger, initialCfg.Metadata)
+	metaMgr, metaCleanup, err := metadata.New(metaCtx, logger, initialCfg.Metadata)
 	if err != nil {
 		logger.Fatal("failed to start metadata manager", zap.Error(err))
 	}
 	defer metaCleanup()
 
 	// Setup the subscriber manager:
-	sm := subscribermgr.New(logger.Logger, metaMgr.EventBuffer, &wg)
+	sm := subscribermgr.New(logger, metaMgr.EventBuffer, &wg)
 
 	// Using a different context for subscribers is important so we can coordinate shutdown.
 	// Notably we want to wait to disconnect until the buffer is empty.

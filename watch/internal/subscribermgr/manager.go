@@ -15,13 +15,14 @@ import (
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/watch/internal/subscriber"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	"go.uber.org/zap"
 )
 
 type Manager struct {
-	log             *zap.Logger
+	log             *logger.Logger
 	handlers        []*Handler
 	metaEventBuffer *types.MultiCursorRingBuffer
 	wg              *sync.WaitGroup
@@ -30,7 +31,7 @@ type Manager struct {
 // Verify all interfaces that depend on Manager are satisfied:
 var _ configmgr.Listener = &Manager{}
 
-func New(log *zap.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup) *Manager {
+func New(log *logger.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup) *Manager {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	return &Manager{
@@ -96,7 +97,7 @@ func (sm *Manager) UpdateConfiguration(newConfig any) error {
 				// We don't need to unlock the mutex because it won't exist after we perform the swap.
 				// Swap out the handler. Note is important we don't just swap out the subscriber.
 				// Otherwise we'd have to worry about resetting the context and other state.
-				sm.handlers[i] = newHandler(sm.log, toVerify[h.ID], sm.metaEventBuffer, newHandlerConfig)
+				sm.handlers[i] = newHandler(sm.log.Logger, toVerify[h.ID], sm.metaEventBuffer, newHandlerConfig)
 				go sm.handlers[i].Handle(sm.wg)
 			}
 			handlersToKeep = append(handlersToKeep, sm.handlers[i])
@@ -107,7 +108,7 @@ func (sm *Manager) UpdateConfiguration(newConfig any) error {
 
 	for _, v := range toAdd {
 		sm.log.Info("adding subscriber", zap.Int("id", v.ID))
-		h := newHandler(sm.log, v, sm.metaEventBuffer, newHandlerConfig)
+		h := newHandler(sm.log.Logger, v, sm.metaEventBuffer, newHandlerConfig)
 		sm.handlers = append(sm.handlers, h)
 		go h.Handle(sm.wg)
 	}
