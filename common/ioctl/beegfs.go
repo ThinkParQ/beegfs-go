@@ -21,6 +21,8 @@ const (
 	pingMaxInterval    = 2000
 	pingNodeBufLen     = 64
 	pingSockTypeBufLen = 8
+	maxStripeTargets   = 256
+	maxRSTIDs          = 256
 )
 
 // beegfsIOCTypeID is the type identifier for BeeGFS ioctl operations. In ioctl
@@ -55,6 +57,7 @@ const (
 	ioctlNumGetEntryInfo      = 31
 	ioctlNumPingNode          = 32
 	ioctlNumSetFileState      = 33
+	ioctlNumGetEntryInfoV2    = 34
 )
 
 // BeeGFS ioctl command numbers used in syscalls that combine the BeeGFS type identifier ('t'),
@@ -86,6 +89,7 @@ var (
 	iocGetEntryInfo      = _ior(beegfsIOCTypeID, ioctlNumGetEntryInfo, uintptr(unsafe.Sizeof(getEntryInfoArg{})))
 	iocPingNode          = _ior(beegfsIOCTypeID, ioctlNumPingNode, uintptr(unsafe.Sizeof(pingNodeArg{})))
 	iocSetFileState      = _iow(beegfsIOCTypeID, ioctlNumSetFileState, uintptr(unsafe.Sizeof(setFileStateArg{})))
+	iocGetEntryInfoV2    = _iowr(beegfsIOCTypeID, ioctlNumGetEntryInfoV2, uintptr(unsafe.Sizeof(getEntryInfoV2Arg{})))
 )
 
 // Argument structures used for interacting with the BeeGFS file system via each
@@ -193,4 +197,44 @@ type setFileStateArg struct {
 	_         structs.HostLayout // Mark the struct as using the host memory layout.
 	Filename  [filenameMaxLen]byte
 	FileState uint8 // FileState is the combined AccessFlags and DataState.
+}
+
+type getEntryInfoV2Arg struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
+	// GetEntryInfoV2 expects to called against a directory file descriptor, and optionally a
+	// filename can be provided as input to return entry info for a file inside that directory
+	// instead of the directory itself. After the ioctl is called, on success filename will always
+	// be set to the name of the entry it is returning information about. When a filename is
+	// provided as input the output should usually be the same as the input, but it is set based on
+	// what is actually returned by the metadata server, which could theoretically differ from the
+	// input filename in some scenarios, for example a race involving a rename.
+	Filename [filenameMaxLen]byte
+	// Basic entry info (same as V1):
+	OwnerID       uint32
+	ParentEntryID [entryIDMaxLen + 1]byte
+	EntryID       [entryIDMaxLen + 1]byte
+	EntryType     int32
+	FeatureFlags  int32
+	// Stripe Pattern:
+	PatternType       uint32
+	ChunkSize         uint32
+	StoragePoolID     uint32
+	DefaultNumTargets uint32
+	NumTargets        uint16
+	StripeTargetIDs   [maxStripeTargets]uint16
+	// Path Info:
+	PathInfoFlags     uint32
+	OrigParentUID     uint32
+	OrigParentEntryID [entryIDMaxLen + 1]byte
+	// Remote Storage Targets:
+	RSTMajorVersion uint8
+	RSTMinorVersion uint8
+	RSTCooldown     uint16
+	RSTFilePolicies uint16
+	NumRSTIDs       uint32
+	RSTIDs          [maxRSTIDs]uint32
+	// Session and state info:
+	NumSessionsRead  uint32
+	NumSessionsWrite uint32
+	FileDataState    uint8
 }

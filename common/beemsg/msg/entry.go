@@ -248,6 +248,8 @@ func (m *GetEntryInfoRequest) Serialize(s *beeserde.Serializer) {
 	m.EntryInfo.Serialize(s)
 }
 
+// GetEntryInfoResponse messages are also assembled by the GetEntryInfoV2 ioctl. When
+// extending/changing this message ensure to update that function as well.
 type GetEntryInfoResponse struct {
 	Result  beegfs.OpsErr
 	Pattern StripePattern
