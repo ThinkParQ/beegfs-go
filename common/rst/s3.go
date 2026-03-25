@@ -772,7 +772,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		}
 
 		if !getLockedInfoCalled {
-			if entryInfoMsg, ownerNode, err = entry.GetEntryAndOwnerFromPath(ctx, nil, cfg.Path); err != nil {
+			if entryInfoMsg, _, ownerNode, err = entry.GetEntryAndOwnerFromPath(ctx, nil, cfg.Path); err != nil {
 				err = fmt.Errorf("failed to get entry info: %w", err)
 				return
 			}
