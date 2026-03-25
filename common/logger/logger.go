@@ -5,6 +5,8 @@
 package logger
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/syslog"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"reflect"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -19,10 +22,12 @@ import (
 
 // Logger is a wrapper around zap.Logger. It allows different aspects of the
 // Logger to be reconfigured after the application has started. Notably the log
-// level.
+// level. It optionally embeds a telemetry Provider so components can obtain
+// meters via log.Telemetry.Meter("name").
 type Logger struct {
 	*zap.Logger
-	level zap.AtomicLevel
+	level     zap.AtomicLevel
+	Telemetry *telemetry.Provider
 }
 
 // Verify all interfaces that depend on Logger are satisfied:
@@ -60,8 +65,10 @@ var SupportedLogTypes = []supportedLogTypes{
 	Syslog,
 }
 
-// New returns new logger based on the provided configuration.
-func New(newConfig Config) (*Logger, error) {
+// New returns new logger based on the provided configuration. When
+// telemetryCfg is non-nil, the Logger initializes and owns a telemetry
+// Provider; otherwise it uses a noop Provider (zero overhead).
+func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...telemetry.Option) (*Logger, error) {
 
 	logMgr := Logger{}
 
@@ -83,69 +90,105 @@ func New(newConfig Config) (*Logger, error) {
 			return nil, err
 		}
 		logMgr.Logger = l
-		return &logMgr, nil
-	}
+	} else {
+		// Otherwise build a production config based on the user settings:
+		zapConfig := zap.NewProductionEncoderConfig()
+		zapConfig.TimeKey = "timestamp"
+		zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		// Then setup the encoder that will turn our log entries into byte slices.
+		// For now just log in plaintext and don't expose an option to log using
+		// JSON. We can always add an option later with zapcore.NewJSONEncoder() if
+		// needed. IMPORTANT: If the encoding type ever changes then the way we
+		// handle writing to syslog in SyslogWriteSyncer.Write() MUST be updated
+		// accordingly.
+		zapEncoder := zapcore.NewConsoleEncoder(zapConfig)
 
-	// Otherwise build a production config based on the user settings:
-	zapConfig := zap.NewProductionEncoderConfig()
-	zapConfig.TimeKey = "timestamp"
-	zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	// Then setup the encoder that will turn our log entries into byte slices.
-	// For now just log in plaintext and don't expose an option to log using
-	// JSON. We can always add an option later with zapcore.NewJSONEncoder() if
-	// needed. IMPORTANT: If the encoding type ever changes then the way we
-	// handle writing to syslog in SyslogWriteSyncer.Write() MUST be updated
-	// accordingly.
-	zapEncoder := zapcore.NewConsoleEncoder(zapConfig)
-
-	// The use of an atomic level means we can update the log level later on.
-	// However we have to keep a reference to the atomic level if we want to
-	// adjust it later (which is why we add it to the logger struct).
-	zapLevel, err := getLevel(newConfig.Level)
-	if err != nil {
-		return nil, err
-	}
-	logMgr.level = zap.NewAtomicLevelAt(zapLevel)
-
-	// zapcore.WriteSyncers are what handle writing the byte slices from the
-	// encoder somewhere. This means we can easily add support for new types of
-	// logging (i.e., log destinations) by simply swapping out the WriteSyncer.
-	var logDestination zapcore.WriteSyncer
-	switch newConfig.Type {
-	case StdOut:
-		logDestination = zapcore.AddSync(os.Stdout)
-	case StdErr:
-		logDestination = zapcore.AddSync(os.Stderr)
-	case LogFile:
-		// Just being able to write to the provided log file is not sufficient
-		// if we want to rotate log files. Make sure the directory selected for
-		// logging exists and we can write to it.
-		if err := ensureLogsAreWritable(newConfig.File); err != nil {
+		// The use of an atomic level means we can update the log level later on.
+		// However we have to keep a reference to the atomic level if we want to
+		// adjust it later (which is why we add it to the logger struct).
+		zapLevel, err := getLevel(newConfig.Level)
+		if err != nil {
 			return nil, err
 		}
+		logMgr.level = zap.NewAtomicLevelAt(zapLevel)
 
-		logDestination = zapcore.AddSync(&lumberjack.Logger{
-			Filename:   newConfig.File,
-			MaxSize:    newConfig.MaxSize,
-			MaxBackups: newConfig.NumRotatedFiles,
-		})
-	case Syslog:
-		// By default we'll log at severity level info. Typically we'll be able
-		// to parse out the log level and log at the appropriate severity level.
-		// We'll use the process name as the prefix tag in case there are multiple
-		// instances of BeeWatch running on the same server.
-		l, err := NewSyslogWriteSyncer(syslog.LOG_INFO|syslog.LOG_LOCAL0, os.Args[0])
-		if err != nil {
-			return nil, fmt.Errorf("unable to initialize syslog destination: %w", err)
+		// zapcore.WriteSyncers are what handle writing the byte slices from the
+		// encoder somewhere. This means we can easily add support for new types of
+		// logging (i.e., log destinations) by simply swapping out the WriteSyncer.
+		var logDestination zapcore.WriteSyncer
+		switch newConfig.Type {
+		case StdOut:
+			logDestination = zapcore.AddSync(os.Stdout)
+		case StdErr:
+			logDestination = zapcore.AddSync(os.Stderr)
+		case LogFile:
+			// Just being able to write to the provided log file is not sufficient
+			// if we want to rotate log files. Make sure the directory selected for
+			// logging exists and we can write to it.
+			if err := ensureLogsAreWritable(newConfig.File); err != nil {
+				return nil, err
+			}
+
+			logDestination = zapcore.AddSync(&lumberjack.Logger{
+				Filename:   newConfig.File,
+				MaxSize:    newConfig.MaxSize,
+				MaxBackups: newConfig.NumRotatedFiles,
+			})
+		case Syslog:
+			// By default we'll log at severity level info. Typically we'll be able
+			// to parse out the log level and log at the appropriate severity level.
+			// We'll use the process name as the prefix tag in case there are multiple
+			// instances of BeeWatch running on the same server.
+			l, err := NewSyslogWriteSyncer(syslog.LOG_INFO|syslog.LOG_LOCAL0, os.Args[0])
+			if err != nil {
+				return nil, fmt.Errorf("unable to initialize syslog destination: %w", err)
+			}
+			logDestination = l
+		default:
+			return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
 		}
-		logDestination = l
-	default:
-		return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
+
+		logMgr.Logger = zap.New(zapcore.NewCore(zapEncoder, logDestination, logMgr.level))
 	}
 
-	logMgr.Logger = zap.New(zapcore.NewCore(zapEncoder, logDestination, logMgr.level))
-	return &logMgr, nil
+	// Initialize telemetry. When telemetryCfg is provided, use the supplied
+	// config; otherwise create a noop Provider (zero overhead).
+	effectiveCfg := telemetry.Config{Enabled: false}
+	if telemetryCfg != nil {
+		effectiveCfg = *telemetryCfg
+	}
+	tp, err := telemetry.New(effectiveCfg, telemetryOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to initialize telemetry: %w", err)
+	}
+	logMgr.Telemetry = tp
 
+	return &logMgr, nil
+}
+
+// With shadows the embedded zap.Logger.With to return a *Logger that preserves
+// the Telemetry reference and atomic level.
+func (lm *Logger) With(fields ...zap.Field) *Logger {
+	return &Logger{
+		Logger:    lm.Logger.With(fields...),
+		level:     lm.level,
+		Telemetry: lm.Telemetry,
+	}
+}
+
+// Shutdown flushes pending telemetry metrics and syncs the logger. It should be
+// called during graceful service shutdown (typically via defer).
+func (lm *Logger) Shutdown(ctx context.Context) error {
+	var errs []error
+	if lm.Telemetry != nil {
+		if err := lm.Telemetry.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := lm.Sync(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // Configurer interface is used to get the logging configuration. It allows the
@@ -158,11 +201,11 @@ type Configurer interface {
 	GetLoggingConfig() Config
 }
 
-// UpdateConfiguration satisfies the [gobee.configmgr.ConfigListener] interface
-// and is used to dynamically update supported aspects of the logger. Currently
-// it only supports dynamically updating the log level. So it can be used with
-// any application configuration it accepts an interface{} but it is expected
-// that interface satisfy the [Configurer] interface.
+// UpdateConfiguration satisfies the [configmgr.Listener] interface and is used
+// to dynamically update supported aspects of the logger and its embedded
+// telemetry Provider. For logging it currently only supports dynamically
+// updating the log level. Telemetry configuration changes are delegated to the
+// Provider when the config implements telemetry.Configurer.
 func (lm *Logger) UpdateConfiguration(newConfig any) error {
 
 	// Use type assertion to verify the newConfig interface variable is of the
@@ -194,6 +237,14 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 		log.Log(lm.level.Level(), "set log level", zap.Any("logLevel", lm.level.Level()))
 	} else {
 		log.Debug("no change to log level")
+	}
+
+	// Forward the config reload to the telemetry Provider if the application
+	// has telemetry configuration (i.e. its AppConfig implements telemetry.Configurer).
+	if _, ok := newConfig.(telemetry.Configurer); ok {
+		if err := lm.Telemetry.UpdateConfiguration(newConfig); err != nil {
+			log.Warn("unable to update telemetry configuration", zap.Error(err))
+		}
 	}
 
 	return nil

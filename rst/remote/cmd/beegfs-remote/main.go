@@ -148,26 +148,21 @@ Using environment variables:
 		}()
 	}
 
-	logger, err := logger.New(initialCfg.Log)
+	logger, err := logger.New(initialCfg.Log, &initialCfg.Telemetry,
+		telemetry.WithInstanceID(initialCfg.Server.Address),
+		telemetry.WithVersion(version),
+	)
 	if err != nil {
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
-	defer logger.Sync()
+	defer logger.Shutdown(context.Background())
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {
 		logger.Fatal("unable to initialize ctl logging", zap.Error(err))
 	}
 
-	tp, err := telemetry.New(initialCfg.Telemetry,
-		telemetry.WithInstanceID(initialCfg.Server.Address),
-		telemetry.WithVersion(version),
-	)
-	if err != nil {
-		logger.Fatal("unable to initialize telemetry", zap.Error(err))
-	}
-	defer tp.Shutdown(context.Background()) //nolint:errcheck
-	cfgMgr.AddListener(tp)
+	cfgMgr.AddListener(logger)
 
 	err = ctl.InitViperFromExternal(
 		ctl.GlobalConfig{
@@ -289,7 +284,7 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
+	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}
@@ -299,14 +294,14 @@ Using environment variables:
 		logger.Fatal("unable to start worker manager", zap.Error(err))
 	}
 
-	jobManager := job.NewManager(logger.Logger, initialCfg.Job, tp.Meter("job"), workerManager)
+	jobManager := job.NewManager(logger, initialCfg.Job, workerManager)
 	err = jobManager.Start()
 	if err != nil {
 		logger.Fatal("unable to start job manager", zap.Error(err))
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	jobServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
 	}

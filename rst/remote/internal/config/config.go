@@ -22,6 +22,7 @@ import (
 // Verify all interfaces that depend on AppConfig are satisfied.
 var _ configmgr.Configurable = &AppConfig{}
 var _ telemetry.Configurer = &AppConfig{}
+var _ logger.Configurer = &AppConfig{}
 
 type AppConfig struct {
 	MountPoint           string                      `mapstructure:"mount-point"`
@@ -47,6 +48,10 @@ type MgmtdConfig struct {
 	UseProxy               bool   `mapstructure:"use-http-proxy"`
 	AuthFile               string `mapstructure:"auth-file"`
 	AuthDisable            bool   `mapstructure:"auth-disable"`
+}
+
+func (c *AppConfig) GetLoggingConfig() logger.Config {
+	return c.Log
 }
 
 func (c *AppConfig) GetTelemetryConfig() telemetry.Config {

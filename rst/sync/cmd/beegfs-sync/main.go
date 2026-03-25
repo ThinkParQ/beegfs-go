@@ -129,26 +129,21 @@ Using environment variables:
 		}()
 	}
 
-	logger, err := logger.New(initialCfg.Log)
+	logger, err := logger.New(initialCfg.Log, &initialCfg.Telemetry,
+		telemetry.WithInstanceID(initialCfg.Server.Address),
+		telemetry.WithVersion(version),
+	)
 	if err != nil {
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
-	defer logger.Sync()
+	defer logger.Shutdown(context.Background())
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {
 		logger.Fatal("unable to initialize ctl logging", zap.Error(err))
 	}
 
-	tp, err := telemetry.New(initialCfg.Telemetry,
-		telemetry.WithInstanceID(initialCfg.Server.Address),
-		telemetry.WithVersion(version),
-	)
-	if err != nil {
-		logger.Fatal("unable to initialize telemetry", zap.Error(err))
-	}
-	defer tp.Shutdown(context.Background()) //nolint:errcheck
-	cfgMgr.AddListener(tp)
+	cfgMgr.AddListener(logger)
 
 	logger.Info("<=== BeeSync Initialized ===>")
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
@@ -198,13 +193,13 @@ Using environment variables:
 		logger.Fatal("failed to initialize Remote gRPC client", zap.Error(err))
 	}
 
-	workMgr, err := workmgr.NewAndStart(logger.Logger, initialCfg.WorkMgr, tp.Meter("workmgr"), beeRemoteClient, mountPoint)
+	workMgr, err := workmgr.NewAndStart(logger, initialCfg.WorkMgr, beeRemoteClient, mountPoint)
 	if err != nil {
 		logger.Fatal("failed to initialize work manager", zap.Error(err))
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, workMgr, buildInfo, capabilities)
+	jobServer, err := server.New(logger, initialCfg.Server, workMgr, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Sync gRPC server", zap.Error(err))
 	}

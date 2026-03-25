@@ -53,7 +53,7 @@ type Config struct {
 }
 
 type Manager struct {
-	log       *zap.Logger
+	log       *logger.Logger
 	wg        sync.WaitGroup
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -113,8 +113,9 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 }
 
 // NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
-func NewManager(log *zap.Logger, config Config, meter metric.Meter, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
+func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	meter := log.Telemetry.Meter("job")
 	ctx, cancel := context.WithCancel(context.Background())
 	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
 	jobUpdatesChan := make(chan *beeremote.UpdateJobsRequest, config.RequestQueueDepth)
@@ -208,7 +209,7 @@ func (m *Manager) Start() error {
 
 	// We initialize databases in Manage() so we can ensure the DBs are closed properly when shutting down.
 	pathDBOpts := badger.DefaultOptions(m.config.PathDBPath)
-	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log))
+	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log.Logger))
 	pathStore, closePathDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
 	if err != nil {
 		return fmt.Errorf("unable to setup paths DB: %w", err)

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -29,7 +30,7 @@ var _ flex.WorkerNodeServer = &WorkerNodeServer{}
 
 type WorkerNodeServer struct {
 	flex.UnimplementedWorkerNodeServer
-	log *zap.Logger
+	log *logger.Logger
 	wg  *sync.WaitGroup
 	Config
 	grpcServer *grpc.Server
@@ -39,7 +40,7 @@ type WorkerNodeServer struct {
 }
 
 // New() creates a new WorkerNodeServer that can be used with ListenAndServe().
-func New(log *zap.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
+func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[WorkerNodeServer]().PkgPath())))
 

@@ -15,6 +15,7 @@ import (
 // Verify all interfaces that depend on AppConfig are satisfied.
 var _ configmgr.Configurable = &AppConfig{}
 var _ telemetry.Configurer = &AppConfig{}
+var _ logger.Configurer = &AppConfig{}
 
 type AppConfig struct {
 	MountPoint string           `mapstructure:"mount-point"`
@@ -27,6 +28,10 @@ type AppConfig struct {
 		PerfProfilingPort int  `mapstructure:"perf-profiling-port"`
 		DumpConfig        bool `mapstructure:"dump-config"`
 	}
+}
+
+func (c *AppConfig) GetLoggingConfig() logger.Config {
+	return c.Log
 }
 
 func (c *AppConfig) GetTelemetryConfig() telemetry.Config {
