@@ -131,23 +131,18 @@ func (t OutputType) String() string {
 	}
 }
 
-// InitLoggerFromExternal allows CTL to use an externally configured/managed zap.Logger. By default
-// CTL uses an opinionated logger that is initialized on first call that logs to stderr only. This
-// allows CTL logging to respect the logging configuration of the application that is using it
-// including dynamic reconfiguration (like log level updates). This does not add any context to the
-// logger and relies on the caller to do that if desired. For example:
+// InitLoggerFromExternal allows CTL to use an externally configured/managed *logger.Logger. By
+// default CTL uses an opinionated logger that is initialized on first call that logs to stderr
+// only. This allows CTL logging to respect the logging configuration of the application that is
+// using it including dynamic reconfiguration (like log level updates). This does not add any
+// context to the logger and relies on the caller to do that if desired. For example:
 //
 //	ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
-func InitLoggerFromExternal(logUsing *zap.Logger) error {
+func InitLoggerFromExternal(log *logger.Logger) error {
 	if globalLogger != nil {
 		return fmt.Errorf("ctl logging was already initialized (this is probably a bug)")
 	}
-	// Same approach used for the BadgerLoggerBridge. A new type could have been created (like
-	// CtlLoggerBridge) but when this function was added the logger was already widely used in CTL
-	// and would have caused a lot of unnecessary refactoring. Just don't do anything with level.
-	globalLogger = &logger.Logger{
-		Logger: logUsing,
-	}
+	globalLogger = log
 	return nil
 }
 
@@ -624,7 +619,7 @@ func GetLogger() (*logger.Logger, error) {
 			Level:     int8(logLevel),
 			Type:      logger.StdErr,
 			Developer: viper.GetBool(LogDeveloperKey),
-		})
+		}, nil)
 		if err != nil {
 			return nil, err
 		}

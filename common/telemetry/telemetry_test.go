@@ -229,7 +229,7 @@ func TestWithOptions(t *testing.T) {
 		telemetry.WithVersion("v2.0.0"),
 	)
 	require.NoError(t, err)
-	defer p.Shutdown(context.Background()) //nolint:errcheck
+	defer p.Shutdown(context.Background())
 
 	// Record a metric so the response is non-empty.
 	counter, err := p.Meter("test").Int64Counter("options_test_counter")
@@ -237,7 +237,7 @@ func TestWithOptions(t *testing.T) {
 	counter.Add(context.Background(), 1)
 
 	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := http.Get(url)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -275,7 +275,7 @@ func TestPrometheusEndpoint(t *testing.T) {
 	}
 	p, err := telemetry.New(cfg)
 	require.NoError(t, err)
-	defer p.Shutdown(context.Background()) //nolint:errcheck
+	defer p.Shutdown(context.Background())
 
 	// Record a metric so the response is non-empty.
 	meter := p.Meter("test")
@@ -285,7 +285,7 @@ func TestPrometheusEndpoint(t *testing.T) {
 
 	// The port is pre-bound by New(), so the server is ready immediately.
 	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := http.Get(url)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -352,7 +352,7 @@ func TestUpdateConfiguration(t *testing.T) {
 	t.Run("non-Configurer returns error", func(t *testing.T) {
 		p, err := telemetry.New(baseCfg)
 		require.NoError(t, err)
-		defer p.Shutdown(context.Background()) //nolint:errcheck
+		defer p.Shutdown(context.Background())
 		err = p.UpdateConfiguration("not a configurer")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unable to get telemetry configuration")
@@ -361,7 +361,7 @@ func TestUpdateConfiguration(t *testing.T) {
 	t.Run("unchanged config on disabled provider is silent", func(t *testing.T) {
 		p, err := telemetry.New(baseCfg)
 		require.NoError(t, err)
-		defer p.Shutdown(context.Background()) //nolint:errcheck
+		defer p.Shutdown(context.Background())
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: baseCfg})
 		assert.NoError(t, err)
 	})
@@ -369,7 +369,7 @@ func TestUpdateConfiguration(t *testing.T) {
 	t.Run("toggling enabled on disabled provider accepts config", func(t *testing.T) {
 		p, err := telemetry.New(baseCfg)
 		require.NoError(t, err)
-		defer p.Shutdown(context.Background()) //nolint:errcheck
+		defer p.Shutdown(context.Background())
 		// UpdateConfiguration stores the new config but does NOT restart the
 		// provider, so no server is actually started here.
 		newCfg := telemetry.Config{
@@ -398,7 +398,7 @@ func TestUpdateConfiguration(t *testing.T) {
 		}
 		p, err := telemetry.New(cfg)
 		require.NoError(t, err)
-		defer p.Shutdown(context.Background()) //nolint:errcheck
+		defer p.Shutdown(context.Background())
 
 		changedCfg := cfg
 		changedCfg.ServiceName = "changed-name"
@@ -425,7 +425,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	defer p.Shutdown(context.Background()) //nolint:errcheck
+	defer p.Shutdown(context.Background())
 
 	hist, err := p.Meter("test").Float64Histogram("test.duration")
 	require.NoError(t, err)
@@ -433,7 +433,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 	hist.Record(context.Background(), 0.75)
 
 	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := http.Get(url)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -467,7 +467,7 @@ func TestOTLPReaderConstruction(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			defer p.Shutdown(context.Background()) //nolint:errcheck
+			defer p.Shutdown(context.Background())
 		})
 	}
 }

@@ -67,7 +67,7 @@ type Config struct {
 type Manager struct {
 	ready   bool
 	readyMu sync.RWMutex
-	log     *zap.Logger
+	log     *logger.Logger
 	// When shutting down workers must be shutdown first so the manager can handle their results and
 	// store them in the database.
 	workerCtx    context.Context
@@ -139,9 +139,10 @@ type Manager struct {
 	metrics   managerMetrics
 }
 
-func NewAndStart(log *zap.Logger, config Config, meter metric.Meter, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
+func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	meter := log.Telemetry.Meter("workmgr")
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
@@ -188,7 +189,7 @@ func NewAndStart(log *zap.Logger, config Config, meter metric.Meter, beeRemoteCl
 
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
-	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log))
+	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
 	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
@@ -198,7 +199,7 @@ func NewAndStart(log *zap.Logger, config Config, meter metric.Meter, beeRemoteCl
 
 	// Setup job store:
 	jobStoreOpts := badger.DefaultOptions(m.config.JobStorePath)
-	jobStoreOpts = jobStoreOpts.WithLogger(logger.NewBadgerLoggerBridge("jobStore", m.log))
+	jobStoreOpts = jobStoreOpts.WithLogger(logger.NewBadgerLoggerBridge("jobStore", m.log.Logger))
 	jobStore, closeJobStore, err := kvstore.NewMapStore[map[string]string](jobStoreOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup job store: %w", err)
@@ -207,7 +208,7 @@ func NewAndStart(log *zap.Logger, config Config, meter metric.Meter, beeRemoteCl
 	m.jobStore = jobStore
 
 	// Setup and initialize scheduler:
-	workScheduler, closeWorkScheduler := scheduler.NewScheduler(m.mgrCtx, log, m.activeWorkQueue, scheduler.WithNodeName("beesync"), scheduler.WithMeter(meter))
+	workScheduler, closeWorkScheduler := scheduler.NewScheduler(m.mgrCtx, log.Logger, m.activeWorkQueue, scheduler.WithNodeName("beesync"), scheduler.WithMeter(meter))
 	deferredFuncs = append(deferredFuncs, closeWorkScheduler)
 	m.scheduler = workScheduler
 
@@ -289,10 +290,10 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	// work map and new request(s) can be pulled to the active work queue and map.
 	completedWork := make(chan workIdentifier, m.config.ActiveWorkQueueSize+1)
 	for i := 1; i <= m.config.NumWorkers; i++ {
-		log := m.log.With(zap.String("goroutine", strconv.Itoa(i)))
+		workerLog := m.log.With(zap.String("goroutine", strconv.Itoa(i)))
 
 		w := &worker{
-			log:                  log,
+			log:                  workerLog.Logger,
 			workQueue:            m.activeWorkQueue,
 			completedWork:        completedWork,
 			remoteStorageTargets: m.remoteStorageTargets,

@@ -188,7 +188,7 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 
 	if cfg.Prometheus.Enabled {
 		if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-			sdkProvider.Shutdown(context.Background()) //nolint:errcheck
+			sdkProvider.Shutdown(context.Background())
 			return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
 		}
 	}

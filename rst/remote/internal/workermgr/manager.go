@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -23,7 +24,7 @@ type Config struct {
 
 // The WorkerManager handles mapping WorkRequests to the appropriate node type.
 type Manager struct {
-	log *zap.Logger
+	log *logger.Logger
 	// The wait group is incremented for each node that is being managed.
 	// This is how we ensure all nodes are disconnected before shutting down.
 	nodeWG *sync.WaitGroup
@@ -72,7 +73,7 @@ type JobUpdate struct {
 // called to shutdown worker nodes.
 func NewManager(
 	ctx context.Context,
-	log *zap.Logger,
+	log *logger.Logger,
 	managerConfig Config,
 	workerConfigs []worker.Config,
 	rstConfigs []*flex.RemoteStorageTarget,
@@ -104,7 +105,7 @@ func NewManager(
 	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint)
 
 	nodePools := make(map[worker.Type]*Pool, 0)
-	nodes, err := worker.NewWorkerNodesFromConfig(log, workerConfigs)
+	nodes, err := worker.NewWorkerNodesFromConfig(log.Logger, workerConfigs)
 	if err != nil {
 		log.Warn("encountered one or more errors configuring workers", zap.Error(err))
 	}

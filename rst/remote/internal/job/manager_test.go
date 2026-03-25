@@ -2,7 +2,6 @@ package job
 
 import (
 	"context"
-	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -13,18 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
-	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
-	"go.opentelemetry.io/otel/metric/noop"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -54,7 +48,8 @@ func TestManage(t *testing.T) {
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
 
-	logger := zaptest.NewLogger(t)
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
 	workerMgrConfig := workermgr.Config{}
 	workerConfigs := []worker.Config{
 		{
@@ -103,7 +98,7 @@ func TestManage(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -111,7 +106,7 @@ func TestManage(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be scheduled:
@@ -214,7 +209,8 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
 
-	logger := zaptest.NewLogger(t)
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
 	workerMgrConfig := workermgr.Config{}
 	workerConfigs := []worker.Config{
 		{
@@ -263,7 +259,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -271,7 +267,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// Submit two jobs for testing:
@@ -515,7 +511,8 @@ func TestManageErrorHandling(t *testing.T) {
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
 
-	logger := zaptest.NewLogger(t)
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
 	workerMgrConfig := workermgr.Config{}
 
 	// This allows us to modify the expected status to what we expect in
@@ -566,7 +563,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -574,7 +571,7 @@ func TestManageErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be cancelled if any work
@@ -673,7 +670,8 @@ func TestUpdateJobResults(t *testing.T) {
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
 
-	logger := zaptest.NewLogger(t)
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
 	workerMgrConfig := workermgr.Config{}
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	workerConfigs := []worker.Config{
@@ -711,7 +709,7 @@ func TestUpdateJobResults(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -719,7 +717,7 @@ func TestUpdateJobResults(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -860,7 +858,8 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
 
-	logger := zaptest.NewLogger(t)
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
 	workerMgrConfig := workermgr.Config{}
 	workerConfigs := []worker.Config{
 		{
@@ -896,7 +895,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -904,7 +903,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(logger, jobMgrConfig, noop.NewMeterProvider().Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
 	require.NoError(t, jobManager.Start())
 
 	baseTestJobRequest := &beeremote.JobRequest{
@@ -971,473 +970,3 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.Equal(t, result.Job.Status.State, beeremote.Job_FAILED)
 }
 
-// TestJobRequestAndWorkRequestMetrics verifies that submitting a job increments
-// the beeremote.job.requests counter and records beeremote.work.requests with status="created".
-func TestJobRequestAndWorkRequestMetrics(t *testing.T) {
-	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
-	require.NoError(t, err, "error setting up for test")
-	defer cleanupPathDBPath(t)
-
-	logger := zaptest.NewLogger(t)
-	mountPoint := filesystem.NewMockFS()
-	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
-
-	workerConfigs := []worker.Config{
-		{
-			ID:                  "0",
-			Name:                "test-node-0",
-			Type:                worker.Mock,
-			MaxReconnectBackOff: 5,
-			MockConfig: worker.MockConfig{
-				Expectations: []worker.MockExpectation{
-					{MethodName: "connect", ReturnArgs: []any{false, nil}},
-					{
-						MethodName: "SubmitWork",
-						Args:       []any{mock.Anything},
-						ReturnArgs: []any{
-							flex.Work_Status_builder{
-								State:   flex.Work_SCHEDULED,
-								Message: "scheduled",
-							}.Build(),
-							nil,
-						},
-					},
-					{MethodName: "disconnect", ReturnArgs: []any{nil}},
-				},
-			},
-		},
-	}
-
-	remoteStorageTargets := []*flex.RemoteStorageTarget{
-		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
-	}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
-	require.NoError(t, err)
-	require.NoError(t, workerManager.Start())
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background()) //nolint:errcheck
-
-	jobManager := NewManager(logger, Config{PathDBPath: tmpPathDBPath}, mp.Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
-	require.NoError(t, jobManager.Start())
-
-	_, err = jobManager.SubmitJobRequest(beeremote.JobRequest_builder{
-		Path:                "/test/myfile",
-		Name:                "metrics-test",
-		Priority:            3,
-		Mock:                flex.MockJob_builder{NumTestSegments: 3}.Build(),
-		RemoteStorageTarget: 1,
-	}.Build())
-	require.NoError(t, err)
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-
-	var foundJobRequests, foundWorkRequests bool
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			switch m.Name {
-			case "beeremote.job.requests":
-				foundJobRequests = true
-				data, ok := m.Data.(metricdata.Sum[int64])
-				require.True(t, ok, "beeremote.job.requests data must be a Sum[int64]")
-				require.Len(t, data.DataPoints, 1, "beeremote.job.requests must have exactly 1 data point")
-				assert.Equal(t, int64(1), data.DataPoints[0].Value)
-			case "beeremote.work.requests":
-				foundWorkRequests = true
-				data, ok := m.Data.(metricdata.Sum[int64])
-				require.True(t, ok, "beeremote.work.requests data must be a Sum[int64]")
-				require.Len(t, data.DataPoints, 1, "beeremote.work.requests must have exactly 1 data point")
-				val, hasStatus := data.DataPoints[0].Attributes.Value(telemetry.AttrStatus)
-				assert.True(t, hasStatus)
-				assert.Equal(t, "created", val.AsString())
-				// NumTestSegments: 3 above produces exactly 3 work requests.
-				assert.Equal(t, int64(3), data.DataPoints[0].Value)
-			}
-		}
-	}
-	assert.True(t, foundJobRequests, "beeremote.job.requests counter not found")
-	assert.True(t, foundWorkRequests, "beeremote.work.requests counter not found")
-}
-
-// TestJobTerminalMetricCompleted verifies that when all work requests complete
-// successfully (with a working lock release), the terminal metric records state="completed".
-func TestJobTerminalMetricCompleted(t *testing.T) {
-	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
-	require.NoError(t, err, "error setting up for test")
-	defer cleanupPathDBPath(t)
-
-	logger := zaptest.NewLogger(t)
-	mountPoint := filesystem.NewMockFS()
-	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
-
-	workerConfigs := []worker.Config{
-		{
-			ID:                  "0",
-			Name:                "test-node-0",
-			Type:                worker.Mock,
-			MaxReconnectBackOff: 5,
-			MockConfig: worker.MockConfig{
-				Expectations: []worker.MockExpectation{
-					{MethodName: "connect", ReturnArgs: []any{false, nil}},
-					{
-						MethodName: "SubmitWork",
-						Args:       []any{mock.Anything},
-						ReturnArgs: []any{
-							flex.Work_Status_builder{
-								State:   flex.Work_SCHEDULED,
-								Message: "scheduled",
-							}.Build(),
-							nil,
-						},
-					},
-					{MethodName: "disconnect", ReturnArgs: []any{nil}},
-				},
-			},
-		},
-	}
-
-	remoteStorageTargets := []*flex.RemoteStorageTarget{
-		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
-	}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
-	require.NoError(t, err)
-	require.NoError(t, workerManager.Start())
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background()) //nolint:errcheck
-
-	jobManager := NewManager(logger, Config{PathDBPath: tmpPathDBPath}, mp.Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
-	require.NoError(t, jobManager.Start())
-
-	response, err := jobManager.SubmitJobRequest(beeremote.JobRequest_builder{
-		Path:                "/test/myfile",
-		Name:                "completed-test",
-		Priority:            3,
-		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
-		RemoteStorageTarget: 1,
-	}.Build())
-	require.NoError(t, err)
-
-	// Complete both work requests directly (bypassing the worker transport).
-	for i := range 2 {
-		err = jobManager.UpdateWork(flex.Work_builder{
-			Path:      response.GetJob().GetRequest().GetPath(),
-			JobId:     response.GetJob().GetId(),
-			RequestId: strconv.Itoa(i),
-			Status: flex.Work_Status_builder{
-				State:   flex.Work_COMPLETED,
-				Message: "complete",
-			}.Build(),
-			Parts: []*flex.Work_Part{},
-		}.Build())
-		require.NoError(t, err)
-	}
-
-	// Confirm the job reached COMPLETED state before reading metrics, so a failure here
-	// gives a clear diagnostic rather than a confusing metric assertion failure.
-	getJobsRequest := beeremote.GetJobsRequest_builder{
-		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
-			JobId: response.GetJob().GetId(),
-			Path:  response.GetJob().GetRequest().GetPath(),
-		}.Build(),
-	}.Build()
-	jobResponses := make(chan *beeremote.GetJobsResponse, 1)
-	require.NoError(t, jobManager.GetJobs(context.Background(), getJobsRequest, jobResponses))
-	require.Equal(t, beeremote.Job_COMPLETED, (<-jobResponses).GetResults()[0].GetJob().GetStatus().GetState(),
-		"job must reach COMPLETED state before collecting terminal metrics")
-
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	counts := collectTerminalStateCounts(t, rm)
-	assert.Equal(t, int64(1), counts["completed"], "expected 1 completed terminal metric")
-	assert.Equal(t, int64(0), counts["failed"], "expected 0 failed terminal metrics")
-
-	details := collectTerminalMetricDetails(t, rm)
-	require.Len(t, details, 1, "expected exactly 1 terminal metric data point")
-	assert.Equal(t, int64(1), details[0].rstID, "rst.id should match the job's RST")
-
-	assert.Equal(t, int64(1), durationSampleCount(t, rm, "completed", 1),
-		"expected exactly 1 beeremote.job.duration sample with state=completed and rst.id=1")
-}
-
-// terminalMetricInfo holds the extracted data from a single beeremote.job.terminal data point.
-type terminalMetricInfo struct {
-	state string
-	rstID int64
-	count int64
-}
-
-// collectTerminalStateCounts returns a map of state-string → total count for the
-// beeremote.job.terminal counter collected in rm.
-func collectTerminalStateCounts(t *testing.T, rm metricdata.ResourceMetrics) map[string]int64 {
-	t.Helper()
-	counts := map[string]int64{}
-	for _, info := range collectTerminalMetricDetails(t, rm) {
-		counts[info.state] += info.count
-	}
-	return counts
-}
-
-// collectTerminalMetricDetails returns per-data-point details (state, rst.id, count)
-// for the beeremote.job.terminal counter.
-func collectTerminalMetricDetails(t *testing.T, rm metricdata.ResourceMetrics) []terminalMetricInfo {
-	t.Helper()
-	var infos []terminalMetricInfo
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.job.terminal" {
-				continue
-			}
-			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.job.terminal is not a Sum counter")
-			for _, dp := range data.DataPoints {
-				var info terminalMetricInfo
-				info.count = dp.Value
-				if v, ok := dp.Attributes.Value(telemetry.AttrState); ok {
-					info.state = v.AsString()
-				}
-				if v, ok := dp.Attributes.Value(telemetry.AttrRSTID); ok {
-					info.rstID = v.AsInt64()
-				}
-				infos = append(infos, info)
-			}
-		}
-	}
-	return infos
-}
-
-// durationSampleCount returns the histogram sample count for the beeremote.job.duration
-// data point matching the given state and rst.id, or -1 if no matching data point exists.
-func durationSampleCount(t *testing.T, rm metricdata.ResourceMetrics, wantState string, wantRSTID int64) int64 {
-	t.Helper()
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.job.duration" {
-				continue
-			}
-			data, ok := m.Data.(metricdata.Histogram[float64])
-			require.True(t, ok, "beeremote.job.duration is not a Histogram")
-			for _, dp := range data.DataPoints {
-				stateVal, hasState := dp.Attributes.Value(telemetry.AttrState)
-				rstVal, hasRST := dp.Attributes.Value(telemetry.AttrRSTID)
-				if hasState && stateVal.AsString() == wantState &&
-					hasRST && rstVal.AsInt64() == wantRSTID {
-					return int64(dp.Count)
-				}
-			}
-		}
-	}
-	t.Errorf("beeremote.job.duration: no data point found with state=%q rst.id=%d", wantState, wantRSTID)
-	return 0
-}
-
-// TestJobTerminalMetricLockFailureRecordsFailed verifies that when the deferred
-// lock-release function fails after a COMPLETED transition, the recorded metric
-// state is "failed" (not "completed") because the deferred function reads the
-// final job state after the cleanup attempt.
-func TestJobTerminalMetricLockFailureRecordsFailed(t *testing.T) {
-	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
-	require.NoError(t, err, "error setting up for test")
-	defer cleanupPathDBPath(t)
-
-	logger := zaptest.NewLogger(t)
-	mountPoint := filesystem.NewMockFS()
-	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
-
-	workerConfigs := []worker.Config{
-		{
-			ID:                  "0",
-			Name:                "test-node-0",
-			Type:                worker.Mock,
-			MaxReconnectBackOff: 5,
-			MockConfig: worker.MockConfig{
-				Expectations: []worker.MockExpectation{
-					{MethodName: "connect", ReturnArgs: []any{false, nil}},
-					{
-						MethodName: "SubmitWork",
-						Args:       []any{mock.Anything},
-						ReturnArgs: []any{
-							flex.Work_Status_builder{
-								State:   flex.Work_SCHEDULED,
-								Message: "scheduled",
-							}.Build(),
-							nil,
-						},
-					},
-					{MethodName: "disconnect", ReturnArgs: []any{nil}},
-				},
-			},
-		},
-	}
-
-	remoteStorageTargets := []*flex.RemoteStorageTarget{
-		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
-	}
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
-	require.NoError(t, err)
-	require.NoError(t, workerManager.Start())
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background()) //nolint:errcheck
-
-	jobManager := NewManager(logger, Config{PathDBPath: tmpPathDBPath}, mp.Meter("test"), workerManager,
-		func(cfg *managerOptConfig) {
-			cfg.releaseUnusedFileLockFunc = func(path string, jobs map[string]*Job) error {
-				return errors.New("simulated lock release failure")
-			}
-		},
-	)
-	require.NoError(t, jobManager.Start())
-
-	response, err := jobManager.SubmitJobRequest(beeremote.JobRequest_builder{
-		Path:                "/test/myfile",
-		Name:                "lock-failure-test",
-		Priority:            3,
-		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
-		RemoteStorageTarget: 1,
-	}.Build())
-	require.NoError(t, err)
-
-	// Complete both work requests directly (bypassing the worker transport).
-	for i := range 2 {
-		err = jobManager.UpdateWork(flex.Work_builder{
-			Path:      response.GetJob().GetRequest().GetPath(),
-			JobId:     response.GetJob().GetId(),
-			RequestId: strconv.Itoa(i),
-			Status: flex.Work_Status_builder{
-				State:   flex.Work_COMPLETED,
-				Message: "complete",
-			}.Build(),
-			Parts: []*flex.Work_Part{},
-		}.Build())
-		require.NoError(t, err)
-	}
-
-	// The lock-release func runs synchronously inside UpdateWork, so the job is already FAILED
-	// before UpdateWork returns. Confirm this explicitly so a future async refactor produces a
-	// clear diagnostic rather than a confusing metric assertion failure.
-	lockFailGetJobsRequest := beeremote.GetJobsRequest_builder{
-		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
-			JobId: response.GetJob().GetId(),
-			Path:  response.GetJob().GetRequest().GetPath(),
-		}.Build(),
-	}.Build()
-	lockFailJobResponses := make(chan *beeremote.GetJobsResponse, 1)
-	require.NoError(t, jobManager.GetJobs(context.Background(), lockFailGetJobsRequest, lockFailJobResponses))
-	require.Equal(t, beeremote.Job_FAILED, (<-lockFailJobResponses).GetResults()[0].GetJob().GetStatus().GetState(),
-		"job must be FAILED before collecting terminal metrics")
-
-	// The deferred function ran the failing lock func and overwrote the state to FAILED.
-	// We expect a single "failed" terminal metric — not "completed".
-	var rm metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	counts := collectTerminalStateCounts(t, rm)
-	assert.Equal(t, int64(1), counts["failed"], "expected 1 failed metric when lock release fails")
-	assert.Equal(t, int64(0), counts["completed"], "expected 0 completed metric when lock release fails")
-
-	// Verify rst.id attribute is set correctly (RST 1 was used in the job request).
-	details := collectTerminalMetricDetails(t, rm)
-	require.Len(t, details, 1, "expected exactly 1 terminal metric data point")
-	assert.Equal(t, int64(1), details[0].rstID, "rst.id attribute should match the job's RST")
-
-	// Verify beeremote.job.duration histogram was recorded with matching attributes.
-	assert.Equal(t, int64(1), durationSampleCount(t, rm, "failed", 1),
-		"expected exactly 1 beeremote.job.duration sample with state=failed and rst.id=1")
-}
-
-// TestJobTerminalMetricNoDuplicateOnTerminalStateRetry verifies that the
-// prevStateWasTerminal guard in updateJobState prevents a second terminal metric
-// from being emitted when the same job is processed again after it has already
-// reached a terminal state.
-func TestJobTerminalMetricNoDuplicateOnTerminalStateRetry(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	mountPoint := filesystem.NewMockFS()
-
-	// Minimal workerManager: one mock worker (required by NewManager) but no RSTs.
-	// UpdateJob with empty WorkResults succeeds trivially; the RST lookup then fails,
-	// exercising the recording path without reaching any worker transport.
-	workerManager, err := workermgr.NewManager(context.Background(), logger, workermgr.Config{},
-		[]worker.Config{
-			{
-				ID:                  "0",
-				Name:                "test-node-0",
-				Type:                worker.Mock,
-				MaxReconnectBackOff: 5,
-				MockConfig: worker.MockConfig{
-					Expectations: []worker.MockExpectation{
-						{MethodName: "connect", ReturnArgs: []any{false, nil}},
-						{MethodName: "disconnect", ReturnArgs: []any{nil}},
-					},
-				},
-			},
-		},
-		[]*flex.RemoteStorageTarget{}, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
-	require.NoError(t, err)
-	require.NoError(t, workerManager.Start())
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background()) //nolint:errcheck
-
-	// Config.PathDBPath is empty because Start() is never called on this manager;
-	// updateJobState does not access the path store.
-	jobManager := NewManager(logger, Config{}, mp.Meter("test"), workerManager, withIgnoreReleaseUnusedFileLockFunc())
-
-	// A job in UNKNOWN state is not terminal (prevStateWasTerminal=false). With empty
-	// WorkResults, UpdateJob succeeds trivially; then RST 99 is not found, which sets
-	// the state to FAILED and fires the terminal metric.
-	job := &Job{
-		Job: beeremote.Job_builder{
-			Id: "test-job-guard",
-			Request: beeremote.JobRequest_builder{
-				RemoteStorageTarget: 99, // intentionally absent from workerManager
-			}.Build(),
-			Status: beeremote.Job_Status_builder{
-				State: beeremote.Job_UNKNOWN,
-			}.Build(),
-			Created: timestamppb.Now(),
-		}.Build(),
-		WorkResults: map[string]worker.WorkResult{},
-	}
-
-	// First call: non-terminal prior state → records one "failed" metric.
-	// RST 99 is absent, so the call fails (returns false) and sets job state to FAILED.
-	success1, safeToDelete1, _ := jobManager.updateJobState(job, beeremote.UpdateJobsRequest_CANCELLED, false)
-	assert.False(t, success1, "first call should fail because RST 99 does not exist")
-	assert.False(t, safeToDelete1, "first call should not be safe-to-delete when RST lookup fails")
-
-	// The guard for the second call relies on job.Status.State being mutated to FAILED in-place.
-	// If updateJobState ever stops mutating job state in-place, the second call fires the metric again.
-	require.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState(),
-		"job must be in FAILED state after first call for prevStateWasTerminal guard to activate")
-
-	var rm1 metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm1))
-	counts1 := collectTerminalStateCounts(t, rm1)
-	assert.Equal(t, int64(1), counts1["failed"], "expected 1 terminal metric on first call")
-
-	// Verify rst.id=99 is attached and duration histogram is recorded.
-	details1 := collectTerminalMetricDetails(t, rm1)
-	require.Len(t, details1, 1, "expected exactly 1 terminal metric data point after first call")
-	assert.Equal(t, int64(99), details1[0].rstID, "rst.id attribute should match the job's RST")
-	assert.Equal(t, int64(1), durationSampleCount(t, rm1, "failed", 99),
-		"expected exactly 1 beeremote.job.duration sample with state=failed and rst.id=99")
-
-	// Second call: job is now FAILED (prevStateWasTerminal=true) → guard skips recording.
-	success2, safeToDelete2, _ := jobManager.updateJobState(job, beeremote.UpdateJobsRequest_CANCELLED, false)
-	assert.False(t, success2, "second call should still fail because RST 99 does not exist")
-	assert.False(t, safeToDelete2, "second call should not be safe-to-delete when RST lookup fails")
-
-	var rm2 metricdata.ResourceMetrics
-	require.NoError(t, reader.Collect(context.Background(), &rm2))
-	counts2 := collectTerminalStateCounts(t, rm2)
-	assert.Equal(t, int64(1), counts2["failed"], "expected no duplicate metric on second call from terminal state")
-
-	// Duration histogram should also still have exactly 1 sample (no duplicate).
-	assert.Equal(t, int64(1), durationSampleCount(t, rm2, "failed", 99),
-		"expected no duplicate beeremote.job.duration sample after second call")
-}
