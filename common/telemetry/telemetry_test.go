@@ -69,14 +69,28 @@ func TestValidateConfig(t *testing.T) {
 		},
 		{
 			name:    "enabled with no exporters",
-			cfg:     telemetry.Config{Enabled: true},
+			cfg:     telemetry.Config{Enabled: true, ServiceName: "test"},
 			wantErr: true,
 			errMsg:  "no exporter",
 		},
 		{
-			name: "invalid OTLP protocol",
+			name: "metrics enabled without service name",
 			cfg: telemetry.Config{
 				Enabled: true,
+				Prometheus: telemetry.PrometheusConfig{
+					Enabled: true,
+					Port:    9090,
+					Path:    "/metrics",
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.service-name must be set when telemetry or logs are enabled",
+		},
+		{
+			name: "invalid OTLP protocol",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "tcp",
@@ -90,7 +104,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "missing OTLP endpoint",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -103,7 +118,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP interval too short",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -117,7 +133,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "Prometheus port 0",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    0,
@@ -130,7 +147,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "Prometheus port too high",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    70000,
@@ -143,7 +161,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "empty Prometheus path",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -156,7 +175,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid OTLP-only config",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -169,7 +189,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid Prometheus-only config",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -181,7 +202,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid both enabled",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "http",
@@ -199,7 +221,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs only (metrics disabled)",
 			cfg: telemetry.Config{
-				Enabled: false,
+				Enabled:     false,
+				ServiceName: "test-service",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -211,7 +234,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs and metrics both enabled",
 			cfg: telemetry.Config{
-				Enabled: true,
+				Enabled:     true,
+				ServiceName: "test-service",
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -224,6 +248,18 @@ func TestValidateConfig(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "logs enabled without service name",
+			cfg: telemetry.Config{
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.service-name must be set",
 		},
 	}
 
@@ -540,6 +576,7 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "invalid protocol",
 			cfg: telemetry.Config{
+				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "udp",
@@ -551,6 +588,7 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "missing endpoint",
 			cfg: telemetry.Config{
+				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "grpc",

@@ -20,6 +20,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	protocolGRPC = "grpc"
+	protocolHTTP = "http"
+)
+
 // Config represents the telemetry configuration. It is embedded in each
 // service's AppConfig and follows the same mapstructure pattern as logger.Config.
 type Config struct {
@@ -34,7 +39,7 @@ type Config struct {
 // OTLPConfig holds configuration for the OTLP metric exporter.
 type OTLPConfig struct {
 	Enabled  bool              `mapstructure:"enabled"`
-	Protocol string            `mapstructure:"protocol"` // "grpc" or "http"
+	Protocol string            `mapstructure:"protocol"` // protocolGRPC or protocolHTTP
 	Endpoint string            `mapstructure:"endpoint"`
 	Interval time.Duration     `mapstructure:"interval"`
 	Insecure bool              `mapstructure:"insecure"`
@@ -61,7 +66,7 @@ type HistogramConfig struct {
 // require enabling OTLP metrics, and they may use different endpoints.
 type LogsConfig struct {
 	Enabled  bool              `mapstructure:"enabled"`
-	Protocol string            `mapstructure:"protocol"` // "grpc" or "http"
+	Protocol string            `mapstructure:"protocol"`
 	Endpoint string            `mapstructure:"endpoint"`
 	Insecure bool              `mapstructure:"insecure"`
 	Headers  map[string]string `mapstructure:"headers"`
@@ -70,6 +75,9 @@ type LogsConfig struct {
 // ValidateConfig checks telemetry configuration for consistency.
 // Called by the containing AppConfig.ValidateConfig().
 func (c *Config) ValidateConfig() error {
+	if (c.Enabled || c.Logs.Enabled) && c.ServiceName == "" {
+		return fmt.Errorf("telemetry.service-name must be set when telemetry or logs are enabled")
+	}
 	// Validate metrics exporters only if telemetry (metrics) is enabled.
 	if c.Enabled {
 		if !c.OTLP.Enabled && !c.Prometheus.Enabled {
@@ -77,7 +85,7 @@ func (c *Config) ValidateConfig() error {
 				"enable at least one of [telemetry.otlp] or [telemetry.prometheus]")
 		}
 		if c.OTLP.Enabled {
-			if c.OTLP.Protocol != "grpc" && c.OTLP.Protocol != "http" {
+			if c.OTLP.Protocol != protocolGRPC && c.OTLP.Protocol != protocolHTTP {
 				return fmt.Errorf("telemetry.otlp.protocol must be 'grpc' or 'http' (got '%s')", c.OTLP.Protocol)
 			}
 			if c.OTLP.Endpoint == "" {
@@ -99,7 +107,7 @@ func (c *Config) ValidateConfig() error {
 	// Log export validation is independent of c.Enabled: a user can enable logs
 	// without enabling OTLP metrics.
 	if c.Logs.Enabled {
-		if c.Logs.Protocol != "grpc" && c.Logs.Protocol != "http" {
+		if c.Logs.Protocol != protocolGRPC && c.Logs.Protocol != protocolHTTP {
 			return fmt.Errorf("telemetry.logs.protocol must be 'grpc' or 'http' (got '%s')", c.Logs.Protocol)
 		}
 		if c.Logs.Endpoint == "" {

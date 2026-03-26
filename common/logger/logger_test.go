@@ -252,6 +252,17 @@ func TestUpdateConfigurationSkipsTelemetryWithoutConfigurer(t *testing.T) {
 	}
 }
 
+func TestNewWithOtelLogsDisabled(t *testing.T) {
+	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
+		Logs: telemetry.LogsConfig{Enabled: false},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, log)
+	assert.Nil(t, log.Telemetry.LogProvider(), "log provider must be nil when logs are disabled")
+	// Sync on stdout may fail in test environments; not checked.
+	_ = log.Shutdown(context.Background())
+}
+
 func TestGetLevel(t *testing.T) {
 	tests := []struct {
 		newLevel  int8

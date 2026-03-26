@@ -29,7 +29,6 @@ func resolveOptions(opts []Option) options {
 // exported metrics. It merges the default resource with service-specific attributes.
 func buildResource(cfg Config, opts []Option) (*resource.Resource, error) {
 	o := resolveOptions(opts)
-
 	// Use NewSchemaless to avoid schema URL conflicts when merging with
 	// resource.Default(), which may use a different semconv version.
 	return resource.Merge(
