@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/zap"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	OTLP        OTLPConfig       `mapstructure:"otlp"`
 	Prometheus  PrometheusConfig `mapstructure:"prometheus"`
 	Histograms  HistogramConfig  `mapstructure:"histograms"`
+	Logs        LogsConfig       `mapstructure:"logs"`
 }
 
 // OTLPConfig holds configuration for the OTLP metric exporter.
@@ -52,33 +54,56 @@ type HistogramConfig struct {
 	BytesBoundaries    []float64 `mapstructure:"bytes-boundaries"`
 }
 
+// LogsConfig holds configuration for the OTLP log exporter.
+// Logs are always push-based (OTLP only) — there is no pull-based log
+// collection equivalent to Prometheus in the OTel ecosystem.
+// This config is independent of Config.Enabled: enabling logs does not
+// require enabling OTLP metrics, and they may use different endpoints.
+type LogsConfig struct {
+	Enabled  bool              `mapstructure:"enabled"`
+	Protocol string            `mapstructure:"protocol"` // "grpc" or "http"
+	Endpoint string            `mapstructure:"endpoint"`
+	Insecure bool              `mapstructure:"insecure"`
+	Headers  map[string]string `mapstructure:"headers"`
+}
+
 // ValidateConfig checks telemetry configuration for consistency.
 // Called by the containing AppConfig.ValidateConfig().
 func (c *Config) ValidateConfig() error {
-	if !c.Enabled {
-		return nil
+	// Validate metrics exporters only if telemetry (metrics) is enabled.
+	if c.Enabled {
+		if !c.OTLP.Enabled && !c.Prometheus.Enabled {
+			return fmt.Errorf("telemetry is enabled but no exporter is configured: " +
+				"enable at least one of [telemetry.otlp] or [telemetry.prometheus]")
+		}
+		if c.OTLP.Enabled {
+			if c.OTLP.Protocol != "grpc" && c.OTLP.Protocol != "http" {
+				return fmt.Errorf("telemetry.otlp.protocol must be 'grpc' or 'http' (got '%s')", c.OTLP.Protocol)
+			}
+			if c.OTLP.Endpoint == "" {
+				return fmt.Errorf("telemetry.otlp.endpoint must be set when OTLP is enabled")
+			}
+			if c.OTLP.Interval < time.Second {
+				return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
+			}
+		}
+		if c.Prometheus.Enabled {
+			if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
+				return fmt.Errorf("telemetry.prometheus.port must be between 1 and 65535 (got %d)", c.Prometheus.Port)
+			}
+			if c.Prometheus.Path == "" {
+				return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
+			}
+		}
 	}
-	if !c.OTLP.Enabled && !c.Prometheus.Enabled {
-		return fmt.Errorf("telemetry is enabled but no exporter is configured: " +
-			"enable at least one of [telemetry.otlp] or [telemetry.prometheus]")
-	}
-	if c.OTLP.Enabled {
-		if c.OTLP.Protocol != "grpc" && c.OTLP.Protocol != "http" {
-			return fmt.Errorf("telemetry.otlp.protocol must be 'grpc' or 'http' (got '%s')", c.OTLP.Protocol)
+	// Log export validation is independent of c.Enabled: a user can enable logs
+	// without enabling OTLP metrics.
+	if c.Logs.Enabled {
+		if c.Logs.Protocol != "grpc" && c.Logs.Protocol != "http" {
+			return fmt.Errorf("telemetry.logs.protocol must be 'grpc' or 'http' (got '%s')", c.Logs.Protocol)
 		}
-		if c.OTLP.Endpoint == "" {
-			return fmt.Errorf("telemetry.otlp.endpoint must be set when OTLP is enabled")
-		}
-		if c.OTLP.Interval < time.Second {
-			return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
-		}
-	}
-	if c.Prometheus.Enabled {
-		if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
-			return fmt.Errorf("telemetry.prometheus.port must be between 1 and 65535 (got %d)", c.Prometheus.Port)
-		}
-		if c.Prometheus.Path == "" {
-			return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
+		if c.Logs.Endpoint == "" {
+			return fmt.Errorf("telemetry.logs.endpoint must be set when log export is enabled")
 		}
 	}
 	return nil
@@ -96,6 +121,7 @@ type Configurer interface {
 type Provider struct {
 	meterProvider metric.MeterProvider
 	sdkProvider   *sdkmetric.MeterProvider // nil when disabled (using noop)
+	logProvider   *sdklog.LoggerProvider   // nil when log export is disabled
 	config        Config
 	promServer    *http.Server // nil when Prometheus is disabled
 	promReader    *prometheusReader
@@ -135,62 +161,85 @@ func WithVersion(v string) Option {
 func New(cfg Config, opts ...Option) (*Provider, error) {
 	p := &Provider{config: cfg}
 
-	if !cfg.Enabled {
-		p.meterProvider = noop.NewMeterProvider()
-		return p, nil
-	}
-
 	if err := cfg.ValidateConfig(); err != nil {
 		return nil, err
 	}
 
-	res, err := buildResource(cfg, opts)
+	if !cfg.Enabled && !cfg.Logs.Enabled {
+		p.meterProvider = noop.NewMeterProvider()
+		return p, nil
+	}
+
+	// Build resource whenever any signal is enabled; it is shared by both metrics
+	// and log providers to identify the service in exported telemetry.
+	resource, err := buildResource(cfg, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build telemetry resource: %w", err)
 	}
 
-	readers, promRdr, err := buildReaders(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build telemetry exporters: %w", err)
-	}
-	p.promReader = promRdr
-
-	meterOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
-	for _, reader := range readers {
-		meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
-	}
-
-	// Apply histogram bucket views if configured.
-	if len(cfg.Histograms.DurationBoundaries) > 0 {
-		meterOpts = append(meterOpts, sdkmetric.WithView(
-			sdkmetric.NewView(
-				sdkmetric.Instrument{Name: "*.duration"},
-				sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-					Boundaries: cfg.Histograms.DurationBoundaries,
-				}},
-			),
-		))
-	}
-	if len(cfg.Histograms.BytesBoundaries) > 0 {
-		meterOpts = append(meterOpts, sdkmetric.WithView(
-			sdkmetric.NewView(
-				sdkmetric.Instrument{Name: "*.bytes.*"},
-				sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-					Boundaries: cfg.Histograms.BytesBoundaries,
-				}},
-			),
-		))
-	}
-
-	sdkProvider := sdkmetric.NewMeterProvider(meterOpts...)
-	p.sdkProvider = sdkProvider
-	p.meterProvider = sdkProvider
-
-	if cfg.Prometheus.Enabled {
-		if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-			sdkProvider.Shutdown(context.Background())
-			return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
+	if cfg.Enabled {
+		readers, promRdr, err := buildReaders(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build telemetry exporters: %w", err)
 		}
+		p.promReader = promRdr
+
+		meterOpts := []sdkmetric.Option{sdkmetric.WithResource(resource)}
+		for _, reader := range readers {
+			meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
+		}
+
+		// Apply histogram bucket views if configured.
+		if len(cfg.Histograms.DurationBoundaries) > 0 {
+			meterOpts = append(meterOpts, sdkmetric.WithView(
+				sdkmetric.NewView(
+					sdkmetric.Instrument{Name: "*.duration"},
+					sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+						Boundaries: cfg.Histograms.DurationBoundaries,
+					}},
+				),
+			))
+		}
+		if len(cfg.Histograms.BytesBoundaries) > 0 {
+			meterOpts = append(meterOpts, sdkmetric.WithView(
+				sdkmetric.NewView(
+					sdkmetric.Instrument{Name: "*.bytes.*"},
+					sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+						Boundaries: cfg.Histograms.BytesBoundaries,
+					}},
+				),
+			))
+		}
+
+		sdkProvider := sdkmetric.NewMeterProvider(meterOpts...)
+		p.sdkProvider = sdkProvider
+		p.meterProvider = sdkProvider
+
+		if cfg.Prometheus.Enabled {
+			if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
+				sdkProvider.Shutdown(context.Background())
+				return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
+			}
+		}
+	} else {
+		p.meterProvider = noop.NewMeterProvider()
+	}
+
+	if cfg.Logs.Enabled {
+		logExporter, err := buildLogExporter(cfg.Logs)
+		if err != nil {
+			if p.sdkProvider != nil {
+				p.sdkProvider.Shutdown(context.Background())
+			}
+			if p.promServer != nil {
+				p.promServer.Shutdown(context.Background())
+			}
+			return nil, fmt.Errorf("failed to build log exporter: %w", err)
+		}
+		p.logProvider = sdklog.NewLoggerProvider(
+			sdklog.WithResource(resource),
+			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+		)
 	}
 
 	return p, nil
@@ -202,10 +251,16 @@ func (p *Provider) Meter(name string) metric.Meter {
 	return p.meterProvider.Meter(name)
 }
 
+// LogProvider returns the OTel LoggerProvider, or nil when log export is disabled.
+// Used by the logger package to attach the otelzap bridge core.
+func (p *Provider) LogProvider() *sdklog.LoggerProvider {
+	return p.logProvider
+}
+
 // Shutdown flushes pending metrics and releases all resources.
 // Must be called during graceful service shutdown.
 func (p *Provider) Shutdown(ctx context.Context) error {
-	if p.sdkProvider == nil {
+	if p.sdkProvider == nil && p.logProvider == nil {
 		return nil
 	}
 	var errs []error
@@ -214,8 +269,15 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("prometheus server shutdown: %w", err))
 		}
 	}
-	if err := p.sdkProvider.Shutdown(ctx); err != nil {
-		errs = append(errs, fmt.Errorf("meter provider shutdown: %w", err))
+	if p.sdkProvider != nil {
+		if err := p.sdkProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("meter provider shutdown: %w", err))
+		}
+	}
+	if p.logProvider != nil {
+		if err := p.logProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("log provider shutdown: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -231,9 +293,10 @@ func (p *Provider) UpdateConfiguration(newConfig any) error {
 	newCfg := configurer.GetTelemetryConfig()
 
 	// All telemetry config changes take effect only after a restart. Warn
-	// whenever the live provider exists (sdkProvider != nil) or the enabled
-	// state is being toggled, so operators are not surprised by a no-op reload.
-	if p.sdkProvider != nil || newCfg.Enabled != p.config.Enabled {
+	// whenever a live provider exists so operators are not surprised by a no-op
+	// reload. No warning is emitted when nothing is running — there is nothing
+	// to restart.
+	if p.sdkProvider != nil || p.logProvider != nil {
 		if !reflect.DeepEqual(newCfg, p.config) {
 			zap.L().Warn("telemetry configuration changes require a restart to take effect")
 		}

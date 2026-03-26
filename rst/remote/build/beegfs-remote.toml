@@ -51,6 +51,13 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # enabled = false
 # port = 9091
 # path = "/metrics"
+#
+# [telemetry.logs]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# insecure = false
+# # headers = { Authorization = "Bearer <token>" }
 
 #
 # --- Section 1.2: [Worker Settings] ---

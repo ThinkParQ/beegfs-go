@@ -133,6 +133,13 @@ tls-disable = false
 # enabled = false
 # port = 9090
 # path = "/metrics"
+#
+# [telemetry.logs]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# insecure = false
+# # headers = { Authorization = "Bearer <token>" }
 
 # Configuration for the BeeGFS Remote node must be specified under [remote]. Most configuration such
 # as the address/port are synced automatically from the Remote node (see Worker node settings on the

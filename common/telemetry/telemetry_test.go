@@ -196,6 +196,35 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "logs only (metrics disabled)",
+			cfg: telemetry.Config{
+				Enabled: false,
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "logs and metrics both enabled",
+			cfg: telemetry.Config{
+				Enabled: true,
+				Prometheus: telemetry.PrometheusConfig{
+					Enabled: true,
+					Port:    9090,
+					Path:    "/metrics",
+				},
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: "http",
+					Endpoint: "localhost:4318",
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -468,6 +497,177 @@ func TestOTLPReaderConstruction(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
+		})
+	}
+}
+
+// TestLogsDisabledWhenMetricsEnabled verifies that when metrics are enabled but logs are not
+// configured, LogProvider returns nil — metrics running does not activate logs.
+func TestLogsDisabledWhenMetricsEnabled(t *testing.T) {
+	port := findFreePort(t)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "logs-disabled-test",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled: true,
+			Port:    port,
+			Path:    "/metrics",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, p.Shutdown(context.Background()))
+	assert.Nil(t, p.LogProvider())
+}
+
+// TestLogsValidation verifies logs config validation rules.
+func TestLogsValidation(t *testing.T) {
+	t.Run("disabled logs skips validation even with invalid values", func(t *testing.T) {
+		// When Logs.Enabled is false, bad protocol/endpoint values must be ignored.
+		cfg := telemetry.Config{
+			Logs: telemetry.LogsConfig{
+				Enabled:  false,
+				Protocol: "not-a-protocol",
+			},
+		}
+		require.NoError(t, cfg.ValidateConfig())
+	})
+
+	errTests := []struct {
+		name   string
+		cfg    telemetry.Config
+		errMsg string
+	}{
+		{
+			name: "invalid protocol",
+			cfg: telemetry.Config{
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: "udp",
+					Endpoint: "localhost:4317",
+				},
+			},
+			errMsg: "telemetry.logs.protocol must be 'grpc' or 'http'",
+		},
+		{
+			name: "missing endpoint",
+			cfg: telemetry.Config{
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: "grpc",
+				},
+			},
+			errMsg: "telemetry.logs.endpoint must be set",
+		},
+	}
+
+	for _, tt := range errTests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.ValidateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+// TestLogsIndependentOfMetrics verifies that logs can be enabled without enabling metrics.
+// This is the key use case: logs-only mode where metrics telemetry is disabled.
+func TestLogsIndependentOfMetrics(t *testing.T) {
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     false,
+		ServiceName: "logs-only",
+		Logs: telemetry.LogsConfig{
+			Enabled:  true,
+			Protocol: "grpc",
+			Endpoint: "localhost:4317",
+			Insecure: true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, p.LogProvider(), "log provider must be non-nil when logs are enabled")
+	// Meter should still work (returns noop) even though metrics are disabled.
+	meter := p.Meter("test")
+	counter, err := meter.Int64Counter("test.counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1) // must not panic
+
+	assert.NoError(t, p.Shutdown(context.Background()))
+}
+
+// TestLogsAndMetricsEnabled verifies that both log and metrics providers are initialized
+// when both signals are enabled simultaneously.
+func TestLogsAndMetricsEnabled(t *testing.T) {
+	port := findFreePort(t)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "both-signals",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled: true,
+			Port:    port,
+			Path:    "/metrics",
+		},
+		Logs: telemetry.LogsConfig{
+			Enabled:  true,
+			Protocol: "grpc",
+			Endpoint: "localhost:4317",
+			Insecure: true,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, p.LogProvider(), "log provider must be non-nil")
+
+	counter, err := p.Meter("test").Int64Counter("both_signals_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	// Verify the metrics side is actually wired — the counter must appear in Prometheus output.
+	url := fmt.Sprintf("http://localhost:%d/metrics", port)
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "both_signals_counter")
+
+	assert.NoError(t, p.Shutdown(context.Background()))
+}
+
+// TestShutdownWithLogsEnabled verifies that Shutdown flushes the log provider cleanly.
+func TestShutdownWithLogsEnabled(t *testing.T) {
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     false,
+		ServiceName: "log-shutdown-test",
+		Logs: telemetry.LogsConfig{
+			Enabled:  true,
+			Protocol: "grpc",
+			Endpoint: "localhost:4317",
+			Insecure: true,
+		},
+	})
+	require.NoError(t, err)
+	assert.NoError(t, p.Shutdown(context.Background()))
+}
+
+// TestLogsExporterConstruction verifies that log exporter construction succeeds
+// for both gRPC and HTTP protocols (connection is deferred, so no server needed).
+func TestLogsExporterConstruction(t *testing.T) {
+	for _, protocol := range []string{"grpc", "http"} {
+		t.Run(protocol, func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     false,
+				ServiceName: "log-exporter-test",
+				Logs: telemetry.LogsConfig{
+					Enabled:  true,
+					Protocol: protocol,
+					Endpoint: "localhost:4317",
+					Insecure: true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+			assert.NotNil(t, p.LogProvider())
 		})
 	}
 }

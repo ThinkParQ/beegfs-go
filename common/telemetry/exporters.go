@@ -6,9 +6,12 @@ import (
 	"net"
 	"net/http"
 
+	otlploggrpc "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	otlploghttp "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	otlpmetricgrpc "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -100,6 +103,46 @@ func buildPrometheusReader() (*prometheusReader, error) {
 		return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
 	}
 	return &prometheusReader{exporter: exp, registry: reg}, nil
+}
+
+// buildLogExporter constructs an OTLP log exporter for the given configuration.
+func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
+	switch cfg.Protocol {
+	case "grpc":
+		grpcOpts := []otlploggrpc.Option{
+			otlploggrpc.WithEndpoint(cfg.Endpoint),
+		}
+		if cfg.Insecure {
+			grpcOpts = append(grpcOpts, otlploggrpc.WithInsecure())
+		}
+		if len(cfg.Headers) > 0 {
+			grpcOpts = append(grpcOpts, otlploggrpc.WithHeaders(cfg.Headers))
+		}
+		exp, err := otlploggrpc.New(context.Background(), grpcOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP grpc log exporter: %w", err)
+		}
+		return exp, nil
+
+	case "http":
+		httpOpts := []otlploghttp.Option{
+			otlploghttp.WithEndpoint(cfg.Endpoint),
+		}
+		if cfg.Insecure {
+			httpOpts = append(httpOpts, otlploghttp.WithInsecure())
+		}
+		if len(cfg.Headers) > 0 {
+			httpOpts = append(httpOpts, otlploghttp.WithHeaders(cfg.Headers))
+		}
+		exp, err := otlploghttp.New(context.Background(), httpOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP http log exporter: %w", err)
+		}
+		return exp, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported logs OTLP protocol: %q (must be 'grpc' or 'http')", cfg.Protocol)
+	}
 }
 
 // startPrometheusServer starts the Prometheus HTTP server on the configured port
