@@ -15,6 +15,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"go.opentelemetry.io/contrib/bridges/otelzap"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -72,6 +73,16 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 
 	logMgr := Logger{}
 
+	effectiveCfg := telemetry.Config{Enabled: false}
+	if telemetryCfg != nil {
+		effectiveCfg = *telemetryCfg
+	}
+	tp, err := telemetry.New(effectiveCfg, telemetryOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to initialize telemetry: %w", err)
+	}
+	logMgr.Telemetry = tp
+
 	// Use the opinionated Zap development configuration.
 	// This notably gives us stack traces at warn and error levels.
 	if newConfig.Developer {
@@ -91,6 +102,7 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 		}
 		logMgr.Logger = l
 	} else {
+
 		// Otherwise build a production config based on the user settings:
 		zapConfig := zap.NewProductionEncoderConfig()
 		zapConfig.TimeKey = "timestamp"
@@ -148,20 +160,21 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 			return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
 		}
 
-		logMgr.Logger = zap.New(zapcore.NewCore(zapEncoder, logDestination, logMgr.level))
-	}
+		baseCore := zapcore.NewCore(zapEncoder, logDestination, logMgr.level)
 
-	// Initialize telemetry. When telemetryCfg is provided, use the supplied
-	// config; otherwise create a noop Provider (zero overhead).
-	effectiveCfg := telemetry.Config{Enabled: false}
-	if telemetryCfg != nil {
-		effectiveCfg = *telemetryCfg
+		if lp := logMgr.Telemetry.LogProvider(); lp != nil {
+			otelCore := otelzap.NewCore("github.com/thinkparq/beegfs-go/common/logger", otelzap.WithLoggerProvider(lp))
+			// Gate the otelzap core on the same atomic level as the console
+			// sink so OTLP does not receive records below the configured threshold.
+			leveledOtelCore, err := zapcore.NewIncreaseLevelCore(otelCore, logMgr.level)
+			if err != nil {
+				return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
+			}
+			baseCore = zapcore.NewTee(baseCore, leveledOtelCore)
+		}
+
+		logMgr.Logger = zap.New(baseCore)
 	}
-	tp, err := telemetry.New(effectiveCfg, telemetryOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to initialize telemetry: %w", err)
-	}
-	logMgr.Telemetry = tp
 
 	return &logMgr, nil
 }
