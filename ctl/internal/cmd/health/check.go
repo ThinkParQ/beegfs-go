@@ -2,14 +2,17 @@ package health
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/strfmt"
 	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -17,6 +20,9 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
 
 type Status int
@@ -150,8 +156,41 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	if err != nil {
 		return fmt.Errorf("unable to proceed without a working management node: %w", err)
 	}
-	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s", mgmtd.GetAddress()), "#")
+
+	fsUUID, err := mgmtd.GetFsUUID(ctx)
+	// If the mgmtd is not available other checks cannot proceed and fail in confusing ways.
+	if err != nil {
+		// TLS errors are vague, offer some hints for common misconfigurations:
+		if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
+		}
+		if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
+		}
+		if strings.Contains(err.Error(), "failed to verify certificate") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
+		}
+		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+	}
+	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s\n(Filesystem UUID: %s)", mgmtd.GetAddress(), fsUUID), "#")
 	printHeader(">>>>> General Checks <<<<<", "#")
+
+	log.Debug("getting target list")
+	// mgmtdPeer is extracted from the GetTargets resp to avoid a no-op gRPC to check TLS config.
+	var mgmtPeer peer.Peer
+	targets, err := tgtBackend.GetTargets(ctx, grpc.Peer(&mgmtPeer))
+	if err != nil {
+		return err
+	}
+
+	tlsStatus, tlsMsg := checkTLSCertificates(ctx, mgmtPeer)
+	if tlsStatus == Healthy {
+		fmt.Printf("\n%s Management TLS %s", Healthy, hint(fmt.Sprintf("-> %s.", tlsMsg)))
+	} else {
+		failedCheck = true
+		fmt.Printf("\n%s Management TLS %s", tlsStatus, hint(fmt.Sprintf("-> %s.", tlsMsg)))
+	}
+
 	result := license.Check(ctx)
 	if result.IsHealthy() {
 		fmt.Printf("\n%s License Status %s", Healthy, hint("-> No issues detected. Run 'beegfs license' for more details."))
@@ -208,11 +247,6 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	fmt.Print("\n\n")
 
 	printHeader(">>>>> Checking Targets <<<<<", "#")
-	log.Debug("getting target list")
-	targets, err := tgtBackend.GetTargets(ctx)
-	if err != nil {
-		return err
-	}
 	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
 
 	if reachabilityStatus != Healthy {
@@ -380,5 +414,44 @@ func printBusyNodes(nodes []stats.NodeStats) {
 		if n.Stats.QueuedRequests > queuedReqsDegradedThreshold {
 			fmt.Printf("* %s [%s] has %d queued requests\n", n.Node.Alias, n.Node.Id, n.Stats.QueuedRequests)
 		}
+	}
+}
+
+// checkTLSCertificates checks the TLS certificates presented by a peer service and returns a health
+// status based on the earliest expiring certificate in the chain.
+func checkTLSCertificates(ctx context.Context, peer peer.Peer) (Status, string) {
+	tlsInfo, ok := peer.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return Degraded, "Not in use"
+	}
+	status, msg := tlsCertExpirationStatus(tlsInfo.State.PeerCertificates, time.Now())
+	return status, msg
+}
+
+// tlsCertExpirationStatus determines the health status based on the earliest expiring certificate.
+// It accepts the current time as a parameter to enable deterministic testing.
+func tlsCertExpirationStatus(certs []*x509.Certificate, now time.Time) (Status, string) {
+	if len(certs) == 0 {
+		return Critical, "No certificates were presented by the node"
+	}
+
+	earliest := certs[0].NotAfter
+	for _, cert := range certs[1:] {
+		if cert.NotAfter.Before(earliest) {
+			earliest = cert.NotAfter
+		}
+	}
+
+	remaining := earliest.Sub(now)
+	expirationMsg := "Certificate " + strfmt.ExpirationString(remaining)
+	switch {
+	case remaining <= 0:
+		return Critical, expirationMsg
+	case remaining < 30*24*time.Hour:
+		return Critical, expirationMsg
+	case remaining < 90*24*time.Hour:
+		return Degraded, expirationMsg
+	default:
+		return Healthy, expirationMsg
 	}
 }
