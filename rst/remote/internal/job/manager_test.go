@@ -18,6 +18,10 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -584,17 +588,28 @@ func TestManageErrorHandling(t *testing.T) {
 		RemoteStorageTarget: 1,
 	}.Build()
 	jobManager.JobRequests <- testJobRequest
-	time.Sleep(2 * time.Second)
+
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
 		ByPathPrefix:        new("/"),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
-	responses := make(chan *beeremote.GetJobsResponse, 1)
-	err = jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses)
-	require.NoError(t, err)
-	getJobsResponse := <-responses
-	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
+	// Poll until the async job is stored and reaches CANCELLED state. A fixed
+	// sleep is too tight because the mock worker connection takes ~1 second,
+	// and SubmitJobRequest blocks until it is established.
+	var getJobsResponse *beeremote.GetJobsResponse
+	require.Eventually(t, func() bool {
+		responses := make(chan *beeremote.GetJobsResponse, 1)
+		if err := jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses); err != nil {
+			return false
+		}
+		resp := <-responses
+		if len(resp.GetResults()) == 0 {
+			return false
+		}
+		getJobsResponse = resp
+		return resp.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
+	}, 10*time.Second, 100*time.Millisecond)
 
 	// JobMgr should have cancelled all outstanding requests:
 	assert.Len(t, getJobsResponse.GetResults()[0].GetWorkResults(), 4)
@@ -968,5 +983,115 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	result, err = jobManager.SubmitJobRequest(testFailedJobRequest)
 	require.NotNil(t, err)
 	require.Equal(t, result.Job.Status.State, beeremote.Job_FAILED)
+}
+
+// newObserverManager creates a minimal Manager backed by an observer logger and
+// noop OTel metrics — enough to test recordJobTerminal and defer-based recording.
+// Do not call other Manager methods from tests that use this helper; fields like
+// workerManager are nil and will panic if accessed.
+func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
+	t.Helper()
+	core, observed := observer.New(zapcore.DebugLevel)
+	noopMeter := noop.NewMeterProvider().Meter("test")
+	jobTerminal, err := noopMeter.Int64Counter("test.terminal")
+	require.NoError(t, err)
+	jobDuration, err := noopMeter.Float64Histogram("test.duration")
+	require.NoError(t, err)
+	return &Manager{
+		log: &logger.Logger{Logger: zap.New(core)},
+		metrics: managerMetrics{
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+		},
+	}, observed
+}
+
+// TestTerminalStateLogLevels verifies that the full chain from beeremote.Job_State
+// through terminalStateString into recordJobTerminal emits the correct log level
+// and preserves the state field for each terminal state.
+func TestTerminalStateLogLevels(t *testing.T) {
+	tests := []struct {
+		state         beeremote.Job_State
+		expectedLevel zapcore.Level
+	}{
+		{beeremote.Job_FAILED, zapcore.WarnLevel},
+		{beeremote.Job_UNKNOWN, zapcore.WarnLevel},
+		{beeremote.Job_CANCELLED, zapcore.InfoLevel},
+		{beeremote.Job_COMPLETED, zapcore.DebugLevel},
+		{beeremote.Job_OFFLOADED, zapcore.DebugLevel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.state.String(), func(t *testing.T) {
+			m, observed := newObserverManager(t)
+			testJob := &Job{
+				Job: beeremote.Job_builder{
+					Request: &beeremote.JobRequest{},
+					Status:  beeremote.Job_Status_builder{}.Build(),
+				}.Build(),
+			}
+			stateStr := terminalStateString(tt.state)
+			m.recordJobTerminal(testJob, stateStr)
+			logs := observed.All()
+			require.Len(t, logs, 1)
+			assert.Equal(t, tt.expectedLevel, logs[0].Level)
+			assert.Equal(t, "job reached terminal state", logs[0].Message)
+			assert.Equal(t, stateStr, logs[0].ContextMap()["state"])
+		})
+	}
+}
+
+// TestNoDoubleRecordOnAlreadyTerminal verifies that the defer guard in
+// updateJobState skips recording when the job's initial state is already
+// terminal. Tests DELETED updates (which require no workerManager) across all
+// five terminal starting states. Force-cancel (COMPLETED → CANCELLED) exercises
+// workerManager and is covered by the integration tests instead.
+func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
+	// CANCELLED, COMPLETED, OFFLOADED are "clean" terminal states: DELETED succeeds.
+	for _, startState := range []beeremote.Job_State{
+		beeremote.Job_CANCELLED,
+		beeremote.Job_COMPLETED,
+		beeremote.Job_OFFLOADED,
+	} {
+		t.Run(startState.String()+"_deleted", func(t *testing.T) {
+			m, observed := newObserverManager(t)
+			testJob := &Job{
+				Job: beeremote.Job_builder{
+					Request: &beeremote.JobRequest{},
+					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
+				}.Build(),
+			}
+			// COMPLETED/OFFLOADED require forceUpdate to bypass the early "already done" return.
+			forceUpdate := startState == beeremote.Job_COMPLETED || startState == beeremote.Job_OFFLOADED
+			success, safeToDelete, msg := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, forceUpdate)
+			assert.True(t, success)
+			assert.True(t, safeToDelete)
+			// Empty message confirms the DELETED code path was taken, not an early-
+			// return from another branch (e.g., the already-cancelled guard).
+			assert.Empty(t, msg)
+			// State must remain unchanged after marking for deletion.
+			assert.Equal(t, startState, testJob.GetStatus().GetState())
+			assert.Equal(t, 0, observed.Len(), "no log for terminal → terminal transition")
+		})
+	}
+
+	// FAILED and UNKNOWN require user intervention: DELETED is rejected and the
+	// state is preserved.
+	for _, startState := range []beeremote.Job_State{beeremote.Job_FAILED, beeremote.Job_UNKNOWN} {
+		t.Run(startState.String()+"_delete_rejected", func(t *testing.T) {
+			m, observed := newObserverManager(t)
+			testJob := &Job{
+				Job: beeremote.Job_builder{
+					Request: &beeremote.JobRequest{},
+					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
+				}.Build(),
+			}
+			success, safeToDelete, _ := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, false)
+			assert.False(t, success)
+			assert.False(t, safeToDelete)
+			assert.Equal(t, startState, testJob.GetStatus().GetState())
+			assert.Equal(t, 0, observed.Len(), "no log when delete is rejected for a terminal job")
+		})
+	}
 }
 
