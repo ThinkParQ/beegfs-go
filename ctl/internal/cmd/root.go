@@ -33,7 +33,7 @@ import (
 	cmdConfig "github.com/thinkparq/beegfs-go/ctl/internal/config"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	lic "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
+	"go.uber.org/zap"
 	"golang.org/x/term"
 )
 
@@ -265,21 +265,17 @@ func globalPersistentPostRunE(cmd *cobra.Command) error {
 		return nil
 	}
 
-	// Printing license warnings on some commands results in redundant output.
-	if _, ok := cmd.Annotations["license.SkipWarnings"]; !ok {
-		result := lic.Check(cmd.Context())
-		if !result.IsHealthy() {
-			if result.InvalidMsg != "" {
-				cmdfmt.Printf("WARNING: this system does not have a valid license installed.\n")
-				cmdfmt.Printf("To avoid disruptions, run 'beegfs license' and follow the required steps.\n")
-				cmdfmt.Printf("Reason: %s\n", result.InvalidMsg)
-			}
-			if result.ExpirationMsg != "" {
-				cmdfmt.Printf("WARNING: License is nearing expiration (%s). Run 'beegfs license' for more details.\n", result.ExpirationMsg)
-			}
-			if result.ViolationsMsg != "" {
-				cmdfmt.Printf("WARNING: License violations found (%s). Run 'beegfs license' for more details.\n", result.ViolationsMsg)
-			}
+	// Printing health alerts on some commands results in redundant output. There are also some
+	// commands we want to skip remote communication as it would be unexpected (i.e., version).
+	if _, ok := cmd.Annotations["health.SkipAlerts"]; !ok {
+		log, _ := config.GetLogger()
+		log.Debug("executing quick health checks")
+		if required, dismissible, err := health.QuickChecks(cmd.Context()); err != nil {
+			log.Debug("unable to execute quick health checks (ignoring)", zap.Error(err))
+		} else {
+			// These return empty strings so nothing is printed if there are no alerts of that type.
+			cmdfmt.Printf("%s", required)
+			cmdfmt.Printf("%s", dismissible)
 		}
 	}
 
