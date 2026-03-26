@@ -1,47 +1,73 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 )
 
-const (
-	beeBinary   = "/opt/beegfs/python/index/bee"
-	indexConfig = "/etc/beegfs/index/config"
-)
-
-var path string
-
-var commonIndexFlags = []bflag.FlagWrapper{
-	bflag.Flag("fs-path", "F",
-		"File system path for which index will be created.", "-F", ""),
-	bflag.Flag("index-path", "I",
-		"File system path at which the index will be stored.", "-I", ""),
-	bflag.GlobalFlag(config.BeeGFSMountPointKey, "-M"),
-	bflag.Flag("max-memory", "X", "Max memory usage (e.g. 8GB, 1G)", "-X", ""),
-	bflag.GlobalFlag(config.NumWorkersKey, "-n"),
-	bflag.Flag("summary", "s", "Create tree summary table along with other tables", "-s", false),
-	bflag.Flag("only-summary", "S", "Create only tree summary table", "-S", false),
-	bflag.Flag("xattrs", "x", "Pull xattrs from source", "-x", false),
-	bflag.Flag("max-level", "z", "Max level to go down", "-z", ""),
-	bflag.Flag("scan-dirs", "C", "Print the number of scanned directories", "-C", false),
-	bflag.Flag("version", "v", "BeeGFS Hive Index Version", "-v", false),
-	bflag.GlobalFlag(config.DebugKey, "-V=1"),
-	bflag.Flag("no-metadata", "B", "Do not extract BeeGFS specific metadata", "-B", false),
+func init() {
+	indexPkg.LoadGUFIConfig()
 }
 
-func checkBeeGFSConfig() error {
-	if _, err := os.Stat(beeBinary); os.IsNotExist(err) {
-		return fmt.Errorf("BeeGFS Hive Index mode requires the 'beegfs-hive-index' package to be installed")
+// newExecutor creates the appropriate Executor based on the --index-addr viper value.
+func newExecutor() (indexPkg.Executor, error) {
+	return indexPkg.NewExecutor(viper.GetViper())
+}
+
+// applyDotIndexDefaults discovers the BeeGFS mount for fsPath, computes the
+// relative path, and loads the best-matching .beegfs.index entry as viper
+// defaults. Silently skips unmounted or missing cases.
+func applyDotIndexDefaults(fsPath string) {
+	client, err := config.BeeGFSClient(fsPath)
+	if err != nil {
+		return
+	}
+	rel, err := client.GetRelativePathWithinMount(fsPath)
+	if err != nil {
+		return
+	}
+	indexPkg.LoadDotIndexFile(client.GetMountPath(), rel)
+}
+
+// resolveIndexPath converts a user-supplied BeeGFS filesystem path to the
+// corresponding GUFI index tree path.
+//
+//   - If no path is given, the current working directory is used.
+//   - Path normalization is done via BeeGFSClient.GetRelativePathWithinMount,
+//     which works whether BeeGFS is mounted or not.
+//   - .beegfs.index defaults are loaded before reading index-root.
+//   - The result is joined with the index-root viper key.
+func resolveIndexPath(args []string) (string, error) {
+	fsPath := "."
+	if len(args) > 0 {
+		fsPath = args[0]
+	} else {
+		var err error
+		fsPath, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getting working directory: %w", err)
+		}
 	}
 
-	if _, err := os.Stat(indexConfig); os.IsNotExist(err) {
-		return fmt.Errorf("error: required configuration file %s is"+
-			" missing. Verify that beegfs-hive-index is properly installed and configured", indexConfig)
+	beegfsClient, err := config.BeeGFSClient(fsPath)
+	if err != nil && !errors.Is(err, filesystem.ErrUnmounted) {
+		return "", fmt.Errorf("getting BeeGFS client: %w", err)
 	}
 
-	return nil
+	rel, err := beegfsClient.GetRelativePathWithinMount(fsPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving path within BeeGFS mount: %w", err)
+	}
+
+	// Load best-matching .beegfs.index entry before reading IndexRootKey.
+	indexPkg.LoadDotIndexFile(beegfsClient.GetMountPath(), rel)
+
+	return filepath.Join(viper.GetString(indexPkg.IndexRootKey), rel), nil
 }

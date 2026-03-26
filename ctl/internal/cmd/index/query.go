@@ -2,83 +2,93 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 	"go.uber.org/zap"
 )
 
-const queryCmd = "query-index"
+func newQueryCmd() *cobra.Command {
+	backendCfg := indexPkg.QueryCfg{}
 
-func newGenericQueryCmd() *cobra.Command {
-	var bflagSet *bflag.FlagSet
-
-	var cmd = &cobra.Command{
+	cmd := &cobra.Command{
+		Use:         "query [path]",
+		Short:       "Run an SQL query against the GUFI index.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args: func(cmd *cobra.Command, args []string) error {
+			if backendCfg.SQLEntries == "" && backendCfg.SQLSummary == "" {
+				return fmt.Errorf("at least one of --sql-entries or --sql-summary is required")
+			}
+			return nil
+		},
+		Long: `Execute raw SQL against the GUFI index tree.
+
+Use --sql-entries (-E) for per-entry queries and --sql-summary (-S) for
+per-directory summary queries. Aggregation flags (-I/-K/-J/-G/-F) are
+also supported for multi-stage pipelines.
+
+Example: list all .c files from the index
+
+  beegfs index query -E "SELECT rpath(sname,sroll,name) FROM vrpentries WHERE name GLOB '*.c'"
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			log, _ := config.GetLogger()
+
+			exec, err := newExecutor()
+			if err != nil {
 				return err
 			}
-			return runPythonQueryIndex(bflagSet)
+			indexPath, err := resolveIndexPath(args)
+			if err != nil {
+				return err
+			}
+
+			log.Debug("running beegfs index query",
+				zap.String("indexPath", indexPath),
+				zap.Any("cfg", backendCfg),
+			)
+
+			rows, errWait, err := indexPkg.Query(cmd.Context(), exec, backendCfg, indexPath)
+			if err != nil {
+				return err
+			}
+
+			allColumns := []string{"result"}
+			defaultColumns := []string{"result"}
+			if viper.GetBool(config.DebugKey) {
+				defaultColumns = allColumns
+			}
+
+			tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
+			defer tbl.PrintRemaining()
+
+		run:
+			for {
+				select {
+				case <-cmd.Context().Done():
+					return cmd.Context().Err()
+				case row, ok := <-rows:
+					if !ok {
+						break run
+					}
+					tbl.AddItem(toAny(row)...)
+				}
+			}
+
+			return errWait()
 		},
 	}
-	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("db-path", "I", "Path to the directory containing the database (.bdm.db file)", "-I", ""),
-		bflag.Flag("sql-query", "s", "Provide sql query", "-s", ""),
-	}
-	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+
+	cmd.Flags().StringVarP(&backendCfg.SQLEntries, "sql-entries", "E", "", "SQL to run against each entries table.")
+	cmd.Flags().StringVarP(&backendCfg.SQLSummary, "sql-summary", "S", "", "SQL to run against each summary table.")
+	cmd.Flags().StringVarP(&backendCfg.SQLInit, "sql-init", "I", "", "SQL to initialise the aggregate DB.")
+	cmd.Flags().StringVarP(&backendCfg.SQLAggInit, "sql-agg-init", "K", "", "SQL to initialise per-thread aggregate table.")
+	cmd.Flags().StringVarP(&backendCfg.SQLIntermed, "sql-intermed", "J", "", "SQL to insert directory result into per-thread aggregate.")
+	cmd.Flags().StringVarP(&backendCfg.SQLAggregate, "sql-aggregate", "G", "", "SQL to merge per-thread aggregate into global aggregate.")
+	cmd.Flags().StringVarP(&backendCfg.SQLFinal, "sql-final", "F", "", "Final SELECT from aggregate DB.")
 
 	return cmd
-}
-
-func newQueryCmd() *cobra.Command {
-	s := newGenericQueryCmd()
-	s.Use = "query"
-	s.Short = "Run an SQL query on a database file."
-
-	s.Long = `Execute an SQL query on a single-level Hive database file (.bdm.db) within a specified directory.
-
-You can provide multiple SQL statements in a single string, separated by semicolons. Only the output 
-of the last SQL statement in the string will be displayed. This allows you to 
-perform complex operations, such as attaching an input database to join data across queries or applying 
-queries at various levels within a directory structure.
-
-Example:
-
-beegfs index query --db-path /index/dir1/ --sql-query "SELECT * FROM entries;"
-`
-	return s
-}
-
-func runPythonQueryIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
-	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, queryCmd)
-	allArgs = append(allArgs, wrappedArgs...)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index query command",
-		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("queryCmd", queryCmd),
-		zap.Any("allArgs", allArgs),
-	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }
