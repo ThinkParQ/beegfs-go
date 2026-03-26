@@ -51,8 +51,12 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #
 # [telemetry.prometheus]
 # enabled = false
+# listen-address = "0.0.0.0"
 # port = 9091
 # path = "/metrics"
+# tls-cert-file = ""
+# tls-key-file = ""
+# tls-disable = false
 #
 # [telemetry.logs]
 # enabled = false

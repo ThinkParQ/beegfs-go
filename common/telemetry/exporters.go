@@ -221,7 +221,7 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 	// Pre-bind the port synchronously so any bind error (e.g. port already in
 	// use) is returned immediately to the caller rather than being lost in a
 	// goroutine.
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	addr := fmt.Sprintf("%s:%d", cfg.ListenAddress, cfg.Port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("prometheus server failed to bind on %s: %w", addr, err)
@@ -236,8 +236,25 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 	}
 	p.promServer = srv
 
+	serveListener := net.Listener(ln)
+	if !cfg.TLSDisable && cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("prometheus server: failed to load TLS cert/key: %w", err)
+		}
+		serveListener = tls.NewListener(ln, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		})
+	} else if cfg.TLSDisable {
+		zap.L().Info("prometheus metrics server TLS explicitly disabled")
+	} else {
+		zap.L().Warn("prometheus metrics server not using TLS: no cert/key configured")
+	}
+
 	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(serveListener); err != nil && err != http.ErrServerClosed {
 			zap.L().Error("prometheus metrics server terminated unexpectedly", zap.Error(err))
 		}
 	}()
