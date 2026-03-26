@@ -21,7 +21,7 @@ var versionCmd = &cobra.Command{
 	Short: "Print the command line tool version",
 	Annotations: map[string]string{
 		"authorization.AllowAllUsers": "",
-		"license.SkipWarnings":        "",
+		"health.SkipAlerts":           "",
 	},
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {

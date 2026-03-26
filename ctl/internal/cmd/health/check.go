@@ -98,7 +98,7 @@ If this file system is mounted multiple times, network connections will be check
 Optionally specify one or more <mount-paths> to limit the connection checks.
 		`, config.ManagementAddrKey),
 		Annotations: map[string]string{
-			"license.SkipWarnings": "",
+			"health.SkipAlerts": "",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed(watchFlag) {
@@ -137,6 +137,9 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 	return cmd
 }
 
+// runHealthCheckCmd executes all currently defined health checks.
+//
+// When updating this function consider if QuickChecks() needs to be updated as well.
 func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg checkCfg, backendCfg procfs.GetBeeGFSClientsConfig) error {
 
 	log, _ := config.GetLogger()
@@ -191,7 +194,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 		fmt.Printf("\n%s Management TLS %s", tlsStatus, hint(fmt.Sprintf("-> %s.", tlsMsg)))
 	}
 
-	result := license.Check(ctx)
+	result := license.Check(ctx, targets)
 	if result.IsHealthy() {
 		fmt.Printf("\n%s License Status %s", Healthy, hint("-> No issues detected. Run 'beegfs license' for more details."))
 	} else {
@@ -454,4 +457,58 @@ func tlsCertExpirationStatus(certs []*x509.Certificate, now time.Time) (Status, 
 	default:
 		return Healthy, expirationMsg
 	}
+}
+
+// QuickChecks executes a subset of the full health check returning strings of requiredAlerts and
+// dismissibleAlerts. If no alerts are present these strings are empty. If DisableAlerts is set then
+// dismissibleAlerts will always be empty. It is up to the caller to decide if errs are ignored.
+//
+// This function notably skips any health checks that require an active client mount, or involve
+// non-critical or transient conditions that might be gone before a user runs a health check (for
+// example busy node checks). When adding checks be careful not to add checks that add noticeable
+// runtime or could potentially cause commands to hang for an extended period.
+func QuickChecks(ctx context.Context) (requiredAlerts string, dismissibleAlerts string, err error) {
+
+	var mgmtdPeer peer.Peer
+	targets, err := tgtBackend.GetTargets(ctx, grpc.Peer(&mgmtdPeer))
+	if err != nil {
+		return requiredAlerts, dismissibleAlerts, fmt.Errorf("unable to execute quick checks: %w", err)
+	}
+
+	result := license.Check(ctx, targets)
+	if result.Err != nil {
+		return requiredAlerts, dismissibleAlerts, fmt.Errorf("unable to execute quick checks: %w", result.Err)
+	}
+
+	if !result.IsHealthy() {
+		if result.InvalidMsg != "" {
+			requiredAlerts = fmt.Sprintf(`WARNING: This system does not have a valid license installed.
+To avoid disruptions, run 'beegfs license' and follow the required steps.
+Reason: %s.
+`, result.InvalidMsg)
+		}
+		if result.ExpirationMsg != "" {
+			requiredAlerts += fmt.Sprintf("WARNING: License is nearing expiration (%s). Run 'beegfs license' for more details.\n", result.ExpirationMsg)
+		}
+		if result.ViolationsMsg != "" {
+			requiredAlerts += fmt.Sprintf("WARNING: License violations found (%s). Run 'beegfs license' for more details.\n", result.ViolationsMsg)
+		}
+	}
+
+	if viper.GetBool(config.DisableAlerts) {
+		return requiredAlerts, dismissibleAlerts, nil
+	}
+
+	dismissibleWarning := false
+	if tlsStatus, _ := checkTLSCertificates(ctx, mgmtdPeer); tlsStatus != Healthy {
+		dismissibleWarning = true
+	}
+	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
+	if reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy {
+		dismissibleWarning = true
+	}
+	if dismissibleWarning {
+		dismissibleAlerts = fmt.Sprintf("WARNING: One or more health checks are failing, run 'beegfs health check' for more details. Set the global %s flag to turn off this message.\n", config.DisableAlerts)
+	}
+	return requiredAlerts, dismissibleAlerts, nil
 }

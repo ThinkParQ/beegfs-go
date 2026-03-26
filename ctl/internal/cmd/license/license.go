@@ -69,7 +69,7 @@ func NewCmd() *cobra.Command {
 		Short: "Query license information",
 		Args:  cobra.NoArgs,
 		Annotations: map[string]string{
-			"license.SkipWarnings": "",
+			"health.SkipAlerts": "",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.Get {
@@ -198,7 +198,7 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 
 		// Check if any license conditions are violated and that the license is valid.
 		// IMPORTANT: Ensure to keep license.Check() updated with any changes to these checks.
-		if err := licenseCmd.CheckIfOverStorageCapacityLimit(cmd.Context(), capacityLimitBytes); err != nil {
+		if err := licenseCmd.CheckIfOverStorageCapacityLimit(cmd.Context(), capacityLimitBytes, nil); err != nil {
 			color = "\033[31m" // Red if there is a license violation.
 			defer cmdfmt.Printf("\nWARNING: License violations found (%s). Contact %s for options to increase licensed limits or enable additional features.\n", err, licenseCmd.ContactEmail)
 		}
@@ -312,7 +312,7 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	totalStorageCapacity, err := licenseCmd.TotalStorageCapacity(ctx)
+	totalStorageCapacity, err := licenseCmd.TotalStorageCapacity(ctx, nil)
 	if err != nil {
 		return "", err
 	}
