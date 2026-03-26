@@ -45,7 +45,9 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
-# insecure = false
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
 #
 # [telemetry.prometheus]
 # enabled = false
@@ -56,7 +58,9 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
-# insecure = false
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
 # # headers = { Authorization = "Bearer <token>" }
 
 #

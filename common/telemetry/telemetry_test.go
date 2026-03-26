@@ -2,10 +2,18 @@ package telemetry_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -524,11 +532,11 @@ func TestOTLPReaderConstruction(t *testing.T) {
 				Enabled:     true,
 				ServiceName: "otlp-test",
 				OTLP: telemetry.OTLPConfig{
-					Enabled:  true,
-					Protocol: protocol,
-					Endpoint: "localhost:4317",
-					Interval: 30 * time.Second,
-					Insecure: true,
+					Enabled:    true,
+					Protocol:   protocol,
+					Endpoint:   "localhost:4317",
+					Interval:   30 * time.Second,
+					TLSDisable: true,
 				},
 			})
 			require.NoError(t, err)
@@ -614,10 +622,10 @@ func TestLogsIndependentOfMetrics(t *testing.T) {
 		Enabled:     false,
 		ServiceName: "logs-only",
 		Logs: telemetry.LogsConfig{
-			Enabled:  true,
-			Protocol: "grpc",
-			Endpoint: "localhost:4317",
-			Insecure: true,
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			TLSDisable: true,
 		},
 	})
 	require.NoError(t, err)
@@ -645,10 +653,10 @@ func TestLogsAndMetricsEnabled(t *testing.T) {
 			Path:    "/metrics",
 		},
 		Logs: telemetry.LogsConfig{
-			Enabled:  true,
-			Protocol: "grpc",
-			Endpoint: "localhost:4317",
-			Insecure: true,
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			TLSDisable: true,
 		},
 	})
 	require.NoError(t, err)
@@ -678,10 +686,10 @@ func TestShutdownWithLogsEnabled(t *testing.T) {
 		Enabled:     false,
 		ServiceName: "log-shutdown-test",
 		Logs: telemetry.LogsConfig{
-			Enabled:  true,
-			Protocol: "grpc",
-			Endpoint: "localhost:4317",
-			Insecure: true,
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			TLSDisable: true,
 		},
 	})
 	require.NoError(t, err)
@@ -697,10 +705,10 @@ func TestLogsExporterConstruction(t *testing.T) {
 				Enabled:     false,
 				ServiceName: "log-exporter-test",
 				Logs: telemetry.LogsConfig{
-					Enabled:  true,
-					Protocol: protocol,
-					Endpoint: "localhost:4317",
-					Insecure: true,
+					Enabled:    true,
+					Protocol:   protocol,
+					Endpoint:   "localhost:4317",
+					TLSDisable: true,
 				},
 			})
 			require.NoError(t, err)
@@ -708,4 +716,121 @@ func TestLogsExporterConstruction(t *testing.T) {
 			assert.NotNil(t, p.LogProvider())
 		})
 	}
+}
+
+// TestTLSDisableVerification verifies that TLSDisableVerification=true (without TLSDisable)
+// succeeds for construction of both OTLP metric and log exporters across protocols.
+// Connection is deferred so no server is needed.
+func TestTLSDisableVerification(t *testing.T) {
+	for _, protocol := range []string{"grpc", "http"} {
+		t.Run("otlp/"+protocol, func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     true,
+				ServiceName: "tls-skip-verify-test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:                true,
+					Protocol:               protocol,
+					Endpoint:               "localhost:4317",
+					Interval:               30 * time.Second,
+					TLSDisableVerification: true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+		})
+		t.Run("logs/"+protocol, func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     false,
+				ServiceName: "tls-skip-verify-test",
+				Logs: telemetry.LogsConfig{
+					Enabled:                true,
+					Protocol:               protocol,
+					Endpoint:               "localhost:4317",
+					TLSDisableVerification: true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+			assert.NotNil(t, p.LogProvider())
+		})
+	}
+}
+
+// TestTLSCertFileErrors verifies error handling in buildClientTLSConfig for bad cert file inputs.
+func TestTLSCertFileErrors(t *testing.T) {
+	t.Run("non-existent cert file returns error", func(t *testing.T) {
+		_, err := telemetry.New(telemetry.Config{
+			Enabled:     true,
+			ServiceName: "cert-err-test",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:     true,
+				Protocol:    "grpc",
+				Endpoint:    "localhost:4317",
+				Interval:    30 * time.Second,
+				TLSCertFile: "/nonexistent/cert.pem",
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reading certificate file failed")
+	})
+
+	t.Run("invalid PEM content returns error", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "bad-cert-*.pem")
+		require.NoError(t, err)
+		_, err = f.WriteString("-----BEGIN CERTIFICATE-----\nnot a real cert\n-----END CERTIFICATE-----\n")
+		require.NoError(t, err)
+		f.Close()
+
+		_, err = telemetry.New(telemetry.Config{
+			Enabled:     false,
+			ServiceName: "cert-err-test",
+			Logs: telemetry.LogsConfig{
+				Enabled:     true,
+				Protocol:    "grpc",
+				Endpoint:    "localhost:4317",
+				TLSCertFile: f.Name(),
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "appending provided certificate to pool failed")
+	})
+
+	t.Run("valid self-signed cert file succeeds construction", func(t *testing.T) {
+		cert := generateSelfSignedCert(t)
+		f, err := os.CreateTemp(t.TempDir(), "valid-cert-*.pem")
+		require.NoError(t, err)
+		_, err = f.Write(cert)
+		require.NoError(t, err)
+		f.Close()
+
+		p, err := telemetry.New(telemetry.Config{
+			Enabled:     false,
+			ServiceName: "cert-ok-test",
+			Logs: telemetry.LogsConfig{
+				Enabled:     true,
+				Protocol:    "grpc",
+				Endpoint:    "localhost:4317",
+				TLSCertFile: f.Name(),
+			},
+		})
+		require.NoError(t, err)
+		defer p.Shutdown(context.Background())
+		assert.NotNil(t, p.LogProvider())
+	})
+}
+
+// generateSelfSignedCert creates a minimal self-signed CA cert in PEM format for testing.
+func generateSelfSignedCert(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }

@@ -26,7 +26,7 @@ const (
 )
 
 // Config represents the telemetry configuration. It is embedded in each
-// service's AppConfig and follows the same mapstructure pattern as logger.Config.
+// service's AppConfig.
 type Config struct {
 	Enabled     bool             `mapstructure:"enabled"`
 	ServiceName string           `mapstructure:"service-name"`
@@ -38,12 +38,14 @@ type Config struct {
 
 // OTLPConfig holds configuration for the OTLP metric exporter.
 type OTLPConfig struct {
-	Enabled  bool              `mapstructure:"enabled"`
-	Protocol string            `mapstructure:"protocol"` // protocolGRPC or protocolHTTP
-	Endpoint string            `mapstructure:"endpoint"`
-	Interval time.Duration     `mapstructure:"interval"`
-	Insecure bool              `mapstructure:"insecure"`
-	Headers  map[string]string `mapstructure:"headers"`
+	Enabled                bool              `mapstructure:"enabled"`
+	Protocol               string            `mapstructure:"protocol"` // protocolGRPC or protocolHTTP
+	Endpoint               string            `mapstructure:"endpoint"`
+	Interval               time.Duration     `mapstructure:"interval"`
+	TLSCertFile            string            `mapstructure:"tls-cert-file"`
+	TLSDisableVerification bool              `mapstructure:"tls-disable-verification"`
+	TLSDisable             bool              `mapstructure:"tls-disable"`
+	Headers                map[string]string `mapstructure:"headers"`
 }
 
 // PrometheusConfig holds configuration for the Prometheus metric exporter.
@@ -65,11 +67,13 @@ type HistogramConfig struct {
 // This config is independent of Config.Enabled: enabling logs does not
 // require enabling OTLP metrics, and they may use different endpoints.
 type LogsConfig struct {
-	Enabled  bool              `mapstructure:"enabled"`
-	Protocol string            `mapstructure:"protocol"`
-	Endpoint string            `mapstructure:"endpoint"`
-	Insecure bool              `mapstructure:"insecure"`
-	Headers  map[string]string `mapstructure:"headers"`
+	Enabled                bool              `mapstructure:"enabled"`
+	Protocol               string            `mapstructure:"protocol"`
+	Endpoint               string            `mapstructure:"endpoint"`
+	TLSCertFile            string            `mapstructure:"tls-cert-file"`
+	TLSDisableVerification bool              `mapstructure:"tls-disable-verification"`
+	TLSDisable             bool              `mapstructure:"tls-disable"`
+	Headers                map[string]string `mapstructure:"headers"`
 }
 
 // ValidateConfig checks telemetry configuration for consistency.
