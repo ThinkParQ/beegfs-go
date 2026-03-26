@@ -495,22 +495,27 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	var jobSubmission workermgr.JobSubmission
 	if jr.GenerationStatus != nil {
 		status := jr.GenerationStatus
-		if status != nil {
-			switch status.State {
-			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
-				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
-				// mark the job as complete so ignore the err.
-				mtime, _ := time.ParseDateTime(status.Message)
-				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
-			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
-				err = rst.ErrJobAlreadyOffloaded
-			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
-				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
-			case beeremote.JobRequest_GenerationStatus_ERROR:
-				err = errors.New(status.Message)
-			default:
-				err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
+		switch status.GetState() {
+		case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
+			// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
+			// mark the job as complete so ignore the err.
+			mtime, _ := time.ParseDateTime(status.Message)
+			err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
+		case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
+			err = rst.ErrJobAlreadyOffloaded
+		case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
+			err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+		case beeremote.JobRequest_GenerationStatus_ERROR:
+			err = errors.New(status.Message)
+		case beeremote.JobRequest_GenerationStatus_NOT_READY:
+			after, _ := time.ParseDateTime(status.Message)
+			executeAfter := timestamppb.New(after)
+			jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
+			for _, workRequest := range jobSubmission.WorkRequests {
+				workRequest.ExecuteAfter = executeAfter
 			}
+		default:
+			err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
 		}
 	} else {
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
@@ -617,7 +622,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// workers they should cancel those jobs to cleanup any remnants and retry the job creation.
 	// However if we don't have a journal, is there a more simpler way we can ensure this never
 	// happens? Or is it so unlikely its not worth trying to solve?
-
 	m.log.Debug("created job", zap.Any("job", job))
 
 	workRequests := rst.RecreateWorkRequests(job.Get(), job.GetSegments())

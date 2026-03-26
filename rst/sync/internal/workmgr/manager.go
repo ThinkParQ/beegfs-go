@@ -399,6 +399,7 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 		return
 	}
 
+	currentTime := time.Now()
 	var lastSubmissionId string
 	for item != nil && *availableTokens > 0 {
 		submissionId := item.Key
@@ -410,10 +411,14 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			workRequestID: entry.WorkRequest.RequestId,
 		}
 
-		// Check based on the work identifier if there is already an existing workContext in the
-		// activeWork map. If so skip adding it to the map or queue again as we could block a worker
-		// when it tries to lock the journal entry if another worker is already handling the WR.
-		if _, ok := m.activeWork[workId]; !ok {
+		if currentTime.Before(entry.ExecuteAfter) {
+			// New work request is not ready and will be placed in the wait queue.
+			m.scheduler.RemoveWorkToken(submissionId)
+			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
+		} else if _, ok := m.activeWork[workId]; !ok {
+			// Check based on the work identifier if there is already an existing workContext in the
+			// activeWork map. If so skip adding it to the map or queue again as we could block a worker
+			// when it tries to lock the journal entry if another worker is already handling the WR.
 			workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
 			activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 			m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
@@ -632,14 +637,20 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}
+
 	defer func() {
 		if err := commitAndReleaseWork(); err != nil {
 			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
+
 		m.scheduler.AddWorkToken(submissionId)
 		beeSyncNewRequests.Add(priorityIdMap[priority], 1)
 	}()
 
+	executeAfter := wr.GetExecuteAfter()
+	if executeAfter != nil {
+		workEntry.Value.ExecuteAfter = executeAfter.AsTime()
+	}
 	wr.SetPriority(priority)
 	workEntry.Value.WorkRequest = &workRequest{WorkRequest: wr}
 	workResult := newWorkFromRequest(workEntry.Value.WorkRequest)

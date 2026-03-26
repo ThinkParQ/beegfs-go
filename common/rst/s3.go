@@ -46,6 +46,8 @@ type s3Provider interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
+	BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
 type s3ProviderFactory func(client *defaultS3Provider) s3Provider
@@ -108,6 +110,14 @@ func (a *defaultS3Provider) UploadPart(ctx context.Context, params *s3.UploadPar
 
 func (a *defaultS3Provider) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 	return a.client.GetObject(ctx, params, optFns...)
+}
+
+func (a *defaultS3Provider) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+	return false, false, 0
+}
+
+func (a *defaultS3Provider) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+	return nil, nil, nil
 }
 
 type S3StorageClass struct {
@@ -366,6 +376,14 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 // ExecuteJobBuilderRequest is not implemented and should never be called.
 func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
 	return false, ErrUnsupportedOpForRST
+}
+
+func (r *S3Client) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+	return false, false, 0
+}
+
+func (r *S3Client) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
+	return nil, nil, nil
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {

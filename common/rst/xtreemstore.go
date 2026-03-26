@@ -5,10 +5,24 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
+
+type xtreemstoreS3Provider struct {
+	s3Provider
+}
+
+func (p *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	// Update xtreemstore head-object api request headers to include storage details.
+	optFns = append(optFns, func(options *s3.Options) {
+		options.APIOptions = append(options.APIOptions, smithyhttp.AddHeaderValue("x-amz-meta-xts-request-storage-details", "true"))
+	})
+	return p.s3Provider.HeadObject(ctx, in, optFns...)
+}
 
 // XtreemStoreClient is a dedicated provider type for xtreemstore targets. It currently reuses the
 // S3 provider implementation while keeping a separate type so xtreemstore-specific behavior can be
@@ -19,6 +33,17 @@ type XtreemStoreClient struct {
 
 var _ Provider = &XtreemStoreClient{}
 
+// xtreemstoreBulkOperation represents the type of bulk request being built for a builder job.
+type xtreemstoreBulkOperation string
+
+const (
+	xtreemstoreBulkOperationRestore xtreemstoreBulkOperation = "restore"
+)
+
+var xtreemstoreBulkOperations = []xtreemstoreBulkOperation{
+	xtreemstoreBulkOperationRestore,
+}
+
 // newXtreemstore initializes an xtreemstore provider by reusing the S3 client implementation.
 func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
 	xtreemstore := rstConfig.GetXtreemstore()
@@ -26,7 +51,11 @@ func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mo
 		return nil, fmt.Errorf("xtreemstore configuration must include s3 settings")
 	}
 
-	client, err := newS3WithProvider(ctx, rstConfig, xtreemstore.GetS3(), mountPoint, nil)
+	providerFactory := func(client *defaultS3Provider) s3Provider {
+		return &xtreemstoreS3Provider{s3Provider: client}
+	}
+	client, err := newS3WithProvider(ctx, rstConfig, xtreemstore.GetS3(), mountPoint, providerFactory)
+
 	if err != nil {
 		return nil, err
 	}
@@ -81,4 +110,12 @@ func (x *XtreemStoreClient) GenerateExternalId(ctx context.Context, cfg *flex.Jo
 
 func (x *XtreemStoreClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
 	return x.S3Client.IsWorkRequestReady(ctx, request)
+}
+
+func (x *XtreemStoreClient) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+	return false, false, 0
+}
+
+func (x *XtreemStoreClient) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+	return nil, nil, nil
 }

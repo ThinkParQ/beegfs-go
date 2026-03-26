@@ -69,6 +69,11 @@ var SupportedRSTTypes = map[string]func() (any, any){
 	// Mock could be included here if it ever made sense to allow configuration using a file.
 }
 
+// BulkRequestCfgStream is a receive-only stream of request configs consumed to build a
+// provider-specific bulk request.
+type BulkRequestCfgStream <-chan *flex.JobRequestCfg
+type SubmitBulkRequestFn func() error
+type AppendBulkRequestCfgFn func(*flex.JobRequestCfg)
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
 	GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest
@@ -126,6 +131,24 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
+	// PlanRequestSubmission determines whether a request config should be added to a
+	// provider-specific bulk request and whether the individual job request should be skipped.
+	//
+	// includeInBulk=true passes this config to BuildBulkRequests using the returned append callback.
+	// skipIndividual=true skips submitting the individual request.
+	// Returning includeInBulk=false and skipIndividual=true is invalid because the request would
+	// neither be added to a bulk request nor submitted individually, and the builder will mark it
+	// as an error.
+	PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
+	// BuildBulkRequests initializes provider-specific bulk request construction.
+	// It returns a submit callback that finalizes and submits the provider-specific bulk request
+	// after all configs have been appended, and an append callback for configs selected for bulk
+	// processing.
+	//
+	// Return an error only for fatal setup failures that must abort the builder job entirely.
+	// submitBulkRequest should return an error only for fatal finalization or submission failures
+	// that must abort the builder job entirely.
+	BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -259,13 +282,25 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 	return segments
 }
 
+type builtJobRequest struct {
+	request *beeremote.JobRequest
+	cfg     *flex.JobRequestCfg
+}
+
 // BuildJobRequests returns a list of job requests, one for each remote target. Unless
 // skipPrepareJob=true then remote resource information will be added to the request's lockedInfo
 // and common checks and tasks will be preformed.
 //
 // A returned error indicates that one or more job request were not able to be built. However, if
 // a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+func BuildJobRequests(
+	ctx context.Context,
+	rstMap map[uint32]Provider,
+	mountPoint filesystem.Provider,
+	inMountPath string,
+	remotePath string,
+	cfg *flex.JobRequestCfg,
+) ([]*builtJobRequest, error) {
 	keepLock := false
 	lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
 
@@ -298,7 +333,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 	}
 
 	var errs []error
-	var requests []*beeremote.JobRequest
+	var requests []*builtJobRequest
 	for _, rstId := range rstIds {
 		client, ok := rstMap[rstId]
 		if !ok {
@@ -320,7 +355,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 				Message: fmt.Sprintf("failed to build job request: %s", err.Error()),
 			}
 			request.SetGenerationStatus(status)
-			requests = append(requests, request)
+			requests = append(requests, &builtJobRequest{request: request, cfg: requestCfg})
 			continue
 		}
 
@@ -346,8 +381,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 				keepLock = true
 			}
 		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
-
-		requests = append(requests, request)
+		requests = append(requests, &builtJobRequest{request: request, cfg: requestCfg})
 	}
 
 	return requests, errors.Join(errs...)
