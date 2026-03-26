@@ -384,6 +384,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 
 	// If no quotas were returned, this will never be set.
 	refreshPeriod := "?"
+	entriesFound := false
 
 	tbl := cmdfmt.NewPrintomatic(
 		[]string{"name", "id", "type", "pool", "space", "inode"},
@@ -401,6 +402,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 
 		// The first entry comes with the refresh period field
 		if refreshPeriod == "?" {
+			entriesFound = true
 			p := resp.GetRefreshPeriodS()
 			if p == 0 {
 				refreshPeriod = "?"
@@ -486,7 +488,11 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	}
 
 	tbl.PrintRemaining()
-	cmdfmt.Printf("INFO: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
+	if entriesFound {
+		cmdfmt.Printf("INFO: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
+	} else {
+		cmdfmt.Printf("WARNING: No information found for the specified ID(s). Either these ID(s) do not exist, or the management is not configured to query/enforce their quotas.\n")
+	}
 
 	return nil
 }
