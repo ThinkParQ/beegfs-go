@@ -50,9 +50,13 @@ type OTLPConfig struct {
 
 // PrometheusConfig holds configuration for the Prometheus metric exporter.
 type PrometheusConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	Port    int    `mapstructure:"port"`
-	Path    string `mapstructure:"path"`
+	Enabled       bool   `mapstructure:"enabled"`
+	ListenAddress string `mapstructure:"listen-address"`
+	Port          int    `mapstructure:"port"`
+	Path          string `mapstructure:"path"`
+	TLSCertFile   string `mapstructure:"tls-cert-file"`
+	TLSKeyFile    string `mapstructure:"tls-key-file"`
+	TLSDisable    bool   `mapstructure:"tls-disable"`
 }
 
 // HistogramConfig allows overriding the default OTel histogram bucket boundaries.
@@ -105,6 +109,13 @@ func (c *Config) ValidateConfig() error {
 			}
 			if c.Prometheus.Path == "" {
 				return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
+			}
+			if !c.Prometheus.TLSDisable {
+				certSet := c.Prometheus.TLSCertFile != ""
+				keySet := c.Prometheus.TLSKeyFile != ""
+				if certSet != keySet {
+					return fmt.Errorf("telemetry.prometheus: tls-cert-file and tls-key-file must both be set or both be empty")
+				}
 			}
 		}
 	}

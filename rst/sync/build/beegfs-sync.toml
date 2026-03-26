@@ -133,8 +133,12 @@ tls-disable = false
 #
 # [telemetry.prometheus]
 # enabled = false
+# listen-address = "0.0.0.0"
 # port = 9090
 # path = "/metrics"
+# tls-cert-file = ""
+# tls-key-file = ""
+# tls-disable = false
 #
 # [telemetry.logs]
 # enabled = false
