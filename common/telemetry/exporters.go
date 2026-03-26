@@ -59,7 +59,7 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 	var err error
 
 	switch cfg.Protocol {
-	case "grpc":
+	case protocolGRPC:
 		grpcOpts := []otlpmetricgrpc.Option{
 			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
 		}
@@ -71,7 +71,7 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 		}
 		exporter, err = otlpmetricgrpc.New(context.Background(), grpcOpts...)
 
-	case "http":
+	case protocolHTTP:
 		httpOpts := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(cfg.Endpoint),
 		}
@@ -108,7 +108,7 @@ func buildPrometheusReader() (*prometheusReader, error) {
 // buildLogExporter constructs an OTLP log exporter for the given configuration.
 func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 	switch cfg.Protocol {
-	case "grpc":
+	case protocolGRPC:
 		grpcOpts := []otlploggrpc.Option{
 			otlploggrpc.WithEndpoint(cfg.Endpoint),
 		}
@@ -124,7 +124,7 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 		}
 		return exp, nil
 
-	case "http":
+	case protocolHTTP:
 		httpOpts := []otlploghttp.Option{
 			otlploghttp.WithEndpoint(cfg.Endpoint),
 		}

@@ -1094,4 +1094,3 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 		})
 	}
 }
-
