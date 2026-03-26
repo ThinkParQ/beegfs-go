@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"fmt"
+
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"go.uber.org/zap"
