@@ -7,6 +7,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
+	"google.golang.org/grpc"
 )
 
 type GetTargets_Result struct {
@@ -39,14 +40,16 @@ const (
 	CapacityEmergency = "Emergency"
 )
 
-// Get the complete list of targets from the mananagement
-func GetTargets(ctx context.Context) ([]GetTargets_Result, error) {
+// Get the complete list of targets from the management. This accepts optional grpc.CallOptions so
+// information can be extracted from the underlying gRPC connection. This allow TLS health checks
+// without requiring additional gRPC calls since the target list is always needed for health checks.
+func GetTargets(ctx context.Context, opts ...grpc.CallOption) ([]GetTargets_Result, error) {
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
 		return nil, err
 	}
 
-	targets, err := mgmtd.GetTargets(ctx, &pm.GetTargetsRequest{})
+	targets, err := mgmtd.GetTargets(ctx, &pm.GetTargetsRequest{}, opts...)
 	if err != nil {
 		return nil, err
 	}
