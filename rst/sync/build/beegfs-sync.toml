@@ -127,7 +127,9 @@ tls-disable = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
-# insecure = false
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
 #
 # [telemetry.prometheus]
 # enabled = false
@@ -138,7 +140,9 @@ tls-disable = false
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
-# insecure = false
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
 # # headers = { Authorization = "Bearer <token>" }
 
 # Configuration for the BeeGFS Remote node must be specified under [remote]. Most configuration such

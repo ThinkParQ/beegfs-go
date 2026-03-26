@@ -2,9 +2,14 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+
+	"google.golang.org/grpc/credentials"
 
 	otlploggrpc "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	otlploghttp "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -54,17 +59,54 @@ func buildReaders(cfg Config) ([]sdkmetric.Reader, *prometheusReader, error) {
 	return readers, promRdr, nil
 }
 
+// buildClientTLSConfig constructs a *tls.Config for OTLP exporters.
+// Returns nil when certFile is empty and disableVerification is false; callers must
+// not pass any TLS option to the exporter in that case, letting the OTel SDK use its
+// default transport (which enables TLS using the system cert pool).
+func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Config, error) {
+	if certFile == "" && !disableVerification {
+		return nil, nil
+	}
+	certPool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("couldn't load system cert pool: %w", err)
+	}
+	if certFile != "" {
+		cert, err := os.ReadFile(certFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
+		}
+		if !certPool.AppendCertsFromPEM(cert) {
+			return nil, fmt.Errorf("appending provided certificate to pool failed")
+		}
+	}
+	return &tls.Config{
+		RootCAs:            certPool,
+		InsecureSkipVerify: disableVerification,
+	}, nil
+}
+
 func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 	var exporter sdkmetric.Exporter
 	var err error
 
+	// If the user explicitly disabled TLS that takes precedence; TLSCertFile and
+	// TLSDisableVerification are ignored when TLSDisable is set.
 	switch cfg.Protocol {
 	case protocolGRPC:
 		grpcOpts := []otlpmetricgrpc.Option{
 			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
 		}
-		if cfg.Insecure {
+		if cfg.TLSDisable {
 			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
+		} else {
+			tlsCfg, err := buildClientTLSConfig(cfg.TLSCertFile, cfg.TLSDisableVerification)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build TLS config: %w", err)
+			}
+			if tlsCfg != nil {
+				grpcOpts = append(grpcOpts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
+			}
 		}
 		if len(cfg.Headers) > 0 {
 			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithHeaders(cfg.Headers))
@@ -75,8 +117,16 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 		httpOpts := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(cfg.Endpoint),
 		}
-		if cfg.Insecure {
+		if cfg.TLSDisable {
 			httpOpts = append(httpOpts, otlpmetrichttp.WithInsecure())
+		} else {
+			tlsCfg, err := buildClientTLSConfig(cfg.TLSCertFile, cfg.TLSDisableVerification)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build TLS config: %w", err)
+			}
+			if tlsCfg != nil {
+				httpOpts = append(httpOpts, otlpmetrichttp.WithTLSClientConfig(tlsCfg))
+			}
 		}
 		if len(cfg.Headers) > 0 {
 			httpOpts = append(httpOpts, otlpmetrichttp.WithHeaders(cfg.Headers))
@@ -112,8 +162,16 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 		grpcOpts := []otlploggrpc.Option{
 			otlploggrpc.WithEndpoint(cfg.Endpoint),
 		}
-		if cfg.Insecure {
+		if cfg.TLSDisable {
 			grpcOpts = append(grpcOpts, otlploggrpc.WithInsecure())
+		} else {
+			tlsCfg, err := buildClientTLSConfig(cfg.TLSCertFile, cfg.TLSDisableVerification)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build TLS config: %w", err)
+			}
+			if tlsCfg != nil {
+				grpcOpts = append(grpcOpts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
+			}
 		}
 		if len(cfg.Headers) > 0 {
 			grpcOpts = append(grpcOpts, otlploggrpc.WithHeaders(cfg.Headers))
@@ -128,8 +186,16 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 		httpOpts := []otlploghttp.Option{
 			otlploghttp.WithEndpoint(cfg.Endpoint),
 		}
-		if cfg.Insecure {
+		if cfg.TLSDisable {
 			httpOpts = append(httpOpts, otlploghttp.WithInsecure())
+		} else {
+			tlsCfg, err := buildClientTLSConfig(cfg.TLSCertFile, cfg.TLSDisableVerification)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build TLS config: %w", err)
+			}
+			if tlsCfg != nil {
+				httpOpts = append(httpOpts, otlploghttp.WithTLSClientConfig(tlsCfg))
+			}
 		}
 		if len(cfg.Headers) > 0 {
 			httpOpts = append(httpOpts, otlploghttp.WithHeaders(cfg.Headers))
