@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -819,6 +820,107 @@ func TestTLSCertFileErrors(t *testing.T) {
 	})
 }
 
+// TestPrometheusEndpointTLS starts a provider with TLS configured, verifies that a plain
+// HTTP client is rejected, then verifies an HTTPS client with the self-signed cert succeeds.
+func TestPrometheusEndpointTLS(t *testing.T) {
+	certPEM, keyPEM := generateServerCert(t)
+
+	certFile, err := os.CreateTemp(t.TempDir(), "cert-*.pem")
+	require.NoError(t, err)
+	_, err = certFile.Write(certPEM)
+	require.NoError(t, err)
+	certFile.Close()
+
+	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
+	require.NoError(t, err)
+	_, err = keyFile.Write(keyPEM)
+	require.NoError(t, err)
+	keyFile.Close()
+
+	port := findFreePort(t)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "tls-test",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled:     true,
+			Port:        port,
+			Path:        "/metrics",
+			TLSCertFile: certFile.Name(),
+			TLSKeyFile:  keyFile.Name(),
+		},
+	})
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
+
+	// Record a metric so we can assert body content on the TLS path.
+	counter, err := p.Meter("test").Int64Counter("tls_test_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 7)
+
+	// Plain HTTP must not succeed — the server speaks TLS. Go's TLS stack
+	// either closes the connection (returning an error) or sends an HTTP 400.
+	// Accept either outcome; both prove TLS is enforced.
+	plainURL := fmt.Sprintf("http://localhost:%d/metrics", port)
+	plainResp, plainErr := http.Get(plainURL) //nolint:noctx
+	if plainErr == nil {
+		plainResp.Body.Close()
+		assert.NotEqual(t, http.StatusOK, plainResp.StatusCode, "plain HTTP client should not get 200 from a TLS server")
+	}
+
+	// HTTPS client with the self-signed cert in its trust pool must succeed
+	// and return the recorded metric.
+	certPool := x509.NewCertPool()
+	ok := certPool.AppendCertsFromPEM(certPEM)
+	require.True(t, ok)
+	tlsClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: certPool},
+		},
+	}
+	url := fmt.Sprintf("https://localhost:%d/metrics", port)
+	resp, err := tlsClient.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "tls_test_counter", "recorded counter should appear in TLS-secured Prometheus response")
+}
+
+// TestPrometheusPartialTLSConfig verifies that ValidateConfig rejects configs where
+// only one of tls-cert-file and tls-key-file is set.
+func TestPrometheusPartialTLSConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		certSet bool
+		keySet  bool
+	}{
+		{"cert only", true, false},
+		{"key only", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := telemetry.Config{
+				Enabled:     true,
+				ServiceName: "partial-tls-test",
+				Prometheus: telemetry.PrometheusConfig{
+					Enabled: true,
+					Port:    findFreePort(t),
+					Path:    "/metrics",
+				},
+			}
+			if tt.certSet {
+				cfg.Prometheus.TLSCertFile = "/some/cert.pem"
+			}
+			if tt.keySet {
+				cfg.Prometheus.TLSKeyFile = "/some/key.pem"
+			}
+			err := cfg.ValidateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tls-cert-file and tls-key-file must both be set or both be empty")
+		})
+	}
+}
+
 // generateSelfSignedCert creates a minimal self-signed CA cert in PEM format for testing.
 func generateSelfSignedCert(t *testing.T) []byte {
 	t.Helper()
@@ -833,4 +935,27 @@ func generateSelfSignedCert(t *testing.T) []byte {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	require.NoError(t, err)
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// generateServerCert creates a self-signed cert and private key pair in PEM format for testing.
+func generateServerCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return
 }
