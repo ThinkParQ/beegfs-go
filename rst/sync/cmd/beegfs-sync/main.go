@@ -39,6 +39,7 @@ var (
 
 var capabilities = map[string]*flex.Feature{
 	registry.FeatureFilterFiles: nil,
+	registry.FeatureAutoSync:    nil,
 }
 
 func main() {

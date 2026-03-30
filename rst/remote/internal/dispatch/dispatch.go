@@ -93,6 +93,11 @@ func (d *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 
 	// If a restore is currently in progress this will fail for "stub file is malformed". If a
 	// restore was already requested but not yet started, then the job submission below is rejected.
+	// We could add a dedupe map here, but if we set to short a TTL duplicates will slip through
+	// anyway, and too long and we might suppress legitimate retries after a failed restore or
+	// scenarios where a file was offloaded/restored/offloaded (weird, but possible). We already
+	// have a three layer defense against races between the data state check, GetStubContents
+	// failure, and SubmitJobRequest rejecting duplicate requests, no need to add extra complexity.
 	id, url, err := d.jobMgr.GetStubContents(path)
 	if err != nil {
 		d.log.Warn("skipping automatic restore as the stub file's contents could not be retrieved", zap.String("path", path), zap.Error(err))
