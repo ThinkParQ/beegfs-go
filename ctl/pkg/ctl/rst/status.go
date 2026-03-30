@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -575,7 +576,7 @@ func getPathStatusFromDatabase(
 			}
 		} else {
 			syncReason := "No remote targets were specified or configured on this entry."
-			if entry.Entry.Details.FileState.GetDataState() == rst.DataStateOffloaded {
+			if beegfs.IsDataStateOffloaded(entry.Entry.Details.FileState.GetDataState()) {
 				syncReason = "No remote targets were specified or configured on this entry. The contents are offloaded."
 			}
 			return &GetStatusResult{
