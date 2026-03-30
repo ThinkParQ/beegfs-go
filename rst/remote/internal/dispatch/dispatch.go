@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"context"
+	"expvar"
 	"path"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -16,29 +18,46 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	dispatchRestoresTriggered   = expvar.NewInt("beeremote_dispatch_restores_triggered")
+	dispatchRestoresRateLimited = expvar.NewInt("beeremote_dispatch_restores_rate_limited")
+)
+
 type Config struct {
+	// RateLimitWindow is the rolling time window for per-user rate limiting.
+	RateLimitWindow time.Duration `mapstructure:"rate-limit-window"`
+	// RateLimitMaxEvents is the maximum number of restores a single user can trigger per window.
+	RateLimitMaxEvents int `mapstructure:"rate-limit-max-events"`
 }
 
 type Manager struct {
-	log       *zap.Logger
-	jobMgr    *job.Manager
-	events    <-chan *beewatch.Event
-	acks      chan<- subscriber.Ack
-	wg        sync.WaitGroup
-	ctx       context.Context
-	ctxCancel context.CancelFunc
+	log         *zap.Logger
+	jobMgr      *job.Manager
+	events      <-chan *beewatch.Event
+	acks        chan<- subscriber.Ack
+	wg          sync.WaitGroup
+	ctx         context.Context
+	ctxCancel   context.CancelFunc
+	rateLimiter *rateLimiter
 }
 
-func New(log *zap.Logger, jobMgr *job.Manager, events <-chan *beewatch.Event, acks chan<- subscriber.Ack) *Manager {
+func New(cfg Config, log *zap.Logger, jobMgr *job.Manager, events <-chan *beewatch.Event, acks chan<- subscriber.Ack) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	if cfg.RateLimitWindow == 0 {
+		cfg.RateLimitWindow = 5 * time.Minute
+	}
+	if cfg.RateLimitMaxEvents == 0 {
+		cfg.RateLimitMaxEvents = 10
+	}
 	return &Manager{
-		log:       log,
-		jobMgr:    jobMgr,
-		events:    events,
-		acks:      acks,
-		ctx:       ctx,
-		ctxCancel: cancel,
+		log:         log,
+		jobMgr:      jobMgr,
+		events:      events,
+		acks:        acks,
+		ctx:         ctx,
+		ctxCancel:   cancel,
+		rateLimiter: newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents),
 	}
 }
 
@@ -53,6 +72,12 @@ func (d *Manager) Start() {
 			}
 		}
 	})
+}
+
+// ResetUserRateLimit clears the rate limit state for the given user ID, allowing them to
+// immediately trigger restores again. Safe to call from any goroutine (e.g., a gRPC handler).
+func (d *Manager) ResetUserRateLimit(userId uint32) {
+	d.rateLimiter.resetUser(userId)
 }
 
 func (d *Manager) Stop() {
@@ -78,6 +103,7 @@ func (d *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 	}
 
 	path := e.V2.GetPath()
+	userId := e.V2.GetMsgUserId()
 
 	d.log.Info("detected a blocked open event, checking if the stub file is eligible for automatic restore", zap.String("path", path))
 	entry, err := entry.GetEntry(d.ctx, nil, entry.GetEntriesCfg{}, e.V2.Path)
@@ -87,7 +113,13 @@ func (d *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 	}
 
 	if entry.Entry.FileState.GetDataState() != beegfs.DataStateAutoRestore {
-		d.log.Info("stub file's data state does not allow an automatic restore", zap.String("path", path), zap.Any("dataState", entry.Entry.FileState.GetDataState()))
+		d.log.Debug("stub file's data state does not allow an automatic restore", zap.String("path", path), zap.Any("dataState", entry.Entry.FileState.GetDataState()))
+		return ack
+	}
+
+	if !d.rateLimiter.allow(userId) {
+		d.log.Debug("skipping automatic restore due to per-user rate limit", zap.String("path", path), zap.Uint32("userId", userId))
+		dispatchRestoresRateLimited.Add(1)
 		return ack
 	}
 
@@ -122,6 +154,7 @@ func (d *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 		return ack
 	}
 
+	dispatchRestoresTriggered.Add(1)
 	d.log.Info("stub file restore triggered", zap.Any("result", result))
 
 	return ack
