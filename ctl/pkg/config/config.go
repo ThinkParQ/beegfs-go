@@ -520,7 +520,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 			nict := beegfs.InvalidNicType
 			switch a.GetNicType() {
 			case pb.NicType_ETHERNET:
-				nict = beegfs.Ethernet
+				nict = beegfs.Tcp
 			case pb.NicType_RDMA:
 				nict = beegfs.Rdma
 			}

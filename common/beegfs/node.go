@@ -41,7 +41,7 @@ type NicType int
 
 const (
 	InvalidNicType NicType = iota
-	Ethernet
+	Tcp
 	Rdma
 	Sdp
 )
@@ -49,8 +49,8 @@ const (
 // Output user friendly string representation
 func (n NicType) String() string {
 	switch n {
-	case Ethernet:
-		return "ethernet"
+	case Tcp:
+		return "tcp"
 	case Rdma:
 		return "rdma"
 	case Sdp:

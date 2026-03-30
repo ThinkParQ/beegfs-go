@@ -271,7 +271,7 @@ func parseNodes(input io.Reader) ([]Node, error) {
 				}
 				peer := Peer{}
 				if strings.HasPrefix(part, "TCP:") {
-					peer.Type = beegfs.Ethernet
+					peer.Type = beegfs.Tcp
 				} else if strings.HasPrefix(part, "RDMA:") {
 					peer.Type = beegfs.Rdma
 				} else if strings.HasPrefix(part, "SDP:") {

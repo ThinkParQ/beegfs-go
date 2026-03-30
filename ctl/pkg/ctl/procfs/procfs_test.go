@@ -71,7 +71,7 @@ mds3 [ID: 1]
 					NumID: 1,
 					Root:  true,
 					Peers: []Peer{
-						{Type: beegfs.Ethernet, IP: "192.168.64.2:8005", Connections: 1, Fallback: true},
+						{Type: beegfs.Tcp, IP: "192.168.64.2:8005", Connections: 1, Fallback: true},
 						{Type: beegfs.Rdma, IP: "192.168.64.2:8005", Connections: 63, Fallback: false},
 					},
 				},
