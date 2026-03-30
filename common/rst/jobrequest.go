@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
@@ -194,7 +195,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		return nil, fmt.Errorf("full entry details unavailable for %s: %s", pathInfo.Path, e.EntryInfoPopulated)
 	}
 
-	if e.Details.FileState.GetDataState() == DataStateOffloaded {
+	if beegfs.IsDataStateOffloaded(e.Details.FileState.GetDataState()) {
 		// Attempt to retrieve the stub file content from remote and use the rstId to create the job
 		// requests. Otherwise, send the request to job-builder to complete.
 		resp, err := remote.GetStubContents(ctx, &beeremote.GetStubContentsRequest{Path: pathInfo.Path})
