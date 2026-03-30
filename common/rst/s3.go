@@ -243,7 +243,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -735,7 +735,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
-			entry.SetFileDataState(ctx, request.Path, DataStateNone)
+			entry.SetFileDataState(ctx, request.Path, beegfs.DataStateAvailable)
 		}
 	}
 

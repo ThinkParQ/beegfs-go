@@ -40,14 +40,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const (
-	// LockedAccessFlags defines the access flags applied when locking or unlocking job request and stub files.
-	// Always use this constant when managing RST locks.
-	LockedAccessFlags  beegfs.AccessFlags = beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock
-	DataStateNone      beegfs.DataState   = 0
-	DataStateOffloaded beegfs.DataState   = 1
-)
-
 // SupportedRSTTypes is used with SetRSTTypeHook in the config package to allows configuring with
 // multiple RST types without writing repetitive code. The map contains the all lowercase string
 // identifier of the prefix key of the TOML table used to indicate the configuration options for a
@@ -264,7 +256,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 
 	defer func() {
 		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -495,13 +487,17 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	lockedInfo := cfg.LockedInfo
 
 	fileDataStateCleared := false
+	// originalDataState is fetched below before fileDataStateCleared is set, and errors are now
+	// fatal. We still have to pick a default value, use DataStateManualRestore as it is the safest
+	// choice in case a future bug causes us to not fetch the actual originalDataState.
+	originalDataState := beegfs.DataState(beegfs.DataStateManualRestore)
 	filePreallocated := false
 	fileCreated := false
 	defer func() {
 		if err != nil {
 			if IsFileOffloaded(lockedInfo) {
 				if fileDataStateCleared {
-					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, DataStateOffloaded); restoreErr != nil {
+					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, originalDataState); restoreErr != nil {
 						err = fmt.Errorf("%w: unable to restore offloaded data state: %s", err, restoreErr.Error())
 					}
 				}
@@ -540,7 +536,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 				err = fmt.Errorf("failed to create stub file: %w", err)
 				return
 			}
-			err = entry.SetAccessFlags(ctx, cfg.Path, LockedAccessFlags)
+			err = entry.SetAccessFlags(ctx, cfg.Path, beegfs.LockedContentAccessFlags)
 			if err != nil {
 				return
 			}
@@ -572,8 +568,16 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 					err = ErrOffloadFileUrlMismatch
 					return
 				}
-
-				if err = entry.SetFileDataState(ctx, cfg.Path, DataStateNone); err != nil {
+				// Previously if we couldn't fetch the originalDataState we could default to
+				// DataStateManualRestore, but that is no longer a safe fallback since we support
+				// other data states now. In the unlikely event we can't get the current file data
+				// state, treat it as fatal.
+				originalDataState, err = entry.GetFileDataState(ctx, cfg.Path)
+				if err != nil {
+					err = fmt.Errorf("unable to determine original file data state: refusing to proceed with restoring file contents %w", err)
+					return
+				}
+				if err = entry.SetFileDataState(ctx, cfg.Path, beegfs.DataStateAvailable); err != nil {
 					return
 				}
 				fileDataStateCleared = true
@@ -675,7 +679,7 @@ func GetLockedInfo(
 
 	if !skipAccessLock {
 		if !entryInfo.Entry.FileState.IsReadWriteLocked() {
-			err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
+			err = entry.SetAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
 			if err != nil {
 				return
 			}
@@ -692,7 +696,7 @@ func GetLockedInfo(
 	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	lockedInfo.Mode = uint32(stat.Mode())
 
-	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
+	if beegfs.IsDataStateOffloaded(entryInfo.Entry.FileState.GetDataState()) {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, ErrOffloadFileNotReadable
@@ -726,7 +730,7 @@ func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider
 	if err := mountPoint.CreateWriteClose(path, rstUrl, 0644, overwrite); err != nil {
 		return err
 	}
-	if err := entry.SetFileDataState(ctx, path, DataStateOffloaded); err != nil {
+	if err := entry.SetFileDataState(ctx, path, beegfs.DataStateManualRestore); err != nil {
 		return fmt.Errorf("unable to set offloaded data state: %w", err)
 	}
 
