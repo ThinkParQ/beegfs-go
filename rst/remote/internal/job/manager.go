@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
@@ -1135,11 +1136,11 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 				return nil
 			}
 			return err
-		} else if dataState == rst.DataStateOffloaded {
+		} else if beegfs.IsDataStateOffloaded(dataState) {
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
+		if err := entry.ClearAccessFlags(ctx, path, beegfs.LockedContentAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil

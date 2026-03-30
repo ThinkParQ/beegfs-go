@@ -124,6 +124,12 @@ const (
 	AccessFlagReserved5 AccessFlags = 0x10
 )
 
+const (
+	// LockedContentAccessFlags defines the access flags applied when locking or unlocking job
+	// request and stub files. Always use this constant when managing RST locks.
+	LockedContentAccessFlags AccessFlags = AccessFlagReadLock | AccessFlagWriteLock
+)
+
 // DataState represents an user/application defined data state (upper 3 bits of FileState)
 type DataState uint8
 
@@ -137,6 +143,12 @@ const (
 	// DataStateReserved6
 	// DataStateReserved7
 )
+
+// IsDataStateOffloaded returns true when the data state indicates the file contents have been
+// offloaded to a remote storage target (stub file).
+func IsDataStateOffloaded(state DataState) bool {
+	return state == DataStateManualRestore || state == DataStateAutoRestore
+}
 
 // Masks for extracting parts of the state
 const (
