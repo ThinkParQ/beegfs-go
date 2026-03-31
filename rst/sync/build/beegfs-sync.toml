@@ -118,15 +118,21 @@ tls-disable = false
 # --- Section 3.4: [Remote Settings] ---
 #
 
-# [telemetry]
-# enabled = false
-# service-name = "beegfs-sync"
 #
+# --- Section 3.5: [Telemetry Settings] ---
+#
+[telemetry]
+enabled = false
+service-name = "beegfs-sync"
+
 # [telemetry.otlp]
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
+# url-path = "/v1/metrics"   # HTTP only; Loki-compatible backends use "/otlp/v1/metrics"
+# compression = "gzip"
+# timeout = "10s"
 # tls-cert-file = ""
 # tls-disable-verification = false
 # tls-disable = false
@@ -144,6 +150,9 @@ tls-disable = false
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
+# url-path = "/v1/logs"      # HTTP only; Loki direct ingestion uses "/otlp/v1/logs"
+# compression = "gzip"
+# timeout = "10s"
 # tls-cert-file = ""
 # tls-disable-verification = false
 # tls-disable = false
