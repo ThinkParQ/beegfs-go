@@ -19,10 +19,10 @@ import (
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
-	"github.com/thinkparq/beegfs-go/rst/remote/internal/dispatch"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -290,9 +290,10 @@ Using environment variables:
 	// Setup the event dispatcher. This is fed by the event subscriber wired into the job server.
 	events := make(chan *beewatch.Event, 1024)
 	acks := make(chan subscriber.Ack, 1024)
-	dispatchManager, err := dispatch.New(initialCfg.Dispatch, logger.Logger, jobManager, events, acks)
+	dispatchFn := jobManager.GetEventDispatchFunc(ctx, logger.Logger)
+	dispatchManager, err := dispatch.New(initialCfg.Dispatch, logger.Logger, dispatchFn, events, acks)
 	if err != nil {
-		logger.Fatal("unable to initialize dispatcher", zap.Error(&pflag.InvalidSyntaxError{}))
+		logger.Fatal("unable to initialize dispatcher", zap.Error(err))
 	}
 	dispatchManager.Start()
 
