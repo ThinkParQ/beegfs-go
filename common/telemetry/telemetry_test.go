@@ -196,6 +196,98 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "OTLP compression gzip valid",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Interval:    30 * time.Second,
+					Compression: "gzip",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "OTLP compression none valid",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Interval:    30 * time.Second,
+					Compression: "none",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "OTLP compression empty valid",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Interval:    30 * time.Second,
+					Compression: "",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "OTLP compression invalid",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Interval:    30 * time.Second,
+					Compression: "zstd",
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.otlp.compression must be 'gzip' or 'none'",
+		},
+		{
+			name: "OTLP timeout too short",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:   true,
+					Protocol:  "grpc",
+					Endpoint:  "localhost:4317",
+					Interval:  30 * time.Second,
+					Timeout:   500 * time.Millisecond,
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.otlp.timeout must be at least 1s",
+		},
+		{
+			name: "OTLP timeout zero valid (SDK default)",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+					Interval: 30 * time.Second,
+					Timeout:  0,
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid Prometheus-only config",
 			cfg: telemetry.Config{
 				Enabled:     true,
@@ -546,6 +638,61 @@ func TestOTLPReaderConstruction(t *testing.T) {
 	}
 }
 
+// TestOTLPReaderNewFields verifies that url-path, compression, and timeout fields are accepted
+// by exporter construction for both protocols (connection is deferred, so no server needed).
+func TestOTLPReaderNewFields(t *testing.T) {
+	for _, protocol := range []string{"grpc", "http"} {
+		t.Run(protocol+"/compression-gzip", func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     true,
+				ServiceName: "otlp-fields-test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:     true,
+					Protocol:    protocol,
+					Endpoint:    "localhost:4317",
+					Interval:    30 * time.Second,
+					Compression: "gzip",
+					TLSDisable:  true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+		})
+		t.Run(protocol+"/timeout", func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     true,
+				ServiceName: "otlp-fields-test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:    true,
+					Protocol:   protocol,
+					Endpoint:   "localhost:4317",
+					Interval:   30 * time.Second,
+					Timeout:    5 * time.Second,
+					TLSDisable: true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+		})
+	}
+	t.Run("http/url-path", func(t *testing.T) {
+		p, err := telemetry.New(telemetry.Config{
+			Enabled:     true,
+			ServiceName: "otlp-fields-test",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:    true,
+				Protocol:   "http",
+				Endpoint:   "localhost:4318",
+				Interval:   30 * time.Second,
+				URLPath:    "/otlp/v1/metrics",
+				TLSDisable: true,
+			},
+		})
+		require.NoError(t, err)
+		defer p.Shutdown(context.Background())
+	})
+}
+
 // TestLogsDisabledWhenMetricsEnabled verifies that when metrics are enabled but logs are not
 // configured, LogProvider returns nil — metrics running does not activate logs.
 func TestLogsDisabledWhenMetricsEnabled(t *testing.T) {
@@ -605,6 +752,80 @@ func TestLogsValidation(t *testing.T) {
 			},
 			errMsg: "telemetry.logs.endpoint must be set",
 		},
+		{
+			name: "invalid compression",
+			cfg: telemetry.Config{
+				ServiceName: "test-svc",
+				Logs: telemetry.LogsConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Compression: "zstd",
+				},
+			},
+			errMsg: "telemetry.logs.compression must be 'gzip' or 'none'",
+		},
+		{
+			name: "timeout too short",
+			cfg: telemetry.Config{
+				ServiceName: "test-svc",
+				Logs: telemetry.LogsConfig{
+					Enabled:   true,
+					Protocol:  "grpc",
+					Endpoint:  "localhost:4317",
+					Timeout:   500 * time.Millisecond,
+				},
+			},
+			errMsg: "telemetry.logs.timeout must be at least 1s",
+		},
+	}
+
+	validTests := []struct {
+		name string
+		cfg  telemetry.Config
+	}{
+		{
+			name: "compression gzip valid",
+			cfg: telemetry.Config{
+				ServiceName: "test-svc",
+				Logs: telemetry.LogsConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Compression: "gzip",
+				},
+			},
+		},
+		{
+			name: "compression none valid",
+			cfg: telemetry.Config{
+				ServiceName: "test-svc",
+				Logs: telemetry.LogsConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Compression: "none",
+				},
+			},
+		},
+		{
+			name: "compression empty valid",
+			cfg: telemetry.Config{
+				ServiceName: "test-svc",
+				Logs: telemetry.LogsConfig{
+					Enabled:     true,
+					Protocol:    "grpc",
+					Endpoint:    "localhost:4317",
+					Compression: "",
+				},
+			},
+		},
+	}
+
+	for _, tt := range validTests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.cfg.ValidateConfig())
+		})
 	}
 
 	for _, tt := range errTests {
@@ -717,6 +938,61 @@ func TestLogsExporterConstruction(t *testing.T) {
 			assert.NotNil(t, p.LogProvider())
 		})
 	}
+}
+
+// TestLogsExporterNewFields verifies that url-path, compression, and timeout fields are accepted
+// by log exporter construction for both protocols (connection is deferred, so no server needed).
+func TestLogsExporterNewFields(t *testing.T) {
+	for _, protocol := range []string{"grpc", "http"} {
+		t.Run(protocol+"/compression-gzip", func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     false,
+				ServiceName: "log-fields-test",
+				Logs: telemetry.LogsConfig{
+					Enabled:     true,
+					Protocol:    protocol,
+					Endpoint:    "localhost:4317",
+					Compression: "gzip",
+					TLSDisable:  true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+			assert.NotNil(t, p.LogProvider())
+		})
+		t.Run(protocol+"/timeout", func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     false,
+				ServiceName: "log-fields-test",
+				Logs: telemetry.LogsConfig{
+					Enabled:    true,
+					Protocol:   protocol,
+					Endpoint:   "localhost:4317",
+					Timeout:    5 * time.Second,
+					TLSDisable: true,
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+			assert.NotNil(t, p.LogProvider())
+		})
+	}
+	t.Run("http/url-path", func(t *testing.T) {
+		p, err := telemetry.New(telemetry.Config{
+			Enabled:     false,
+			ServiceName: "log-fields-test",
+			Logs: telemetry.LogsConfig{
+				Enabled:    true,
+				Protocol:   "http",
+				Endpoint:   "localhost:4318",
+				URLPath:    "/otlp/v1/logs",
+				TLSDisable: true,
+			},
+		})
+		require.NoError(t, err)
+		defer p.Shutdown(context.Background())
+		assert.NotNil(t, p.LogProvider())
+	})
 }
 
 // TestTLSDisableVerification verifies that TLSDisableVerification=true (without TLSDisable)

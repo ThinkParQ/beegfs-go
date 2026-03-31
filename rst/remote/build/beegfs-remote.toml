@@ -36,15 +36,18 @@ tls-disable = false
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
 
-# [telemetry]
-# enabled = false
-# service-name = "beegfs-remote"
-#
+[telemetry]
+enabled = false
+service-name = "beegfs-remote"
+
 # [telemetry.otlp]
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
+# url-path = "/v1/metrics"   # HTTP only; Loki-compatible backends use "/otlp/v1/metrics"
+# compression = "gzip"
+# timeout = "10s"
 # tls-cert-file = ""
 # tls-disable-verification = false
 # tls-disable = false
@@ -62,6 +65,9 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
+# url-path = "/v1/logs"      # HTTP only; Loki direct ingestion uses "/otlp/v1/logs"
+# compression = "gzip"
+# timeout = "10s"
 # tls-cert-file = ""
 # tls-disable-verification = false
 # tls-disable = false

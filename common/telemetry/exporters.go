@@ -94,6 +94,9 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 	// TLSDisableVerification are ignored when TLSDisable is set.
 	switch cfg.Protocol {
 	case protocolGRPC:
+		if cfg.URLPath != "" {
+			zap.L().Warn("telemetry.otlp.url-path is ignored for gRPC protocol")
+		}
 		grpcOpts := []otlpmetricgrpc.Option{
 			otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
 		}
@@ -107,6 +110,13 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 			if tlsCfg != nil {
 				grpcOpts = append(grpcOpts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
 			}
+		}
+		if cfg.Compression == "gzip" {
+			// The gRPC exporter accepts a string compressor name, not a typed constant.
+			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithCompressor("gzip"))
+		}
+		if cfg.Timeout > 0 {
+			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithTimeout(cfg.Timeout))
 		}
 		if len(cfg.Headers) > 0 {
 			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithHeaders(cfg.Headers))
@@ -127,6 +137,15 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 			if tlsCfg != nil {
 				httpOpts = append(httpOpts, otlpmetrichttp.WithTLSClientConfig(tlsCfg))
 			}
+		}
+		if cfg.URLPath != "" {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithURLPath(cfg.URLPath))
+		}
+		if cfg.Compression == "gzip" {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithCompression(otlpmetrichttp.GzipCompression))
+		}
+		if cfg.Timeout > 0 {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithTimeout(cfg.Timeout))
 		}
 		if len(cfg.Headers) > 0 {
 			httpOpts = append(httpOpts, otlpmetrichttp.WithHeaders(cfg.Headers))
@@ -159,6 +178,9 @@ func buildPrometheusReader() (*prometheusReader, error) {
 func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 	switch cfg.Protocol {
 	case protocolGRPC:
+		if cfg.URLPath != "" {
+			zap.L().Warn("telemetry.logs.url-path is ignored for gRPC protocol")
+		}
 		grpcOpts := []otlploggrpc.Option{
 			otlploggrpc.WithEndpoint(cfg.Endpoint),
 		}
@@ -172,6 +194,13 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 			if tlsCfg != nil {
 				grpcOpts = append(grpcOpts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
 			}
+		}
+		if cfg.Compression == "gzip" {
+			// The gRPC exporter accepts a string compressor name, not a typed constant.
+			grpcOpts = append(grpcOpts, otlploggrpc.WithCompressor("gzip"))
+		}
+		if cfg.Timeout > 0 {
+			grpcOpts = append(grpcOpts, otlploggrpc.WithTimeout(cfg.Timeout))
 		}
 		if len(cfg.Headers) > 0 {
 			grpcOpts = append(grpcOpts, otlploggrpc.WithHeaders(cfg.Headers))
@@ -196,6 +225,15 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 			if tlsCfg != nil {
 				httpOpts = append(httpOpts, otlploghttp.WithTLSClientConfig(tlsCfg))
 			}
+		}
+		if cfg.URLPath != "" {
+			httpOpts = append(httpOpts, otlploghttp.WithURLPath(cfg.URLPath))
+		}
+		if cfg.Compression == "gzip" {
+			httpOpts = append(httpOpts, otlploghttp.WithCompression(otlploghttp.GzipCompression))
+		}
+		if cfg.Timeout > 0 {
+			httpOpts = append(httpOpts, otlploghttp.WithTimeout(cfg.Timeout))
 		}
 		if len(cfg.Headers) > 0 {
 			httpOpts = append(httpOpts, otlploghttp.WithHeaders(cfg.Headers))

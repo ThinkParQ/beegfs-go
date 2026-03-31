@@ -41,6 +41,9 @@ type OTLPConfig struct {
 	Enabled                bool              `mapstructure:"enabled"`
 	Protocol               string            `mapstructure:"protocol"` // protocolGRPC or protocolHTTP
 	Endpoint               string            `mapstructure:"endpoint"`
+	URLPath                string            `mapstructure:"url-path"`    // HTTP only; e.g. "/otlp/v1/metrics" for Loki-compatible backends
+	Compression            string            `mapstructure:"compression"` // "gzip" or "none"
+	Timeout                time.Duration     `mapstructure:"timeout"`
 	Interval               time.Duration     `mapstructure:"interval"`
 	TLSCertFile            string            `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool              `mapstructure:"tls-disable-verification"`
@@ -74,6 +77,9 @@ type LogsConfig struct {
 	Enabled                bool              `mapstructure:"enabled"`
 	Protocol               string            `mapstructure:"protocol"`
 	Endpoint               string            `mapstructure:"endpoint"`
+	URLPath                string            `mapstructure:"url-path"`    // HTTP only; e.g. "/otlp/v1/logs" for direct Loki ingestion
+	Compression            string            `mapstructure:"compression"` // "gzip" or "none"
+	Timeout                time.Duration     `mapstructure:"timeout"`
 	TLSCertFile            string            `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool              `mapstructure:"tls-disable-verification"`
 	TLSDisable             bool              `mapstructure:"tls-disable"`
@@ -102,6 +108,12 @@ func (c *Config) ValidateConfig() error {
 			if c.OTLP.Interval < time.Second {
 				return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
 			}
+			if c.OTLP.Compression != "" && c.OTLP.Compression != "none" && c.OTLP.Compression != "gzip" {
+				return fmt.Errorf("telemetry.otlp.compression must be 'gzip' or 'none' (got '%s')", c.OTLP.Compression)
+			}
+			if c.OTLP.Timeout != 0 && c.OTLP.Timeout < time.Second {
+				return fmt.Errorf("telemetry.otlp.timeout must be at least 1s (got '%s')", c.OTLP.Timeout)
+			}
 		}
 		if c.Prometheus.Enabled {
 			if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
@@ -127,6 +139,12 @@ func (c *Config) ValidateConfig() error {
 		}
 		if c.Logs.Endpoint == "" {
 			return fmt.Errorf("telemetry.logs.endpoint must be set when log export is enabled")
+		}
+		if c.Logs.Compression != "" && c.Logs.Compression != "none" && c.Logs.Compression != "gzip" {
+			return fmt.Errorf("telemetry.logs.compression must be 'gzip' or 'none' (got '%s')", c.Logs.Compression)
+		}
+		if c.Logs.Timeout != 0 && c.Logs.Timeout < time.Second {
+			return fmt.Errorf("telemetry.logs.timeout must be at least 1s (got '%s')", c.Logs.Timeout)
 		}
 	}
 	return nil
