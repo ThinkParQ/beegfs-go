@@ -290,7 +290,10 @@ Using environment variables:
 	// Setup the event dispatcher. This is fed by the event subscriber wired into the job server.
 	events := make(chan *beewatch.Event, 1024)
 	acks := make(chan subscriber.Ack, 1024)
-	dispatchManager := dispatch.New(initialCfg.Dispatch, logger.Logger, jobManager, events, acks)
+	dispatchManager, err := dispatch.New(initialCfg.Dispatch, logger.Logger, jobManager, events, acks)
+	if err != nil {
+		logger.Fatal("unable to initialize dispatcher", zap.Error(&pflag.InvalidSyntaxError{}))
+	}
 	dispatchManager.Start()
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}

@@ -7,8 +7,16 @@ import (
 
 // newTestRateLimiter creates a rateLimiter with a controllable clock.
 func newTestRateLimiter(window time.Duration, maxEvents int) (*rateLimiter, *time.Time) {
+	return newTestRateLimiterWithOverrides(window, maxEvents, nil)
+}
+
+func newTestRateLimiterWithOverrides(window time.Duration, maxEvents int, overrides []RateLimitOverride) (*rateLimiter, *time.Time) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rl := newRateLimiter(window, maxEvents)
+	ol, err := buildOverrideLookup(overrides)
+	if err != nil {
+		panic(err)
+	}
+	rl := newRateLimiter(window, maxEvents, ol)
 	rl.nowFunc = func() time.Time { return now }
 	return rl, &now
 }
@@ -308,4 +316,222 @@ func TestResetUser_NonexistentUserIsNoop(t *testing.T) {
 	rl, _ := newTestRateLimiter(5*time.Minute, 3)
 	// Should not panic.
 	rl.resetUser(999)
+}
+
+// --- buildOverrideLookup parsing tests ---
+
+func TestBuildOverrideLookup_SingleID(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: "1000", MaxEvents: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ol.lookup(1000); v != 5 {
+		t.Fatalf("expected 5, got %d", v)
+	}
+	if v := ol.lookup(999); v != -1 {
+		t.Fatalf("expected -1 for non-matching ID, got %d", v)
+	}
+}
+
+func TestBuildOverrideLookup_Range(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: "2000-2999", MaxEvents: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ol.lookup(2000); v != 3 {
+		t.Fatalf("range start: expected 3, got %d", v)
+	}
+	if v := ol.lookup(2500); v != 3 {
+		t.Fatalf("range mid: expected 3, got %d", v)
+	}
+	if v := ol.lookup(2999); v != 3 {
+		t.Fatalf("range end: expected 3, got %d", v)
+	}
+	if v := ol.lookup(1999); v != -1 {
+		t.Fatalf("below range: expected -1, got %d", v)
+	}
+	if v := ol.lookup(3000); v != -1 {
+		t.Fatalf("above range: expected -1, got %d", v)
+	}
+}
+
+func TestBuildOverrideLookup_CommaSeparated(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: "1000,1001", MaxEvents: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ol.lookup(1000); v != 7 {
+		t.Fatalf("expected 7, got %d", v)
+	}
+	if v := ol.lookup(1001); v != 7 {
+		t.Fatalf("expected 7, got %d", v)
+	}
+}
+
+func TestBuildOverrideLookup_Mixed(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: "3000,3002,3500-3599,4001", MaxEvents: 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint32{3000, 3002, 3500, 3550, 3599, 4001} {
+		if v := ol.lookup(id); v != 10 {
+			t.Fatalf("user %d: expected 10, got %d", id, v)
+		}
+	}
+	for _, id := range []uint32{3001, 3003, 3499, 3600, 4000, 4002} {
+		if v := ol.lookup(id); v != -1 {
+			t.Fatalf("user %d: expected -1, got %d", id, v)
+		}
+	}
+}
+
+func TestBuildOverrideLookup_ZeroID(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: "0", MaxEvents: 99}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ol.lookup(0); v != 99 {
+		t.Fatalf("expected 99, got %d", v)
+	}
+}
+
+func TestBuildOverrideLookup_WhitespaceHandling(t *testing.T) {
+	ol, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: " 100 , 200 - 300 ", MaxEvents: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ol.lookup(100); v != 1 {
+		t.Fatalf("expected 1, got %d", v)
+	}
+	if v := ol.lookup(250); v != 1 {
+		t.Fatalf("expected 1, got %d", v)
+	}
+}
+
+func TestBuildOverrideLookup_InvalidInput(t *testing.T) {
+	for _, input := range []string{"", "abc", "100-abc", "abc-200", "200-100", ","} {
+		_, err := buildOverrideLookup([]RateLimitOverride{{UserIDs: input, MaxEvents: 1}})
+		if err == nil {
+			t.Fatalf("expected error for input %q", input)
+		}
+	}
+}
+
+func TestBuildOverrideLookup_RejectsOverlappingRanges(t *testing.T) {
+	_, err := buildOverrideLookup([]RateLimitOverride{
+		{UserIDs: "1000-2000", MaxEvents: 3},
+		{UserIDs: "1500-2500", MaxEvents: 5},
+	})
+	if err == nil {
+		t.Fatal("expected error for overlapping ranges")
+	}
+}
+
+// --- Override behavior tests ---
+
+func TestAllow_OverrideHigherLimit(t *testing.T) {
+	overrides := []RateLimitOverride{{UserIDs: "1000", MaxEvents: 5}}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 2, overrides)
+
+	// User 1000 gets the override limit (5), not the global (2).
+	for i := range 5 {
+		if !rl.allow(1000) {
+			t.Fatalf("user 1000 event %d should be allowed (override limit 5)", i+1)
+		}
+	}
+	if rl.allow(1000) {
+		t.Fatal("user 1000 should be rejected at override limit")
+	}
+}
+
+func TestAllow_OverrideLowerLimit(t *testing.T) {
+	overrides := []RateLimitOverride{{UserIDs: "500", MaxEvents: 1}}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 10, overrides)
+
+	if !rl.allow(500) {
+		t.Fatal("first event should be allowed")
+	}
+	if rl.allow(500) {
+		t.Fatal("user 500 should be rejected at override limit 1")
+	}
+}
+
+func TestAllow_NoOverrideFallsBackToGlobal(t *testing.T) {
+	overrides := []RateLimitOverride{{UserIDs: "1000", MaxEvents: 100}}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 2, overrides)
+
+	// User 999 has no override, uses global limit of 2.
+	rl.allow(999)
+	rl.allow(999)
+	if rl.allow(999) {
+		t.Fatal("user 999 should use global limit of 2")
+	}
+}
+
+func TestAllow_RangeOverride(t *testing.T) {
+	overrides := []RateLimitOverride{{UserIDs: "2000-2999", MaxEvents: 1}}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 100, overrides)
+
+	// User at range start.
+	rl.allow(2000)
+	if rl.allow(2000) {
+		t.Fatal("user 2000 (range start) should be limited to 1")
+	}
+
+	// User at range end.
+	rl.allow(2999)
+	if rl.allow(2999) {
+		t.Fatal("user 2999 (range end) should be limited to 1")
+	}
+
+	// User just outside range uses global limit.
+	rl.allow(1999)
+	rl.allow(1999)
+	if !rl.allow(1999) {
+		t.Fatal("user 1999 (outside range) should use global limit of 100")
+	}
+}
+
+func TestAllow_ExactOverrideBeatsRange(t *testing.T) {
+	overrides := []RateLimitOverride{
+		{UserIDs: "1000", MaxEvents: 3},       // exact match for 1000
+		{UserIDs: "1001-1999", MaxEvents: 100}, // range for the rest
+	}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 1, overrides)
+
+	// User 1000 matches the exact override (maxEvents=3), not the range.
+	for range 3 {
+		rl.allow(1000)
+	}
+	if rl.allow(1000) {
+		t.Fatal("user 1000 should use exact override limit of 3")
+	}
+
+	// User 1500 matches the range override (maxEvents=100).
+	for range 100 {
+		if !rl.allow(1500) {
+			t.Fatal("user 1500 should use range override limit of 100")
+		}
+	}
+}
+
+func TestAllow_MixedRangesInOverride(t *testing.T) {
+	overrides := []RateLimitOverride{{UserIDs: "100,200-299", MaxEvents: 1}}
+	rl, _ := newTestRateLimiterWithOverrides(5*time.Minute, 100, overrides)
+
+	rl.allow(100)
+	if rl.allow(100) {
+		t.Fatal("user 100 should match override")
+	}
+
+	rl.allow(250)
+	if rl.allow(250) {
+		t.Fatal("user 250 should match override range")
+	}
+
+	// User 150 is between the two, should use global.
+	rl.allow(150)
+	if !rl.allow(150) {
+		t.Fatal("user 150 should use global limit")
+	}
 }

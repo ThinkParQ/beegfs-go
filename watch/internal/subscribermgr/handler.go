@@ -205,7 +205,7 @@ func (h *Handler) receiveLoop() (<-chan struct{}, context.CancelFunc) {
 		}
 		// TODO: Test what happens if we have a REMOTE_DISCONNECT here. Are we safe to just ignore it? It would be better to explicitly handle.
 	case <-time.After(time.Duration(h.config.MaxWaitForResponseAfterConnect) * time.Second):
-		h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event")
+		h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event", zap.Any("lastSeqID", h.lastSeqID))
 	}
 
 	// Move the send cursor back to the last acknowledged event.

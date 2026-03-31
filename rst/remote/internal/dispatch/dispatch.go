@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"expvar"
+	"fmt"
 	"path"
 	"reflect"
 	"sync"
@@ -23,11 +24,22 @@ var (
 	dispatchRestoresRateLimited = expvar.NewInt("beeremote_dispatch_restores_rate_limited")
 )
 
+// RateLimitOverride configures a custom max-events limit for specific user IDs or ranges.
+type RateLimitOverride struct {
+	// UserIDs is a comma-separated string of user IDs and/or inclusive ranges (e.g., "1000,2000-2999").
+	UserIDs string `mapstructure:"user-ids"`
+	// MaxEvents is the maximum number of restores these users can trigger per window.
+	MaxEvents int `mapstructure:"max-events"`
+}
+
 type Config struct {
 	// RateLimitWindow is the rolling time window for per-user rate limiting.
 	RateLimitWindow time.Duration `mapstructure:"rate-limit-window"`
 	// RateLimitMaxEvents is the maximum number of restores a single user can trigger per window.
 	RateLimitMaxEvents int `mapstructure:"rate-limit-max-events"`
+	// RateLimitOverrides configures per-user or per-range max-events limits that take precedence
+	// over RateLimitMaxEvents. Overrides are evaluated in order; the first match wins.
+	RateLimitOverrides []RateLimitOverride `mapstructure:"rate-limit-override"`
 }
 
 type Manager struct {
@@ -41,14 +53,15 @@ type Manager struct {
 	rateLimiter *rateLimiter
 }
 
-func New(cfg Config, log *zap.Logger, jobMgr *job.Manager, events <-chan *beewatch.Event, acks chan<- subscriber.Ack) *Manager {
+func New(cfg Config, log *zap.Logger, jobMgr *job.Manager, events <-chan *beewatch.Event, acks chan<- subscriber.Ack) (*Manager, error) {
+	overrides, err := buildOverrideLookup(cfg.RateLimitOverrides)
+	if err != nil {
+		return nil, fmt.Errorf("invalid rate-limit-override configuration: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	if cfg.RateLimitWindow == 0 {
 		cfg.RateLimitWindow = 5 * time.Minute
-	}
-	if cfg.RateLimitMaxEvents == 0 {
-		cfg.RateLimitMaxEvents = 10
 	}
 	return &Manager{
 		log:         log,
@@ -57,8 +70,8 @@ func New(cfg Config, log *zap.Logger, jobMgr *job.Manager, events <-chan *beewat
 		acks:        acks,
 		ctx:         ctx,
 		ctxCancel:   cancel,
-		rateLimiter: newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents),
-	}
+		rateLimiter: newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents, overrides),
+	}, nil
 }
 
 func (d *Manager) Start() {
@@ -98,14 +111,14 @@ func (d *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 		d.log.Warn("event version is unsupported (ignoring)", zap.Any("ack", ack))
 		return ack
 	} else if e.V2.Type != beewatch.V2Event_OPEN_BLOCKED {
-		d.log.Info("filtered out event type (ignoring)", zap.Any("ack", ack), zap.Any("type", e.V2.GetType()))
+		d.log.Debug("filtered out event type (ignoring)", zap.Any("ack", ack), zap.Any("type", e.V2.GetType()))
 		return ack
 	}
 
 	path := e.V2.GetPath()
 	userId := e.V2.GetMsgUserId()
 
-	d.log.Info("detected a blocked open event, checking if the stub file is eligible for automatic restore", zap.String("path", path))
+	d.log.Info("detected a blocked open event, checking if the stub file is eligible for automatic restore", zap.String("path", path), zap.Any("ack", ack), zap.Any("type", e.V2.GetType()))
 	entry, err := entry.GetEntry(d.ctx, nil, entry.GetEntriesCfg{}, e.V2.Path)
 	if err != nil {
 		d.log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(err))

@@ -43,7 +43,7 @@ type Service struct {
 	wg           *sync.WaitGroup
 	events       chan<- *bw.Event
 	lastAcksMu   sync.RWMutex
-	lastAcks     map[uint32]lastAck // keyed by MetaId
+	lastAcks     map[uint32]*lastAck // keyed by MetaId
 }
 
 type lastAck struct {
@@ -62,7 +62,7 @@ func NewService(log *zap.Logger, ackFrequency time.Duration, wg *sync.WaitGroup,
 		log:          log,
 		wg:           wg,
 		ackFrequency: ackFrequency,
-		lastAcks:     make(map[uint32]lastAck),
+		lastAcks:     make(map[uint32]*lastAck),
 	}
 	bw.RegisterSubscriberServer(grpcServer, s)
 	return s
@@ -119,7 +119,7 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	// starts at 0, we will not attempt to send any acks below until an actual event is ack'd.
 	s.lastAcksMu.Lock()
 	if _, ok := s.lastAcks[metaId]; !ok {
-		s.lastAcks[metaId] = lastAck{
+		s.lastAcks[metaId] = &lastAck{
 			mu:    &sync.Mutex{},
 			seqID: 0,
 		}
@@ -141,8 +141,9 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 				case <-ticker.C:
 					seqID := s.getAckedSeqID(metaId)
 					if seqID != lastAck {
+						s.log.Debug("sending event acknowledgement to Watch", zap.Any("metaID", metaId), zap.Any("seqID", seqID))
 						if err := stream.Send(&bw.Response{CompletedSeq: seqID}); err != nil {
-							s.log.Error("error sending ack to Watch", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
+							s.log.Error("error sending acknowledgement to Watch", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
 						}
 						lastAck = seqID
 					}

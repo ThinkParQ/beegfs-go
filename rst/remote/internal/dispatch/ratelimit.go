@@ -1,6 +1,10 @@
 package dispatch
 
 import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +19,103 @@ type userWindow struct {
 	windowStart time.Time
 }
 
+// interval is a single entry in the sorted interval table for range-based overrides.
+type interval struct {
+	start     uint32
+	end       uint32
+	maxEvents int
+}
+
+// overrideLookup provides O(1) lookups for exact user IDs and O(log N) lookups for range-based
+// overrides. It is built once at startup and is immutable after construction.
+type overrideLookup struct {
+	// exact maps individual user IDs to their maxEvents limit.
+	exact map[uint32]int
+	// intervals is sorted by start for binary search. Intervals must not overlap.
+	intervals []interval
+}
+
+// buildOverrideLookup parses config overrides and constructs the lookup in a single pass. Each
+// element of user-ids is a comma-separated mix of single IDs ("1000") and inclusive ranges
+// ("2000-2999"). Single IDs go into the exact map; ranges go into the sorted interval table.
+// Returns an error if any user-ids string is malformed or if intervals overlap.
+func buildOverrideLookup(overrides []RateLimitOverride) (*overrideLookup, error) {
+	ol := &overrideLookup{exact: make(map[uint32]int)}
+
+	for _, o := range overrides {
+		found := false
+		for _, part := range strings.Split(o.UserIDs, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			found = true
+
+			if startStr, endStr, ok := strings.Cut(part, "-"); ok {
+				s, err := strconv.ParseUint(strings.TrimSpace(startStr), 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("invalid range start %q in %q: %w", startStr, o.UserIDs, err)
+				}
+				e, err := strconv.ParseUint(strings.TrimSpace(endStr), 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("invalid range end %q in %q: %w", endStr, o.UserIDs, err)
+				}
+				if s > e {
+					return nil, fmt.Errorf("range start %d is greater than end %d in %q", s, e, o.UserIDs)
+				}
+				ol.intervals = append(ol.intervals, interval{
+					start:     uint32(s),
+					end:       uint32(e),
+					maxEvents: o.MaxEvents,
+				})
+			} else {
+				id, err := strconv.ParseUint(part, 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("invalid user ID %q in %q: %w", part, o.UserIDs, err)
+				}
+				ol.exact[uint32(id)] = o.MaxEvents
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("no user IDs specified in %q", o.UserIDs)
+		}
+	}
+
+	sort.Slice(ol.intervals, func(i, j int) bool {
+		return ol.intervals[i].start < ol.intervals[j].start
+	})
+
+	for i := 1; i < len(ol.intervals); i++ {
+		if ol.intervals[i].start <= ol.intervals[i-1].end {
+			return nil, fmt.Errorf("overlapping rate-limit-override ranges: [%d-%d] and [%d-%d]",
+				ol.intervals[i-1].start, ol.intervals[i-1].end,
+				ol.intervals[i].start, ol.intervals[i].end)
+		}
+	}
+
+	return ol, nil
+}
+
+// lookup returns the maxEvents override for the given user ID, or -1 if no override matches.
+// Exact matches take priority over range matches.
+func (ol *overrideLookup) lookup(userId uint32) int {
+	if maxEvents, ok := ol.exact[userId]; ok {
+		return maxEvents
+	}
+
+	// Binary search: find the last interval whose start <= userId.
+	n := len(ol.intervals)
+	i := sort.Search(n, func(i int) bool {
+		return ol.intervals[i].start > userId
+	}) - 1
+
+	if i >= 0 && userId <= ol.intervals[i].end {
+		return ol.intervals[i].maxEvents
+	}
+
+	return -1
+}
+
 // rateLimiter implements a per-user sliding window rate limiter using a counter-based approximation.
 // Each user requires only a few integers of state regardless of event volume. It is safe for
 // concurrent use.
@@ -22,6 +123,7 @@ type rateLimiter struct {
 	mu        sync.Mutex
 	window    time.Duration
 	maxEvents int
+	overrides *overrideLookup
 	users     map[uint32]*userWindow
 	// cleanupCounter tracks calls to allow() to trigger periodic cleanup of idle users.
 	cleanupCounter int
@@ -31,10 +133,11 @@ type rateLimiter struct {
 
 const cleanupInterval = 1000
 
-func newRateLimiter(window time.Duration, maxEvents int) *rateLimiter {
+func newRateLimiter(window time.Duration, maxEvents int, overrides *overrideLookup) *rateLimiter {
 	return &rateLimiter{
 		window:    window,
 		maxEvents: maxEvents,
+		overrides: overrides,
 		users:     make(map[uint32]*userWindow),
 		nowFunc:   time.Now,
 	}
@@ -66,7 +169,7 @@ func (r *rateLimiter) allow(userId uint32) bool {
 	}
 	estimate := float64(uw.prevCount)*weight + float64(uw.currCount)
 
-	if estimate >= float64(r.maxEvents) {
+	if estimate >= float64(r.maxEventsForUser(userId)) {
 		return false
 	}
 
@@ -79,6 +182,18 @@ func (r *rateLimiter) allow(userId uint32) bool {
 	}
 
 	return true
+}
+
+// maxEventsForUser returns the effective max events limit for the given user ID. Exact ID matches
+// are O(1) via map lookup; range matches are O(log N) via binary search. Falls back to the global
+// limit if no override matches. Must be called with mu held.
+func (r *rateLimiter) maxEventsForUser(userId uint32) int {
+	if r.overrides != nil {
+		if maxEvents := r.overrides.lookup(userId); maxEvents >= 0 {
+			return maxEvents
+		}
+	}
+	return r.maxEvents
 }
 
 // advance rotates windows as needed so that windowStart is within the current window. Must be
