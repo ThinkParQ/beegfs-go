@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -42,17 +43,16 @@ type Config struct {
 }
 
 type Manager struct {
-	log         *zap.Logger
-	dispatchFn  DispatchFunc
-	events      <-chan *beewatch.Event
-	acks        chan<- subscriber.Ack
-	wg          sync.WaitGroup
-	ctx         context.Context
-	ctxCancel   context.CancelFunc
-	rateLimiter *rateLimiter
+	log             *zap.Logger
+	dispatchFn      DispatchFunc
+	wg              *sync.WaitGroup
+	ctx             context.Context
+	ctxCancel       context.CancelFunc
+	rateLimiter     *rateLimiter
+	eventSubscriber *subscriber.Service
 }
 
-func New(cfg Config, log *zap.Logger, fn DispatchFunc, events <-chan *beewatch.Event, acks chan<- subscriber.Ack) (*Manager, error) {
+func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Server) (*Manager, error) {
 	overrides, err := buildOverrideLookup(cfg.RateLimitOverrides)
 	if err != nil {
 		return nil, fmt.Errorf("invalid rate-limit-override configuration: %w", err)
@@ -62,25 +62,30 @@ func New(cfg Config, log *zap.Logger, fn DispatchFunc, events <-chan *beewatch.E
 	if cfg.RateLimitWindow == 0 {
 		cfg.RateLimitWindow = 5 * time.Minute
 	}
+
+	wg := &sync.WaitGroup{}
 	return &Manager{
-		log:         log,
-		dispatchFn:  fn,
-		events:      events,
-		acks:        acks,
-		ctx:         ctx,
-		ctxCancel:   cancel,
-		rateLimiter: newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents, overrides),
+		log:             log,
+		dispatchFn:      fn,
+		ctx:             ctx,
+		ctxCancel:       cancel,
+		wg:              wg,
+		rateLimiter:     newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents, overrides),
+		eventSubscriber: subscriber.NewService(log, 1*time.Second, wg, attachToServer),
 	}, nil
 }
 
 func (m *Manager) Start() {
+	events := make(chan *beewatch.Event, 1024)
+	acks := make(chan subscriber.Ack, 1024)
+	m.eventSubscriber.Start(events, acks)
 	m.wg.Go(func() {
 		for {
 			select {
 			case <-m.ctx.Done():
 				return
-			case event := <-m.events:
-				m.acks <- m.dispatch(event)
+			case event := <-events:
+				acks <- m.dispatch(event)
 			}
 		}
 	})

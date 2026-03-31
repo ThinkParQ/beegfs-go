@@ -16,7 +16,6 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beeremote"
-	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -75,16 +74,19 @@ func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.Bu
 	}
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	beeremote.RegisterBeeRemoteServer(s.grpcServer, &s)
-	s.eventSubscriber = subscriber.NewService(log, 1*time.Second, s.wg, s.grpcServer)
 	return &s, nil
+}
+
+// GetGRPCServer returns the underlying gRPC server to enable additional services to be attached.
+func (s *BeeRemoteServer) GetGRPCServer() *grpc.Server {
+	return s.grpcServer
 }
 
 // ListenAndServe should be called against a BeeRemoteServer initialized with New(). It spawns a new
 // goroutine to handle serving requests until an an error occurs or Stop() is called against the
 // BeeRemoteServer. It accepts an errChan where any errors will be returned if the gRPC server
 // terminates early unexpectedly.
-func (s *BeeRemoteServer) ListenAndServe(events chan<- *beewatch.Event, acks <-chan subscriber.Ack, errChan chan<- error) {
-	s.eventSubscriber.Start(events, acks)
+func (s *BeeRemoteServer) ListenAndServe(errChan chan<- error) {
 	go func() {
 		s.log.Info("listening on local network address", zap.Any("address", s.Address))
 		lis, err := net.Listen("tcp", s.Address)

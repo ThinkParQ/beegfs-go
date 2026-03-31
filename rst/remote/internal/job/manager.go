@@ -247,7 +247,7 @@ func (m *Manager) GetEventDispatchFunc(ctx context.Context, log *zap.Logger) dis
 		// The dispatcher ensures we receive V2 events.
 		e := event.EventData.(*beewatch.Event_V2)
 		if e.V2.Type != beewatch.V2Event_OPEN_BLOCKED {
-			log.Debug("filtered out event type (ignoring)", zap.Any("type", e.V2.GetType()))
+			log.Info("filtered out event type (ignoring)", zap.Any("type", e.V2.GetType()))
 			return
 		}
 
