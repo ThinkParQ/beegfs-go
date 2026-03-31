@@ -288,7 +288,7 @@ Using environment variables:
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
 	remoteServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
-		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
+		logger.Fatal("unable to initialize Remote gRPC server", zap.Error(err))
 	}
 
 	// Setup the event dispatcher and wire it into the existing Remote gRPC server.

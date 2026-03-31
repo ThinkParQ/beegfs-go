@@ -38,7 +38,7 @@ type Config struct {
 }
 
 // NewServer creates a Service and a dedicated gRPC server bound to config.Address.
-func NewServer(log *zap.Logger, config Config) (*Server, error) {
+func NewServer(log *zap.Logger, config Config, checkpoint Checkpointer) (*Server, error) {
 	wg := &sync.WaitGroup{}
 
 	var grpcServerOpts []grpc.ServerOption
@@ -53,7 +53,10 @@ func NewServer(log *zap.Logger, config Config) (*Server, error) {
 	}
 
 	grpcServer := grpc.NewServer(grpcServerOpts...)
-	svc := NewService(log, config.AckFrequency, wg, grpcServer)
+	svc, err := NewService(log, config.AckFrequency, wg, grpcServer, checkpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Server{
 		Service:    svc,

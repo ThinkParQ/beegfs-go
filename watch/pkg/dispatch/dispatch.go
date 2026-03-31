@@ -40,6 +40,7 @@ type Config struct {
 	// RateLimitOverrides configures per-user or per-range max-events limits that take precedence
 	// over RateLimitMaxEvents. Overrides are evaluated in order; the first match wins.
 	RateLimitOverrides []RateLimitOverride `mapstructure:"rate-limit-override"`
+	CheckpointPath     string              `mapstructure:"checkpoint-path"`
 }
 
 type Manager struct {
@@ -57,13 +58,24 @@ func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Serv
 	if err != nil {
 		return nil, fmt.Errorf("invalid rate-limit-override configuration: %w", err)
 	}
+
+	diskStore, err := subscriber.NewDiskStore(cfg.CheckpointPath)
+	if err != nil {
+		return nil, err
+	}
+
+	wg := &sync.WaitGroup{}
+	eventSubscriber, err := subscriber.NewService(log, 1*time.Second, wg, attachToServer, diskStore)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	if cfg.RateLimitWindow == 0 {
 		cfg.RateLimitWindow = 5 * time.Minute
 	}
 
-	wg := &sync.WaitGroup{}
 	return &Manager{
 		log:             log,
 		dispatchFn:      fn,
@@ -71,7 +83,7 @@ func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Serv
 		ctxCancel:       cancel,
 		wg:              wg,
 		rateLimiter:     newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents, overrides),
-		eventSubscriber: subscriber.NewService(log, 1*time.Second, wg, attachToServer),
+		eventSubscriber: eventSubscriber,
 	}, nil
 }
 

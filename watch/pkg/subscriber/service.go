@@ -44,6 +44,7 @@ type Service struct {
 	events       chan<- *bw.Event
 	lastAcksMu   sync.RWMutex
 	lastAcks     map[uint32]*lastAck // keyed by MetaId
+	lastAckStore Checkpointer
 }
 
 type lastAck struct {
@@ -56,16 +57,30 @@ var _ bw.SubscriberServer = &Service{}
 
 // NewService creates a subscriber handler that can be registered on any gRPC server. ackFrequency
 // controls how often acknowledged sequence IDs are sent back to Watch (0 disables).
-func NewService(log *zap.Logger, ackFrequency time.Duration, wg *sync.WaitGroup, grpcServer *grpc.Server) *Service {
+func NewService(log *zap.Logger, ackFrequency time.Duration, wg *sync.WaitGroup, grpcServer *grpc.Server, checkpoint Checkpointer) (*Service, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Service]().PkgPath())))
+
+	storedLastAcks, err := checkpoint.Retrieve()
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve last checkpoint: %w", err)
+	}
+
+	lastAcks := make(map[uint32]*lastAck)
+	for metaID, seqID := range storedLastAcks {
+		lastAcks[metaID] = &lastAck{
+			mu:    &sync.Mutex{},
+			seqID: seqID,
+		}
+	}
+
 	s := &Service{
 		log:          log,
 		wg:           wg,
 		ackFrequency: ackFrequency,
-		lastAcks:     make(map[uint32]*lastAck),
+		lastAcks:     lastAcks,
 	}
 	bw.RegisterSubscriberServer(grpcServer, s)
-	return s
+	return s, nil
 }
 
 // Start sets the events channel and begins draining the acks channel. Must be called before the
@@ -146,6 +161,9 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 							s.log.Error("error sending acknowledgement to Watch", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
 						}
 						lastAck = seqID
+						if err := s.lastAckStore.Store(metaId, lastAck); err != nil {
+							s.log.Error("unable to checkpoint sequence ID: duplicate events may be processed after a restart", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
+						}
 					}
 				}
 			}
