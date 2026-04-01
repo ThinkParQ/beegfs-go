@@ -116,3 +116,30 @@ func _ior(t, nr, size uintptr) uintptr {
 func _iow(t, nr, size uintptr) uintptr {
 	return _ioc(_ioc_write, t, nr, size)
 }
+
+// _iowr replicates the functionality of the _IOWR macro from C. It is used for creating ioctl
+// command numbers for operations that write data to a device driver (i.e., data is transferred from
+// user space to kernel) and read data from a device driver (i.e., data is transferred from kernel
+// to user space).
+//
+// Parameters:
+//   - t: the magic number or type identifier for the ioctl command. This is specific to
+//     the driver or subsystem handling the ioctl. For BeeGFS use beegfsIOCTypeID.
+//   - nr: the command number or identifier within the type. Each ioctl command within
+//     a given type should have a unique number.
+//   - size: the size of the data involved in the ioctl call. For ioctls that
+//     write data structures, this would be the size of the structure being written.
+//
+// Returns: - A uintptr representing the ioctl command number for a write operation.
+//
+// Usage:
+//   - This function is used when an ioctl command involves writing and reading data from the kernel.
+//     The returned command number can then be used with syscall.Syscall (or similar functions)
+//     to perform the ioctl operation.
+//
+// Example:
+//
+//	cmd := _iowr(myType, myCmd, unsafe.Sizeof(myDataStruct))
+func _iowr(t, nr, size uintptr) uintptr {
+	return _ioc(_ioc_read|_ioc_write, t, nr, size)
+}

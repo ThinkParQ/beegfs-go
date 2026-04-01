@@ -42,7 +42,7 @@ func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan
 }
 
 func refreshEntryInfo(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, path string) (*RefreshEntryResult, error) {
-	entryInfo, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
+	entryInfo, _, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path)
 	if err != nil {
 		return &RefreshEntryResult{}, err
 	}

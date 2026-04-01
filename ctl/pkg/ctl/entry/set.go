@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
-	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/ioctl"
+	"github.com/thinkparq/beegfs-go/common/probecache"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 	"go.uber.org/zap"
@@ -280,9 +281,10 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 	}, nil
 }
 
-// setFileStateIoctlNotAvailable is used to cache if the ioctl is not available with this client
-// version or if BeeGFS is not mounted. If the ioctl is not available RPCs are used instead.
-var setFileStateIoctlNotAvailable atomic.Bool
+// setFileStateIoctl tracks whether the SetFileState ioctl is available on this client. If
+// unavailable, RPCs are used instead and the ioctl is re-probed after the recheck window. The
+// recheck window here can be larger as use of the ioctl is a performance optimization.
+var setFileStateIoctl = probecache.New(5 * time.Minute)
 
 func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
 	// Get current file state from entry
@@ -313,7 +315,7 @@ func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *
 	newFileState := beegfs.NewFileState(newAccessFlags, newDataState)
 
 	// Check if the ioctl is available, otherwise cache it is unavailable and fallback to rpcs.
-	if !setFileStateIoctlNotAvailable.Load() {
+	if setFileStateIoctl.ShouldAttempt() {
 		var beegfsClient filesystem.Provider
 		var err error
 		if beegfsClient, err = config.BeeGFSClient(searchPath); err == nil {
@@ -332,7 +334,7 @@ func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *
 		}
 		log, _ := config.GetLogger()
 		log.Debug("unable to handle file state update using an ioctl (falling back to rpcs)", zap.Error(err))
-		setFileStateIoctlNotAvailable.Store(true)
+		setFileStateIoctl.MarkUnavailable()
 	}
 
 	// Assemble/send the request and handle the response.
