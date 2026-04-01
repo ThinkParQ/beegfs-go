@@ -122,8 +122,8 @@ func NewFromPath(path string) (Provider, error) {
 	for {
 		currentStat, err := os.Lstat(absPath)
 		if err != nil {
-			if errors.Is(err, os.ErrPermission) {
-				return nil, fmt.Errorf("%s: %w", path, ErrInitFSClient)
+			if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+				return nil, fmt.Errorf("%s: %w: %w", path, ErrInitFSClient, err)
 			}
 			parentPath := filepath.Dir(absPath)
 			if parentPath == absPath {
