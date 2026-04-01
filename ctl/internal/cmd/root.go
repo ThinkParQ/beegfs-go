@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/mitchellh/go-wordwrap"
 	"github.com/spf13/cobra"
@@ -34,8 +33,7 @@ import (
 	cmdConfig "github.com/thinkparq/beegfs-go/ctl/internal/config"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	lic "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
-	pl "github.com/thinkparq/protobuf/go/license"
+	"go.uber.org/zap"
 	"golang.org/x/term"
 )
 
@@ -79,6 +77,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 		PersistentPreRunE: func(c *cobra.Command, args []string) error {
 			return globalPersistentPreRunE(c)
 		},
+		// Note PersistentPostRunE functions are not executed if a command returns an error.
 		PersistentPostRunE: func(c *cobra.Command, args []string) error {
 			return globalPersistentPostRunE(c)
 		},
@@ -186,6 +185,10 @@ func attachCustomArgsErr(argsFn cobra.PositionalArgs) cobra.PositionalArgs {
 // sufficient to simply set checkCommand as the PersistentPreRunE of the root command, because it
 // would be overridden if a command defined its own PersistentPreRunE. This approach ensures the
 // globalPersistentPreRunE always runs before the PersistentPreRunE defined by any sub-command.
+//
+// Note technically we don't need to do this and could set `cobra.EnableTraverseRunHooks = true`
+// instead. However these functions were created before realizing that was an option, and they have
+// the added bonus of allowing other commands to define hooks that aren't inherited by sub-commands.
 func attachPersistentPreRunE(cmd *cobra.Command) {
 	// Do not wrap the root command. It already calls globalPersistentPreRunE and wrapping it would
 	// invoke the global handler twice when executing the root command or any command that inherits
@@ -262,37 +265,17 @@ func globalPersistentPostRunE(cmd *cobra.Command) error {
 		return nil
 	}
 
-	// Printing license warnings on the license command results in redundant output.
-	if _, ok := cmd.Annotations["license.SkipWarnings"]; !ok {
-		license, err := lic.GetLicense(cmd.Context(), false)
-		if err != nil {
-			return fmt.Errorf("unable to verify licensed status: %w", err)
-		}
-
-		if license.Result != pl.VerifyResult_VERIFY_VALID {
-			cmdfmt.Printf("WARNING: this system does not have a valid license installed.\n")
-			cmdfmt.Printf("To avoid disruptions, run 'beegfs license' and follow the required steps.\n")
-			cmdfmt.Printf("Reason: %s\n", license.Message)
-			return nil
-		}
-
-		remaining, message := lic.GetTimeToExpiration(license)
-		// Warn by default 90 days before expiry.
-		renewalWindow := 90 * 24 * time.Hour
-		if license.Data.Type == pl.CertType_CERT_TYPE_TEMPORARY {
-			// For temp licenses only warn 14 days before.
-			renewalWindow = 14 * 24 * time.Hour
-		}
-		if remaining <= renewalWindow {
-			cmdfmt.Printf("WARNING: License %s, run 'beegfs license' for more details.\n", message)
-		}
-
-		for _, f := range license.Data.DnsNames {
-			if after, ok := strings.CutPrefix(f, lic.PrefixCapacity); ok {
-				if err := lic.CheckIfOverStorageCapacityLimit(cmd.Context(), after); err != nil {
-					cmdfmt.Printf("WARNING: The %s.\n", err)
-				}
-			}
+	// Printing health alerts on some commands results in redundant output. There are also some
+	// commands we want to skip remote communication as it would be unexpected (i.e., version).
+	if _, ok := cmd.Annotations["health.SkipAlerts"]; !ok {
+		log, _ := config.GetLogger()
+		log.Debug("executing quick health checks")
+		if required, dismissible, err := health.QuickChecks(cmd.Context()); err != nil {
+			log.Debug("unable to execute quick health checks (ignoring)", zap.Error(err))
+		} else {
+			// These return empty strings so nothing is printed if there are no alerts of that type.
+			cmdfmt.Printf("%s", required)
+			cmdfmt.Printf("%s", dismissible)
 		}
 	}
 

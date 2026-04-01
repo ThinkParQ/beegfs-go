@@ -69,7 +69,7 @@ func NewCmd() *cobra.Command {
 		Short: "Query license information",
 		Args:  cobra.NoArgs,
 		Annotations: map[string]string{
-			"license.SkipWarnings": "",
+			"health.SkipAlerts": "",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.Get {
@@ -147,12 +147,13 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		var scopes []string
 		var numservers string
 		var capacityLimit string = "n/a"
+		var capacityLimitBytes string = "n/a"
 		for _, f := range license.Data.DnsNames {
 			if after, ok := strings.CutPrefix(f, licenseCmd.PrefixNumServers); ok {
 				numservers = after
 			} else if after, ok := strings.CutPrefix(f, licenseCmd.PrefixCapacity); ok {
-				capacityLimit = after
-				cl, err := strconv.ParseUint(capacityLimit, 10, 64)
+				capacityLimitBytes = after
+				cl, err := strconv.ParseUint(after, 10, 64)
 				if err != nil {
 					log, _ := config.GetLogger()
 					log.Debug("unable to convert capacity limit to an integer, ignoring and printing value as is", zap.Error(err))
@@ -196,9 +197,10 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		}
 
 		// Check if any license conditions are violated and that the license is valid.
-		if err := licenseCmd.CheckIfOverStorageCapacityLimit(cmd.Context(), capacityLimit); err != nil {
+		// IMPORTANT: Ensure to keep license.Check() updated with any changes to these checks.
+		if err := licenseCmd.CheckIfOverStorageCapacityLimit(cmd.Context(), capacityLimitBytes, nil); err != nil {
 			color = "\033[31m" // Red if there is a license violation.
-			defer cmdfmt.Printf("\nWARNING: The %s.\n", err)
+			defer cmdfmt.Printf("\nWARNING: License violations found (%s). Contact %s for options to increase licensed limits or enable additional features.\n", err, licenseCmd.ContactEmail)
 		}
 		if license.Result == pl.VerifyResult_VERIFY_INVALID {
 			color = "\033[31m" // Red if license is invalid
@@ -310,7 +312,7 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	totalStorageCapacity, err := licenseCmd.TotalStorageCapacity(ctx)
+	totalStorageCapacity, err := licenseCmd.TotalStorageCapacity(ctx, nil)
 	if err != nil {
 		return "", err
 	}

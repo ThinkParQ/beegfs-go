@@ -86,7 +86,8 @@ const (
 	OutputKey   = "output"
 	// Whether to use a proxy configured globally or via environment variables when making gRPC
 	// connections to either mgmtd or remote.
-	UseProxyKey = "use-http-proxy"
+	UseProxyKey   = "use-http-proxy"
+	DisableAlerts = "disable-alerts"
 )
 
 // Viper values for certain configuration values.

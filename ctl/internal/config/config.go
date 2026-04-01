@@ -81,6 +81,10 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	When printing an unknown or large number of elements it is recommended to use NDJSON (Newline-Delimited JSON).`, config.OutputOptions, config.PageSizeKey, config.PageSizeKey))
 	cmd.PersistentFlags().Bool(config.UseProxyKey, false, "Use the proxy that is configured globally or in the environment when making gRPC connections.")
 	cmd.PersistentFlags().MarkHidden(config.UseProxyKey)
+	cmd.PersistentFlags().Bool(config.DisableAlerts, false, `Suppress health check alerts printed to standard error after regular command output.
+	Only select checks from 'beegfs health check' are executed with every command.
+	Checks that require a client mount or involve non-critical or potentially transient conditions (for example busy nodes) are omitted.
+	Note license alerts are always printed and cannot be suppressed.`)
 	// Environment variables should start with BEEGFS_
 	viper.SetEnvPrefix("beegfs")
 	// Environment variables cannot use "-", replace with "_"
