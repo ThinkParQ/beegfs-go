@@ -53,8 +53,8 @@ func TestBeeGFSWriteAndReadFileParts(t *testing.T) {
 	mount := BeeGFS{MountPoint: testDir}
 	err = mount.CreatePreallocatedFile(testFileName, expectedFileLen, false)
 	require.NoError(t, err)
-	// The expected base64 encoded SHA256 hash of the resulting file.
-	expectedSha256Sum := "prE1tnmy/L+UhGmlamLhJ+wG+M9v4/Q02eYe/geD2Qw="
+	// The expected base64 encoded CRC32C hash of the resulting file.
+	expectedCRC32CSum := "EZymYA=="
 	parts := []struct {
 		start, stop int64
 		data        byte
@@ -79,9 +79,9 @@ func TestBeeGFSWriteAndReadFileParts(t *testing.T) {
 		assert.Equal(t, part.stop-part.start+1, int64(bytesWritten))
 	}
 
-	filePart, actualSha256Sum, err := mount.ReadFilePart(testFileName, 0, 36)
+	filePart, actualCRC32CSum, err := mount.ReadFilePart(testFileName, 0, 36)
 	require.NoError(t, err)
-	assert.Equal(t, expectedSha256Sum, actualSha256Sum)
+	assert.Equal(t, expectedCRC32CSum, actualCRC32CSum)
 
 	buf := make([]byte, expectedFileLen)
 	readBytes, err := filePart.Read(buf)
