@@ -98,7 +98,7 @@ func (r *MockClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCf
 	return false, false, 0
 }
 
-func (r *MockClient) BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (r *MockClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
 	return nil, nil, nil
 }
 

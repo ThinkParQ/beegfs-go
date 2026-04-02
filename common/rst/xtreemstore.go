@@ -105,6 +105,6 @@ func (x *XtreemStoreClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRe
 	return false, false, 0
 }
 
-func (x *XtreemStoreClient) BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (x *XtreemStoreClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
 	return nil, nil, nil
 }

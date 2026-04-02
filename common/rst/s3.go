@@ -47,7 +47,7 @@ type s3Provider interface {
 	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
-	BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
+	BuildBulkRequests(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
 type s3ProviderFactory func(client *defaultS3Provider) s3Provider
@@ -116,7 +116,7 @@ func (a *defaultS3Provider) PlanRequestSubmission(ctx context.Context, cfg *flex
 	return false, false, 0
 }
 
-func (a *defaultS3Provider) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (a *defaultS3Provider) BuildBulkRequests(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
 	return nil, nil, nil
 }
 
@@ -382,7 +382,7 @@ func (r *S3Client) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg)
 	return false, false, 0
 }
 
-func (r *S3Client) BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
+func (r *S3Client) BuildBulkRequest(ctx context.Context) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
 	return nil, nil, nil
 }
 

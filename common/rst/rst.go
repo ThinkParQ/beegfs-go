@@ -148,7 +148,7 @@ type Provider interface {
 	// Return an error only for fatal setup failures that must abort the builder job entirely.
 	// submitBulkRequest should return an error only for fatal finalization or submission failures
 	// that must abort the builder job entirely.
-	BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
+	BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
