@@ -140,7 +140,7 @@ type Provider interface {
 	// neither be added to a bulk request nor submitted individually, and the builder will mark it
 	// as an error.
 	PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
-	// BuildBulkRequests initializes provider-specific bulk request construction.
+	// BuildBulkRequest initializes provider-specific bulk request construction.
 	// It returns a submit callback that finalizes and submits the provider-specific bulk request
 	// after all configs have been appended, and an append callback for configs selected for bulk
 	// processing.
@@ -148,7 +148,7 @@ type Provider interface {
 	// Return an error only for fatal setup failures that must abort the builder job entirely.
 	// submitBulkRequest should return an error only for fatal finalization or submission failures
 	// that must abort the builder job entirely.
-	BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
+	BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be

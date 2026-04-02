@@ -130,7 +130,7 @@ func (r *JobBuilderClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobReq
 	return false, false, 0
 }
 
-func (r *JobBuilderClient) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (r *JobBuilderClient) BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }
 
@@ -215,7 +215,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				if _, ok := bulkRequestAdders[rstId]; !ok {
 					builder.BulkStats[rstId] = &flex.BuilderJob_BulkStat{}
 					client := c.rstMap[rstId]
-					submitBulkRequest, appendBulkRequestCfg, err := client.BuildBulkRequests(ctx, bulkRequestsChan)
+					submitBulkRequest, appendBulkRequestCfg, err := client.BuildBulkRequest(ctx, bulkRequestsChan)
 					if err != nil {
 						// BuildBulkRequests should only return fatal errors, or cases where there
 						// is no way to surface the problem on a generated request, because any

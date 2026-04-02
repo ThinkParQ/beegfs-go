@@ -382,7 +382,7 @@ func (r *S3Client) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg)
 	return false, false, 0
 }
 
-func (r *S3Client) BuildBulkRequests(ctx context.Context, cfgStream BulkRequestCfgStream) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
+func (r *S3Client) BuildBulkRequest(ctx context.Context, cfgStream BulkRequestCfgStream) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
 	return nil, nil, nil
 }
 
