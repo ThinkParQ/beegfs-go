@@ -33,17 +33,6 @@ type XtreemStoreClient struct {
 
 var _ Provider = &XtreemStoreClient{}
 
-// xtreemstoreBulkOperation represents the type of bulk request being built for a builder job.
-type xtreemstoreBulkOperation string
-
-const (
-	xtreemstoreBulkOperationRestore xtreemstoreBulkOperation = "restore"
-)
-
-var xtreemstoreBulkOperations = []xtreemstoreBulkOperation{
-	xtreemstoreBulkOperationRestore,
-}
-
 // newXtreemstore initializes an xtreemstore provider by reusing the S3 client implementation.
 func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
 	xtreemstore := rstConfig.GetXtreemstore()
