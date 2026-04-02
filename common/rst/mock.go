@@ -94,7 +94,7 @@ func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	return false, ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+func (r *MockClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
 	return false, false, 0
 }
 

@@ -112,7 +112,7 @@ func (x *XtreemStoreClient) IsWorkRequestReady(ctx context.Context, request *fle
 	return x.S3Client.IsWorkRequestReady(ctx, request)
 }
 
-func (x *XtreemStoreClient) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+func (x *XtreemStoreClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
 	return false, false, 0
 }
 

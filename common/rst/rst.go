@@ -131,7 +131,7 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
-	// PlanRequestSubmission determines whether a request config should be added to a
+	// PlanBulkRequest determines whether a request config should be added to a
 	// provider-specific bulk request and whether the individual job request should be skipped.
 	//
 	// includeInBulk=true passes this config to BuildBulkRequests using the returned append callback.
@@ -139,7 +139,7 @@ type Provider interface {
 	// Returning includeInBulk=false and skipIndividual=true is invalid because the request would
 	// neither be added to a bulk request nor submitted individually, and the builder will mark it
 	// as an error.
-	PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
+	PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
 	// BuildBulkRequests initializes provider-specific bulk request construction.
 	// It returns a submit callback that finalizes and submits the provider-specific bulk request
 	// after all configs have been appended, and an append callback for configs selected for bulk

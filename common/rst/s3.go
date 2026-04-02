@@ -378,7 +378,7 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 	return false, ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+func (r *S3Client) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
 	return false, false, 0
 }
 

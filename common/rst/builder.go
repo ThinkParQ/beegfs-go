@@ -126,7 +126,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
 }
 
-func (r *JobBuilderClient) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
+func (r *JobBuilderClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
 	return false, false, 0
 }
 
@@ -319,7 +319,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 					errorCount++
 				} else if status == nil || status.State == beeremote.JobRequest_GenerationStatus_UNSPECIFIED {
 					client := c.rstMap[requestCfg.GetRemoteStorageTarget()]
-					includeInBulk, skipIndividual, waitQueueDelay := client.PlanRequestSubmission(ctx, requestCfg)
+					includeInBulk, skipIndividual, waitQueueDelay := client.PlanBulkRequest(ctx, requestCfg)
 					if !includeInBulk && skipIndividual {
 						errorCount++
 						jobRequest.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
@@ -342,7 +342,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 								State:   beeremote.JobRequest_GenerationStatus_NOT_READY,
 								Message: waitQueueDelay.String(),
 							})
-							fmt.Println(jobRequest.GetGenerationStatus())
 						}
 					}
 				}
