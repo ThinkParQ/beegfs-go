@@ -222,6 +222,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 						// returned error aborts the builder job entirely.
 						return err
 					}
+					if submitBulkRequest == nil || appendBulkRequestCfg == nil {
+						return fmt.Errorf("RST client %T for target %d returned invalid bulk request callbacks: submit and append functions must both be non-nil", client, rstId)
+					}
 
 					defer func() {
 						if err := submitBulkRequest(); err != nil {
