@@ -340,7 +340,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 						if waitQueueDelay > 0 {
 							jobRequest.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 								State:   beeremote.JobRequest_GenerationStatus_NOT_READY,
-								Message: time.Now().Add(waitQueueDelay).Format(time.RFC3339),
+								Message: waitQueueDelay.String(),
 							})
 							fmt.Println(jobRequest.GetGenerationStatus())
 						}

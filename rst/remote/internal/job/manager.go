@@ -12,8 +12,9 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/aws/smithy-go/time"
+	smithyTime "github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -499,7 +500,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 		case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
 			// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
 			// mark the job as complete so ignore the err.
-			mtime, _ := time.ParseDateTime(status.Message)
+			mtime, _ := smithyTime.ParseDateTime(status.Message)
 			err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
 		case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 			err = rst.ErrJobAlreadyOffloaded
@@ -508,11 +509,11 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 		case beeremote.JobRequest_GenerationStatus_ERROR:
 			err = errors.New(status.Message)
 		case beeremote.JobRequest_GenerationStatus_NOT_READY:
-			after, _ := time.ParseDateTime(status.Message)
-			executeAfter := timestamppb.New(after)
+			duration, _ := time.ParseDuration(status.Message)
+			executeAfter := time.Now().Add(duration)
 			jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
 			for _, workRequest := range jobSubmission.WorkRequests {
-				workRequest.ExecuteAfter = executeAfter
+				workRequest.ExecuteAfter = timestamppb.New(executeAfter)
 			}
 		default:
 			err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
