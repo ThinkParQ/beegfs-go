@@ -33,6 +33,7 @@ type RateLimitOverride struct {
 }
 
 type Config struct {
+	Enabled bool `mapstructure:"enabled"`
 	// RateLimitWindow is the rolling time window for per-user rate limiting.
 	RateLimitWindow time.Duration `mapstructure:"rate-limit-window"`
 	// RateLimitMaxEvents is the maximum number of events a single user can trigger per window.
@@ -51,9 +52,17 @@ type Manager struct {
 	ctxCancel       context.CancelFunc
 	rateLimiter     *rateLimiter
 	eventSubscriber *subscriber.Service
+	enabled         bool
 }
 
 func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Server) (*Manager, error) {
+	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	if !cfg.Enabled {
+		log.Warn("automatically dispatching jobs from file system modification events is disabled")
+		return &Manager{}, nil
+	}
+	log.Info("automatic job dispatch from file system modification events is enabled")
+
 	overrides, err := buildOverrideLookup(cfg.RateLimitOverrides)
 	if err != nil {
 		return nil, fmt.Errorf("invalid rate-limit-override configuration: %w", err)
@@ -71,7 +80,6 @@ func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Serv
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	if cfg.RateLimitWindow == 0 {
 		cfg.RateLimitWindow = 5 * time.Minute
 	}
@@ -84,10 +92,14 @@ func New(cfg Config, log *zap.Logger, fn DispatchFunc, attachToServer *grpc.Serv
 		wg:              wg,
 		rateLimiter:     newRateLimiter(cfg.RateLimitWindow, cfg.RateLimitMaxEvents, overrides),
 		eventSubscriber: eventSubscriber,
+		enabled:         true,
 	}, nil
 }
 
 func (m *Manager) Start() {
+	if !m.enabled {
+		return
+	}
 	events := make(chan *beewatch.Event, 1024)
 	acks := make(chan subscriber.Ack, 1024)
 	m.eventSubscriber.Start(events, acks)
@@ -110,6 +122,9 @@ func (m *Manager) ResetUserRateLimit(userId uint32) {
 }
 
 func (m *Manager) Stop() {
+	if !m.enabled {
+		return
+	}
 	m.ctxCancel()
 	m.wg.Wait()
 	m.log.Info("stopped dispatcher")

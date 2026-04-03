@@ -36,6 +36,20 @@ tls-disable = false
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
 
+[dispatch]
+enabled = false
+checkpoint-path = "/var/lib/beegfs/remote/dispatch/events.ckpt"
+rate-limit-window = "10m"
+rate-limit-max-events = 0
+
+# [[dispatch.rate-limit-override]]
+# user-ids="0"
+# max-events=100000
+
+# [[dispatch.rate-limit-override]]
+# user-ids="1000-2000,3000,4000"
+# max-events=1000
+
 #
 # --- Section 1.2: [Worker Settings] ---
 #
@@ -218,6 +232,38 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # max-job-entries-per-rst: Once this threshold is exceeded, older jobs will be deleted
 # (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.
 
+#
+# --- Section 3.5: [Dispatch Settings] ---
+#
+
+# Optionally Remote can automatically trigger jobs in response to certain file system modification
+# events sent by the Watch service on behalf of a BeeGFS metadata node.
+
+# enabled: By default event dispatch is disabled. When first enabling event dispatch historical
+# events are ignored and only future file system modifications will trigger jobs.
+
+# checkpoint-path: This allows Remote to be restarted and resume dispatching events from where it
+# left off. The checkpoint file can be deleted to cause Remote to discard all historical events and
+# start dispatching from the next file system modification event from each metadata node.
+
+# rate-limit-window: The number of events that trigger jobs is tracked on a per user basis for this
+# rolling time window and limited based on rate-limit-max-events.
+
+# rate-limit-max-events: The default max number of events for a particular user ID during the
+# rate-limit-window that can trigger jobs. Only events that trigger jobs count against the max.
+
+#
+# --- Section 3.5.1: [Dispatch Rate Limit Override Settings] ---
+#
+
+# One ore more rate limit overrides can be specified under [[dispatch.rate-limit-override]] headers.
+# If a range includes a user ID that is also specified individually in a different override, the
+# individual override will take precedence for that user ID.
+
+# user-ids: one or more comma separated ranges or individual user IDs the override applies to. For
+# example "1000,2000-3000,4000".
+
+# max-events: override the default rate-limit-max-events for the specified user-ids.
 
 #
 # --- Section 4: [Worker Settings] ---

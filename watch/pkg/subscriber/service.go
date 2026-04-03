@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"reflect"
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -78,6 +81,7 @@ func NewService(log *zap.Logger, ackFrequency time.Duration, wg *sync.WaitGroup,
 		wg:           wg,
 		ackFrequency: ackFrequency,
 		lastAcks:     lastAcks,
+		lastAckStore: checkpoint,
 	}
 	bw.RegisterSubscriberServer(grpcServer, s)
 	return s, nil
@@ -111,7 +115,7 @@ func (s *Service) Start(events chan<- *bw.Event, acks <-chan Ack) {
 // ReceiveEvents implements bw.SubscriberServer. It is called by the gRPC framework each time Watch
 // establishes a new event stream connection.
 //
-// The MetaId is determined from the first received event and remains fixed for the lifetime of the
+// The MetaId is determined from the stream context remains fixed for the lifetime of the
 // connection. The per-MetaId acknowledged sequence ID is used for all acks sent back to this Watch
 // instance.
 func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error {
@@ -119,27 +123,53 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	defer s.wg.Done()
 
 	ctx := stream.Context()
-
-	// Receive the first event to determine the MetaId for this connection. This is safe because the
-	// MetaId is stable for the lifetime of a Watch connection.
-	event, err := s.recv(ctx, stream)
-	if event == nil {
-		return err // nil on clean EOF, non-nil on fatal error
+	metadata, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		err := fmt.Errorf("event stream from watch does not include any metadata (ensure skip-node-id-detection is not set for this subscriber)")
+		s.log.Error(err.Error())
+		return err
+	}
+	nodeID := metadata.Get("node-id")
+	if len(nodeID) == 0 {
+		err := fmt.Errorf("event stream from watch does not include the metadata node-id (ensure skip-node-id-detection is not set for this subscriber)")
+		s.log.Error(err.Error())
+		return err
 	}
 
-	metaId := event.GetMetaId()
-	s.log.Info("Watch client connected", zap.Uint32("metaId", metaId))
+	parser := beegfs.NewEntityIdParser(32, beegfs.Meta)
+	entityID, err := parser.Parse(nodeID[0])
+	if err != nil {
+		err := fmt.Errorf("unable to parse a valid metadata node ID from the watch event stream: %w (ensure skip-node-id-detection is not set for this subscriber)", err)
+		s.log.Error(err.Error())
+		return err
+	}
+	legacyID, ok := entityID.(beegfs.LegacyId)
+	if !ok {
+		err := fmt.Errorf("successfully parsed metadata node entity ID from the watch event stream, but it is not a valid legacy ID: %s (ensure skip-node-id-detection is not set for this subscriber)", entityID)
+		s.log.Error(err.Error())
+		return err
+	}
+	// Downcast is safe because NewEntityIdParser already validated this is a 32-bit integer.
+	metaId := uint32(legacyID.NumId)
+	s.log.Info("watching for events from metadata node", zap.Any("metaID", metaId))
 
-	// Automatically init the lastAck for this meta the first time we see it. The lastAck.seqID
-	// starts at 0, we will not attempt to send any acks below until an actual event is ack'd.
+	// Automatically init the lastAck for this meta the first time we see it. Use math.MaxUint64 to
+	// start, which will tell Watch to start streaming from the next event it receives from the
+	// metadata service. This prevents having to process a large number of historical events that
+	// may no longer be relevant.
 	s.lastAcksMu.Lock()
 	if _, ok := s.lastAcks[metaId]; !ok {
 		s.lastAcks[metaId] = &lastAck{
 			mu:    &sync.Mutex{},
-			seqID: 0,
+			seqID: math.MaxUint64,
 		}
 	}
 	s.lastAcksMu.Unlock()
+
+	// The default/recommended "wait-for-response-after-connect=0" requires Watch to wait for the
+	// subscriber to ack the last event to minimize duplicate events. Thus if acks are enabled
+	// always send an initial ack.
+	initialAckSent := false
 
 	// Periodically send the last caller-acknowledged sequence ID for this MetaId back to Watch.
 	// This tells Watch which events have been fully consumed so it can advance its buffer.
@@ -155,12 +185,13 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 					return
 				case <-ticker.C:
 					seqID := s.getAckedSeqID(metaId)
-					if seqID != lastAck {
-						s.log.Debug("sending event acknowledgement to Watch", zap.Any("metaID", metaId), zap.Any("seqID", seqID))
+					if !initialAckSent || seqID != lastAck {
+						s.log.Debug("sending event acknowledgement to watch", zap.Any("metaID", metaId), zap.Any("seqID", seqID))
 						if err := stream.Send(&bw.Response{CompletedSeq: seqID}); err != nil {
-							s.log.Error("error sending acknowledgement to Watch", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
+							s.log.Error("error sending acknowledgement to watch", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
 						}
 						lastAck = seqID
+						initialAckSent = true
 						if err := s.lastAckStore.Store(metaId, lastAck); err != nil {
 							s.log.Error("unable to checkpoint sequence ID: duplicate events may be processed after a restart", zap.Error(err), zap.Uint32("metaId", metaId), zap.Uint64("seqID", seqID))
 						}
@@ -172,21 +203,22 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 
 	// Forward events to the caller. The loop starts with the first event already in hand,
 	// then calls recv for each subsequent one.
+	event, err := s.recv(ctx, stream)
 	for event != nil {
 		s.log.Debug("received event", zap.Any("event", event))
-
 		select {
 		case s.events <- event:
 		case <-ctx.Done():
-			s.log.Info("stream context cancelled while forwarding event", zap.Uint32("metaId", metaId))
+			s.log.Info("stream context cancelled while forwarding event from watch", zap.Uint32("metaId", metaId))
 			return ctx.Err()
 		}
-
 		event, err = s.recv(ctx, stream)
 	}
 
-	if err == nil {
-		s.log.Info("Watch client closed the stream", zap.Uint32("metaId", metaId))
+	if err != nil {
+		s.log.Warn("watch closed the stream with an error", zap.Uint32("metaId", metaId), zap.Error(err))
+	} else {
+		s.log.Info("watch closed the stream gracefully", zap.Uint32("metaId", metaId))
 	}
 	return err
 }
@@ -212,7 +244,7 @@ func (s *Service) recv(ctx context.Context, stream bw.Subscriber_ReceiveEventsSe
 			if ok && st.Code() == codes.Canceled {
 				return nil, ctx.Err()
 			}
-			s.log.Error("error receiving event from Watch", zap.Error(err))
+			s.log.Error("error receiving event from watch", zap.Error(err))
 			continue
 		}
 
