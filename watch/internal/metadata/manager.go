@@ -307,6 +307,13 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		return
 	}
 
+	if currRingID := m.EventBuffer.GetRingID(); currRingID == 0 {
+		m.EventBuffer.SetRingID(uint64(handshakeResp.MetaID))
+	} else {
+		m.log.Error("metadata node ID changed unexpectedly, verify multiple meta nodes aren't trying to write to the same socket (restart Watch if this is intentional)", zap.Any("currMetaID", currRingID), zap.Any("newMetaID", handshakeResp.MetaID))
+		return
+	}
+
 	m.log.Info("connection established", zap.Any("handshakeResp", handshakeResp))
 	if !handler.send(&RequestMessageRange{}) {
 		return

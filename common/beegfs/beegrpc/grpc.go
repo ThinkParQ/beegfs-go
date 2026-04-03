@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -23,6 +24,7 @@ type connOpts struct {
 	TLSCaCert []byte
 	// AuthSecret is the contents of an auth file or nil if authentication should be disabled.
 	AuthSecret []byte
+	NodeID     *beegfs.LegacyId
 }
 
 // applyConnOpts is a common constructor for connOpts. It exists because originally only
@@ -74,6 +76,12 @@ func WithProxy(enable bool) connOpt {
 	}
 }
 
+func WithNode(nodeID *beegfs.LegacyId) connOpt {
+	return func(co *connOpts) {
+		co.NodeID = nodeID
+	}
+}
+
 // NewClientConn provides a standard method to configure TLS and BeeGFS connection authentication
 // when setting up a gRPC client connection for use with a BeeGFS gRPC client.
 func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
@@ -111,6 +119,18 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 			return streamer(newCtx, desc, cc, method, opts...)
 		}
 		opts = append(opts, grpc.WithStreamInterceptor(connAuthStreamInterceptor))
+	}
+	if config.NodeID != nil {
+		nodeIDUnaryInterceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			newCtx := metadata.AppendToOutgoingContext(ctx, "node-id", config.NodeID.String())
+			return invoker(newCtx, method, req, reply, cc, opts...)
+		}
+		opts = append(opts, grpc.WithUnaryInterceptor(nodeIDUnaryInterceptor))
+		nodeIDStreamInterceptor := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			newCtx := metadata.AppendToOutgoingContext(ctx, "node-id", config.NodeID.String())
+			return streamer(newCtx, desc, cc, method, opts...)
+		}
+		opts = append(opts, grpc.WithStreamInterceptor(nodeIDStreamInterceptor))
 	}
 	// If the user explicitly disabled TLS that should take precedence. Note a mismatch between the
 	// client and server TLS configuration will likely return a vague `error reading server preface:
