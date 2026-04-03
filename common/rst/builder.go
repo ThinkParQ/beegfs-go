@@ -84,8 +84,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	// Each client should at least have some input since there may be costs associated with the
 	// requests as in s3.
 	maxRequests := 1000
-
-	walkChanSize := cap(jobSubmissionChan)
+	walkChanSize := min(cap(jobSubmissionChan), maxRequests+1) // maxRequests +1 is for ResumeToken when there is more work
 	var walkChan <-chan *filesystem.StreamPathResult
 	walkPaths := filesystem.StreamPathsLexicographically
 	if cfg.GetUpdate() {
@@ -122,7 +121,15 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 		}
 	}
 
-	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
+	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, maxRequests, jobSubmissionChan, cfg)
+}
+
+func (r *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
+}
+
+func (r *JobBuilderClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
 func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -167,10 +174,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	ctx context.Context,
 	request *flex.WorkRequest,
 	walkChan <-chan *filesystem.StreamPathResult,
+	maxRequests int,
 	jobSubmissionChan chan<- *beeremote.JobRequest,
 	cfg *flex.JobRequestCfg,
 ) (bool, error) {
-	builder := request.GetBuilder()
 
 	var walkingLocalPath bool
 	var remotePathDir string
@@ -183,8 +190,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		isPathDir = err == nil && stat.IsDir()
 	}
 
+	bulkJobRequestsChan := make(chan *beeremote.JobRequest, maxRequests)
+
 	reschedule := false
+	builder := request.GetBuilder()
 	builderStateMu := sync.Mutex{}
+
+	g, walkCtx := errgroup.WithContext(ctx)
 	maxWorkers := runtime.GOMAXPROCS(0)
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
@@ -194,7 +206,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		var remotePath string
 		for {
 			select {
-			case <-ctx.Done():
+			case <-walkCtx.Done():
 				return ctx.Err()
 			case walkResp, ok := <-walkChan:
 				if !ok {
@@ -244,7 +256,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 			if cfg.GetUpdate() {
 				if stat, statErr := c.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
-					dirErr := updateDirRstConfig(ctx, cfg.RemoteStorageTarget, inMountPath)
+					dirErr := updateDirRstConfig(walkCtx, cfg.RemoteStorageTarget, inMountPath)
 					builderStateMu.Lock()
 					builder.Submitted++
 					if dirErr != nil {
@@ -255,7 +267,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 			}
 
-			jobRequests, err := BuildJobRequests(ctx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
+			jobRequests, err := BuildJobRequests(walkCtx, c.rstMap, c.mountPoint, inMountPath, remotePath, cfg)
 			if err != nil {
 				// BuildJobRequest should only return fatal errors, or if there are no RSTs
 				// specified/configured on an entry and there is no other way to return the
@@ -263,21 +275,36 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				return err
 			}
 
-			errorCount := 0
+			errorCount := int32(0)
+			submitted := int32(0)
 			for _, jobRequest := range jobRequests {
+
 				status := jobRequest.GetGenerationStatus()
 				if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
 					errorCount++
+				} else if status == nil || status.State == beeremote.JobRequest_GenerationStatus_UNSPECIFIED {
+					client := c.rstMap[jobRequest.GetRemoteStorageTarget()]
+					if client.IncludeInBulkRequest(walkCtx, jobRequest) {
+						select {
+						case <-walkCtx.Done():
+							return walkCtx.Err()
+						case bulkJobRequestsChan <- jobRequest:
+							continue
+						}
+					}
 				}
+
 				select {
-				case <-ctx.Done():
+				case <-walkCtx.Done():
+					return walkCtx.Err()
 				case jobSubmissionChan <- jobRequest:
+					submitted++
 				}
 			}
 
 			builderStateMu.Lock()
-			builder.Submitted += int32(len(jobRequests))
-			builder.Errors += int32(errorCount)
+			builder.Submitted += submitted
+			builder.Errors += errorCount
 			builderStateMu.Unlock()
 		}
 	}
@@ -286,14 +313,13 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	// (up to GOMAXPROCS) when the job submission channel stays near empty, indicating the consumer is
 	// draining faster than we can fill it. This keeps throughput balanced without over saturating
 	// the system.
-	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		workers := 1
 		lowThresholdTicks := 0
 		g.Go(createJobRequests)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-walkCtx.Done():
 				return nil
 			case <-walkDoneChan:
 				return nil
@@ -317,9 +343,81 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			}
 		}
 	})
-	if err := g.Wait(); err != nil {
+
+	err := g.Wait()
+	close(bulkJobRequestsChan)
+	if err != nil {
 		return false, fmt.Errorf("job builder request was aborted: %w", err)
 	}
+
+	g, bulkRequestCtx := errgroup.WithContext(ctx)
+	type bulkRequestFns struct {
+		append AppendBulkRequestCfgFn
+		submit SubmitBulkRequestFn
+	}
+	bulkRequestRstFns := make(map[uint32]bulkRequestFns)
+bulkRequestComplete:
+	for {
+
+		select {
+		case <-bulkRequestCtx.Done():
+			return false, fmt.Errorf("job builder request was aborted: %w", bulkRequestCtx.Err())
+		case jobRequest, ok := <-bulkJobRequestsChan:
+			if !ok {
+				for _, bulkRequestFns := range bulkRequestRstFns {
+					g.Go(func() error {
+						errorCount := int32(0)
+						submitted := int32(0)
+						for _, jobRequest := range bulkRequestFns.submit() {
+
+							status := jobRequest.GetGenerationStatus()
+							if status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
+								errorCount++
+							}
+
+							select {
+							case <-bulkRequestCtx.Done():
+								return bulkRequestCtx.Err()
+							case jobSubmissionChan <- jobRequest:
+								submitted++
+							}
+						}
+
+						builderStateMu.Lock()
+						builder.Submitted += submitted
+						builder.Errors += errorCount
+						builderStateMu.Unlock()
+						return nil
+					})
+				}
+
+				if err := g.Wait(); err != nil {
+					return false, fmt.Errorf("job builder request was aborted: %w", err)
+				}
+
+				break bulkRequestComplete
+			}
+
+			rstId := jobRequest.GetRemoteStorageTarget()
+			if _, ok := bulkRequestRstFns[rstId]; !ok {
+				client := c.rstMap[rstId]
+				submitBulkRequest, appendBulkRequestCfg, err := client.BuildBulkRequest(bulkRequestCtx)
+				if err != nil {
+					// BuildBulkRequests should only return fatal errors, or cases where there is no
+					// way to surface the problem on a generated request, because any returned error
+					// aborts the builder job entirely.
+					return false, fmt.Errorf("job builder request was aborted: %w", err)
+				}
+				if submitBulkRequest == nil || appendBulkRequestCfg == nil {
+					return false, fmt.Errorf("job builder request was aborted: RST client %T for target %d returned invalid bulk request callbacks: submit and append functions must both be non-nil", client, rstId)
+				}
+				bulkRequestRstFns[rstId] = bulkRequestFns{submit: submitBulkRequest, append: appendBulkRequestCfg}
+			}
+
+			bulkRequestRstFns[rstId].append(jobRequest)
+		}
+	}
+
 	if reschedule {
 		return true, nil
 	}
