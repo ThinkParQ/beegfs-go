@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/types"
 	pb "github.com/thinkparq/protobuf/go/beewatch"
@@ -56,7 +57,7 @@ type ComparableGRPCSubscriber struct {
 	GrpcConfig
 }
 
-func (s *GRPCSubscriber) Connect() (retry bool, err error) {
+func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error) {
 
 	var cert []byte
 	if !s.TlsDisable && s.TLSCertFile != "" {
@@ -71,6 +72,12 @@ func (s *GRPCSubscriber) Connect() (retry bool, err error) {
 		beegrpc.WithTLSDisableVerification(s.TLSDisableVerification),
 		beegrpc.WithTLSDisable(s.TlsDisable),
 		beegrpc.WithProxy(s.UseProxy),
+		beegrpc.WithNode(&beegfs.LegacyId{
+			NodeType: beegfs.Meta,
+			// This will be zero if node ID detection is skipped. That is an invalid NumId which
+			// will cause the caller to be unable to parse an entity ID from the legacy ID.
+			NumId: forMetaID,
+		}),
 	)
 	if err != nil {
 		return true, fmt.Errorf("unable to connect to the subscriber: %w", err)

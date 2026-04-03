@@ -32,7 +32,7 @@ event-buffer-gc-frequency = 419430
 
 [handler]
 max-reconnect-backoff = 60
-max-wait-for-response-after-connect = 2
+max-wait-for-response-after-connect = 0
 poll-frequency = 1
 
 
@@ -187,8 +187,9 @@ poll-frequency = 1
 # reconnection attempts to avoid increasing the backoff timer forever.
 
 # max-wait-for-response-after-connect: When a subscriber connects/reconnects wait this long for the
-# subscriber to acknowledge the sequence ID of the last event it received successfully. This
-# prevents sending duplicate events if the connection was disrupted unexpectedly. 
+# subscriber to acknowledge the sequence ID of the last event it received successfully. Starting in
+# BeeGFS 8.4 this defaults to 0, which indicates to wait indefinitely for subscribers to acknowledge
+# the last event they received. This can be overridden on a per subscriber basis (see section 4.1).
 
 # poll-frequency: How often subscribers should poll the metadata buffer for new events (causes more
 # CPU utilization when idle).
@@ -212,6 +213,14 @@ poll-frequency = 1
 # type: The `type` option is used to specify what protocol should be used to communicate with this
 # subscriber. Additional options will be needed based on the provided type. Support types: 'grpc'.
 
+# skip-node-id-detection: By default, Watch waits to connect to subscribers until it receives a
+# connection from the BeeGFS metadata service it is listening to. This allows Watch to communicate
+# the metadata node's ID to each subscriber at the start of the stream, which may be required for a
+# subscriber to handle the stream, for example acknowledging the sequence ID of the last event
+# received from this metadata node.
+
+# wait-for-response-after-connect: This allows individual subscribers to override the global
+# max-wait-for-response-after-connect configuration.
 
 #
 # --- Section 4.2: [gRPC Subscriber Settings] ---
