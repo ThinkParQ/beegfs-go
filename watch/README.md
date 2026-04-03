@@ -591,15 +591,25 @@ events every second.
 
 #### Avoid duplicate events by acknowledging the last event received when reconnecting
 
-Watch keeps track of the last event sent and the last event acknowledged for each subscriber.
-Events are not removed from the buffer until they are acknowledged. When a subscriber disconnects it
-is possible some of the events that were sent were not actually received/processed by the
-subscriber. While we could simply start resending from the last acknowledged event, this means we
-could send the same event multiple times, which some subscribers may not expect. To prevent this
-when a subscriber connects/reconnects, Watch waits for a brief period (based on
-`--handler.max-wait-for-response-after-connect`) for the subscriber to acknowledge the last event it
-received, which allows it to send the next event in the sequence. If the subscriber does not send
-this acknowledgement without period set by `--handler.max-wait-for-response-after-connect`, then
-Watch starts sending events from the last acknowledged event.
+Watch keeps track of the last event sent and the last event acknowledged for each subscriber. Events
+are not removed from the buffer until they are acknowledged. When a subscriber disconnects it is
+possible some of the events that were sent were not actually received/processed by the subscriber.
+While we could simply start resending from the last acknowledged event, this means we could send the
+same event multiple times, which some subscribers may not expect. To prevent this when a subscriber
+connects/reconnects, Watch waits for the subscriber to acknowledge the last event received, which it
+allows it to send the next event in the sequence. 
+
+How long Watch wait for the last event to be acknowledged is based on the global
+`--handler.max-wait-for-response-after-connect` or per subscriber `wait-for-response-after-connect`
+configuration.Prior to BeeGFS 8.4 `max-wait-for-response-after-connect` defaulted 2 seconds before
+sending events from the last acknowledged event. Starting in 8.4 this defaults to "0" which causes
+Watch to wait indefinitely, which was determined to be safer default behavior. 
+
+Subscribers that send acknowledgements can send an initial ack with a special sequence ID to
+negotiate where to start the event stream:
+
+* Sequence ID `0` will send all events from the earliest stored in Watch's buffers (as of 8.0).
+* Sequence ID `18446744073709551615` (max uint64) will not send any historical events and start with
+  the next event received from the metadata node (as of 8.4).
 
 TL;DR - After reconnecting, immediately acknowledge the sequence ID of the last event you received.

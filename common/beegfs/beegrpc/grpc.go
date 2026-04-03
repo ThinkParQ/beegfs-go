@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -23,6 +24,7 @@ type connOpts struct {
 	TLSCaCert []byte
 	// AuthSecret is the contents of an auth file or nil if authentication should be disabled.
 	AuthSecret []byte
+	NodeID     *beegfs.LegacyId
 	// extraDialOpts are appended verbatim to the grpc.DialOption slice passed to grpc.NewClient.
 	extraDialOpts []grpc.DialOption
 }
@@ -76,6 +78,12 @@ func WithProxy(enable bool) connOpt {
 	}
 }
 
+func WithNode(nodeID *beegfs.LegacyId) connOpt {
+	return func(co *connOpts) {
+		co.NodeID = nodeID
+	}
+}
+
 // WithDialOptions appends extra grpc.DialOptions to the connection. This allows callers to
 // configure connection-scoped behavior (e.g. a custom codec) without affecting other connections.
 func WithDialOptions(opts ...grpc.DialOption) connOpt {
@@ -115,12 +123,24 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 			newCtx := metadata.AppendToOutgoingContext(ctx, "auth-secret", fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret)))
 			return invoker(newCtx, method, req, reply, cc, opts...)
 		}
-		opts = append(opts, grpc.WithUnaryInterceptor(connAuthUnaryInterceptor))
+		opts = append(opts, grpc.WithChainUnaryInterceptor(connAuthUnaryInterceptor))
 		connAuthStreamInterceptor := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 			newCtx := metadata.AppendToOutgoingContext(ctx, "auth-secret", fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret)))
 			return streamer(newCtx, desc, cc, method, opts...)
 		}
-		opts = append(opts, grpc.WithStreamInterceptor(connAuthStreamInterceptor))
+		opts = append(opts, grpc.WithChainStreamInterceptor(connAuthStreamInterceptor))
+	}
+	if config.NodeID != nil {
+		nodeIDUnaryInterceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			newCtx := metadata.AppendToOutgoingContext(ctx, "node-id", config.NodeID.String())
+			return invoker(newCtx, method, req, reply, cc, opts...)
+		}
+		opts = append(opts, grpc.WithChainUnaryInterceptor(nodeIDUnaryInterceptor))
+		nodeIDStreamInterceptor := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+			newCtx := metadata.AppendToOutgoingContext(ctx, "node-id", config.NodeID.String())
+			return streamer(newCtx, desc, cc, method, opts...)
+		}
+		opts = append(opts, grpc.WithChainStreamInterceptor(nodeIDStreamInterceptor))
 	}
 	// If the user explicitly disabled TLS that should take precedence. Note a mismatch between the
 	// client and server TLS configuration will likely return a vague `error reading server preface:
