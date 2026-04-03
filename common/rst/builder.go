@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -193,9 +192,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 	reschedule := false
 	builder := request.GetBuilder()
-	if builder.BulkStats == nil {
-		builder.BulkStats = make(map[uint32]*flex.BuilderJob_BulkStat)
-	}
 	builderStateMu := sync.Mutex{}
 
 	bulkRequestsChan := make(chan *flex.JobRequestCfg, 1024)
@@ -213,7 +209,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 				rstId := cfg.RemoteStorageTarget
 				if _, ok := bulkRequestAdders[rstId]; !ok {
-					builder.BulkStats[rstId] = &flex.BuilderJob_BulkStat{}
 					client := c.rstMap[rstId]
 					submitBulkRequest, appendBulkRequestCfg, err := client.BuildBulkRequest(ctx)
 					if err != nil {
@@ -228,14 +223,12 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 
 					defer func() {
 						if err := submitBulkRequest(); err != nil {
-							builder.BulkStats[rstId].SetError(err.Error())
 						}
 					}()
 					bulkRequestAdders[rstId] = appendBulkRequestCfg
 				}
 
 				bulkRequestAdders[rstId](cfg)
-				builder.BulkStats[rstId].Paths++
 			}
 		}
 	}
@@ -415,7 +408,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			}
 		}
 	})
-
 	if err := g.Wait(); err != nil {
 		return false, fmt.Errorf("job builder request was aborted: %w", err)
 	}
@@ -423,51 +415,28 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		return true, nil
 	}
 
-	bulkRequestSubmitted := int32(0)
-	bulkErrMessages := make([]string, 0)
-	for rstId, stats := range builder.GetBulkStats() {
-		if stats == nil {
-			continue
-		}
-
-		includedPaths := stats.GetPaths()
-		bulkRequestSubmitted += includedPaths
-		if !stats.HasError() {
-			continue
-		}
-		bulkErrMessage := fmt.Sprintf("rst %d: paths=%d, error=%q", rstId, includedPaths, stats.GetError())
-		bulkErrMessages = append(bulkErrMessages, bulkErrMessage)
-	}
-
-	errMessages := make([]string, 0)
-	individualRequestSubmitted := builder.GetSubmitted()
-	individualRequestErrors := builder.GetErrors()
-	if individualRequestSubmitted == 0 && bulkRequestSubmitted == 0 {
+	var errMessage string
+	totalSubmitted := builder.GetSubmitted()
+	totalErrors := builder.GetErrors()
+	if totalSubmitted == 0 {
 		if cfg.Download {
 			if walkingLocalPath {
-				errMessages = append(errMessages, fmt.Sprintf("walking local path since --%s was not provided; No matches found in path: %s", RemotePathFlag, cfg.Path))
+				errMessage = fmt.Sprintf("walking local path since --%s was not provided; No matches found in path: %s", RemotePathFlag, cfg.Path)
 			} else {
-				errMessages = append(errMessages, fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath))
+				errMessage = fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath)
 			}
 		} else {
-			errMessages = append(errMessages, fmt.Sprintf("no matches found in local path: %s", cfg.Path))
+			errMessage = fmt.Sprintf("no matches found in local path: %s", cfg.Path)
 		}
-	} else {
-		if individualRequestErrors > 0 {
-			errMessages = append(errMessages, fmt.Sprintf("%d of %d requests were submitted with errors", individualRequestErrors, individualRequestSubmitted))
-		}
-
-		if len(bulkErrMessages) > 0 {
-			bulkErrMessage := fmt.Sprintf("bulk submission errors: %s", strings.Join(bulkErrMessages, " | "))
-			errMessages = append(errMessages, bulkErrMessage)
-		}
+	} else if totalErrors > 0 {
+		errMessage = fmt.Sprintf("%d of %d requests were submitted with errors", totalErrors, totalSubmitted)
 	}
 
-	if len(errMessages) > 0 {
+	if errMessage != "" {
 		if !IsValidRstId(cfg.RemoteStorageTarget) {
-			errMessages = append(errMessages, fmt.Sprintf("--%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag))
+			errMessage += fmt.Sprintf("; --%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag)
 		}
-		return false, errors.New(strings.Join(errMessages, "; "))
+		return false, errors.New(errMessage)
 	}
 	return false, nil
 }
