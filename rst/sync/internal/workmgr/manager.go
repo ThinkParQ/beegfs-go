@@ -415,6 +415,7 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			// New work request is not ready and will be placed in the wait queue.
 			m.scheduler.RemoveWorkToken(submissionId)
 			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
+			fmt.Println("New work request is not ready yet and has been moved to the wait-queue")
 		} else if _, ok := m.activeWork[workId]; !ok {
 			// Check based on the work identifier if there is already an existing workContext in the
 			// activeWork map. If so skip adding it to the map or queue again as we could block a worker

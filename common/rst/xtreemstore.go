@@ -36,6 +36,7 @@ var _ Provider = &XtreemStoreClient{}
 // newXtreemstore initializes an xtreemstore provider by reusing the S3 client implementation.
 func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
 	xtreemstore := rstConfig.GetXtreemstore()
+	fmt.Println("newXtreemstore", xtreemstore)
 	if xtreemstore == nil || xtreemstore.GetS3() == nil {
 		return nil, fmt.Errorf("xtreemstore configuration must include s3 settings")
 	}
@@ -101,8 +102,8 @@ func (x *XtreemStoreClient) IsWorkRequestReady(ctx context.Context, request *fle
 	return x.S3Client.IsWorkRequestReady(ctx, request)
 }
 
-func (x *XtreemStoreClient) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
-	return false, false, 0
+func (x *XtreemStoreClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (includeInBulk bool) {
+	return false
 }
 
 func (x *XtreemStoreClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {

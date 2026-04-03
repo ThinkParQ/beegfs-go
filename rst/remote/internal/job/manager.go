@@ -515,6 +515,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			for _, workRequest := range jobSubmission.WorkRequests {
 				workRequest.ExecuteAfter = timestamppb.New(executeAfter)
 			}
+			fmt.Println("beeremote.JobRequest_GenerationStatus_NOT_READY", jobSubmission)
 		default:
 			err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
 		}

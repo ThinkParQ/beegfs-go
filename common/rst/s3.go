@@ -46,7 +46,7 @@ type s3Provider interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
-	PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration)
+	PlanRequestSubmission(ctx context.Context, request *beeremote.JobRequest) (includeInBulk bool)
 	BuildBulkRequests(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
 }
 
@@ -112,8 +112,8 @@ func (a *defaultS3Provider) GetObject(ctx context.Context, params *s3.GetObjectI
 	return a.client.GetObject(ctx, params, optFns...)
 }
 
-func (a *defaultS3Provider) PlanRequestSubmission(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
-	return false, false, 0
+func (a *defaultS3Provider) PlanRequestSubmission(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
 }
 
 func (a *defaultS3Provider) BuildBulkRequests(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
@@ -378,8 +378,8 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 	return false, ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) PlanBulkRequest(ctx context.Context, cfg *flex.JobRequestCfg) (includeInBulk bool, skipIndividual bool, waitQueueDelay time.Duration) {
-	return false, false, 0
+func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
 }
 
 func (r *S3Client) BuildBulkRequest(ctx context.Context) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
