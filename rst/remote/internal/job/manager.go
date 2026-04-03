@@ -36,6 +36,7 @@ type managerMetrics struct {
 	workRequests metric.Int64Counter
 	jobTerminal  metric.Int64Counter
 	jobDuration  metric.Float64Histogram
+	jobCount     metric.Int64ObservableGauge
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -141,8 +142,12 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		metric.WithDescription("Time from job creation to terminal state"),
 		metric.WithUnit("s"),
 	)
+	jobCount, _ := meter.Int64ObservableGauge("beeremote.job.count",
+		metric.WithDescription("Current number of jobs in each state"),
+		metric.WithUnit("{job}"),
+	)
 
-	return &Manager{
+	m := &Manager{
 		log:                       log,
 		ctx:                       ctx,
 		ctxCancel:                 cancel,
@@ -161,8 +166,13 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 			workRequests: workRequests,
 			jobTerminal:  jobTerminal,
 			jobDuration:  jobDuration,
+			jobCount:     jobCount,
 		},
 	}
+	if _, err := meter.RegisterCallback(m.collectJobCounts, jobCount); err != nil {
+		log.Warn("failed to register job count gauge callback", zap.Error(err))
+	}
+	return m
 }
 
 // recordJobTerminal records metrics and emits a structured log when a job
@@ -233,6 +243,83 @@ func terminalStateString(state beeremote.Job_State) string {
 		// silently miscounting metrics as "failed".
 		panic(fmt.Sprintf("terminalStateString called with non-terminal state: %v", state))
 	}
+}
+
+// jobStateString returns the metric attribute string for any job state.
+// If a new proto state is added and this switch is not updated, counts will
+// accumulate under "unknown" as a visible signal rather than crashing the process.
+func jobStateString(state beeremote.Job_State) string {
+	switch state {
+	case beeremote.Job_UNSPECIFIED:
+		return "unspecified"
+	case beeremote.Job_UNASSIGNED:
+		return "unassigned"
+	case beeremote.Job_SCHEDULED:
+		return "scheduled"
+	case beeremote.Job_RUNNING:
+		return "running"
+	case beeremote.Job_ERROR:
+		return "error"
+	case beeremote.Job_COMPLETED:
+		return "completed"
+	case beeremote.Job_OFFLOADED:
+		return "offloaded"
+	case beeremote.Job_CANCELLED:
+		return "cancelled"
+	case beeremote.Job_FAILED:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
+// collectJobCounts is an OTel observable gauge callback that iterates the job
+// store and reports the current count of jobs per state and RST ID.
+func (m *Manager) collectJobCounts(_ context.Context, o metric.Observer) error {
+	m.readyMu.RLock()
+	defer m.readyMu.RUnlock()
+	if !m.ready {
+		return nil
+	}
+
+	type stateKey struct {
+		state string
+		rstID int
+	}
+	counts := make(map[stateKey]int64)
+
+	nextEntry, cleanup, err := m.pathStore.GetEntries(kvstore.WithKeyPrefix("/"))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	for {
+		entry, err := nextEntry()
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			break
+		}
+		for _, job := range entry.Entry.Value {
+			k := stateKey{
+				state: jobStateString(job.GetStatus().GetState()),
+				rstID: int(job.Request.GetRemoteStorageTarget()),
+			}
+			counts[k]++
+		}
+	}
+
+	for k, n := range counts {
+		o.ObserveInt64(m.metrics.jobCount, n,
+			metric.WithAttributes(
+				telemetry.AttrState.String(k.state),
+				telemetry.AttrRSTID.Int(k.rstID),
+			),
+		)
+	}
+	return nil
 }
 
 // Start handles initializing all databases and starting a goroutine that

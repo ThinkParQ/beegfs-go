@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -14,11 +15,14 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1093,4 +1097,132 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 			assert.Equal(t, 0, observed.Len(), "no log when delete is rejected for a terminal job")
 		})
 	}
+}
+
+// TestJobStateString pins every beeremote.Job_State enum value to its expected
+// metric label. A missing case here will catch proto enum additions before they
+// silently accumulate under "unknown" in production metrics.
+func TestJobStateString(t *testing.T) {
+	tests := []struct {
+		state    beeremote.Job_State
+		expected string
+	}{
+		{beeremote.Job_UNSPECIFIED, "unspecified"},
+		{beeremote.Job_UNKNOWN, "unknown"},
+		{beeremote.Job_UNASSIGNED, "unassigned"},
+		{beeremote.Job_SCHEDULED, "scheduled"},
+		{beeremote.Job_RUNNING, "running"},
+		{beeremote.Job_ERROR, "error"},
+		{beeremote.Job_COMPLETED, "completed"},
+		{beeremote.Job_OFFLOADED, "offloaded"},
+		{beeremote.Job_CANCELLED, "cancelled"},
+		{beeremote.Job_FAILED, "failed"},
+		// Unrecognized values fall through to "unknown".
+		{beeremote.Job_State(9999), "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			assert.Equal(t, tt.expected, jobStateString(tt.state))
+		})
+	}
+}
+
+// TestCollectJobCounts verifies that collectJobCounts emits the correct per-(state, rst_id)
+// counts and that it skips observation before the manager is ready.
+func TestCollectJobCounts(t *testing.T) {
+	tmpPath, cleanupPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err)
+	defer cleanupPath(t)
+
+	// Set up a real OTel SDK meter with a ManualReader so we can read back observations.
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { require.NoError(t, mp.Shutdown(context.Background())) }()
+	meter := mp.Meter("test")
+
+	jobCount, err := meter.Int64ObservableGauge("beeremote.job.count")
+	require.NoError(t, err)
+
+	// Build a minimal Manager with a real pathStore.
+	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
+	pathStore, closeDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, closeDB()) }()
+
+	m := &Manager{
+		log:       &logger.Logger{Logger: zap.NewNop()},
+		pathStore: pathStore,
+		metrics:   managerMetrics{jobCount: jobCount},
+	}
+
+	// Before ready: callback must emit nothing.
+	_, regErr := meter.RegisterCallback(m.collectJobCounts, jobCount)
+	require.NoError(t, regErr)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	assert.Empty(t, gaugeDataPoints(t, rm, "beeremote.job.count"), "no observations expected before ready")
+
+	// Mark ready and insert test jobs.
+	m.readyMu.Lock()
+	m.ready = true
+	m.readyMu.Unlock()
+
+	insertJob := func(path string, rstID uint32, state beeremote.Job_State) {
+		_, entry, commit, err := pathStore.CreateAndLockEntry(path)
+		if err == kvstore.ErrEntryAlreadyExistsInDB {
+			entry, commit, err = pathStore.GetAndLockEntry(path)
+		}
+		require.NoError(t, err)
+		if entry.Value == nil {
+			entry.Value = make(map[string]*Job)
+		}
+		jobID := strconv.Itoa(len(entry.Value))
+		entry.Value[jobID] = &Job{
+			Job: beeremote.Job_builder{
+				Request: beeremote.JobRequest_builder{RemoteStorageTarget: rstID}.Build(),
+				Status:  beeremote.Job_Status_builder{State: state}.Build(),
+			}.Build(),
+		}
+		require.NoError(t, commit())
+	}
+
+	// RST 1: 2 RUNNING, 1 FAILED. RST 2: 1 COMPLETED.
+	insertJob("/a", 1, beeremote.Job_RUNNING)
+	insertJob("/b", 1, beeremote.Job_RUNNING)
+	insertJob("/c", 1, beeremote.Job_FAILED)
+	insertJob("/d", 2, beeremote.Job_COMPLETED)
+
+	rm = metricdata.ResourceMetrics{}
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	points := gaugeDataPoints(t, rm, "beeremote.job.count")
+
+	type key struct{ state string; rstID int }
+	observed := make(map[key]int64)
+	for _, dp := range points {
+		state, _ := dp.Attributes.Value(telemetry.AttrState)
+		rstID, _ := dp.Attributes.Value(telemetry.AttrRSTID)
+		observed[key{state.AsString(), int(rstID.AsInt64())}] = dp.Value
+	}
+
+	assert.Equal(t, int64(2), observed[key{"running", 1}])
+	assert.Equal(t, int64(1), observed[key{"failed", 1}])
+	assert.Equal(t, int64(1), observed[key{"completed", 2}])
+	assert.Len(t, observed, 3, "unexpected extra label sets observed")
+}
+
+// gaugeDataPoints extracts the data points from an Int64 gauge named metricName
+// from a ResourceMetrics snapshot.
+func gaugeDataPoints(t *testing.T, rm metricdata.ResourceMetrics, metricName string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == metricName {
+				data, ok := m.Data.(metricdata.Gauge[int64])
+				require.True(t, ok, "metric %q is not a Gauge[int64]", metricName)
+				return data.DataPoints
+			}
+		}
+	}
+	return nil
 }
