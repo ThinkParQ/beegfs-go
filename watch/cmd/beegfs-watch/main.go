@@ -58,7 +58,7 @@ func main() {
 	pflag.String("management.auth-file", "/etc/beegfs/conn.auth", "The file containing the connection authentication shared secret.")
 	pflag.Bool("management.auth-disable", false, "Disable connection authentication.")
 	pflag.Int("handler.max-reconnect-backoff", 60, "When a connection cannot be made to a subscriber subscriber reconnection attempts will be made with an exponential backoff. This is the maximum time in seconds between reconnection attempts to avoid increasing the backoff timer forever.")
-	pflag.Int("handler.max-wait-for-response-after-connect", 2, "When a subscriber connects/reconnects wait this long for the subscriber to acknowledge the sequence ID of the last event it received successfully. This prevents sending duplicate events if the connection was disrupted unexpectedly.")
+	pflag.Int("handler.max-wait-for-response-after-connect", 0, "When a subscriber connects/reconnects wait this long for the subscriber to acknowledge the sequence ID of the last event it received successfully. This prevents sending duplicate events if the connection was disrupted unexpectedly. The default 0 will wait indefinitely.")
 	pflag.Int("handler.poll-frequency", 1, "How often subscribers should poll the metadata buffer for new events (causes more CPU utilization when idle).")
 	// Hidden flags:
 	pflag.Bool("management.use-http-proxy", false, "Use proxy configured globally or in the environment for gRPC communication to the Management node.")
@@ -239,7 +239,11 @@ shutdownLoop:
 			subscribersCancel()
 			break shutdownLoop
 		case <-time.After(1 * time.Second):
-			// Otherwise wait for subscribers to send all events and the buffer to be empty:
+			// Otherwise wait for subscribers to send all events and the buffer to be empty. If
+			// there are any disconnected subscribers, or subscribers that are partially connected
+			// (e.g., stream is established but they haven't ack'd the last event they saw), then
+			// shutdown will hang until they reconnect and receive all events. We might want to
+			// change this so disconnected/partially connected subscribers don't block shutdown.
 			if metaMgr.EventBuffer.AllEventsAcknowledged() {
 				subscribersCancel()
 				break shutdownLoop

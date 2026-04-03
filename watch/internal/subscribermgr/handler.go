@@ -2,10 +2,12 @@ package subscribermgr
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/watch/internal/subscriber"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	"go.uber.org/zap"
@@ -153,13 +155,36 @@ func (h *Handler) doDisconnect() bool {
 func (h *Handler) connectLoop() bool {
 	h.log.Info("connecting to subscriber")
 	var reconnectBackOff float64 = 1
+
+	var metaID beegfs.NumId
+	if !h.Subscriber.Config.SkipNodeIDDetection {
+		ringID := h.metaEventBuffer.GetRingID()
+		if ringID == 0 {
+			h.log.Info("waiting for metadata node ID to be available due to subscriber configuration")
+		waitForRingID:
+			for {
+				select {
+				case <-h.ctx.Done():
+					h.log.Info("not attempting to detect metadata node ID for subscriber because the handler is shutting down")
+					return false
+				case <-time.After(time.Second):
+					if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
+						break waitForRingID
+					}
+				}
+			}
+		}
+		metaID = beegfs.NumId(ringID)
+		h.log.Info("detected metadata node ID for subscriber", zap.Any("metaID", metaID))
+	}
+
 	for {
 		select {
 		case <-h.ctx.Done():
 			h.log.Info("not attempting to connect to subscriber because the handler is shutting down")
 			return false
 		case <-time.After(time.Second * time.Duration(reconnectBackOff)): // We use this instead of time.Ticker so we can change the duration.
-			retry, err := h.Connect()
+			retry, err := h.Connect(metaID)
 			if err != nil {
 				if !retry {
 					h.log.Error("unable to connect to subscriber (unable to retry)", zap.Error(err))
@@ -188,24 +213,83 @@ func (h *Handler) receiveLoop() (<-chan struct{}, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	recvStream := h.Receive()
 	h.log.Info("receiving responses from subscriber")
-	// When we connect, some subscribers may acknowledge the last event they successfully received before a disconnect.
-	// TODO: Consider if the time we wait should be configurable based per subscriber.
-	select {
-	case response, ok := <-recvStream:
-		if ok {
-			// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
-			h.log.Info("subscriber acknowledged last event received before disconnect", zap.Any("sequenceID", response.CompletedSeq))
-			err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
-			if err != nil {
-				// Ignore errors, an error is expected if the event buffer is not fully repopulated.
-				// This is logged in case we start seeing errors unexpected under other circumstances.
-				h.log.Debug("error updating subscriber ack cursor with last event before disconnect", zap.Error(err))
-			}
-			h.lastSeqID = response.CompletedSeq
+
+	var timeout <-chan time.Time
+	waitForAckIndefinitely := false
+	// When waiting indefinitely we still want to log an warning if we don't get a quick response.
+	waitForAckIndefinitelyWarnTimeout := time.After(2 * time.Second)
+
+	if h.Subscriber.WaitForResponseAfterConnect != nil {
+		switch subscriberTimeout := *h.Subscriber.WaitForResponseAfterConnect; {
+		case subscriberTimeout <= 0:
+			waitForAckIndefinitely = true
+			timeout = waitForAckIndefinitelyWarnTimeout
+		default:
+			timeout = time.After(time.Duration(subscriberTimeout) * time.Second)
 		}
-		// TODO: Test what happens if we have a REMOTE_DISCONNECT here. Are we safe to just ignore it? It would be better to explicitly handle.
-	case <-time.After(time.Duration(h.config.MaxWaitForResponseAfterConnect) * time.Second):
-		h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event")
+	} else {
+		switch defaultTimeout := h.config.MaxWaitForResponseAfterConnect; {
+		case defaultTimeout <= 0:
+			waitForAckIndefinitely = true
+			timeout = waitForAckIndefinitelyWarnTimeout
+		default:
+			timeout = time.After(time.Duration(defaultTimeout) * time.Second)
+		}
+	}
+
+	// When we connect, subscribers can indicate where they want to resume reading in the buffer.
+	// They can request to receive only new events by indicating the max uint64 as the completed
+	// sequence, from the last event they successfully received before a disconnect, or all events.
+waitForInitialAck:
+	for {
+		select {
+		case <-h.ctx.Done():
+			h.log.Info("handler was shutdown before the subscriber acknowledged the last event received before disconnect")
+			close(done)
+			return done, cancel
+		case response, ok := <-recvStream:
+			if ok {
+				// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
+				if response.CompletedSeq == math.MaxUint64 {
+					h.log.Info("subscriber requested to resume sending events from the end of the buffer", zap.Any("sequenceID", response.CompletedSeq))
+					lastSeqID, err := h.metaEventBuffer.SeekToEnd(h.ID)
+					if err != nil {
+						// This probably indicates a bug. We should bail out since the subscriber
+						// specifically indicated they don't want to receive all historical events.
+						h.log.Error("error seeking subscriber ack cursor to the end of the buffer", zap.Error(err))
+						close(done)
+						return done, cancel
+					}
+					h.lastSeqID = lastSeqID
+				} else {
+					// This branch also handles if the CompletedSeq is 0, which indicates to send
+					// everything in the buffer to the subscriber.
+					h.log.Info("subscriber acknowledged last event received before disconnect", zap.Any("sequenceID", response.CompletedSeq))
+					err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
+					if err != nil {
+						// Ignore errors, an error is expected if the event buffer is not fully
+						// repopulated or if there were no new events received while the subscriber
+						// was disconnected.
+						//
+						// This is logged in case we start seeing errors unexpected under other
+						// circumstances.
+						h.log.Debug("error updating subscriber ack cursor with last event before disconnect", zap.Error(err))
+					}
+					h.lastSeqID = response.CompletedSeq
+				}
+			}
+			break waitForInitialAck
+			// If we get a REMOTE_DISCONNECT here (!ok) we could bail out early. For now we just go
+			// into the sendLoop which will immediately exit because the receive loop below will
+			// have shutdown.
+		case <-timeout:
+			if !waitForAckIndefinitely {
+				h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event", zap.Any("lastSeqID", h.lastSeqID))
+				break waitForInitialAck
+			}
+			h.log.Warn("subscriber did not acknowledge last event received before disconnect within the expected timeframe, waiting indefinitely due to subscriber configuration")
+			// The timeout fires once so this warning will not be logged again.
+		}
 	}
 
 	// Move the send cursor back to the last acknowledged event.

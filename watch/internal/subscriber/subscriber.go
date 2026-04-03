@@ -9,6 +9,7 @@ package subscriber
 import (
 	"sync"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	pb "github.com/thinkparq/protobuf/go/beewatch"
 )
 
@@ -19,7 +20,7 @@ type Interface interface {
 	// If it returns an error retry should be true if there was a transient issue that can be retried (i.e., subscriber not ready).
 	// Otherwise retry should be false if there is a fatal error connecting to the subscriber (i.e., subscriber is misconfigured).
 	// In either case it is not expected to be idempotent, and if an error occurs Disconnect() should be called to cleanup before reconnecting.
-	Connect() (retry bool, err error)
+	Connect(forMetaID beegfs.NumId) (retry bool, err error)
 	// Send transmits a single event to a subscriber.
 	Send(*pb.Event) (err error)
 	// Receive starts a goroutine that listens responses from the subscriber and posts them to the returned channel.
