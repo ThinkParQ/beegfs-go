@@ -20,6 +20,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
@@ -79,6 +80,9 @@ func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Confi
 		if !certPool.AppendCertsFromPEM(cert) {
 			return nil, fmt.Errorf("appending provided certificate to pool failed")
 		}
+	}
+	if disableVerification {
+		zap.L().Warn("TLS certificate verification is disabled for this OTLP connection; the connection is vulnerable to man-in-the-middle attacks")
 	}
 	return &tls.Config{
 		RootCAs:            certPool,
@@ -165,8 +169,16 @@ func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 
 func buildPrometheusReader() (*prometheusReader, error) {
 	// Use a custom registry so we can serve its handler independently of the
-	// process-wide default Prometheus registry.
+	// process-wide default Prometheus registry. Explicitly register the standard
+	// Go runtime and process collectors so the /metrics endpoint includes them,
+	// since they are only auto-registered on prometheus.DefaultRegisterer.
 	reg := prometheus.NewRegistry()
+	if err := reg.Register(collectors.NewGoCollector()); err != nil {
+		return nil, fmt.Errorf("failed to register Go collector: %w", err)
+	}
+	if err := reg.Register(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})); err != nil {
+		return nil, fmt.Errorf("failed to register process collector: %w", err)
+	}
 	exp, err := prometheusexporter.New(prometheusexporter.WithRegisterer(reg))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
@@ -287,8 +299,6 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 		})
 	} else if cfg.TLSDisable {
 		zap.L().Info("prometheus metrics server TLS explicitly disabled")
-	} else {
-		zap.L().Warn("prometheus metrics server not using TLS: no cert/key configured")
 	}
 
 	go func() {
