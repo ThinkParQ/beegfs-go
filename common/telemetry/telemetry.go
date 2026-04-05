@@ -114,6 +114,9 @@ func (c *Config) ValidateConfig() error {
 			if c.OTLP.Timeout != 0 && c.OTLP.Timeout < time.Second {
 				return fmt.Errorf("telemetry.otlp.timeout must be at least 1s (got '%s')", c.OTLP.Timeout)
 			}
+			if c.OTLP.TLSDisable && c.OTLP.TLSDisableVerification {
+				return fmt.Errorf("telemetry.otlp: tls-disable and tls-disable-verification are mutually exclusive; tls-disable-verification only applies when TLS is enabled")
+			}
 		}
 		if c.Prometheus.Enabled {
 			if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
@@ -145,6 +148,9 @@ func (c *Config) ValidateConfig() error {
 		}
 		if c.Logs.Timeout != 0 && c.Logs.Timeout < time.Second {
 			return fmt.Errorf("telemetry.logs.timeout must be at least 1s (got '%s')", c.Logs.Timeout)
+		}
+		if c.Logs.TLSDisable && c.Logs.TLSDisableVerification {
+			return fmt.Errorf("telemetry.logs: tls-disable and tls-disable-verification are mutually exclusive; tls-disable-verification only applies when TLS is enabled")
 		}
 	}
 	return nil
@@ -258,7 +264,11 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 
 		if cfg.Prometheus.Enabled {
 			if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-				sdkProvider.Shutdown(context.Background())
+				// Use a short deadline so a stalled provider shutdown cannot block
+				// New() indefinitely before signal handling is set up in main.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cleanupCancel()
+				sdkProvider.Shutdown(cleanupCtx)
 				return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
 			}
 		}
@@ -269,11 +279,15 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 	if cfg.Logs.Enabled {
 		logExporter, err := buildLogExporter(cfg.Logs)
 		if err != nil {
+			// Use a short deadline so a stalled OTLP flush cannot block New()
+			// indefinitely before signal handling is set up in main.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanupCancel()
 			if p.sdkProvider != nil {
-				p.sdkProvider.Shutdown(context.Background())
+				p.sdkProvider.Shutdown(cleanupCtx)
 			}
 			if p.promServer != nil {
-				p.promServer.Shutdown(context.Background())
+				p.promServer.Shutdown(cleanupCtx)
 			}
 			return nil, fmt.Errorf("failed to build log exporter: %w", err)
 		}
