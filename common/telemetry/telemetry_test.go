@@ -22,6 +22,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // findFreePort finds an available TCP port by binding to :0.
@@ -262,11 +265,11 @@ func TestValidateConfig(t *testing.T) {
 				Enabled:     true,
 				ServiceName: "test",
 				OTLP: telemetry.OTLPConfig{
-					Enabled:   true,
-					Protocol:  "grpc",
-					Endpoint:  "localhost:4317",
-					Interval:  30 * time.Second,
-					Timeout:   500 * time.Millisecond,
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+					Interval: 30 * time.Second,
+					Timeout:  500 * time.Millisecond,
 				},
 			},
 			wantErr: true,
@@ -459,7 +462,12 @@ func TestPrometheusEndpoint(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.NotEmpty(t, body)
-	assert.Contains(t, string(body), "test_prom_counter", "recorded counter should appear in Prometheus response")
+	bodyStr := string(body)
+	assert.Contains(t, bodyStr, "test_prom_counter", "recorded counter should appear in Prometheus response")
+	// Verify that Go runtime and process collectors registered on the custom
+	// registry are included in the output.
+	assert.Contains(t, bodyStr, "go_goroutines", "Go runtime metrics should appear in Prometheus response")
+	assert.Contains(t, bodyStr, "process_resident_memory_bytes", "process metrics should appear in Prometheus response")
 }
 
 // TestPrometheusPortAlreadyInUse verifies that New() returns an error immediately
@@ -500,6 +508,17 @@ func TestShutdownEnabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NoError(t, p.Shutdown(context.Background()))
+}
+
+// observeGlobalLogger replaces the global zap logger with an observed one for
+// the duration of the test, restoring the original on cleanup.
+func observeGlobalLogger(t *testing.T) *observer.ObservedLogs {
+	t.Helper()
+	core, logs := observer.New(zapcore.WarnLevel)
+	observed := zap.New(core)
+	restore := zap.ReplaceGlobals(observed)
+	t.Cleanup(restore)
+	return logs
 }
 
 // testTelemetryConfig implements telemetry.Configurer for testing UpdateConfiguration.
@@ -552,6 +571,7 @@ func TestUpdateConfiguration(t *testing.T) {
 	})
 
 	t.Run("changed config on enabled provider warns but succeeds", func(t *testing.T) {
+		logs := observeGlobalLogger(t)
 		port := findFreePort(t)
 		cfg := telemetry.Config{
 			Enabled:     true,
@@ -570,6 +590,17 @@ func TestUpdateConfiguration(t *testing.T) {
 		changedCfg.ServiceName = "changed-name"
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: changedCfg})
 		assert.NoError(t, err)
+
+		// A live provider must warn when its config changes, because the change
+		// only takes effect after a restart.
+		var found bool
+		for _, entry := range logs.All() {
+			if strings.Contains(entry.Message, "telemetry configuration changes require a restart") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected restart warning to be logged when config changes on a live provider")
 	})
 }
 
@@ -770,10 +801,10 @@ func TestLogsValidation(t *testing.T) {
 			cfg: telemetry.Config{
 				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
-					Enabled:   true,
-					Protocol:  "grpc",
-					Endpoint:  "localhost:4317",
-					Timeout:   500 * time.Millisecond,
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+					Timeout:  500 * time.Millisecond,
 				},
 			},
 			errMsg: "telemetry.logs.timeout must be at least 1s",
@@ -1001,6 +1032,7 @@ func TestLogsExporterNewFields(t *testing.T) {
 func TestTLSDisableVerification(t *testing.T) {
 	for _, protocol := range []string{"grpc", "http"} {
 		t.Run("otlp/"+protocol, func(t *testing.T) {
+			logs := observeGlobalLogger(t)
 			p, err := telemetry.New(telemetry.Config{
 				Enabled:     true,
 				ServiceName: "tls-skip-verify-test",
@@ -1014,8 +1046,18 @@ func TestTLSDisableVerification(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
+			// A security-relevant warning must be emitted when verification is disabled.
+			var found bool
+			for _, entry := range logs.All() {
+				if strings.Contains(entry.Message, "TLS certificate verification is disabled") {
+					found = true
+					break
+				}
+			}
+			assert.True(t, found, "expected InsecureSkipVerify warning for otlp/%s", protocol)
 		})
 		t.Run("logs/"+protocol, func(t *testing.T) {
+			logs := observeGlobalLogger(t)
 			p, err := telemetry.New(telemetry.Config{
 				Enabled:     false,
 				ServiceName: "tls-skip-verify-test",
@@ -1029,6 +1071,14 @@ func TestTLSDisableVerification(t *testing.T) {
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			assert.NotNil(t, p.LogProvider())
+			var found bool
+			for _, entry := range logs.All() {
+				if strings.Contains(entry.Message, "TLS certificate verification is disabled") {
+					found = true
+					break
+				}
+			}
+			assert.True(t, found, "expected InsecureSkipVerify warning for logs/%s", protocol)
 		})
 	}
 }
