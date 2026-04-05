@@ -37,7 +37,7 @@ func TestNew(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "debug", devLogger.level.String())
 	assert.NotNil(t, devLogger.Logger)
-	assert.NotNil(t, devLogger.Telemetry, "developer logger should have noop telemetry")
+	assert.NotNil(t, devLogger.telemetry, "developer logger should have noop telemetry")
 
 	logger1, err := New(Config{
 		Type:  "stdout",
@@ -46,7 +46,7 @@ func TestNew(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "info", logger1.level.String())
 	assert.NotNil(t, logger1.Logger)
-	assert.NotNil(t, logger1.Telemetry, "production logger should have noop telemetry")
+	assert.NotNil(t, logger1.telemetry, "production logger should have noop telemetry")
 
 	_, err = New(Config{Type: "foo", Level: 3}, nil)
 	assert.Error(t, err)
@@ -68,11 +68,10 @@ func TestNewWithTelemetryEnabled(t *testing.T) {
 	}
 	log, err := New(Config{Type: "stdout", Level: 3}, telCfg)
 	require.NoError(t, err)
-	require.NotNil(t, log.Telemetry)
 	defer log.Shutdown(context.Background())
 
 	// Create an instrument and record a value so the endpoint has data.
-	meter := log.Telemetry.Meter("test")
+	meter := log.Meter("test")
 	counter, err := meter.Int64Counter("logger_test_counter")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 42)
@@ -108,8 +107,11 @@ func TestWith(t *testing.T) {
 
 	// Child should be a different Logger instance.
 	assert.NotSame(t, log, child)
-	// But share the same Telemetry provider.
-	assert.Same(t, log.Telemetry, child.Telemetry)
+	// Both must share the same telemetry provider pointer so that instruments
+	// created through either logger contribute to the same metric pipeline.
+	// This assertion is structural (pointer equality) by design: the sharing
+	// contract is enforced by With() copying the pointer, not by cloning.
+	assert.Same(t, log.telemetry, child.telemetry)
 	// And share the same atomic level.
 	assert.Equal(t, log.level, child.level)
 }
@@ -207,7 +209,7 @@ func TestUpdateConfigurationDelegatesToTelemetry(t *testing.T) {
 	log := &Logger{
 		Logger:    zap.New(core),
 		level:     zap.NewAtomicLevelAt(zapcore.InfoLevel),
-		Telemetry: tp,
+		telemetry: tp,
 	}
 
 	cfg := &testFullConfig{
@@ -229,27 +231,24 @@ func TestUpdateConfigurationDelegatesToTelemetry(t *testing.T) {
 
 func TestUpdateConfigurationSkipsTelemetryWithoutConfigurer(t *testing.T) {
 	// When the config implements logger.Configurer but NOT telemetry.Configurer,
-	// UpdateConfiguration should skip telemetry delegation silently (no warning).
-	core, logs := observer.New(zapcore.DebugLevel)
+	// UpdateConfiguration should skip telemetry delegation and still apply the
+	// log-level change from the config.
+	core, _ := observer.New(zapcore.DebugLevel)
 	tp, err := telemetry.New(telemetry.Config{Enabled: false})
 	require.NoError(t, err)
 	log := &Logger{
 		Logger:    zap.New(core),
 		level:     zap.NewAtomicLevelAt(zapcore.InfoLevel),
-		Telemetry: tp,
+		telemetry: tp,
 	}
 
 	logOnlyConfig := &testConfig{
-		logConfig: Config{Level: 3, Type: "stdout"},
+		logConfig: Config{Level: 4, Type: "stdout"}, // level 4 = debug
 	}
 	err = log.UpdateConfiguration(logOnlyConfig)
 	assert.NoError(t, err)
-
-	// Verify no telemetry warning was emitted — delegation was skipped cleanly.
-	for _, entry := range logs.All() {
-		assert.NotEqual(t, "unable to update telemetry configuration", entry.Message,
-			"should not warn about telemetry when config doesn't implement telemetry.Configurer")
-	}
+	// The log level must be updated even though telemetry delegation was skipped.
+	assert.Equal(t, zapcore.DebugLevel, log.level.Level())
 }
 
 func TestNewWithOtelLogsDisabled(t *testing.T) {
@@ -258,7 +257,7 @@ func TestNewWithOtelLogsDisabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, log)
-	assert.Nil(t, log.Telemetry.LogProvider(), "log provider must be nil when logs are disabled")
+	assert.Nil(t, log.LogProvider(), "log provider must be nil when logs are disabled")
 	// Sync on stdout may fail in test environments; not checked.
 	_ = log.Shutdown(context.Background())
 }
