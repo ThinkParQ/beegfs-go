@@ -142,7 +142,7 @@ type Manager struct {
 func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.Client, mountPoint filesystem.Provider) (*Manager, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
-	meter := log.Telemetry.Meter("workmgr")
+	meter := log.Meter("workmgr")
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 
