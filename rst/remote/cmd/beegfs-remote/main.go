@@ -75,8 +75,12 @@ func main() {
 	pflag.Bool("telemetry.otlp.tls-disable-verification", false, "Disable TLS server verification for OTLP connections.")
 	pflag.Bool("telemetry.otlp.tls-disable", false, "Disable TLS entirely for OTLP connections.")
 	pflag.Bool("telemetry.prometheus.enabled", false, "Enable Prometheus /metrics endpoint.")
+	pflag.String("telemetry.prometheus.listen-address", "", "Address the Prometheus HTTP server listens on (empty string binds all interfaces).")
 	pflag.Int("telemetry.prometheus.port", 9091, "Prometheus metrics HTTP port.")
 	pflag.String("telemetry.prometheus.path", "/metrics", "Prometheus metrics HTTP path.")
+	pflag.String("telemetry.prometheus.tls-cert-file", "", "Path to the TLS certificate file for the Prometheus endpoint.")
+	pflag.String("telemetry.prometheus.tls-key-file", "", "Path to the TLS key file for the Prometheus endpoint.")
+	pflag.Bool("telemetry.prometheus.tls-disable", false, "Disable TLS for the Prometheus metrics endpoint.")
 	pflag.Bool("telemetry.logs.enabled", false, "Enable exporting logs via OTLP.")
 	pflag.String("telemetry.logs.protocol", "grpc", "OTLP logs transport ('grpc' or 'http').")
 	pflag.String("telemetry.logs.endpoint", "localhost:4317", "OTLP logs collector endpoint.")
@@ -169,7 +173,16 @@ Using environment variables:
 	if err != nil {
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
-	defer logger.Shutdown(context.Background())
+	defer func() {
+		// 10s gives the OTel SDK time to flush the last metrics window. If
+		// telemetry.otlp.timeout is configured above 10s, the final flush may be
+		// cut short; adjust this value accordingly in that case.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := logger.Shutdown(shutdownCtx); err != nil {
+			log.Printf("error during logger shutdown: %v", err)
+		}
+	}()
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {
