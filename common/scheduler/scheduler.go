@@ -174,6 +174,9 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	}
 
 	// Register OTel observable gauges for scheduler throughput metrics.
+	// The OTel API always returns a valid (no-op) instrument even on error; errors
+	// only occur for invalid names or incompatible re-registration, neither of which
+	// can happen with these compile-time constants.
 	completedWorkGauge, _ := cfg.meter.Float64ObservableGauge(
 		metricCompletedWorkRate,
 		metric.WithDescription("Work completion rate (Hz)"),
@@ -182,6 +185,8 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 		metricTokensAllowedRate,
 		metric.WithDescription("Token release rate (Hz)"),
 	)
+	// RegisterCallback only errors when given a nil callback, zero instruments, or instruments
+	// from a different meter — none of which can happen here.
 	_, _ = cfg.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveFloat64(completedWorkGauge, math.Float64frombits(s.completedWorkHz.Load()))
 		o.ObserveFloat64(tokensAllowedGauge, math.Float64frombits(s.tokensAllowedHz.Load()))
