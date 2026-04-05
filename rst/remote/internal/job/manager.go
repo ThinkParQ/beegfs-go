@@ -116,7 +116,7 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 // NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
 func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
-	meter := log.Telemetry.Meter("job")
+	meter := log.Meter("job")
 	ctx, cancel := context.WithCancel(context.Background())
 	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
 	jobUpdatesChan := make(chan *beeremote.UpdateJobsRequest, config.RequestQueueDepth)
@@ -129,6 +129,9 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		opt(cfg)
 	}
 
+	// The OTel API always returns a valid (no-op) instrument even on error; errors
+	// only occur for invalid names or incompatible re-registration, neither of which
+	// can happen with these compile-time constants.
 	jobRequests, _ := meter.Int64Counter("beeremote.job.requests",
 		metric.WithDescription("Total job requests received"),
 	)
