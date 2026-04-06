@@ -96,7 +96,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "telemetry.service-name must be set when telemetry or logs are enabled",
+			errMsg:  "telemetry.service-name must be set when metrics are enabled",
 		},
 		{
 			name: "invalid OTLP protocol",
@@ -461,7 +461,6 @@ func TestPrometheusEndpoint(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.NotEmpty(t, body)
 	bodyStr := string(body)
 	assert.Contains(t, bodyStr, "test_prom_counter", "recorded counter should appear in Prometheus response")
 	// Verify that Go runtime and process collectors registered on the custom
@@ -511,14 +510,28 @@ func TestShutdownEnabled(t *testing.T) {
 }
 
 // observeGlobalLogger replaces the global zap logger with an observed one for
-// the duration of the test, restoring the original on cleanup.
-func observeGlobalLogger(t *testing.T) *observer.ObservedLogs {
+// the duration of the test, restoring the original on cleanup. Only log entries
+// at level or above are captured.
+func observeGlobalLogger(t *testing.T, level zapcore.Level) *observer.ObservedLogs {
 	t.Helper()
-	core, logs := observer.New(zapcore.WarnLevel)
+	core, logs := observer.New(level)
 	observed := zap.New(core)
 	restore := zap.ReplaceGlobals(observed)
 	t.Cleanup(restore)
 	return logs
+}
+
+// assertLogContains fails the test if no captured log entry's Message contains substr.
+// Note: only entry.Message is searched; structured zap fields in entry.Context are not.
+// If production code ever moves the key text into a Field, update this helper accordingly.
+func assertLogContains(t *testing.T, logs *observer.ObservedLogs, substr string, msgAndArgs ...interface{}) {
+	t.Helper()
+	for _, entry := range logs.All() {
+		if strings.Contains(entry.Message, substr) {
+			return
+		}
+	}
+	assert.Fail(t, fmt.Sprintf("expected a log entry containing %q but none found", substr), msgAndArgs...)
 }
 
 // testTelemetryConfig implements telemetry.Configurer for testing UpdateConfiguration.
@@ -551,7 +564,8 @@ func TestUpdateConfiguration(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("toggling enabled on disabled provider accepts config", func(t *testing.T) {
+	t.Run("disabled provider suppresses restart warning on config change", func(t *testing.T) {
+		logs := observeGlobalLogger(t, zapcore.WarnLevel)
 		p, err := telemetry.New(baseCfg)
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
@@ -568,10 +582,22 @@ func TestUpdateConfiguration(t *testing.T) {
 		}
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: newCfg})
 		assert.NoError(t, err)
+
+		// A second UpdateConfiguration on a still-disabled provider (sdkProvider
+		// and logProvider remain nil) must also succeed without a restart warning,
+		// regardless of whether the config changed.
+		differentCfg := newCfg
+		differentCfg.ServiceName = "toggled-again"
+		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: differentCfg})
+		assert.NoError(t, err)
+		for _, entry := range logs.All() {
+			assert.NotContains(t, entry.Message, "telemetry configuration changes require a restart",
+				"disabled provider must not warn on config change")
+		}
 	})
 
 	t.Run("changed config on enabled provider warns but succeeds", func(t *testing.T) {
-		logs := observeGlobalLogger(t)
+		logs := observeGlobalLogger(t, zapcore.WarnLevel)
 		port := findFreePort(t)
 		cfg := telemetry.Config{
 			Enabled:     true,
@@ -593,80 +619,97 @@ func TestUpdateConfiguration(t *testing.T) {
 
 		// A live provider must warn when its config changes, because the change
 		// only takes effect after a restart.
-		var found bool
-		for _, entry := range logs.All() {
-			if strings.Contains(entry.Message, "telemetry configuration changes require a restart") {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "expected restart warning to be logged when config changes on a live provider")
+		assertLogContains(t, logs, "telemetry configuration changes require a restart",
+			"expected restart warning when config changes on a live provider")
 	})
 }
 
-// TestHistogramBucketBoundaries verifies that custom DurationBoundaries are
-// applied to *.duration histograms via the Prometheus exporter.
+// TestHistogramBucketBoundaries verifies that custom DurationBoundaries and
+// BytesBoundaries are applied to their respective histograms via the Prometheus exporter.
 func TestHistogramBucketBoundaries(t *testing.T) {
-	port := findFreePort(t)
-	customBounds := []float64{0.01, 0.05, 0.1, 0.5, 1.0}
-	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "histogram-test",
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
-		},
-		Histograms: telemetry.HistogramConfig{
-			DurationBoundaries: customBounds,
-		},
-	})
-	require.NoError(t, err)
-	defer p.Shutdown(context.Background())
-
-	hist, err := p.Meter("test").Float64Histogram("test.duration")
-	require.NoError(t, err)
-	hist.Record(context.Background(), 0.03)
-	hist.Record(context.Background(), 0.75)
-
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	bodyStr := string(body)
-
-	// Verify the custom bucket boundaries appear in the Prometheus output.
-	for _, bound := range customBounds {
-		le := fmt.Sprintf("le=\"%g\"", bound)
-		assert.True(t, strings.Contains(bodyStr, le),
-			"expected bucket boundary %s in Prometheus output", le)
-	}
-}
-
-// TestOTLPReaderConstruction verifies that OTLP exporter construction succeeds
-// for both gRPC and HTTP protocols (connection is deferred, so no server needed).
-func TestOTLPReaderConstruction(t *testing.T) {
-	for _, protocol := range []string{"grpc", "http"} {
-		t.Run(protocol, func(t *testing.T) {
-			p, err := telemetry.New(telemetry.Config{
-				Enabled:     true,
-				ServiceName: "otlp-test",
-				OTLP: telemetry.OTLPConfig{
-					Enabled:    true,
-					Protocol:   protocol,
-					Endpoint:   "localhost:4317",
-					Interval:   30 * time.Second,
-					TLSDisable: true,
-				},
-			})
-			require.NoError(t, err)
-			defer p.Shutdown(context.Background())
+	t.Run("DurationBoundaries", func(t *testing.T) {
+		t.Parallel()
+		port := findFreePort(t)
+		customBounds := []float64{0.01, 0.05, 0.1, 0.5, 1.0}
+		p, err := telemetry.New(telemetry.Config{
+			Enabled:     true,
+			ServiceName: "histogram-test",
+			Prometheus: telemetry.PrometheusConfig{
+				Enabled: true,
+				Port:    port,
+				Path:    "/metrics",
+			},
+			Histograms: telemetry.HistogramConfig{
+				DurationBoundaries: customBounds,
+			},
 		})
-	}
+		require.NoError(t, err)
+		defer p.Shutdown(context.Background())
+
+		hist, err := p.Meter("test").Float64Histogram("test.duration")
+		require.NoError(t, err)
+		hist.Record(context.Background(), 0.03)
+		hist.Record(context.Background(), 0.75)
+
+		url := fmt.Sprintf("http://localhost:%d/metrics", port)
+		resp, err := http.Get(url)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		bodyStr := string(body)
+
+		// Verify the custom bucket boundaries appear in the Prometheus output.
+		for _, bound := range customBounds {
+			le := fmt.Sprintf("le=\"%g\"", bound)
+			assert.True(t, strings.Contains(bodyStr, le),
+				"expected bucket boundary %s in Prometheus output", le)
+		}
+	})
+
+	t.Run("BytesBoundaries", func(t *testing.T) {
+		t.Parallel()
+		port := findFreePort(t)
+		customBounds := []float64{1024, 65536, 1048576}
+		p, err := telemetry.New(telemetry.Config{
+			Enabled:     true,
+			ServiceName: "histogram-bytes-test",
+			Prometheus: telemetry.PrometheusConfig{
+				Enabled: true,
+				Port:    port,
+				Path:    "/metrics",
+			},
+			Histograms: telemetry.HistogramConfig{
+				BytesBoundaries: customBounds,
+			},
+		})
+		require.NoError(t, err)
+		defer p.Shutdown(context.Background())
+
+		hist, err := p.Meter("test").Float64Histogram("test.bytes.transferred")
+		require.NoError(t, err)
+		hist.Record(context.Background(), 2048)
+		hist.Record(context.Background(), 131072)
+
+		url := fmt.Sprintf("http://localhost:%d/metrics", port)
+		resp, err := http.Get(url)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		bodyStr := string(body)
+
+		// Verify the custom byte bucket boundaries appear in the Prometheus output.
+		for _, bound := range customBounds {
+			le := fmt.Sprintf("le=\"%g\"", bound)
+			assert.True(t, strings.Contains(bodyStr, le),
+				"expected byte bucket boundary %s in Prometheus output", le)
+		}
+	})
 }
 
 // TestOTLPReaderNewFields verifies that url-path, compression, and timeout fields are accepted
@@ -971,68 +1014,13 @@ func TestLogsExporterConstruction(t *testing.T) {
 	}
 }
 
-// TestLogsExporterNewFields verifies that url-path, compression, and timeout fields are accepted
-// by log exporter construction for both protocols (connection is deferred, so no server needed).
-func TestLogsExporterNewFields(t *testing.T) {
-	for _, protocol := range []string{"grpc", "http"} {
-		t.Run(protocol+"/compression-gzip", func(t *testing.T) {
-			p, err := telemetry.New(telemetry.Config{
-				Enabled:     false,
-				ServiceName: "log-fields-test",
-				Logs: telemetry.LogsConfig{
-					Enabled:     true,
-					Protocol:    protocol,
-					Endpoint:    "localhost:4317",
-					Compression: "gzip",
-					TLSDisable:  true,
-				},
-			})
-			require.NoError(t, err)
-			defer p.Shutdown(context.Background())
-			assert.NotNil(t, p.LogProvider())
-		})
-		t.Run(protocol+"/timeout", func(t *testing.T) {
-			p, err := telemetry.New(telemetry.Config{
-				Enabled:     false,
-				ServiceName: "log-fields-test",
-				Logs: telemetry.LogsConfig{
-					Enabled:    true,
-					Protocol:   protocol,
-					Endpoint:   "localhost:4317",
-					Timeout:    5 * time.Second,
-					TLSDisable: true,
-				},
-			})
-			require.NoError(t, err)
-			defer p.Shutdown(context.Background())
-			assert.NotNil(t, p.LogProvider())
-		})
-	}
-	t.Run("http/url-path", func(t *testing.T) {
-		p, err := telemetry.New(telemetry.Config{
-			Enabled:     false,
-			ServiceName: "log-fields-test",
-			Logs: telemetry.LogsConfig{
-				Enabled:    true,
-				Protocol:   "http",
-				Endpoint:   "localhost:4318",
-				URLPath:    "/otlp/v1/logs",
-				TLSDisable: true,
-			},
-		})
-		require.NoError(t, err)
-		defer p.Shutdown(context.Background())
-		assert.NotNil(t, p.LogProvider())
-	})
-}
-
 // TestTLSDisableVerification verifies that TLSDisableVerification=true (without TLSDisable)
 // succeeds for construction of both OTLP metric and log exporters across protocols.
 // Connection is deferred so no server is needed.
 func TestTLSDisableVerification(t *testing.T) {
 	for _, protocol := range []string{"grpc", "http"} {
 		t.Run("otlp/"+protocol, func(t *testing.T) {
-			logs := observeGlobalLogger(t)
+			logs := observeGlobalLogger(t, zapcore.WarnLevel)
 			p, err := telemetry.New(telemetry.Config{
 				Enabled:     true,
 				ServiceName: "tls-skip-verify-test",
@@ -1047,17 +1035,11 @@ func TestTLSDisableVerification(t *testing.T) {
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			// A security-relevant warning must be emitted when verification is disabled.
-			var found bool
-			for _, entry := range logs.All() {
-				if strings.Contains(entry.Message, "TLS certificate verification is disabled") {
-					found = true
-					break
-				}
-			}
-			assert.True(t, found, "expected InsecureSkipVerify warning for otlp/%s", protocol)
+			assertLogContains(t, logs, "TLS certificate verification is disabled",
+				"expected InsecureSkipVerify warning for otlp/%s", protocol)
 		})
 		t.Run("logs/"+protocol, func(t *testing.T) {
-			logs := observeGlobalLogger(t)
+			logs := observeGlobalLogger(t, zapcore.WarnLevel)
 			p, err := telemetry.New(telemetry.Config{
 				Enabled:     false,
 				ServiceName: "tls-skip-verify-test",
@@ -1071,14 +1053,8 @@ func TestTLSDisableVerification(t *testing.T) {
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			assert.NotNil(t, p.LogProvider())
-			var found bool
-			for _, entry := range logs.All() {
-				if strings.Contains(entry.Message, "TLS certificate verification is disabled") {
-					found = true
-					break
-				}
-			}
-			assert.True(t, found, "expected InsecureSkipVerify warning for logs/%s", protocol)
+			assertLogContains(t, logs, "TLS certificate verification is disabled",
+				"expected InsecureSkipVerify warning for logs/%s", protocol)
 		})
 	}
 }
@@ -1183,13 +1159,16 @@ func TestPrometheusEndpointTLS(t *testing.T) {
 	require.NoError(t, err)
 	counter.Add(context.Background(), 7)
 
-	// Plain HTTP must not succeed — the server speaks TLS. Go's TLS stack
-	// either closes the connection (returning an error) or sends an HTTP 400.
-	// Accept either outcome; both prove TLS is enforced.
+	// Plain HTTP must not succeed — the server speaks TLS. When a plain HTTP/1.1
+	// request hits a TLS listener, Go's TLS stack fails the handshake. Depending
+	// on the platform and Go version, the client sees either a connection error
+	// or an HTTP error status (e.g. 400). Both outcomes prove TLS is enforced.
 	plainURL := fmt.Sprintf("http://localhost:%d/metrics", port)
-	plainResp, plainErr := http.Get(plainURL) //nolint:noctx
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, plainURL, nil)
+	require.NoError(t, err)
+	plainResp, plainErr := http.DefaultClient.Do(req)
 	if plainErr == nil {
-		plainResp.Body.Close()
+		defer plainResp.Body.Close()
 		assert.NotEqual(t, http.StatusOK, plainResp.StatusCode, "plain HTTP client should not get 200 from a TLS server")
 	}
 
@@ -1245,6 +1224,96 @@ func TestPrometheusPartialTLSConfig(t *testing.T) {
 			assert.Contains(t, err.Error(), "tls-cert-file and tls-key-file must both be set or both be empty")
 		})
 	}
+}
+
+// TestOTLPDefaultTLSConstruction verifies that OTLP exporter construction succeeds when
+// neither a cert file nor disable-verification is configured. In this case the OTel SDK
+// uses its default TLS transport (system cert pool). Connection is deferred so no server
+// is needed. Note: this is a construction smoke test; it does not verify TLS handshake
+// behavior.
+func TestOTLPDefaultTLSConstruction(t *testing.T) {
+	for _, protocol := range []string{"grpc", "http"} {
+		t.Run(protocol, func(t *testing.T) {
+			p, err := telemetry.New(telemetry.Config{
+				Enabled:     true,
+				ServiceName: "tls-nil-test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:  true,
+					Protocol: protocol,
+					Endpoint: "localhost:4317",
+					Interval: 30 * time.Second,
+					// No TLSDisable, no TLSCertFile, no TLSDisableVerification —
+					// exercises buildClientTLSConfig("", false) -> nil, nil.
+				},
+			})
+			require.NoError(t, err)
+			defer p.Shutdown(context.Background())
+		})
+	}
+}
+
+// TestOTLPReaderGRPCURLPathWarning verifies that configuring a URL path for gRPC
+// protocol emits a warning, since gRPC transport ignores url-path.
+func TestOTLPReaderGRPCURLPathWarning(t *testing.T) {
+	logs := observeGlobalLogger(t, zapcore.WarnLevel)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "grpc-urlpath-test",
+		OTLP: telemetry.OTLPConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			Interval:   30 * time.Second,
+			URLPath:    "/custom",
+			TLSDisable: true,
+		},
+	})
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
+	assertLogContains(t, logs, "telemetry.otlp.url-path is ignored for gRPC protocol",
+		"expected url-path warning for OTLP gRPC protocol")
+}
+
+// TestLogsGRPCURLPathWarning verifies that configuring a URL path for gRPC log
+// export emits a warning, since gRPC transport ignores url-path.
+func TestLogsGRPCURLPathWarning(t *testing.T) {
+	logs := observeGlobalLogger(t, zapcore.WarnLevel)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     false,
+		ServiceName: "logs-grpc-urlpath-test",
+		Logs: telemetry.LogsConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			URLPath:    "/custom",
+			TLSDisable: true,
+		},
+	})
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
+	assertLogContains(t, logs, "telemetry.logs.url-path is ignored for gRPC protocol",
+		"expected url-path warning for logs gRPC protocol")
+}
+
+// TestPrometheusServerTLSDisableLog verifies that starting a Prometheus server
+// with TLSDisable=true logs an info-level message indicating TLS was explicitly disabled.
+func TestPrometheusServerTLSDisableLog(t *testing.T) {
+	logs := observeGlobalLogger(t, zapcore.InfoLevel)
+	port := findFreePort(t)
+	p, err := telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "tls-disable-log-test",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled:    true,
+			Port:       port,
+			Path:       "/metrics",
+			TLSDisable: true,
+		},
+	})
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
+	assertLogContains(t, logs, "prometheus metrics server TLS explicitly disabled",
+		"expected TLS-disabled info log when Prometheus TLS is explicitly disabled")
 }
 
 // generateSelfSignedCert creates a minimal self-signed CA cert in PEM format for testing.

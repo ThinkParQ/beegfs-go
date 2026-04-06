@@ -1,6 +1,5 @@
 // Package telemetry provides a common OpenTelemetry metrics implementation for
-// BeeGFS Go services. It follows the same lifecycle and configuration patterns
-// as the common/logger package.
+// BeeGFS Go services.
 package telemetry
 
 import (
@@ -89,8 +88,11 @@ type LogsConfig struct {
 // ValidateConfig checks telemetry configuration for consistency.
 // Called by the containing AppConfig.ValidateConfig().
 func (c *Config) ValidateConfig() error {
-	if (c.Enabled || c.Logs.Enabled) && c.ServiceName == "" {
-		return fmt.Errorf("telemetry.service-name must be set when telemetry or logs are enabled")
+	if c.Enabled && c.ServiceName == "" {
+		return fmt.Errorf("telemetry.service-name must be set when metrics are enabled")
+	}
+	if c.Logs.Enabled && c.ServiceName == "" {
+		return fmt.Errorf("telemetry.service-name must be set when log export is enabled")
 	}
 	// Validate metrics exporters only if telemetry (metrics) is enabled.
 	if c.Enabled {
@@ -217,6 +219,24 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 		return p, nil
 	}
 
+	// cleanupFns collects shutdown callbacks for resources acquired during
+	// construction. On any error, cleanup() drains them best-effort with a
+	// short timeout so New() never blocks indefinitely before signal handling
+	// is set up in main.
+	//
+	// Resources are drained in registration order (oldest first). This differs
+	// from the reverse order used by Shutdown(), but it is safe here because
+	// cleanup() only fires during partial construction where the Prometheus
+	// server and SDK provider have never handled real traffic.
+	var cleanupFns []func(context.Context) error
+	cleanup := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, fn := range cleanupFns {
+			_ = fn(ctx) // best-effort; the construction error is already being returned
+		}
+	}
+
 	// Build resource whenever any signal is enabled; it is shared by both metrics
 	// and log providers to identify the service in exported telemetry.
 	resource, err := buildResource(cfg, opts)
@@ -261,16 +281,15 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 		sdkProvider := sdkmetric.NewMeterProvider(meterOpts...)
 		p.sdkProvider = sdkProvider
 		p.meterProvider = sdkProvider
+		cleanupFns = append(cleanupFns, sdkProvider.Shutdown)
 
 		if cfg.Prometheus.Enabled {
 			if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-				// Use a short deadline so a stalled provider shutdown cannot block
-				// New() indefinitely before signal handling is set up in main.
-				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cleanupCancel()
-				sdkProvider.Shutdown(cleanupCtx)
+				cleanup()
 				return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
 			}
+			srv := p.promServer
+			cleanupFns = append(cleanupFns, srv.Shutdown)
 		}
 	} else {
 		p.meterProvider = noop.NewMeterProvider()
@@ -279,22 +298,14 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 	if cfg.Logs.Enabled {
 		logExporter, err := buildLogExporter(cfg.Logs)
 		if err != nil {
-			// Use a short deadline so a stalled OTLP flush cannot block New()
-			// indefinitely before signal handling is set up in main.
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cleanupCancel()
-			if p.sdkProvider != nil {
-				p.sdkProvider.Shutdown(cleanupCtx)
-			}
-			if p.promServer != nil {
-				p.promServer.Shutdown(cleanupCtx)
-			}
+			cleanup()
 			return nil, fmt.Errorf("failed to build log exporter: %w", err)
 		}
 		p.logProvider = sdklog.NewLoggerProvider(
 			sdklog.WithResource(resource),
 			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
 		)
+		cleanupFns = append(cleanupFns, p.logProvider.Shutdown)
 	}
 
 	return p, nil
@@ -347,10 +358,14 @@ func (p *Provider) UpdateConfiguration(newConfig any) error {
 	}
 	newCfg := configurer.GetTelemetryConfig()
 
-	// All telemetry config changes take effect only after a restart. Warn
-	// whenever a live provider exists so operators are not surprised by a no-op
-	// reload. No warning is emitted when nothing is running — there is nothing
-	// to restart.
+	if err := newCfg.ValidateConfig(); err != nil {
+		return fmt.Errorf("invalid telemetry configuration: %w", err)
+	}
+
+	// All telemetry config changes take effect only after a restart. Warn if at
+	// least one signal (metrics or logs) is actually running, so operators are
+	// not surprised by a no-op SIGHUP reload. If telemetry was disabled at
+	// startup, both fields are nil and there is nothing to restart.
 	if p.sdkProvider != nil || p.logProvider != nil {
 		if !reflect.DeepEqual(newCfg, p.config) {
 			zap.L().Warn("telemetry configuration changes require a restart to take effect")
