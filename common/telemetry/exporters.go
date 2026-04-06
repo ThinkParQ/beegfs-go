@@ -90,6 +90,13 @@ func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Confi
 	}, nil
 }
 
+// buildOTLPReader constructs a periodic metric reader for the given OTLP config.
+// The option-building logic in this function mirrors buildLogExporter.
+// Keep both in sync when adding new OTLP fields.
+//
+// context.Background() is passed to the exporter constructor because the OTel SDK
+// connects lazily. If a future SDK version adds a synchronous handshake, pass ctx
+// down from New() instead.
 func buildOTLPReader(cfg OTLPConfig) (sdkmetric.Reader, error) {
 	var exporter sdkmetric.Exporter
 	var err error
@@ -187,6 +194,12 @@ func buildPrometheusReader() (*prometheusReader, error) {
 }
 
 // buildLogExporter constructs an OTLP log exporter for the given configuration.
+// The option-building logic in this function mirrors buildOTLPReader.
+// Keep both in sync when adding new OTLP fields.
+//
+// context.Background() is passed to the exporter constructor because the OTel SDK
+// connects lazily. If a future SDK version adds a synchronous handshake, pass ctx
+// down from New() instead.
 func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 	switch cfg.Protocol {
 	case protocolGRPC:
