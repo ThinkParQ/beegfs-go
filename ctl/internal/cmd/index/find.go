@@ -89,6 +89,9 @@ Example: find BeeGFS files by metadata owner
 			if err != nil {
 				return err
 			}
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
+			}
 
 			log.Debug("running beegfs index find",
 				zap.String("indexPath", indexPath),

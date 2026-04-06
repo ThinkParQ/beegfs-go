@@ -49,6 +49,9 @@ Example: include BeeGFS metadata
 			if err != nil {
 				return err
 			}
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
+			}
 
 			log.Debug("running beegfs index ls",
 				zap.String("indexPath", indexPath),

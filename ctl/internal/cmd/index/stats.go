@@ -65,6 +65,9 @@ Example: total filesize owned by uid 1000
 			if err != nil {
 				return err
 			}
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
+			}
 
 			backendCfg.Stat = statName
 

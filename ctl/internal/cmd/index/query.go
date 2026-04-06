@@ -45,6 +45,9 @@ Example: list all .c files from the index
 			if err != nil {
 				return err
 			}
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
+			}
 
 			log.Debug("running beegfs index query",
 				zap.String("indexPath", indexPath),

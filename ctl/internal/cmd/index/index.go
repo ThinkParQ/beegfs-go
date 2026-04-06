@@ -35,6 +35,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newStatsCmd())
 	cmd.AddCommand(newQueryCmd())
 	cmd.AddCommand(newRescanCmd())
+	cmd.AddCommand(newMigrateCmd())
 	//cmd.AddCommand(newUpgradeCmd()) Shall not be included in V8 Release
 
 	return cmd

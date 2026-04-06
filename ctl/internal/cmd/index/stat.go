@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -45,6 +46,9 @@ Example: display BeeGFS-specific metadata
 			// Stat() will split it into parent dir + basename internally.
 			indexPath, err := resolveIndexPath(args)
 			if err != nil {
+				return err
+			}
+			if err := checkIndexExists(filepath.Dir(indexPath)); err != nil {
 				return err
 			}
 

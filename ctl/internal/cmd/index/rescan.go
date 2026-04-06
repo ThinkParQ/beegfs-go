@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 	"go.uber.org/zap"
@@ -13,6 +14,7 @@ import (
 func newRescanCmd() *cobra.Command {
 	backendCfg := indexPkg.RescanCfg{}
 	var indexPath string
+	var indexRoot string
 
 	cmd := &cobra.Command{
 		Use:   "rescan <directory-path> [<directory-path>...]",
@@ -46,13 +48,26 @@ Example: rescan the entire filesystem index
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log, _ := config.GetLogger()
 
+			if indexRoot != "" {
+				viper.Set(indexPkg.IndexRootKey, indexRoot)
+			}
+
 			paths := args
 			if len(paths) == 0 {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return fmt.Errorf("getting working directory: %w", err)
+				if indexPath != "" {
+					// Derive the BeeGFS FS path from the explicitly provided index path.
+					fsPath, err := fsDirFromIndexPath(indexPath)
+					if err != nil {
+						return err
+					}
+					paths = []string{fsPath}
+				} else {
+					cwd, err := os.Getwd()
+					if err != nil {
+						return fmt.Errorf("getting working directory: %w", err)
+					}
+					paths = []string{cwd}
 				}
-				paths = []string{cwd}
 			}
 			backendCfg.Paths = paths
 			applyDotIndexDefaults(paths[0])
@@ -63,6 +78,10 @@ Example: rescan the entire filesystem index
 					return err
 				}
 				indexPath = idx
+			}
+
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
 			}
 
 			log.Debug("running beegfs index rescan",
@@ -93,10 +112,11 @@ Example: rescan the entire filesystem index
 		},
 	}
 
-	cmd.Flags().StringVarP(&indexPath, "index-path", "I", "", "GUFI index root path (default: derived from path + index-root config).")
+	cmd.Flags().StringVarP(&indexPath, "index-path", "I", "", "GUFI index path for the target directory (default: derived from path + index-root config).")
+	cmd.Flags().StringVar(&indexRoot, "index-root", "", "Root path of the GUFI index tree (overrides .beegfs.index and config defaults).")
 	cmd.Flags().BoolVar(&backendCfg.Recurse, "recurse", false, "Recursively rescan all subdirectories beneath the specified path.")
 	cmd.Flags().IntVarP(&backendCfg.Threads, "threads", "n", 0, "Number of threads (default: index-threads from config).")
-	cmd.Flags().BoolVarP(&backendCfg.Summary, "summary", "s", false, "Re-run gufi_treesummary on the index root after rescan.")
+	cmd.Flags().BoolVar(&backendCfg.SkipTreesummary, "skip-treesummary", false, "Skip running gufi_treesummary after rescan.")
 	cmd.Flags().BoolVarP(&backendCfg.Xattrs, "xattrs", "x", false, "Index extended attributes.")
 
 	return cmd

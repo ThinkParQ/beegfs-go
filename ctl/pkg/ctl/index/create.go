@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -14,17 +16,17 @@ import (
 
 // CreateCfg holds backend configuration for the create command.
 type CreateCfg struct {
-	FSPath     string // source filesystem path (-F)
-	IndexPath  string // destination index path (-I)
-	Threads    int    // -n (0 → viper ThreadsKey)
-	Summary    bool   // run gufi_treesummary after indexing
-	Xattrs     bool   // index extended attributes
-	NoMetadata bool   // skip BeeGFS plugin (--no-metadata)
+	FSPath          string // source filesystem path (-F)
+	IndexPath       string // destination index path (-I)
+	Threads         int    // -n (0 → viper ThreadsKey)
+	SkipTreesummary bool   // skip gufi_treesummary after indexing
+	Xattrs          bool   // index extended attributes
+	NoMetadata      bool   // skip BeeGFS plugin (--no-metadata)
 }
 
 // Create runs the indexing pipeline:
-//  1. gufi_dir2index   (always)
-//  2. gufi_treesummary on IndexRootKey (if cfg.Summary)
+//  1. gufi_dir2index   (always); index lands at cfg.IndexPath/<basename(cfg.FSPath)>/
+//  2. gufi_treesummary on the new index root (unless cfg.SkipTreesummary)
 //
 // Progress lines from each subprocess are streamed into the returned channel.
 func Create(ctx context.Context, cfg CreateCfg) (<-chan string, func() error, error) {
@@ -42,18 +44,24 @@ func Create(ctx context.Context, cfg CreateCfg) (<-chan string, func() error, er
 	g.Go(func() error {
 		defer close(lines)
 
-		// 1. gufi_dir2index
+		// Ensure cfg.IndexPath exists before running gufi_dir2index inside it.
+		if err := os.MkdirAll(cfg.IndexPath, 0755); err != nil {
+			return fmt.Errorf("creating index directory: %w", err)
+		}
+
+		// 1. gufi_dir2index into cfg.IndexPath — creates cfg.IndexPath/<basename(FSPath)>/
 		dir2indexBin := viper.GetString(IndexBinKey)
-		args := buildDir2IndexArgs(cfg, threads)
+		args := buildDir2IndexArgs(cfg, cfg.IndexPath, threads)
 		log.Debug("running gufi_dir2index", zap.String("bin", dir2indexBin), zap.Strings("args", args))
 		if err := runSubprocess(gCtx, dir2indexBin, args, lines); err != nil {
 			return fmt.Errorf("gufi_dir2index: %w", err)
 		}
 
-		// 2. optional treesummary
-		if cfg.Summary {
+		// 2. treesummary on the new index root (default on; skip with SkipTreesummary)
+		finalPath := filepath.Join(cfg.IndexPath, filepath.Base(filepath.Clean(cfg.FSPath)))
+		if !cfg.SkipTreesummary {
 			treesumBin := viper.GetString(TreesumBinKey)
-			treesumArgs := []string{"-n", fmt.Sprint(threads), viper.GetString(IndexRootKey)}
+			treesumArgs := []string{"-n", fmt.Sprint(threads), finalPath}
 			log.Debug("running gufi_treesummary", zap.String("bin", treesumBin), zap.Strings("args", treesumArgs))
 			if err := runSubprocess(gCtx, treesumBin, treesumArgs, lines); err != nil {
 				return fmt.Errorf("gufi_treesummary: %w", err)
@@ -66,7 +74,7 @@ func Create(ctx context.Context, cfg CreateCfg) (<-chan string, func() error, er
 	return lines, g.Wait, nil
 }
 
-func buildDir2IndexArgs(cfg CreateCfg, threads int) []string {
+func buildDir2IndexArgs(cfg CreateCfg, destDir string, threads int) []string {
 	args := []string{"-n", fmt.Sprint(threads)}
 	if cfg.Xattrs {
 		args = append(args, "-x")
@@ -74,7 +82,7 @@ func buildDir2IndexArgs(cfg CreateCfg, threads int) []string {
 	if !cfg.NoMetadata {
 		args = append(args, "--plugin", IndexPluginPath)
 	}
-	args = append(args, cfg.FSPath, cfg.IndexPath)
+	args = append(args, cfg.FSPath, destDir)
 	return args
 }
 

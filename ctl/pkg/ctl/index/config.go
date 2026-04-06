@@ -2,8 +2,6 @@
 package index
 
 import (
-	"bufio"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,13 +21,12 @@ const (
 	TreesumBinKey = "treesummary-bin"
 )
 
-// Hardcoded plugin paths installed by the GUFI BeeGFS package.
+// Hardcoded plugin specs installed by the GUFI BeeGFS package.
+// Format required by gufi_dir2index --plugin: "entrypoint:path/to/lib.so"
 const (
-	IndexPluginPath = "/usr/local/lib/libbeegfs_index_plugin.so"
-	QueryPluginPath = "/usr/local/lib/libbeegfs_query_plugin.so"
+	IndexPluginPath = "beegfs_index_ops:/usr/local/lib/libbeegfs_index_plugin.so"
+	QueryPluginPath = "beegfs_query_ops:/usr/local/lib/libbeegfs_query_plugin.so"
 )
-
-const gufiConfigPath = "/etc/GUFI/config"
 
 // DotIndexFileName is the per-mount TOML config file that stores index location info.
 const DotIndexFileName = ".beegfs.index"
@@ -98,9 +95,8 @@ func pathHasPrefix(path, prefix string) bool {
 	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
-// LoadGUFIConfig reads /etc/GUFI/config and registers each key as a viper default.
+// LoadGUFIConfig registers default values for all GUFI-related viper keys.
 // CLI flags (registered after this call) will override these values automatically.
-// Missing file or malformed lines are silently skipped — binary defaults apply.
 func LoadGUFIConfig() {
 	viper.SetDefault(IndexAddrKey, "")
 	viper.SetDefault(IndexRootKey, "/search")
@@ -109,34 +105,4 @@ func LoadGUFIConfig() {
 	viper.SetDefault(ThreadsKey, runtime.NumCPU())
 	viper.SetDefault(IndexBinKey, "gufi_dir2index")
 	viper.SetDefault(TreesumBinKey, "gufi_treesummary")
-
-	f, err := os.Open(gufiConfigPath)
-	if err != nil {
-		return // not installed — defaults above apply
-	}
-	defer f.Close()
-
-	// Map GUFI config keys to viper keys.
-	keyMap := map[string]string{
-		"Query":     QueryBinKey,
-		"Sqlite3":   Sqlite3BinKey,
-		"IndexRoot": IndexRootKey,
-		"Threads":   ThreadsKey,
-	}
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key, val := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		if viperKey, ok := keyMap[key]; ok {
-			viper.SetDefault(viperKey, val)
-		}
-	}
 }

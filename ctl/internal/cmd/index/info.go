@@ -1,6 +1,9 @@
 package index
 
 import (
+	"fmt"
+	osexec "os/exec"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
@@ -10,6 +13,8 @@ import (
 )
 
 func newInfoCmd() *cobra.Command {
+	var runTreesummary bool
+
 	cmd := &cobra.Command{
 		Use:         "info [path]",
 		Short:       "Display index configuration and tree summary statistics.",
@@ -43,6 +48,22 @@ Example: show all columns as JSON
 			indexPath, err := resolveIndexPath(args)
 			if err != nil {
 				return err
+			}
+
+			if err := checkIndexExists(indexPath); err != nil {
+				return err
+			}
+
+			if runTreesummary {
+				treesumBin := viper.GetString(indexPkg.TreesumBinKey)
+				threads := viper.GetInt(indexPkg.ThreadsKey)
+				treesumCmd := osexec.CommandContext(cmd.Context(), treesumBin,
+					"-n", fmt.Sprint(threads), indexPath)
+				treesumCmd.Stdout = cmd.OutOrStdout()
+				treesumCmd.Stderr = cmd.ErrOrStderr()
+				if err := treesumCmd.Run(); err != nil {
+					return fmt.Errorf("gufi_treesummary: %w", err)
+				}
 			}
 
 			cfg := indexPkg.InfoCfg{
@@ -94,6 +115,9 @@ Example: show all columns as JSON
 			return errWait()
 		},
 	}
+
+	cmd.Flags().BoolVar(&runTreesummary, "treesummary", false,
+		"Run gufi_treesummary on the index path before displaying stats.")
 
 	return cmd
 }
