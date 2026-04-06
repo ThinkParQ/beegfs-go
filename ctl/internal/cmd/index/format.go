@@ -154,6 +154,31 @@ func typeDesc(typeChar string) string {
 	}
 }
 
+// formatInfoRow formats an info row for display.
+// Row positions: index_root(0), index_addr(1), last_updated(2),
+// total_files(3), total_dirs(4), total_links(5), total_size(6), depth(7),
+// min_uid(8), max_uid(9), min_gid(10), max_gid(11),
+// min_size(12), max_size(13), min_mtime(14), max_mtime(15),
+// zero_files(16), total_blocks(17).
+// Without raw, sizes (6, 12, 13) are human-readable and mtimes (14, 15) are formatted.
+func formatInfoRow(row []string, raw bool) []string {
+	out := make([]string, len(row))
+	copy(out, row)
+	if !raw {
+		for _, i := range []int{6, 12, 13} {
+			if i < len(out) && out[i] != "" {
+				out[i] = fmtSizeHuman(out[i])
+			}
+		}
+		for _, i := range []int{14, 15} {
+			if i < len(out) && out[i] != "" {
+				out[i] = fmtStatTime(out[i])
+			}
+		}
+	}
+	return out
+}
+
 // safeGet returns raw[i] or "" if i is out of bounds.
 func safeGet(raw []string, i int) string {
 	if i >= 0 && i < len(raw) {

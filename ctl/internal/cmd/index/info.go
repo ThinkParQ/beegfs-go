@@ -14,6 +14,7 @@ import (
 
 func newInfoCmd() *cobra.Command {
 	var runTreesummary bool
+	var raw bool
 
 	cmd := &cobra.Command{
 		Use:         "info [path]",
@@ -108,7 +109,7 @@ Example: show all columns as JSON
 					if !ok {
 						break run
 					}
-					tbl.AddItem(toAny(row)...)
+					tbl.AddItem(toAny(formatInfoRow(row, raw))...)
 				}
 			}
 
@@ -118,6 +119,8 @@ Example: show all columns as JSON
 
 	cmd.Flags().BoolVar(&runTreesummary, "treesummary", false,
 		"Run gufi_treesummary on the index path before displaying stats.")
+	cmd.Flags().BoolVar(&raw, "raw", false,
+		"Print raw values instead of human-readable sizes and timestamps.")
 
 	return cmd
 }
