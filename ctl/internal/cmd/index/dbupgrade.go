@@ -14,6 +14,13 @@ import (
 
 const dbUpgradeCmd = "db"
 
+// beeBinary is the path to the BeeGFS CLI binary, used only by the suppressed
+// db upgrade command which has not been migrated to direct GUFI invocation.
+const beeBinary = ""
+
+// checkBeeGFSConfig is retained for the suppressed db upgrade command.
+func checkBeeGFSConfig() error { return nil }
+
 func newGenericUpgradeCmd() *cobra.Command {
 	var bflagSet *bflag.FlagSet
 

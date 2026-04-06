@@ -2,75 +2,70 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 	"go.uber.org/zap"
 )
 
-const createCmd = "index"
+func newCreateCmd() *cobra.Command {
+	backendCfg := indexPkg.CreateCfg{}
 
-func newGenericCreateCmd() *cobra.Command {
-	var bflagSet *bflag.FlagSet
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Generates or updates the index for the specified file system.",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if backendCfg.FSPath == "" {
+				return fmt.Errorf("--fs-path is required")
+			}
+			if backendCfg.IndexPath == "" {
+				return fmt.Errorf("--index-path is required")
+			}
+			return nil
+		},
+		Long: `Generate a new GUFI index by traversing the source directory.
 
-	var cmd = &cobra.Command{
+The index is created at --index-path. Optionally run gufi_treesummary
+after indexing for improved query performance.
+
+Example: create an index for /mnt/fs at /mnt/index
+
+  beegfs index create --fs-path /mnt/fs --index-path /mnt/index
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			log, _ := config.GetLogger()
+			applyDotIndexDefaults(backendCfg.FSPath)
+			log.Debug("running beegfs index create", zap.Any("cfg", backendCfg))
+
+			lines, errWait, err := indexPkg.Create(cmd.Context(), backendCfg)
+			if err != nil {
 				return err
 			}
-			return runPythonCreateIndex(bflagSet)
+
+		run:
+			for {
+				select {
+				case <-cmd.Context().Done():
+					return cmd.Context().Err()
+				case line, ok := <-lines:
+					if !ok {
+						break run
+					}
+					fmt.Println(line)
+				}
+			}
+
+			return errWait()
 		},
 	}
 
-	bflagSet = bflag.NewFlagSet(commonIndexFlags, cmd)
+	cmd.Flags().StringVarP(&backendCfg.FSPath, "fs-path", "F", "", "Source filesystem path to index. (required)")
+	cmd.Flags().StringVarP(&backendCfg.IndexPath, "index-path", "I", "", "Destination path for the GUFI index. (required)")
+	cmd.Flags().IntVarP(&backendCfg.Threads, "threads", "n", 0, "Number of indexing threads (default: index-threads from config).")
+	cmd.Flags().BoolVarP(&backendCfg.Summary, "summary", "s", false, "Run gufi_treesummary on the index root after indexing.")
+	cmd.Flags().BoolVarP(&backendCfg.Xattrs, "xattrs", "x", false, "Index extended attributes.")
+	cmd.Flags().BoolVarP(&backendCfg.NoMetadata, "no-metadata", "B", false, "Skip BeeGFS plugin (do not collect BeeGFS metadata).")
+
 	return cmd
-}
-
-func newCreateCmd() *cobra.Command {
-	s := newGenericCreateCmd()
-	s.Use = "create"
-	s.Short = "Generates or updates the index for the specified file system."
-	s.Long = `Generate or updates the index by traversing the source directory.
-
-The index can exist within the source directory or in a separate index directory.
-The program performs a breadth-first readdirplus traversal to list the contents, or it creates
-an output database and/or files listing directories and files it encounters. This program serves two main purposes:
-
-1. To identify directories with changes, allowing incremental updates to a Hive index from changes in the source file system.
-2. To create a comprehensive dump of directories, files, and links. You can choose to output in traversal order
-   (each directory followed by its files) or to stride inodes across multiple files for merging with inode-strided attribute lists.
-
-Example: Create or update the index for the file system at /mnt/fs, limiting memory usage to 8GB:
-
-$ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
-`
-	return s
-}
-
-func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
-	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, createCmd)
-	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("Running BeeGFS Hive Index create command",
-		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("createCmd", createCmd),
-		zap.Any("allArgs", allArgs),
-	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }
