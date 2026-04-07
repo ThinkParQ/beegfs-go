@@ -18,16 +18,22 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
-	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+var (
+	attrState  = attribute.Key("state")
+	attrStatus = attribute.Key("status")
+	attrRSTID  = attribute.Key("rst.id")
 )
 
 // managerMetrics holds the OTel instruments used to report job manager metrics.
@@ -178,104 +184,6 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	return m
 }
 
-// recordJobTerminal records metrics and emits a structured log when a job
-// reaches a terminal state.
-func (m *Manager) recordJobTerminal(job *Job, terminalState string) {
-	logFields := []zap.Field{
-		zap.String("state", terminalState),
-		zap.Int("rst_id", int(job.Request.GetRemoteStorageTarget())),
-		zap.String("job_id", job.GetId()),
-		zap.String("path", job.Request.GetPath()),
-		zap.String("message", job.GetStatus().GetMessage()),
-	}
-	switch terminalState {
-	case "failed", "unknown":
-		m.log.Warn("job reached terminal state", logFields...)
-	case "cancelled":
-		m.log.Info("job reached terminal state", logFields...)
-	default: // "completed", "offloaded"
-		m.log.Debug("job reached terminal state", logFields...)
-	}
-
-	attrs := metric.WithAttributes(
-		telemetry.AttrState.String(terminalState),
-		telemetry.AttrRSTID.Int(int(job.Request.GetRemoteStorageTarget())),
-	)
-	m.metrics.jobTerminal.Add(context.Background(), 1, attrs)
-	if created := job.GetCreated(); created != nil && created.IsValid() {
-		duration := stdtime.Since(created.AsTime()).Seconds()
-		m.metrics.jobDuration.Record(context.Background(), duration, attrs)
-	}
-}
-
-// isTerminalState reports whether state is a terminal job state for metrics and
-// logging purposes. This is broader than Job.InTerminalState(), which covers
-// only COMPLETED, OFFLOADED, and CANCELLED — the "clean" states where a job
-// can be deleted without orphaned requests. FAILED and UNKNOWN are terminal
-// here because no further work is running, but they require user intervention
-// before deletion.
-func isTerminalState(state beeremote.Job_State) bool {
-	switch state {
-	case beeremote.Job_COMPLETED,
-		beeremote.Job_CANCELLED,
-		beeremote.Job_FAILED,
-		beeremote.Job_OFFLOADED,
-		beeremote.Job_UNKNOWN:
-		return true
-	}
-	return false
-}
-
-// terminalStateString maps a terminal job state to the string used for
-// metrics attributes and log fields.
-func terminalStateString(state beeremote.Job_State) string {
-	switch state {
-	case beeremote.Job_COMPLETED:
-		return "completed"
-	case beeremote.Job_CANCELLED:
-		return "cancelled"
-	case beeremote.Job_OFFLOADED:
-		return "offloaded"
-	case beeremote.Job_UNKNOWN:
-		return "unknown"
-	case beeremote.Job_FAILED:
-		return "failed"
-	default:
-		// Unreachable: callers must guard with isTerminalState before calling.
-		// Panic here so contract violations surface immediately rather than
-		// silently miscounting metrics as "failed".
-		panic(fmt.Sprintf("terminalStateString called with non-terminal state: %v", state))
-	}
-}
-
-// jobStateString returns the metric attribute string for any job state.
-// If a new proto state is added and this switch is not updated, counts will
-// accumulate under "unknown" as a visible signal rather than crashing the process.
-func jobStateString(state beeremote.Job_State) string {
-	switch state {
-	case beeremote.Job_UNSPECIFIED:
-		return "unspecified"
-	case beeremote.Job_UNASSIGNED:
-		return "unassigned"
-	case beeremote.Job_SCHEDULED:
-		return "scheduled"
-	case beeremote.Job_RUNNING:
-		return "running"
-	case beeremote.Job_ERROR:
-		return "error"
-	case beeremote.Job_COMPLETED:
-		return "completed"
-	case beeremote.Job_OFFLOADED:
-		return "offloaded"
-	case beeremote.Job_CANCELLED:
-		return "cancelled"
-	case beeremote.Job_FAILED:
-		return "failed"
-	default:
-		return "unknown"
-	}
-}
-
 // collectJobCounts is an OTel observable gauge callback that iterates the job
 // store and reports the current count of jobs per state and RST ID.
 func (m *Manager) collectJobCounts(_ context.Context, o metric.Observer) error {
@@ -317,8 +225,8 @@ func (m *Manager) collectJobCounts(_ context.Context, o metric.Observer) error {
 	for k, n := range counts {
 		o.ObserveInt64(m.metrics.jobCount, n,
 			metric.WithAttributes(
-				telemetry.AttrState.String(k.state),
-				telemetry.AttrRSTID.Int(k.rstID),
+				attrState.String(k.state),
+				attrRSTID.Int(k.rstID),
 			),
 		)
 	}
@@ -812,7 +720,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	workRequests := rst.RecreateWorkRequests(job.Get(), job.GetSegments())
 	m.metrics.jobRequests.Add(context.Background(), 1)
 	m.metrics.workRequests.Add(context.Background(), int64(len(workRequests)),
-		metric.WithAttributes(telemetry.AttrStatus.String("created")),
+		metric.WithAttributes(attrStatus.String("created")),
 	)
 	return beeremote.JobResult_builder{
 		Job:          job.Get(),
@@ -1332,6 +1240,104 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	}
 	m.log.Debug("job result", zap.Any("job", job))
 	return nil
+}
+
+// recordJobTerminal records metrics and emits a structured log when a job
+// reaches a terminal state.
+func (m *Manager) recordJobTerminal(job *Job, terminalState string) {
+	logFields := []zap.Field{
+		zap.String("state", terminalState),
+		zap.Int("rst_id", int(job.Request.GetRemoteStorageTarget())),
+		zap.String("job_id", job.GetId()),
+		zap.String("path", job.Request.GetPath()),
+		zap.String("message", job.GetStatus().GetMessage()),
+	}
+	switch terminalState {
+	case "failed", "unknown":
+		m.log.Warn("job reached terminal state", logFields...)
+	case "cancelled":
+		m.log.Info("job reached terminal state", logFields...)
+	default: // "completed", "offloaded"
+		m.log.Debug("job reached terminal state", logFields...)
+	}
+
+	attrs := metric.WithAttributes(
+		attrState.String(terminalState),
+		attrRSTID.Int(int(job.Request.GetRemoteStorageTarget())),
+	)
+	m.metrics.jobTerminal.Add(context.Background(), 1, attrs)
+	if created := job.GetCreated(); created != nil && created.IsValid() {
+		duration := stdtime.Since(created.AsTime()).Seconds()
+		m.metrics.jobDuration.Record(context.Background(), duration, attrs)
+	}
+}
+
+// isTerminalState reports whether state is a terminal job state for metrics and
+// logging purposes. This is broader than Job.InTerminalState(), which covers
+// only COMPLETED, OFFLOADED, and CANCELLED — the "clean" states where a job
+// can be deleted without orphaned requests. FAILED and UNKNOWN are terminal
+// here because no further work is running, but they require user intervention
+// before deletion.
+func isTerminalState(state beeremote.Job_State) bool {
+	switch state {
+	case beeremote.Job_COMPLETED,
+		beeremote.Job_CANCELLED,
+		beeremote.Job_FAILED,
+		beeremote.Job_OFFLOADED,
+		beeremote.Job_UNKNOWN:
+		return true
+	}
+	return false
+}
+
+// terminalStateString maps a terminal job state to the string used for
+// metrics attributes and log fields.
+func terminalStateString(state beeremote.Job_State) string {
+	switch state {
+	case beeremote.Job_COMPLETED:
+		return "completed"
+	case beeremote.Job_CANCELLED:
+		return "cancelled"
+	case beeremote.Job_OFFLOADED:
+		return "offloaded"
+	case beeremote.Job_UNKNOWN:
+		return "unknown"
+	case beeremote.Job_FAILED:
+		return "failed"
+	default:
+		// Unreachable: callers must guard with isTerminalState before calling.
+		// Panic here so contract violations surface immediately rather than
+		// silently miscounting metrics as "failed".
+		panic(fmt.Sprintf("terminalStateString called with non-terminal state: %v", state))
+	}
+}
+
+// jobStateString returns the metric attribute string for any job state.
+// If a new proto state is added and this switch is not updated, counts will
+// accumulate under "unknown" as a visible signal rather than crashing the process.
+func jobStateString(state beeremote.Job_State) string {
+	switch state {
+	case beeremote.Job_UNSPECIFIED:
+		return "unspecified"
+	case beeremote.Job_UNASSIGNED:
+		return "unassigned"
+	case beeremote.Job_SCHEDULED:
+		return "scheduled"
+	case beeremote.Job_RUNNING:
+		return "running"
+	case beeremote.Job_ERROR:
+		return "error"
+	case beeremote.Job_COMPLETED:
+		return "completed"
+	case beeremote.Job_OFFLOADED:
+		return "offloaded"
+	case beeremote.Job_CANCELLED:
+		return "cancelled"
+	case beeremote.Job_FAILED:
+		return "failed"
+	default:
+		return "unknown"
+	}
 }
 
 func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {

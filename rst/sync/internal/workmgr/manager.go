@@ -16,9 +16,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
-	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -27,6 +27,9 @@ import (
 )
 
 var (
+	attrState    = attribute.Key("state")
+	attrPriority = attribute.Key("priority")
+
 	// priorityIdMap maps each priority level to its string representation. Valid priorities range
 	// from 1–5. Priority 0 is included only for backward compatibility with work requests from
 	// earlier versions, which may still exist in the work journal. These legacy requests already
@@ -435,8 +438,8 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			m.scheduler.RemoveWorkToken(submissionId)
 			m.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
-					telemetry.AttrState.String("queued"),
-					telemetry.AttrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
+					attrState.String("queued"),
+					attrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
 				),
 			)
 		}
@@ -514,8 +517,8 @@ func (m *Manager) pullInRescheduledWork(start string, stop string, availableToke
 					m.scheduler.RemoveRescheduledWorkToken(submissionId)
 					m.metrics.workRequests.Add(context.Background(), 1,
 						metric.WithAttributes(
-							telemetry.AttrState.String("queued"),
-							telemetry.AttrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
+							attrState.String("queued"),
+							attrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
 						),
 					)
 				} else {
@@ -578,8 +581,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 			scheduledCount++
 			m.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
-					telemetry.AttrState.String("new"),
-					telemetry.AttrPriority.Int(priority+1),
+					attrState.String("new"),
+					attrPriority.Int(priority+1),
 				),
 			)
 		} else {
@@ -587,8 +590,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 			rescheduledCount++
 			m.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
-					telemetry.AttrState.String("rescheduled"),
-					telemetry.AttrPriority.Int(priority+1),
+					attrState.String("rescheduled"),
+					attrPriority.Int(priority+1),
 				),
 			)
 		}
@@ -670,8 +673,8 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 		m.scheduler.AddWorkToken(submissionId)
 		m.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
-				telemetry.AttrState.String("new"),
-				telemetry.AttrPriority.Int(normalizedPriority(priority)),
+				attrState.String("new"),
+				attrPriority.Int(normalizedPriority(priority)),
 			),
 		)
 	}()

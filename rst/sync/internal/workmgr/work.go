@@ -10,7 +10,6 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
-	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -189,8 +188,8 @@ func (w *worker) process(work workAssignment) {
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
 	w.metrics.workRequests.Add(context.Background(), 1,
 		metric.WithAttributes(
-			telemetry.AttrState.String("processed"),
-			telemetry.AttrPriority.Int(normalizedPriority(request.GetPriority())),
+			attrState.String("processed"),
+			attrPriority.Int(normalizedPriority(request.GetPriority())),
 		),
 	)
 
@@ -250,8 +249,8 @@ func (w *worker) process(work workAssignment) {
 
 			w.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
-					telemetry.AttrState.String("completed"),
-					telemetry.AttrPriority.Int(normalizedPriority(request.GetPriority())),
+					attrState.String("completed"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
 				),
 			)
 			return
@@ -313,8 +312,8 @@ func (w *worker) process(work workAssignment) {
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
-				telemetry.AttrState.String("rescheduled"),
-				telemetry.AttrPriority.Int(normalizedPriority(request.GetPriority())),
+				attrState.String("rescheduled"),
+				attrPriority.Int(normalizedPriority(request.GetPriority())),
 			),
 		)
 		return
@@ -458,8 +457,8 @@ processJobs:
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
-				telemetry.AttrState.String("rescheduled"),
-				telemetry.AttrPriority.Int(normalizedPriority(request.GetPriority())),
+				attrState.String("rescheduled"),
+				attrPriority.Int(normalizedPriority(request.GetPriority())),
 			),
 		)
 		return

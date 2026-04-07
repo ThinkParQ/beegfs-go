@@ -60,36 +60,6 @@ func buildReaders(cfg Config) ([]sdkmetric.Reader, *prometheusReader, error) {
 	return readers, promRdr, nil
 }
 
-// buildClientTLSConfig constructs a *tls.Config for OTLP exporters.
-// Returns nil when certFile is empty and disableVerification is false; callers must
-// not pass any TLS option to the exporter in that case, letting the OTel SDK use its
-// default transport (which enables TLS using the system cert pool).
-func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Config, error) {
-	if certFile == "" && !disableVerification {
-		return nil, nil
-	}
-	certPool, err := x509.SystemCertPool()
-	if err != nil {
-		return nil, fmt.Errorf("couldn't load system cert pool: %w", err)
-	}
-	if certFile != "" {
-		cert, err := os.ReadFile(certFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading certificate file failed: %w", err)
-		}
-		if !certPool.AppendCertsFromPEM(cert) {
-			return nil, fmt.Errorf("appending provided certificate to pool failed")
-		}
-	}
-	if disableVerification {
-		zap.L().Warn("TLS certificate verification is disabled for this OTLP connection; the connection is vulnerable to man-in-the-middle attacks")
-	}
-	return &tls.Config{
-		RootCAs:            certPool,
-		InsecureSkipVerify: disableVerification,
-	}, nil
-}
-
 // buildOTLPReader constructs a periodic metric reader for the given OTLP config.
 // The option-building logic in this function mirrors buildLogExporter.
 // Keep both in sync when adding new OTLP fields.
@@ -272,6 +242,36 @@ func buildLogExporter(cfg LogsConfig) (sdklog.Exporter, error) {
 	default:
 		return nil, fmt.Errorf("unsupported logs OTLP protocol: %q (must be 'grpc' or 'http')", cfg.Protocol)
 	}
+}
+
+// buildClientTLSConfig constructs a *tls.Config for OTLP exporters.
+// Returns nil when certFile is empty and disableVerification is false; callers must
+// not pass any TLS option to the exporter in that case, letting the OTel SDK use its
+// default transport (which enables TLS using the system cert pool).
+func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Config, error) {
+	if certFile == "" && !disableVerification {
+		return nil, nil
+	}
+	certPool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("couldn't load system cert pool: %w", err)
+	}
+	if certFile != "" {
+		cert, err := os.ReadFile(certFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
+		}
+		if !certPool.AppendCertsFromPEM(cert) {
+			return nil, fmt.Errorf("appending provided certificate to pool failed")
+		}
+	}
+	if disableVerification {
+		zap.L().Warn("TLS certificate verification is disabled for this OTLP connection; the connection is vulnerable to man-in-the-middle attacks")
+	}
+	return &tls.Config{
+		RootCAs:            certPool,
+		InsecureSkipVerify: disableVerification,
+	}, nil
 }
 
 // startPrometheusServer starts the Prometheus HTTP server on the configured port

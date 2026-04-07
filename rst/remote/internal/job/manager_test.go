@@ -15,7 +15,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
-	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -1197,11 +1196,14 @@ func TestCollectJobCounts(t *testing.T) {
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 	points := gaugeDataPoints(t, rm, "beeremote.job.count")
 
-	type key struct{ state string; rstID int }
+	type key struct {
+		state string
+		rstID int
+	}
 	observed := make(map[key]int64)
 	for _, dp := range points {
-		state, _ := dp.Attributes.Value(telemetry.AttrState)
-		rstID, _ := dp.Attributes.Value(telemetry.AttrRSTID)
+		state, _ := dp.Attributes.Value(attrState)
+		rstID, _ := dp.Attributes.Value(attrRSTID)
 		observed[key{state.AsString(), int(rstID.AsInt64())}] = dp.Value
 	}
 
