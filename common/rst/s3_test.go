@@ -22,6 +22,9 @@ var testS3Client = &S3Client{
 	config: &flex.RemoteStorageTarget{
 		Policies: &flex.RemoteStorageTarget_Policies{},
 	},
+	s3Config: &flex.RemoteStorageTarget_S3{
+		Bucket: "test-bucket",
+	},
 }
 
 func TestGenerateWorkRequests(t *testing.T) {
