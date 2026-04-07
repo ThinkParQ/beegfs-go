@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/syslog"
 	"os"
 	"path"
 	"reflect"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
@@ -109,86 +111,86 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 		if logMgr.telemetry.LogProvider() != nil {
 			logMgr.Logger.Warn("developer mode is active: OTLP log export is disabled (logs will not be sent to the configured endpoint)")
 		}
-	} else {
-
-		// Otherwise build a production config based on the user settings:
-		zapConfig := zap.NewProductionEncoderConfig()
-		zapConfig.TimeKey = "timestamp"
-		zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-		// Then setup the encoder that will turn our log entries into byte slices.
-		// For now just log in plaintext and don't expose an option to log using
-		// JSON. We can always add an option later with zapcore.NewJSONEncoder() if
-		// needed. IMPORTANT: If the encoding type ever changes then the way we
-		// handle writing to syslog in SyslogWriteSyncer.Write() MUST be updated
-		// accordingly.
-		zapEncoder := zapcore.NewConsoleEncoder(zapConfig)
-
-		// The use of an atomic level means we can update the log level later on.
-		// However we have to keep a reference to the atomic level if we want to
-		// adjust it later (which is why we add it to the logger struct).
-		zapLevel, err := getLevel(newConfig.Level)
-		if err != nil {
-			return nil, err
-		}
-		logMgr.level = zap.NewAtomicLevelAt(zapLevel)
-
-		// zapcore.WriteSyncers are what handle writing the byte slices from the
-		// encoder somewhere. This means we can easily add support for new types of
-		// logging (i.e., log destinations) by simply swapping out the WriteSyncer.
-		var logDestination zapcore.WriteSyncer
-		switch newConfig.Type {
-		case StdOut:
-			logDestination = zapcore.AddSync(os.Stdout)
-		case StdErr:
-			logDestination = zapcore.AddSync(os.Stderr)
-		case LogFile:
-			// Just being able to write to the provided log file is not sufficient
-			// if we want to rotate log files. Make sure the directory selected for
-			// logging exists and we can write to it.
-			if err := ensureLogsAreWritable(newConfig.File); err != nil {
-				return nil, err
-			}
-
-			logDestination = zapcore.AddSync(&lumberjack.Logger{
-				Filename:   newConfig.File,
-				MaxSize:    newConfig.MaxSize,
-				MaxBackups: newConfig.NumRotatedFiles,
-			})
-		case Syslog:
-			// By default we'll log at severity level info. Typically we'll be able
-			// to parse out the log level and log at the appropriate severity level.
-			// We'll use the process name as the prefix tag in case there are multiple
-			// instances of BeeWatch running on the same server.
-			l, err := NewSyslogWriteSyncer(syslog.LOG_INFO|syslog.LOG_LOCAL0, os.Args[0])
-			if err != nil {
-				return nil, fmt.Errorf("unable to initialize syslog destination: %w", err)
-			}
-			logDestination = l
-		default:
-			return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
-		}
-
-		baseCore := zapcore.NewCore(zapEncoder, logDestination, logMgr.level)
-
-		if lp := logMgr.telemetry.LogProvider(); lp != nil {
-			otelCore := otelzap.NewCore("github.com/thinkparq/beegfs-go/common/logger", otelzap.WithLoggerProvider(lp))
-			// Gate the otelzap core on the same atomic level as the console
-			// sink so OTLP does not receive records below the configured threshold.
-			leveledOtelCore, err := zapcore.NewIncreaseLevelCore(otelCore, logMgr.level)
-			if err != nil {
-				return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
-			}
-			baseCore = zapcore.NewTee(baseCore, leveledOtelCore)
-		}
-
-		logMgr.Logger = zap.New(baseCore)
+		return &logMgr, nil
 	}
 
+	// Otherwise build a production config based on the user settings:
+	zapConfig := zap.NewProductionEncoderConfig()
+	zapConfig.TimeKey = "timestamp"
+	zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	// Then setup the encoder that will turn our log entries into byte slices.
+	// For now just log in plaintext and don't expose an option to log using
+	// JSON. We can always add an option later with zapcore.NewJSONEncoder() if
+	// needed. IMPORTANT: If the encoding type ever changes then the way we
+	// handle writing to syslog in SyslogWriteSyncer.Write() MUST be updated
+	// accordingly.
+	zapEncoder := zapcore.NewConsoleEncoder(zapConfig)
+
+	// The use of an atomic level means we can update the log level later on.
+	// However we have to keep a reference to the atomic level if we want to
+	// adjust it later (which is why we add it to the logger struct).
+	zapLevel, err := getLevel(newConfig.Level)
+	if err != nil {
+		return nil, err
+	}
+	logMgr.level = zap.NewAtomicLevelAt(zapLevel)
+
+	// zapcore.WriteSyncers are what handle writing the byte slices from the
+	// encoder somewhere. This means we can easily add support for new types of
+	// logging (i.e., log destinations) by simply swapping out the WriteSyncer.
+	var logDestination zapcore.WriteSyncer
+	switch newConfig.Type {
+	case StdOut:
+		logDestination = zapcore.AddSync(os.Stdout)
+	case StdErr:
+		logDestination = zapcore.AddSync(os.Stderr)
+	case LogFile:
+		// Just being able to write to the provided log file is not sufficient
+		// if we want to rotate log files. Make sure the directory selected for
+		// logging exists and we can write to it.
+		if err := ensureLogsAreWritable(newConfig.File); err != nil {
+			return nil, err
+		}
+
+		logDestination = zapcore.AddSync(&lumberjack.Logger{
+			Filename:   newConfig.File,
+			MaxSize:    newConfig.MaxSize,
+			MaxBackups: newConfig.NumRotatedFiles,
+		})
+	case Syslog:
+		// By default we'll log at severity level info. Typically we'll be able
+		// to parse out the log level and log at the appropriate severity level.
+		// We'll use the process name as the prefix tag in case there are multiple
+		// instances of BeeWatch running on the same server.
+		l, err := NewSyslogWriteSyncer(syslog.LOG_INFO|syslog.LOG_LOCAL0, os.Args[0])
+		if err != nil {
+			return nil, fmt.Errorf("unable to initialize syslog destination: %w", err)
+		}
+		logDestination = l
+	default:
+		return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
+	}
+
+	baseCore := zapcore.NewCore(zapEncoder, logDestination, logMgr.level)
+
+	if lp := logMgr.telemetry.LogProvider(); lp != nil {
+		otelCore := otelzap.NewCore("github.com/thinkparq/beegfs-go/common/logger", otelzap.WithLoggerProvider(lp))
+		// Gate the otelzap core on the same atomic level as the console
+		// sink so OTLP does not receive records below the configured threshold.
+		leveledOtelCore, err := zapcore.NewIncreaseLevelCore(otelCore, logMgr.level)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
+		}
+		baseCore = zapcore.NewTee(baseCore, leveledOtelCore)
+	}
+
+	logMgr.Logger = zap.New(baseCore)
 	return &logMgr, nil
 }
 
-// With shadows the embedded zap.Logger.With to return a *Logger that preserves
-// the telemetry provider and atomic level.
+// With returns a child logger with the given fields permanently attached to
+// every log entry it produces. The child shares the same telemetry provider
+// and log level as the parent.
 func (lm *Logger) With(fields ...zap.Field) *Logger {
 	return &Logger{
 		Logger:    lm.Logger.With(fields...),
@@ -223,6 +225,23 @@ func (lm *Logger) Shutdown(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// DeferredShutdown returns a function that shuts down the logger within the
+// given timeout. Intended for use with defer:
+//
+//	defer logger.DeferredShutdown(10 * time.Second)()
+//
+// Falls back to stdlib log on error because the zap logger may already be shut
+// down by the time the deferred function runs.
+func (lm *Logger) DeferredShutdown(timeout time.Duration) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := lm.Shutdown(ctx); err != nil {
+			log.Printf("error during logger shutdown: %v", err)
+		}
+	}
 }
 
 // Configurer interface is used to get the logging configuration. It allows the

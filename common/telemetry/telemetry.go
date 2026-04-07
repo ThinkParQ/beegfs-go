@@ -1,5 +1,3 @@
-// Package telemetry provides a common OpenTelemetry metrics implementation for
-// BeeGFS Go services.
 package telemetry
 
 import (
@@ -11,11 +9,11 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/zap"
 )
 
@@ -239,76 +237,98 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 
 	// Build resource whenever any signal is enabled; it is shared by both metrics
 	// and log providers to identify the service in exported telemetry.
-	resource, err := buildResource(cfg, opts)
+	res, err := buildResource(cfg, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build telemetry resource: %w", err)
 	}
 
 	if cfg.Enabled {
-		readers, promRdr, err := buildReaders(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build telemetry exporters: %w", err)
-		}
-		p.promReader = promRdr
-
-		meterOpts := []sdkmetric.Option{sdkmetric.WithResource(resource)}
-		for _, reader := range readers {
-			meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
-		}
-
-		// Apply histogram bucket views if configured.
-		if len(cfg.Histograms.DurationBoundaries) > 0 {
-			meterOpts = append(meterOpts, sdkmetric.WithView(
-				sdkmetric.NewView(
-					sdkmetric.Instrument{Name: "*.duration"},
-					sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-						Boundaries: cfg.Histograms.DurationBoundaries,
-					}},
-				),
-			))
-		}
-		if len(cfg.Histograms.BytesBoundaries) > 0 {
-			meterOpts = append(meterOpts, sdkmetric.WithView(
-				sdkmetric.NewView(
-					sdkmetric.Instrument{Name: "*.bytes.*"},
-					sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-						Boundaries: cfg.Histograms.BytesBoundaries,
-					}},
-				),
-			))
-		}
-
-		sdkProvider := sdkmetric.NewMeterProvider(meterOpts...)
-		p.sdkProvider = sdkProvider
-		p.meterProvider = sdkProvider
-		cleanupFns = append(cleanupFns, sdkProvider.Shutdown)
-
-		if cfg.Prometheus.Enabled {
-			if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-				cleanup()
-				return nil, fmt.Errorf("failed to start Prometheus server: %w", err)
-			}
-			srv := p.promServer
-			cleanupFns = append(cleanupFns, srv.Shutdown)
+		if err := p.initMetrics(cfg, res, &cleanupFns); err != nil {
+			cleanup()
+			return nil, err
 		}
 	} else {
 		p.meterProvider = noop.NewMeterProvider()
 	}
 
 	if cfg.Logs.Enabled {
-		logExporter, err := buildLogExporter(cfg.Logs)
-		if err != nil {
+		if err := p.initLogs(cfg, res, &cleanupFns); err != nil {
 			cleanup()
-			return nil, fmt.Errorf("failed to build log exporter: %w", err)
+			return nil, err
 		}
-		p.logProvider = sdklog.NewLoggerProvider(
-			sdklog.WithResource(resource),
-			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
-		)
-		cleanupFns = append(cleanupFns, p.logProvider.Shutdown)
 	}
 
 	return p, nil
+}
+
+// initMetrics creates and registers the OTel MeterProvider and any configured metric exporters
+// (OTLP, Prometheus). On success it appends shutdown callbacks to cleanupFns.
+func (p *Provider) initMetrics(cfg Config, res *resource.Resource, cleanupFns *[]func(context.Context) error) error {
+	readers, promRdr, err := buildReaders(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to build telemetry exporters: %w", err)
+	}
+	p.promReader = promRdr
+
+	meterOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	for _, reader := range readers {
+		meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
+	}
+
+	// OTel's default histogram bucket boundaries ([0, 5ms, 10ms, ..., 10s]) are
+	// designed for web request latency and are meaningless for job durations (seconds
+	// to hours) or byte counts (KB to GB). Override the boundaries for any instruments
+	// whose names match the configured patterns so the distribution data is useful.
+	if len(cfg.Histograms.DurationBoundaries) > 0 {
+		meterOpts = append(meterOpts, sdkmetric.WithView(
+			sdkmetric.NewView(
+				sdkmetric.Instrument{Name: "*.duration"},
+				sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+					Boundaries: cfg.Histograms.DurationBoundaries,
+				}},
+			),
+		))
+	}
+	if len(cfg.Histograms.BytesBoundaries) > 0 {
+		meterOpts = append(meterOpts, sdkmetric.WithView(
+			sdkmetric.NewView(
+				sdkmetric.Instrument{Name: "*.bytes.*"},
+				sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+					Boundaries: cfg.Histograms.BytesBoundaries,
+				}},
+			),
+		))
+	}
+
+	sdkProvider := sdkmetric.NewMeterProvider(meterOpts...)
+	p.sdkProvider = sdkProvider
+	p.meterProvider = sdkProvider
+	*cleanupFns = append(*cleanupFns, sdkProvider.Shutdown)
+
+	if cfg.Prometheus.Enabled {
+		if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
+			return fmt.Errorf("failed to start Prometheus server: %w", err)
+		}
+		srv := p.promServer
+		*cleanupFns = append(*cleanupFns, srv.Shutdown)
+	}
+
+	return nil
+}
+
+// initLogs creates the OTel LoggerProvider and its OTLP exporter.
+// On success it appends a shutdown callback to cleanupFns.
+func (p *Provider) initLogs(cfg Config, res *resource.Resource, cleanupFns *[]func(context.Context) error) error {
+	logExporter, err := buildLogExporter(cfg.Logs)
+	if err != nil {
+		return fmt.Errorf("failed to build log exporter: %w", err)
+	}
+	p.logProvider = sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+	)
+	*cleanupFns = append(*cleanupFns, p.logProvider.Shutdown)
+	return nil
 }
 
 // Meter returns a named Meter for creating instruments.
@@ -375,15 +395,3 @@ func (p *Provider) UpdateConfiguration(newConfig any) error {
 	p.config = newCfg
 	return nil
 }
-
-// Standard attribute keys used across BeeGFS metrics.
-var (
-	AttrState     = attribute.Key("state")
-	AttrPriority  = attribute.Key("priority")
-	AttrDirection = attribute.Key("direction")
-	AttrOperation = attribute.Key("operation")
-	AttrStatus    = attribute.Key("status")
-	AttrErrorType = attribute.Key("error.type")
-	AttrRSTType   = attribute.Key("rst.type")
-	AttrRSTID     = attribute.Key("rst.id")
-)

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,6 +144,34 @@ func TestShutdownWithTelemetry(t *testing.T) {
 
 	_, err = http.Get(url)
 	assert.Error(t, err, "Prometheus endpoint should be unreachable after shutdown")
+}
+
+func TestDeferredShutdown(t *testing.T) {
+	// Verify that the closure returned by DeferredShutdown actually shuts down
+	// the telemetry provider when invoked.
+	port := findFreePort(t)
+	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
+		Enabled:     true,
+		ServiceName: "deferred-shutdown-test",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled: true,
+			Port:    port,
+			Path:    "/metrics",
+		},
+	})
+	require.NoError(t, err)
+
+	url := fmt.Sprintf("http://localhost:%d/metrics", port)
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Invoke the returned closure directly (same as defer would do at return).
+	log.DeferredShutdown(5 * time.Second)()
+
+	_, err = http.Get(url)
+	assert.Error(t, err, "Prometheus endpoint should be unreachable after DeferredShutdown")
 }
 
 type testConfig struct {

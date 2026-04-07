@@ -154,16 +154,10 @@ Using environment variables:
 	if err != nil {
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
-	defer func() {
-		// 10s gives the OTel SDK time to flush the last metrics window. If
-		// telemetry.otlp.timeout is configured above 10s, the final flush may be
-		// cut short; adjust this value accordingly in that case.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := logger.Shutdown(shutdownCtx); err != nil {
-			log.Printf("error during logger shutdown: %v", err)
-		}
-	}()
+	// 10s gives the OTel SDK time to flush the last metrics window. If
+	// telemetry.otlp.timeout is configured above 10s, the final flush may be
+	// cut short; adjust this value accordingly in that case.
+	defer logger.DeferredShutdown(10 * time.Second)()
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {

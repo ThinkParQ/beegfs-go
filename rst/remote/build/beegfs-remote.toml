@@ -5,10 +5,22 @@
 # --- [Table of Contents] ---
 #
 # 1) Settings
+#   1.1) Basic Settings
+#   1.2) Worker Settings
+#   1.3) Remote Storage Target Settings
+#   1.4) Telemetry Settings
 # 2) Command Line Arguments
 # 3) Basic Settings Documentation
+#   3.1) Management Settings
+#   3.2) Logging Settings
+#   3.3) Server Settings
+#   3.4) Job Settings
+#   3.5) Telemetry Settings
 # 4) Worker Settings Documentation
+#   4.1) Advanced Worker Settings
 # 5) Remote Storage Target Settings Documentation
+#   5.1) S3 Remote Storage Target Settings
+#     5.1.1) S3 Storage Class Settings
 
 #
 # --- Section 1.1: [Basic Settings] ---
@@ -35,43 +47,6 @@ tls-disable = false
 
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
-
-[telemetry]
-enabled = false
-service-name = "beegfs-remote"
-
-# [telemetry.otlp]
-# enabled = false
-# protocol = "grpc"
-# endpoint = "localhost:4317"
-# interval = "30s"
-# url-path = "/v1/metrics"   # HTTP only; Loki-compatible backends use "/otlp/v1/metrics"
-# compression = "gzip"
-# timeout = "10s"
-# tls-cert-file = ""
-# tls-disable-verification = false
-# tls-disable = false
-#
-# [telemetry.prometheus]
-# enabled = false
-# listen-address = "0.0.0.0"
-# port = 9091
-# path = "/metrics"
-# tls-cert-file = ""
-# tls-key-file = ""
-# tls-disable = false
-#
-# [telemetry.logs]
-# enabled = false
-# protocol = "grpc"
-# endpoint = "localhost:4317"
-# url-path = "/v1/logs"      # HTTP only; Loki direct ingestion uses "/otlp/v1/logs"
-# compression = "gzip"
-# timeout = "10s"
-# tls-cert-file = ""
-# tls-disable-verification = false
-# tls-disable = false
-# # headers = { Authorization = "Bearer <token>" }
 
 #
 # --- Section 1.2: [Worker Settings] ---
@@ -143,6 +118,47 @@ service-name = "beegfs-remote"
 #   bucket = "<BUCKET>"
 #   access-key = "<ACCESS_KEY>"
 #   secret-key = "<SECRET_KEY>"
+
+#
+# --- Section 1.4: [Telemetry Settings] ---
+#
+
+[telemetry]
+enabled = false
+service-name = "beegfs-remote"
+
+# [telemetry.otlp]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# interval = "30s"
+# url-path = "/v1/metrics"
+# compression = "gzip"
+# timeout = "10s"
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
+#
+# [telemetry.prometheus]
+# enabled = false
+# listen-address = "0.0.0.0"
+# port = 9091
+# path = "/metrics"
+# tls-cert-file = ""
+# tls-key-file = ""
+# tls-disable = false
+#
+# [telemetry.logs]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# url-path = "/v1/logs"
+# compression = "gzip"
+# timeout = "10s"
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
+# # headers = { Authorization = "Bearer <token>" }
 
 #
 # --- Section 2: [Command Line Arguments] ---
@@ -257,6 +273,79 @@ service-name = "beegfs-remote"
 
 
 #
+# --- Section 3.5: [Telemetry Settings] ---
+#
+
+# Telemetry configuration must be specified under [telemetry]. Metrics can be exported via OTLP
+# (push to a collector such as OpenTelemetry Collector, Grafana Alloy, or Grafana Mimir) and/or
+# scraped by Prometheus. Log export via OTLP is configured independently under [telemetry.logs]
+# and does not require metrics to be enabled.
+
+# enabled: Set to true to enable metrics export. At least one of [telemetry.otlp] or
+# [telemetry.prometheus] must also be enabled.
+
+# service-name: Identifies this service in exported metrics and logs. Appears as the
+# service.name resource attribute in all telemetry data.
+
+# [telemetry.otlp] — push-based metrics export via OTLP:
+
+# enabled: Set to true to enable OTLP metrics export.
+
+# protocol: Transport to use when sending metrics. Must be "grpc" or "http".
+
+# endpoint: Address of the OTLP collector (e.g. "localhost:4317" for gRPC,
+# "localhost:4318" for HTTP).
+
+# interval: How often metrics are pushed to the collector (e.g. "30s").
+
+# url-path: URL path for the metrics endpoint. Only applies when protocol is "http".
+# Default is "/v1/metrics". Some backends use different paths; for example
+# Loki-compatible backends that accept OTLP metrics use "/otlp/v1/metrics".
+
+# compression: Compression to apply when sending metrics. Must be "gzip" or "none".
+
+# timeout: Maximum time to wait for a single export attempt. If not set the OTLP default
+# applies. Must be at least 1s if set.
+
+# tls-cert-file: PEM certificate to add to the TLS trust pool when connecting to the
+# OTLP endpoint. Leave empty to use only the system's default certificate pool.
+
+# tls-disable-verification: Skip TLS server certificate verification. Enables encryption
+# but leaves the connection vulnerable to man-in-the-middle attacks.
+
+# tls-disable: Disable TLS entirely for OTLP connections (sends data in clear text).
+
+# headers: Additional HTTP/gRPC headers to send with every export request. Commonly used
+# to pass authentication tokens (e.g. Authorization: Bearer <token>). Can only be set
+# via config file; not available as a command line flag.
+
+# [telemetry.prometheus] — pull-based metrics export via Prometheus:
+
+# enabled: Set to true to expose a Prometheus /metrics endpoint.
+
+# listen-address: IP address the Prometheus HTTP server binds to. Empty string binds all
+# interfaces.
+
+# port: Port for the Prometheus HTTP server.
+
+# path: URL path for the metrics endpoint (e.g. "/metrics").
+
+# tls-cert-file / tls-key-file: Certificate and key for TLS on the Prometheus endpoint.
+# Both must be set together, or both left empty for plain HTTP.
+
+# tls-disable: Disable TLS for the Prometheus endpoint.
+
+# [telemetry.logs] — OTLP log export (independent of metrics):
+
+# enabled: Set to true to export logs via OTLP. Does not require telemetry.enabled.
+
+# protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same
+# semantics as the corresponding [telemetry.otlp] fields, but applied to log export.
+# The url-path default for logs is "/v1/logs". For Loki direct ingestion use
+# "/otlp/v1/logs".
+
+
+#
 # --- Section 4: [Worker Settings] ---
 #
 
@@ -335,7 +424,7 @@ service-name = "beegfs-remote"
 
 
 #
-# --- Section 6: [General Remote Storage Target Settings] ---
+# --- Section 5: [General Remote Storage Target Settings] ---
 #
 
 # Configuration for each Remote Storage Target (RST) should be specified under
@@ -360,7 +449,7 @@ service-name = "beegfs-remote"
 
 
 #
-# --- Section 6.1: [S3 Remote Storage Target Settings] ---
+# --- Section 5.1: [S3 Remote Storage Target Settings] ---
 #
 
 # Configuration for RSTs that are backed by an S3 bucket should be specified using "s3.<key-name>"
@@ -394,7 +483,7 @@ service-name = "beegfs-remote"
 
 
 #
-# --- Section 6.1.1: [S3 Storage Class Settings] ---
+# --- Section 5.1.1: [S3 Storage Class Settings] ---
 #
 
 # Storage class definitions should be specified under [[remote-storage-target.s3.storage-class]] to
