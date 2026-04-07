@@ -67,7 +67,7 @@ func Check(ctx context.Context, allTargets []target.GetTargets_Result) (result C
 	remaining, message := GetTimeToExpiration(license)
 	// Warn by default 90 days before expiry.
 	renewalWindow := 90 * 24 * time.Hour
-	if license.Data.Type == pl.CertType_CERT_TYPE_TEMPORARY {
+	if license.Data.Type == pl.CertType_CERT_TYPE_TRIAL {
 		// For temp licenses only warn 14 days before.
 		renewalWindow = 14 * 24 * time.Hour
 	}

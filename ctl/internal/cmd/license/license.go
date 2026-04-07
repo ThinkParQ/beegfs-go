@@ -175,11 +175,11 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 			header = fmt.Sprintf("NOT FOR RESALE License Certificate %s", license.Data.CommonName)
 		} else if slices.Contains(scopes, "beeond") {
 			header = fmt.Sprintf("BeeOND License Certificate %s", license.Data.CommonName)
-		} else if license.Data.Type == pl.CertType_CERT_TYPE_CUSTOMER {
+		} else if license.Data.Type == pl.CertType_CERT_TYPE_ENTERPRISE {
 			header = fmt.Sprintf("BeeGFS Enterprise License Certificate %s", license.Data.CommonName)
-		} else if license.Data.Type == pl.CertType_CERT_TYPE_TEMPORARY {
-			header = fmt.Sprintf("BeeGFS Temporary License Certificate %s", license.Data.CommonName)
-			defer genLicHelpFunc(cmd.Context(), "\nWARNING: This system has a temporary license installed.")
+		} else if license.Data.Type == pl.CertType_CERT_TYPE_TRIAL {
+			header = fmt.Sprintf("BeeGFS Trial License Certificate %s", license.Data.CommonName)
+			defer genLicHelpFunc(cmd.Context(), "\nWARNING: This system has a trial license installed.")
 		} else if license.Data.Type == pl.CertType_CERT_TYPE_COMMUNITY {
 			header = fmt.Sprintf("BeeGFS Community License Certificate %s", license.Data.CommonName)
 		} else {
@@ -188,10 +188,10 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 
 		var color string
 		switch license.Data.Type {
-		case pl.CertType_CERT_TYPE_CUSTOMER:
-			color = "\033[32m" // Green if license is valid and customer license
-		case pl.CertType_CERT_TYPE_TEMPORARY:
-			color = "\033[33m" // Yellow if license is valid and temporary license
+		case pl.CertType_CERT_TYPE_ENTERPRISE:
+			color = "\033[32m" // Green if license is valid and enterprise license
+		case pl.CertType_CERT_TYPE_TRIAL:
+			color = "\033[33m" // Yellow if license is valid and trial license
 		default:
 			color = "\033[34m" // Blue for all other license types including community licenses
 		}
