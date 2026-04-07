@@ -35,6 +35,132 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+type s3ApiClient interface {
+	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error
+	RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error)
+	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
+	CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+}
+
+type defaultS3ApiClient struct {
+	client *s3.Client
+}
+
+var _ s3ApiClient = &defaultS3ApiClient{}
+
+func (d *defaultS3ApiClient) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	return d.client.ListObjectsV2(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error {
+	paginator := s3.NewListObjectsV2Paginator(d.client, params)
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		cont, err := pageFn(output)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (d *defaultS3ApiClient) RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error) {
+	return d.client.RestoreObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return d.client.HeadObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	return d.client.CreateMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return d.client.AbortMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return d.client.CompleteMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return d.client.PutObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	return d.client.UploadPart(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return d.client.GetObject(ctx, params, optFns...)
+}
+
+type s3Provider interface {
+	Provider
+}
+type defaultS3Provider struct {
+	provider *S3Client
+}
+
+var _ Provider = &defaultS3Provider{}
+
+func (d *defaultS3Provider) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	return d.provider.GetJobRequest(cfg)
+}
+
+func (d *defaultS3Provider) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+	return d.provider.GenerateWorkRequests(ctx, lastJob, job, availableWorkers)
+}
+
+func (d *defaultS3Provider) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error) {
+	return d.provider.ExecuteJobBuilderRequest(ctx, workRequest, jobSubmissionChan)
+}
+
+func (d *defaultS3Provider) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
+	return d.provider.ExecuteWorkRequestPart(ctx, request, part)
+}
+
+func (d *defaultS3Provider) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	return d.provider.CompleteWorkRequests(ctx, job, workResults, abort)
+}
+
+func (d *defaultS3Provider) GetConfig() *flex.RemoteStorageTarget {
+	return d.provider.GetConfig()
+}
+
+func (d *defaultS3Provider) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
+	return d.provider.GetWalk(ctx, path, chanSize, resumeToken, maxRequests)
+}
+
+func (d *defaultS3Provider) SanitizeRemotePath(remotePath string) string {
+	return d.provider.SanitizeRemotePath(remotePath)
+}
+
+func (d *defaultS3Provider) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error) {
+	return d.provider.GetRemotePathInfo(ctx, cfg)
+}
+
+func (d *defaultS3Provider) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error) {
+	return d.provider.GenerateExternalId(ctx, cfg)
+}
+
+func (d *defaultS3Provider) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
+	return d.provider.IsWorkRequestReady(ctx, request)
+}
+
 type S3StorageClass struct {
 	retrievalTier types.Tier
 	archival      bool
@@ -46,9 +172,11 @@ type S3StorageClass struct {
 
 type S3Client struct {
 	config *flex.RemoteStorageTarget
-	// TODO: https://github.com/thinkparq/gobee/issues/28
-	// Rework client into an `s3Provider` interface type.
-	client                         *s3.Client
+	// s3Config holds provider-specific S3 options used by this client. This allows providers such
+	// as xtreemstore to reuse the S3 implementation while keeping their own top-level RST type.
+	s3Config                       *flex.RemoteStorageTarget_S3
+	apiClient                      s3ApiClient
+	provider                       s3Provider
 	mountPoint                     filesystem.Provider
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
@@ -58,15 +186,75 @@ type S3Client struct {
 var _ Provider = &S3Client{}
 
 func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
-	s3Provider := rstConfig.GetS3()
+	return newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), mountPoint)
+}
+
+type s3ProviderOption func(*s3ProviderBuildCfg)
+type s3ProviderBuildCfg struct {
+	apiClient func(base s3ApiClient) s3ApiClient
+	provider  func(base s3Provider) s3Provider
+	s3Options []func(*s3.Options)
+}
+
+func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
+	return s3ProviderBuildCfg{
+		apiClient: func(base s3ApiClient) s3ApiClient { return base },
+		provider:  func(base s3Provider) s3Provider { return base },
+	}
+}
+
+func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		if fn != nil {
+			cfg.apiClient = fn
+		}
+	}
+}
+
+func withS3Provider(fn func(s3Provider) s3Provider) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		if fn != nil {
+			cfg.provider = fn
+		}
+	}
+}
+
+func withS3Options(optFns ...func(*s3.Options)) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		for _, optFn := range optFns {
+			if optFn != nil {
+				cfg.s3Options = append(cfg.s3Options, optFn)
+			}
+		}
+	}
+}
+
+func newS3WithOptions(
+	ctx context.Context,
+	rstConfig *flex.RemoteStorageTarget,
+	s3Config *flex.RemoteStorageTarget_S3,
+	mountPoint filesystem.Provider,
+	opts ...s3ProviderOption,
+) (Provider, error) {
+	if s3Config == nil {
+		return nil, fmt.Errorf("s3 configuration must be specified")
+	}
+
+	buildCfg := defaultS3ProviderBuildCfg()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&buildCfg)
+		}
+	}
+
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
-		awsConfig.WithBaseEndpoint(s3Provider.GetEndpointUrl()),
-		awsConfig.WithRegion(s3Provider.GetRegion()),
+		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
+		awsConfig.WithRegion(s3Config.GetRegion()),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
-				s3Provider.GetAccessKey(),
-				s3Provider.GetSecretKey(),
+				s3Config.GetAccessKey(),
+				s3Config.GetSecretKey(),
 				"", // session token
 			),
 		),
@@ -79,26 +267,42 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	// was deprecated for new regions in 2020. So, check whether the provided endpoint url starts
 	// with the bucket as part of the hostname. Otherwise, use the path-style.
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html
-	endpointUrl, err := url.Parse(s3Provider.GetEndpointUrl())
+	endpointUrl, err := url.Parse(s3Config.GetEndpointUrl())
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse s3 end-point: %w", err)
 	}
-	bucket := s3Provider.GetBucket()
+	bucket := s3Config.GetBucket()
 	host := endpointUrl.Hostname()
 	usePathStyle := !strings.HasPrefix(host, bucket+".")
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	awsClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = usePathStyle
+		for _, optFn := range buildCfg.s3Options {
+			optFn(o)
+		}
 	})
 
+	apiClient := buildCfg.apiClient(&defaultS3ApiClient{client: awsClient})
+	if apiClient == nil {
+		return nil, fmt.Errorf("s3 api client wrapper returned nil")
+	}
 	s3Client := &S3Client{
 		config:                         rstConfig,
-		client:                         client,
+		s3Config:                       s3Config,
+		apiClient:                      apiClient,
 		mountPoint:                     mountPoint,
 		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
 		isListStartAfterKeySupportedMu: sync.Mutex{},
 	}
 
-	for _, class := range s3Provider.StorageClass {
+	// Use the s3
+	baseProvider := s3Provider(&defaultS3Provider{provider: s3Client})
+	provider := buildCfg.provider(baseProvider)
+	if provider == nil {
+		return nil, fmt.Errorf("s3 provider wrapper returned nil")
+	}
+	s3Client.provider = provider
+
+	for _, class := range s3Config.StorageClass {
 		name := types.StorageClass(class.GetName())
 		if name == "" {
 			return nil, fmt.Errorf("storage class must specify a valid storage class name")
@@ -137,7 +341,7 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		}
 	}
 
-	return s3Client, nil
+	return provider, nil
 }
 
 func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
@@ -148,12 +352,12 @@ func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
 	}
 
 	input := &s3.ListObjectsV2Input{
-		Bucket:     aws.String(s.config.GetS3().Bucket),
+		Bucket:     aws.String(s.s3Config.Bucket),
 		StartAfter: aws.String("-"),
 		MaxKeys:    aws.Int32(0),
 	}
 
-	if _, err := s.client.ListObjectsV2(ctx, input); err != nil {
+	if _, err := s.apiClient.ListObjectsV2(ctx, input); err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidArgument" && strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "startafter") {
 			s.isListStartAfterKeySupported = new(bool)
@@ -294,7 +498,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				}
 
 				restoreObjectInput := &s3.RestoreObjectInput{
-					Bucket:         aws.String(r.config.GetS3().Bucket),
+					Bucket:         aws.String(r.s3Config.Bucket),
 					Key:            aws.String(sync.RemotePath),
 					RestoreRequest: restoreRequest,
 				}
@@ -302,7 +506,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				// Multiple workers may attempt to restore the same object concurrently. In that
 				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
 				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
-				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
+				if _, err := r.apiClient.RestoreObject(ctx, restoreObjectInput); err != nil {
 					var apiErr smithy.APIError
 					if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "RestoreAlreadyInProgress" {
 						return false, 0, err
@@ -419,7 +623,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 			}
 
 			input := &s3.ListObjectsV2Input{
-				Bucket:  aws.String(r.config.GetS3().Bucket),
+				Bucket:  aws.String(r.s3Config.Bucket),
 				Prefix:  aws.String(prefixWithoutPattern),
 				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
 			}
@@ -436,18 +640,8 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 			var key string
 			var lastKey string
-			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
-			keysFound = objectPaginator.HasMorePages()
-			for objectPaginator.HasMorePages() {
-				output, err := objectPaginator.NextPage(ctx)
-				if err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
-					} else {
-						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
-					}
-					return
-				}
+			pageFn := func(output *s3.ListObjectsV2Output) (bool, error) {
+				keysFound = true
 
 				// When resuming with s3ResumeToken ContinuationToken and ContinuationStartKey,
 				// search for ContinuationStartKey on the page. If it does not exist and there's a
@@ -470,7 +664,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					if len(filteredContents) == 0 {
 						if nextGreaterKeyIndex == -1 {
 							// There were no greater keys on the current page. So check the next page.
-							continue
+							return true, nil
 						}
 						continuationFindStart = false
 						filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
@@ -495,7 +689,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 							} else {
 								send(&filesystem.StreamPathResult{ResumeToken: token})
 							}
-							return
+							return false, nil
 						}
 
 						rt := s3ResumeToken{ContinuationToken: aws.ToString(output.ContinuationToken), ContinuationStartKey: key}
@@ -504,11 +698,11 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 						} else {
 							send(&filesystem.StreamPathResult{ResumeToken: token})
 						}
-						return
+						return false, nil
 					}
 
 					if !send(&filesystem.StreamPathResult{Path: key}) {
-						return
+						return false, nil
 					}
 
 					lastKey = key
@@ -516,15 +710,24 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 						maxKeys--
 					}
 				}
+
+				return true, nil
+			}
+
+			err := r.apiClient.ListObjectsV2Pages(ctx, input, pageFn)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
+				} else {
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
+				}
+				return
 			}
 			return
 		}
 
 		if isKey {
-			_, err := r.client.HeadObject(ctx, &s3.HeadObjectInput{
-				Bucket: aws.String(r.config.GetS3().Bucket),
-				Key:    aws.String(prefix),
-			})
+			_, err := r.headObject(ctx, prefix)
 			if err != nil {
 				var apiErr smithy.APIError
 				if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound" {
@@ -820,6 +1023,14 @@ func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *st
 	return status
 }
 
+func (r *S3Client) headObject(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(r.s3Config.Bucket),
+		Key:    aws.String(key),
+	}
+	return r.apiClient.HeadObject(ctx, input)
+}
+
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
 func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, *s3ArchiveInfo, error) {
 	if key == "" {
@@ -829,15 +1040,9 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 		return 0, time.Time{}, nil, nil
 	}
 
-	headObjectInput := &s3.HeadObjectInput{
-		Bucket: aws.String(r.config.GetS3().Bucket),
-		Key:    aws.String(key),
-	}
-
-	resp, err := r.client.HeadObject(ctx, headObjectInput)
+	resp, err := r.headObject(ctx, key)
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
+		if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
 				return 0, time.Time{}, nil, os.ErrNotExist
 			}
@@ -871,7 +1076,7 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	}
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(path),
 		Metadata: metadata,
 		Tagging:  tagging,
@@ -880,7 +1085,7 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
 	}
 
-	result, err := r.client.CreateMultipartUpload(ctx, createMultipartUploadInput)
+	result, err := r.apiClient.CreateMultipartUpload(ctx, createMultipartUploadInput)
 	if err != nil {
 		return "", err
 	}
@@ -890,11 +1095,11 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 func (r *S3Client) abortUpload(ctx context.Context, uploadID string, remotePath string) error {
 	abortMultipartUploadInput := &s3.AbortMultipartUploadInput{
 		UploadId: aws.String(uploadID),
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(remotePath),
 	}
 
-	_, err := r.client.AbortMultipartUpload(ctx, abortMultipartUploadInput)
+	_, err := r.apiClient.AbortMultipartUpload(ctx, abortMultipartUploadInput)
 	return err
 }
 
@@ -915,7 +1120,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 	})
 
 	completeMultipartUploadInput := &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(remotePath),
 		UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{
@@ -923,7 +1128,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 		},
 	}
 
-	_, err := r.client.CompleteMultipartUpload(ctx, completeMultipartUploadInput)
+	_, err := r.apiClient.CompleteMultipartUpload(ctx, completeMultipartUploadInput)
 	return err
 }
 
@@ -976,7 +1181,7 @@ func (r *S3Client) upload(
 		}
 
 		input := &s3.PutObjectInput{
-			Bucket:         aws.String(r.config.GetS3().Bucket),
+			Bucket:         aws.String(r.s3Config.Bucket),
 			Key:            aws.String(remotePath),
 			Body:           filePart,
 			ChecksumSHA256: aws.String(part.ChecksumSha256),
@@ -989,7 +1194,7 @@ func (r *S3Client) upload(
 			input.StorageClass = types.StorageClass(*storageClass)
 		}
 
-		resp, err := r.client.PutObject(ctx, input)
+		resp, err := r.apiClient.PutObject(ctx, input)
 
 		if err != nil {
 			return err
@@ -999,7 +1204,7 @@ func (r *S3Client) upload(
 	}
 
 	uploadPartReq := &s3.UploadPartInput{
-		Bucket:         aws.String(r.config.GetS3().Bucket),
+		Bucket:         aws.String(r.s3Config.Bucket),
 		Key:            aws.String(remotePath),
 		UploadId:       aws.String(uploadID),
 		PartNumber:     aws.Int32(part.PartNumber),
@@ -1007,7 +1212,7 @@ func (r *S3Client) upload(
 		ChecksumSHA256: aws.String(part.ChecksumSha256),
 	}
 
-	resp, err := r.client.UploadPart(ctx, uploadPartReq)
+	resp, err := r.apiClient.UploadPart(ctx, uploadPartReq)
 	if err != nil {
 		return err
 	}
@@ -1031,12 +1236,12 @@ func (r *S3Client) download(ctx context.Context, path string, remotePath string,
 	defer filePart.Close()
 
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(r.config.GetS3().Bucket),
+		Bucket: aws.String(r.s3Config.Bucket),
 		Key:    aws.String(remotePath),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", part.OffsetStart, part.OffsetStop)),
 	}
 
-	resp, err := r.client.GetObject(ctx, getObjectInput)
+	resp, err := r.apiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
 		return err
 	}
