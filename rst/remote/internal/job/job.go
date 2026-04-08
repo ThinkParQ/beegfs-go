@@ -105,12 +105,15 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 			return workermgr.JobSubmission{}, err
 		}
 
+		executeAfter := rst.GetJobExecuteAfter(j.Get())
 		j.Segments = make([]*Segment, 0, len(workRequests))
 		for _, wr := range workRequests {
+			if executeAfter != nil {
+				wr.SetExecuteAfter(executeAfter)
+			}
 			seg := proto.Clone(wr.GetSegment()).(*flex.WorkRequest_Segment)
 			j.Segments = append(j.Segments, &Segment{segment: seg})
 		}
-
 	} else {
 		workRequests = rst.RecreateWorkRequests(j.Get(), j.GetSegments())
 	}
