@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	iUtil "github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -107,14 +108,14 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
 	All desired IDs must be specified. Specify 'none' to unset all RSTs.`)
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
-	cmd.Flags().Var(newRstCooldownFlag(&backendCfg.RemoteCooldownSecs), "remote-cooldown", "Time to wait after a file is closed before replication begins. Accepts a duration such as 1s, 1m, or 1h. The max duration is 65,535 seconds.")
-	// TODO: https://github.com/ThinkParQ/bee-remote/issues/18
-	// Unmark this as hidden once automatic uploads are supported.
-	cmd.Flags().MarkHidden("remote-cooldown")
+	cmd.Flags().Var(rst.NewCooldownFlag(&backendCfg.RemoteCooldownSecs), rst.RemoteCooldownFlag, rst.RemoteCooldownFlagHelp)
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
 	cmd.Flags().Var(newAccessControlFlag(&backendCfg.AccessFlags), "access-flags", "Set access control restrictions for files (values: unlocked, read-lock, write-lock, read-write-lock). Specify 'none' to reset the access restrictions.")
 	cmd.Flags().MarkHidden("access-flags")
+	// There isn't a separate user facing "restore-policy" flag on entry set as there is on remote
+	// push/pull because the restore policy needs to be set when stubbing files. The ability to
+	// manually override the data state here is intended only for debugging/support purposes.
 	cmd.Flags().Var(newDataStateFlag(&backendCfg.DataState), "data-state", "Set the data state for regular files (numeric values: 0-7). Specify 'none' to reset the state.")
 	cmd.Flags().MarkHidden("data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")

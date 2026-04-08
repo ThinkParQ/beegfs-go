@@ -876,33 +876,60 @@ func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, 
 	return nil
 }
 
-func SetFileRstIds(ctx context.Context, entry msg.EntryInfo, ownerNode beegfs.Node, path string, rstIds []uint32) error {
-	if rstIds == nil {
+// SetFileRstPattern applies the specified RST fields to a file using a single SetFilePatternRequest,
+// preserving all other RST fields (IDs, cooldown, policies, etc.).
+// Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave
+// the current cooldown unchanged. When entryInfoMsg, ownerNode, and existingRst are already known
+// (e.g. from a prior GetLockedInfo call), pass them to avoid a redundant GetEntry round-trip;
+// otherwise pass zero values and the entry will be fetched internally.
+func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
+	if rstIds == nil && cooldownSecs == nil {
 		return nil
+	}
+	if len(entryInfoMsg.EntryID) == 0 {
+		entryInfo, err := GetEntry(ctx, nil, GetEntriesCfg{Verbose: false, IncludeOrigMsg: true}, path)
+		if err != nil {
+			return err
+		}
+		if entryInfo.Entry.Details == nil {
+			return fmt.Errorf("unable to set remote targets, full entry details unavailable for %s: %s", path, entryInfo.Entry.EntryInfoPopulated)
+		}
+		currentRSTCfg = entryInfo.Entry.Details.Remote.RemoteStorageTarget
+		if origPtr := entryInfo.GetOrigEntryInfo(); origPtr != nil {
+			entryInfoMsg = *origPtr
+		}
+		ownerNode = entryInfo.Entry.MetaOwnerNode
 	}
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return err
 	}
-
-	rstIDRequest := &msg.SetFilePatternRequest{EntryInfo: entry, RST: msg.RemoteStorageTarget{RSTIDs: rstIds}}
-	rstIDResp := &msg.SetFilePatternResponse{}
-	err = store.RequestTCP(ctx, ownerNode.Uid, rstIDRequest, rstIDResp)
-	if err != nil {
+	newRSTCfg := currentRSTCfg
+	if rstIds != nil {
+		newRSTCfg.RSTIDs = rstIds
+	}
+	if cooldownSecs != nil {
+		newRSTCfg.CoolDownPeriod = *cooldownSecs
+	}
+	req := &msg.SetFilePatternRequest{EntryInfo: entryInfoMsg, RST: newRSTCfg}
+	resp := &msg.SetFilePatternResponse{}
+	if err = store.RequestTCP(ctx, ownerNode.Uid, req, resp); err != nil {
 		return err
 	}
-	if rstIDResp.Result != beegfs.OpsErr_SUCCESS {
-		return fmt.Errorf("server returned an error configuring file targets, %s: %w", path, rstIDResp.Result)
+	if resp.Result != beegfs.OpsErr_SUCCESS {
+		return fmt.Errorf("server returned an error setting RST pattern for %s: %w", path, resp.Result)
 	}
-
 	return nil
 }
 
-func SetDirRstIds(ctx context.Context, path string, rstIds []uint32) error {
-	if rstIds == nil {
+// SetDirRstPattern fetches the directory entry once and applies the specified RST fields using a
+// single SetDirPatternRequest, preserving the existing stripe pattern and all other RST fields.
+// Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave
+// the current cooldown unchanged.
+func SetDirRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16) error {
+	if rstIds == nil && cooldownSecs == nil {
 		return nil
 	}
-
 	entryInfo, err := GetEntry(ctx, nil, GetEntriesCfg{
 		Verbose:        false,
 		IncludeOrigMsg: true,
@@ -920,27 +947,28 @@ func SetDirRstIds(ctx context.Context, path string, rstIds []uint32) error {
 	if euid < 0 || euid > math.MaxUint32 {
 		return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", euid)
 	}
-
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
 		Pattern:   entryInfo.Entry.Details.Pattern.StripePattern,
 		RST:       entryInfo.Entry.Details.Remote.RemoteStorageTarget,
 	}
 	request.SetUID(uint32(euid))
-	request.RST.RSTIDs = rstIds
-
+	if rstIds != nil {
+		request.RST.RSTIDs = rstIds
+	}
+	if cooldownSecs != nil {
+		request.RST.CoolDownPeriod = *cooldownSecs
+	}
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return err
 	}
-
 	resp := &msg.SetDirPatternResponse{}
 	if err := store.RequestTCP(ctx, entryInfo.Entry.MetaOwnerNode.Uid, request, resp); err != nil {
 		return err
 	}
 	if resp.Result != beegfs.OpsErr_SUCCESS && resp.Result != beegfs.OpsErr_NOTADIR {
-		return fmt.Errorf("server returned an error configuring directory targets, %s: %w", path, resp.Result)
+		return fmt.Errorf("server returned an error setting RST pattern for directory %s: %w", path, resp.Result)
 	}
-
 	return nil
 }

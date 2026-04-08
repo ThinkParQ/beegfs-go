@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
@@ -156,41 +155,6 @@ func (f *numTargetsFlag) Set(value string) error {
 	}
 	numTargets := uint32(nt)
 	*f.p = &numTargets
-	return nil
-}
-
-type rstCooldownFlag struct {
-	p **uint16
-}
-
-func newRstCooldownFlag(p **uint16) *rstCooldownFlag {
-	return &rstCooldownFlag{p: p}
-}
-
-func (f *rstCooldownFlag) String() string {
-	if *f.p == nil {
-		return "unchanged"
-	}
-	return fmt.Sprintf("%d", **f.p)
-}
-
-func (f *rstCooldownFlag) Type() string {
-	return "<duration>"
-}
-
-func (f *rstCooldownFlag) Set(value string) error {
-	parsedTime, err := time.ParseDuration(value)
-	if err != nil {
-		return fmt.Errorf("invalid duration %s: %w", value, err)
-	}
-
-	if parsedTime.Seconds() > math.MaxUint16 {
-		return fmt.Errorf("cooldown cannot be greater than %d", math.MaxUint16)
-	}
-
-	cd := uint16(parsedTime.Seconds())
-	cooldown := uint16(cd)
-	*f.p = &cooldown
 	return nil
 }
 
