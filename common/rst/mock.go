@@ -94,6 +94,14 @@ func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	return false, ErrUnsupportedOpForRST
 }
 
+func (r *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
+}
+
+func (r *MockClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
+}
+
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
 
 	if job.Request.GetMock() != nil {
