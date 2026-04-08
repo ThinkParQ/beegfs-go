@@ -161,6 +161,14 @@ func (d *defaultS3Provider) IsWorkRequestReady(ctx context.Context, request *fle
 	return d.provider.IsWorkRequestReady(ctx, request)
 }
 
+func (d *defaultS3Provider) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return d.provider.IncludeInBulkRequest(ctx, request)
+}
+
+func (d *defaultS3Provider) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+	return d.provider.BuildBulkRequest(ctx)
+}
+
 type S3StorageClass struct {
 	retrievalTier types.Tier
 	archival      bool
@@ -472,6 +480,14 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 // ExecuteJobBuilderRequest is not implemented and should never be called.
 func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
 	return false, ErrUnsupportedOpForRST
+}
+
+func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
+}
+
+func (r *S3Client) BuildBulkRequest(ctx context.Context) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
