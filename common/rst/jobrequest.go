@@ -123,6 +123,16 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		}
 	}
 
+	if cfg.GetRestorePolicy() != flex.RestorePolicy_RESTORE_POLICY_UNSPECIFIED || cfg.HasCooldownSecs() {
+		remoteRegistry, err := config.BeeRemoteRegistry(ctx, false)
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve BeeGFS remote registry: %w", err)
+		}
+		if err := remoteRegistry.RequireFeature(ctx, registry.FeatureRestorePolicyAndCooldown); err != nil {
+			return nil, err
+		}
+	}
+
 	jobBuilder := false
 	if pathInfo.IsGlob {
 		jobBuilder = true

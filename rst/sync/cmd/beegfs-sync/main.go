@@ -40,7 +40,8 @@ var (
 )
 
 var capabilities = map[string]*flex.Feature{
-	registry.FeatureFilterFiles: nil,
+	registry.FeatureFilterFiles:              nil,
+	registry.FeatureRestorePolicyAndCooldown: nil,
 }
 
 func main() {
