@@ -107,6 +107,18 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #   access-key = "<ACCESS_KEY>"
 #   secret-key = "<SECRET_KEY>"
 
+# [[remote-storage-target]]
+# id = "4"
+# name = "xtreemstore"
+# policies = { FastStartMaxSize = 104857600 }
+#
+#   [remote-storage-target.xtreemstore]
+#   endpoint-url = "https://<XTREEMSTORE_ENDPOINT>:<PORT>"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
+
 #
 # --- Section 2: [Command Line Arguments] ---
 #
