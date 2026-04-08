@@ -196,6 +196,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
+			RestorePolicy:       new(request.GetRestorePolicy()),
 			Priority:            new(request.GetPriority()),
 		}
 
@@ -532,7 +533,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
 		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
-			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
+			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
 				err = fmt.Errorf("failed to create stub file: %w", err)
 				return
 			}
@@ -548,6 +549,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
 				err = ErrOffloadFileUrlMismatch
 				return
+			}
+			if cfg.HasRestorePolicy() {
+				if err = entry.SetFileDataState(ctx, cfg.Path, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
+					return
+				}
 			}
 			return updateRstCfg(ErrJobAlreadyOffloaded)
 		}
@@ -724,13 +730,28 @@ func GetLockedInfo(
 	return
 }
 
+// restorePolicyToDataState maps a RestorePolicy enum value to the corresponding beegfs.DataState.
+// UNSPECIFIED and MANUAL both map to DataStateManualRestore as the safe default.
+func restorePolicyToDataState(p flex.RestorePolicy) beegfs.DataState {
+	switch p {
+	case flex.RestorePolicy_RESTORE_POLICY_AUTO:
+		return beegfs.DataStateAutoRestore
+	case flex.RestorePolicy_RESTORE_POLICY_DELAYED:
+		return beegfs.DataStateDelayedRestore
+	default:
+		return beegfs.DataStateManualRestore
+	}
+}
+
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
-func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool) error {
+// The dataState parameter controls which BeeGFS data state is set on the stub (e.g. ManualRestore,
+// AutoRestore, or DelayedRestore).
+func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool, dataState beegfs.DataState) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
 	if err := mountPoint.CreateWriteClose(path, rstUrl, 0644, overwrite); err != nil {
 		return err
 	}
-	if err := entry.SetFileDataState(ctx, path, beegfs.DataStateManualRestore); err != nil {
+	if err := entry.SetFileDataState(ctx, path, dataState); err != nil {
 		return fmt.Errorf("unable to set offloaded data state: %w", err)
 	}
 

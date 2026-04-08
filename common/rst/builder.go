@@ -38,6 +38,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 		Path:                cfg.Path,
 		RemoteStorageTarget: 0,
 		StubLocal:           cfg.StubLocal,
+		RestorePolicy:       cfg.RestorePolicy,
 		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Builder{

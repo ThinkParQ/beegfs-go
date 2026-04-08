@@ -1,5 +1,6 @@
 package registry
 
 const (
-	FeatureFilterFiles = "filter-files"
+	FeatureFilterFiles   = "filter-files"
+	FeatureRestorePolicy = "restore-policy"
 )
