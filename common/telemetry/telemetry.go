@@ -99,23 +99,12 @@ func (c *Config) ValidateConfig() error {
 				"enable at least one of [telemetry.otlp] or [telemetry.prometheus]")
 		}
 		if c.OTLP.Enabled {
-			if c.OTLP.Protocol != protocolGRPC && c.OTLP.Protocol != protocolHTTP {
-				return fmt.Errorf("telemetry.otlp.protocol must be 'grpc' or 'http' (got '%s')", c.OTLP.Protocol)
-			}
-			if c.OTLP.Endpoint == "" {
-				return fmt.Errorf("telemetry.otlp.endpoint must be set when OTLP is enabled")
+			if err := validateOTLPTransport("telemetry.otlp", c.OTLP.Protocol, c.OTLP.Endpoint,
+				c.OTLP.Compression, c.OTLP.Timeout, c.OTLP.TLSDisable, c.OTLP.TLSDisableVerification); err != nil {
+				return err
 			}
 			if c.OTLP.Interval < time.Second {
 				return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
-			}
-			if c.OTLP.Compression != "" && c.OTLP.Compression != "none" && c.OTLP.Compression != "gzip" {
-				return fmt.Errorf("telemetry.otlp.compression must be 'gzip' or 'none' (got '%s')", c.OTLP.Compression)
-			}
-			if c.OTLP.Timeout != 0 && c.OTLP.Timeout < time.Second {
-				return fmt.Errorf("telemetry.otlp.timeout must be at least 1s (got '%s')", c.OTLP.Timeout)
-			}
-			if c.OTLP.TLSDisable && c.OTLP.TLSDisableVerification {
-				return fmt.Errorf("telemetry.otlp: tls-disable and tls-disable-verification are mutually exclusive; tls-disable-verification only applies when TLS is enabled")
 			}
 		}
 		if c.Prometheus.Enabled {
@@ -137,21 +126,32 @@ func (c *Config) ValidateConfig() error {
 	// Log export validation is independent of c.Enabled: a user can enable logs
 	// without enabling OTLP metrics.
 	if c.Logs.Enabled {
-		if c.Logs.Protocol != protocolGRPC && c.Logs.Protocol != protocolHTTP {
-			return fmt.Errorf("telemetry.logs.protocol must be 'grpc' or 'http' (got '%s')", c.Logs.Protocol)
+		if err := validateOTLPTransport("telemetry.logs", c.Logs.Protocol, c.Logs.Endpoint,
+			c.Logs.Compression, c.Logs.Timeout, c.Logs.TLSDisable, c.Logs.TLSDisableVerification); err != nil {
+			return err
 		}
-		if c.Logs.Endpoint == "" {
-			return fmt.Errorf("telemetry.logs.endpoint must be set when log export is enabled")
-		}
-		if c.Logs.Compression != "" && c.Logs.Compression != "none" && c.Logs.Compression != "gzip" {
-			return fmt.Errorf("telemetry.logs.compression must be 'gzip' or 'none' (got '%s')", c.Logs.Compression)
-		}
-		if c.Logs.Timeout != 0 && c.Logs.Timeout < time.Second {
-			return fmt.Errorf("telemetry.logs.timeout must be at least 1s (got '%s')", c.Logs.Timeout)
-		}
-		if c.Logs.TLSDisable && c.Logs.TLSDisableVerification {
-			return fmt.Errorf("telemetry.logs: tls-disable and tls-disable-verification are mutually exclusive; tls-disable-verification only applies when TLS is enabled")
-		}
+	}
+	return nil
+}
+
+// validateOTLPTransport checks the transport fields shared by both the OTLP
+// metrics exporter (OTLPConfig) and the log exporter (LogsConfig).
+// prefix is the config key path used in error messages (e.g. "telemetry.otlp").
+func validateOTLPTransport(prefix, protocol, endpoint, compression string, timeout time.Duration, tlsDisable, tlsDisableVerification bool) error {
+	if protocol != protocolGRPC && protocol != protocolHTTP {
+		return fmt.Errorf("%s.protocol must be 'grpc' or 'http' (got '%s')", prefix, protocol)
+	}
+	if endpoint == "" {
+		return fmt.Errorf("%s.endpoint must be set when OTLP is enabled", prefix)
+	}
+	if compression != "" && compression != "none" && compression != "gzip" {
+		return fmt.Errorf("%s.compression must be 'gzip' or 'none' (got '%s')", prefix, compression)
+	}
+	if timeout != 0 && timeout < time.Second {
+		return fmt.Errorf("%s.timeout must be at least 1s (got '%s')", prefix, timeout)
+	}
+	if tlsDisable && tlsDisableVerification {
+		return fmt.Errorf("%s: tls-disable and tls-disable-verification are mutually exclusive; tls-disable-verification only applies when TLS is enabled", prefix)
 	}
 	return nil
 }

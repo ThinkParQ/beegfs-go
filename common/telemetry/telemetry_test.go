@@ -365,6 +365,38 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "telemetry.service-name must be set",
 		},
+		{
+			name: "OTLP TLS disable and disable-verification are mutually exclusive",
+			cfg: telemetry.Config{
+				Enabled:     true,
+				ServiceName: "test",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:                true,
+					Protocol:               "grpc",
+					Endpoint:               "localhost:4317",
+					Interval:               30 * time.Second,
+					TLSDisable:             true,
+					TLSDisableVerification: true,
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.otlp: tls-disable and tls-disable-verification are mutually exclusive",
+		},
+		{
+			name: "logs TLS disable and disable-verification are mutually exclusive",
+			cfg: telemetry.Config{
+				ServiceName: "test",
+				Logs: telemetry.LogsConfig{
+					Enabled:                true,
+					Protocol:               "grpc",
+					Endpoint:               "localhost:4317",
+					TLSDisable:             true,
+					TLSDisableVerification: true,
+				},
+			},
+			wantErr: true,
+			errMsg:  "telemetry.logs: tls-disable and tls-disable-verification are mutually exclusive",
+		},
 	}
 
 	for _, tt := range tests {
