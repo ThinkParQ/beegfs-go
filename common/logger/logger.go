@@ -256,9 +256,8 @@ type Configurer interface {
 
 // UpdateConfiguration satisfies the [configmgr.Listener] interface and is used
 // to dynamically update supported aspects of the logger and its embedded
-// telemetry Provider. For logging it currently only supports dynamically
-// updating the log level. Telemetry configuration changes are delegated to the
-// Provider when the config implements telemetry.Configurer.
+// telemetry Provider. It updates the log level and delegates telemetry config
+// changes to the Provider when the config implements telemetry.Configurer.
 func (lm *Logger) UpdateConfiguration(newConfig any) error {
 
 	// Use type assertion to verify the newConfig interface variable is of the
@@ -292,8 +291,6 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 		log.Debug("no change to log level")
 	}
 
-	// Forward the config reload to the telemetry Provider if the application
-	// has telemetry configuration (i.e. its AppConfig implements telemetry.Configurer).
 	if _, ok := newConfig.(telemetry.Configurer); ok {
 		if err := lm.telemetry.UpdateConfiguration(newConfig); err != nil {
 			log.Warn("unable to update telemetry configuration", zap.Error(err))

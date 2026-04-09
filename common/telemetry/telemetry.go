@@ -22,8 +22,7 @@ const (
 	protocolHTTP = "http"
 )
 
-// Config represents the telemetry configuration. It is embedded in each
-// service's AppConfig.
+// Config represents the telemetry configuration.
 type Config struct {
 	Enabled     bool             `mapstructure:"enabled"`
 	ServiceName string           `mapstructure:"service-name"`
@@ -33,7 +32,6 @@ type Config struct {
 	Logs        LogsConfig       `mapstructure:"logs"`
 }
 
-// OTLPConfig holds configuration for the OTLP metric exporter.
 type OTLPConfig struct {
 	Enabled                bool              `mapstructure:"enabled"`
 	Protocol               string            `mapstructure:"protocol"` // protocolGRPC or protocolHTTP
@@ -48,7 +46,6 @@ type OTLPConfig struct {
 	Headers                map[string]string `mapstructure:"headers"`
 }
 
-// PrometheusConfig holds configuration for the Prometheus metric exporter.
 type PrometheusConfig struct {
 	Enabled       bool   `mapstructure:"enabled"`
 	ListenAddress string `mapstructure:"listen-address"`
@@ -65,7 +62,6 @@ type HistogramConfig struct {
 	BytesBoundaries    []float64 `mapstructure:"bytes-boundaries"`
 }
 
-// LogsConfig holds configuration for the OTLP log exporter.
 // Logs are always push-based (OTLP only) — there is no pull-based log
 // collection equivalent to Prometheus in the OTel ecosystem.
 // This config is independent of Config.Enabled: enabling logs does not
@@ -84,7 +80,6 @@ type LogsConfig struct {
 }
 
 // ValidateConfig checks telemetry configuration for consistency.
-// Called by the containing AppConfig.ValidateConfig().
 func (c *Config) ValidateConfig() error {
 	if c.Enabled && c.ServiceName == "" {
 		return fmt.Errorf("telemetry.service-name must be set when metrics are enabled")
@@ -92,7 +87,6 @@ func (c *Config) ValidateConfig() error {
 	if c.Logs.Enabled && c.ServiceName == "" {
 		return fmt.Errorf("telemetry.service-name must be set when log export is enabled")
 	}
-	// Validate metrics exporters only if telemetry (metrics) is enabled.
 	if c.Enabled {
 		if !c.OTLP.Enabled && !c.Prometheus.Enabled {
 			return fmt.Errorf("telemetry is enabled but no exporter is configured: " +
@@ -158,7 +152,6 @@ func validateOTLPTransport(prefix, protocol, endpoint, compression string, timeo
 
 // Configurer allows the telemetry package to extract its config from any
 // AppConfig without importing the application's config package.
-// This follows the same pattern as logger.Configurer.
 type Configurer interface {
 	GetTelemetryConfig() Config
 }
@@ -338,7 +331,6 @@ func (p *Provider) Meter(name string) metric.Meter {
 }
 
 // LogProvider returns the OTel LoggerProvider, or nil when log export is disabled.
-// Used by the logger package to attach the otelzap bridge core.
 func (p *Provider) LogProvider() *sdklog.LoggerProvider {
 	return p.logProvider
 }
@@ -369,8 +361,8 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 }
 
 // UpdateConfiguration implements configmgr.Listener.
-// For v1, all telemetry config changes require a restart. This method logs a
-// warning if immutable fields changed and stores the new config.
+// All telemetry config changes require a restart; this logs a warning if the
+// config changed while a signal is running so operators aren't surprised.
 func (p *Provider) UpdateConfiguration(newConfig any) error {
 	configurer, ok := newConfig.(Configurer)
 	if !ok {

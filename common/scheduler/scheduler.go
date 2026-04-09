@@ -21,7 +21,6 @@ const (
 	priorityLevels  = 5
 	tolerance       = 1e-6
 
-	// Metric names for OTel observable gauges registered by the scheduler.
 	metricCompletedWorkRate = "beesync.scheduler.completed.work.rate"
 	metricTokensAllowedRate = "beesync.scheduler.tokens.allowed.rate"
 )
@@ -55,7 +54,6 @@ type schedulerConfig struct {
 	releasesPerStatUpdate int
 	// releaseTokensTick defines the periodic release of work tokens.
 	releaseTokensTick time.Duration
-	// meter is the OTel metric.Meter used to register observable gauges for scheduler metrics.
 	meter metric.Meter
 }
 
