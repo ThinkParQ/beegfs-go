@@ -297,7 +297,6 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 		Addr:    addr,
 		Handler: mux,
 	}
-	p.promServer = srv
 
 	serveListener := net.Listener(ln)
 	if !cfg.TLSDisable && cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
@@ -314,6 +313,7 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 		zap.L().Info("prometheus metrics server TLS explicitly disabled")
 	}
 
+	p.promServer = srv
 	go func() {
 		if err := srv.Serve(serveListener); err != nil && err != http.ErrServerClosed {
 			zap.L().Error("prometheus metrics server terminated unexpectedly", zap.Error(err))

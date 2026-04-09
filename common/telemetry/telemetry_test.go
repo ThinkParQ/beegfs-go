@@ -1258,6 +1258,48 @@ func TestPrometheusPartialTLSConfig(t *testing.T) {
 	}
 }
 
+// TestPrometheusTLSMismatchedKeyPair verifies that a mismatched cert/key pair causes New
+// to return an error without binding the port — the listener must be released so the port
+// can be reused immediately.
+func TestPrometheusTLSMismatchedKeyPair(t *testing.T) {
+	// Generate two independent cert/key pairs; use cert from one, key from the other.
+	certPEM, _ := generateServerCert(t)
+	_, unrelatedKeyPEM := generateServerCert(t)
+
+	certFile, err := os.CreateTemp(t.TempDir(), "cert-*.pem")
+	require.NoError(t, err)
+	_, err = certFile.Write(certPEM)
+	require.NoError(t, err)
+	certFile.Close()
+
+	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
+	require.NoError(t, err)
+	_, err = keyFile.Write(unrelatedKeyPEM)
+	require.NoError(t, err)
+	keyFile.Close()
+
+	port := findFreePort(t)
+	_, err = telemetry.New(telemetry.Config{
+		Enabled:     true,
+		ServiceName: "mismatched-tls-test",
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled:     true,
+			Port:        port,
+			Path:        "/metrics",
+			TLSCertFile: certFile.Name(),
+			TLSKeyFile:  keyFile.Name(),
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to load TLS cert/key")
+
+	// The listener must have been released on error — the port should be immediately
+	// rebindable, proving no socket was leaked.
+	ln, listenErr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	require.NoError(t, listenErr, "port should be available after construction failure")
+	ln.Close()
+}
+
 // TestOTLPDefaultTLSConstruction verifies that OTLP exporter construction succeeds when
 // neither a cert file nor disable-verification is configured. In this case the OTel SDK
 // uses its default TLS transport (system cert pool). Connection is deferred so no server

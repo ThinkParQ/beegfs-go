@@ -185,7 +185,7 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	)
 	// RegisterCallback only errors when given a nil callback, zero instruments, or instruments
 	// from a different meter — none of which can happen here.
-	_, _ = cfg.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+	reg, _ := cfg.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		o.ObserveFloat64(completedWorkGauge, math.Float64frombits(s.completedWorkHz.Load()))
 		o.ObserveFloat64(tokensAllowedGauge, math.Float64frombits(s.tokensAllowedHz.Load()))
 		return nil
@@ -194,6 +194,7 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	releaseTokensTicker := time.NewTicker(cfg.releaseTokensTick)
 	close = func() error {
 		releaseTokensTicker.Stop()
+		_ = reg.Unregister()
 		return nil
 	}
 

@@ -293,7 +293,7 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 
 	if _, ok := newConfig.(telemetry.Configurer); ok {
 		if err := lm.telemetry.UpdateConfiguration(newConfig); err != nil {
-			log.Warn("unable to update telemetry configuration", zap.Error(err))
+			return fmt.Errorf("unable to update telemetry configuration: %w", err)
 		}
 	}
 

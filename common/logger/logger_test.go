@@ -280,6 +280,28 @@ func TestUpdateConfigurationSkipsTelemetryWithoutConfigurer(t *testing.T) {
 	assert.Equal(t, zapcore.DebugLevel, log.level.Level())
 }
 
+func TestUpdateConfigurationTelemetryDelegationError(t *testing.T) {
+	// When telemetry config delegation fails (invalid config), UpdateConfiguration
+	// must return an error rather than swallowing it.
+	log, err := New(Config{Type: "stdout", Level: 3}, nil)
+	require.NoError(t, err)
+
+	// Enabled=true with no exporters configured fails ValidateConfig inside
+	// telemetry.UpdateConfiguration, which should propagate back to the caller.
+	badTelemetryCfg := &testFullConfig{
+		logConfig: Config{Level: 3, Type: "stdout"},
+		telemetryConfig: telemetry.Config{
+			Enabled:     true,
+			ServiceName: "test",
+			// No OTLP or Prometheus configured — ValidateConfig will reject this.
+		},
+	}
+
+	err = log.UpdateConfiguration(badTelemetryCfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unable to update telemetry configuration")
+}
+
 func TestNewWithOtelLogsDisabled(t *testing.T) {
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
 		Logs: telemetry.LogsConfig{Enabled: false},
