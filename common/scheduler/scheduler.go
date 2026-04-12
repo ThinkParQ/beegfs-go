@@ -54,7 +54,7 @@ type schedulerConfig struct {
 	releasesPerStatUpdate int
 	// releaseTokensTick defines the periodic release of work tokens.
 	releaseTokensTick time.Duration
-	meter metric.Meter
+	meter             metric.Meter
 }
 
 type schedulerOpt func(*schedulerConfig)
