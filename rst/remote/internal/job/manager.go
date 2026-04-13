@@ -1022,6 +1022,15 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	for _, workResult := range job.WorkResults {
 		if !workResult.InTerminalState() && !workResult.RequiresUserIntervention() {
 			// Don't do anything else if all work requests haven't reached a terminal state or aren't failed.
+			// Reflect active execution once any worker reports progress, but don't finalize job state
+			// until all work requests have finished or need intervention.
+			if entryToUpdate.Status().GetState() == flex.Work_RUNNING {
+				status := job.GetStatus()
+				status.SetState(beeremote.Job_RUNNING)
+				status.SetMessage("one or more work requests are in progress")
+				status.SetUpdated(timestamppb.Now())
+			}
+
 			return nil
 		}
 		// Verify all work requests have reached the same terminal state.

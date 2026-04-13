@@ -303,10 +303,15 @@ func (w *worker) process(work workAssignment) {
 		return
 	}
 
-	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
+	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
 	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(work, client, entry)
 	} else {
