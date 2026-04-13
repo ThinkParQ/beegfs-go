@@ -628,7 +628,6 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
 			replayCount++
 		default:
-			unrecoverableCount++
 			m.log.Warn("skipping unrecoverable work journal entry during scheduler init",
 				zap.String("submissionId", submissionId),
 				zap.String("jobId", entry.WorkRequest.GetJobId()),
@@ -638,6 +637,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 				zap.Bool("hasWorkResult", entry.WorkResult != nil),
 				zap.Bool("hasStatus", status != nil),
 			)
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			unrecoverableCount++
 		}
 
 		entriesFound++
