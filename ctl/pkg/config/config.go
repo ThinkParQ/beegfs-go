@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -100,6 +101,7 @@ const (
 const (
 	procfsMgmtdHost = "sysMgmtdHost"
 	procfsMgmtdGrpc = "connMgmtdGrpcPort"
+	procfsCfgFile   = "cfgFile"
 )
 
 // OutputType is used to control what type of structured output should be printed.
@@ -270,24 +272,73 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 			return nil, fmt.Errorf("unable to auto-configure the management address: BeeGFS does not appear to be mounted, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage", ManagementAddrKey)
 		}
 		for _, c := range clients {
-			sysMgmtdHost, ok := c.Config[procfsMgmtdHost]
+			sysMgmtdHostFromProcfs, ok := c.Config[procfsMgmtdHost]
 			if !ok {
 				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdHost, ManagementAddrKey)
+			}
+
+			// The client mount script handles DNS resolution if the sysMgmtdAddr in the config file
+			// is a hostname so the mgmtd address in procfs is always an IP. This can cause problems
+			// if the mgmtd's TLS certificate is only valid for the hostname and not the IP address.
+			// This attempts to extract the user configured sysMgmtdAddr from the client config used
+			// for this client mount, and falls back on the procfs IP to maintain legacy behavior in
+			// case the client config file is not readable from the client, or is malformed.
+			sysMgmtdHostFromCfgFile := ""
+			cfgFilePath, ok := c.Config[procfsCfgFile]
+			if !ok {
+				log.Debug("unable to get client config file path from procfs, ignoring and falling back to use the management IP address from procfs")
+			} else {
+				if f, err := os.Open(cfgFilePath); err == nil {
+					defer f.Close()
+					scanner := bufio.NewScanner(f)
+					found := false
+					for scanner.Scan() {
+						line := strings.TrimSpace(scanner.Text())
+						// Ignore comments and empty lines
+						if line == "" || strings.HasPrefix(line, "#") {
+							continue
+						}
+						if strings.HasPrefix(line, procfsMgmtdHost) {
+							parts := strings.SplitN(line, "=", 2)
+							if len(parts) != 2 {
+								continue
+							}
+							sysMgmtdHostFromCfgFile = strings.TrimSpace(parts[1])
+							found = true
+						}
+					}
+					if !found {
+						log.Debug(fmt.Sprintf("client config file does not appear to contain a %s line, ignoring and falling back to use the management IP address from procfs", procfsMgmtdHost), zap.Any(procfsCfgFile, cfgFilePath))
+					}
+				} else {
+					log.Debug("unable to open client config file from procfs, ignoring and falling back to use the management IP address from procfs", zap.Any(procfsCfgFile, cfgFilePath), zap.Error(err))
+				}
 			}
 			connMgmtdGrpcPort, ok := c.Config[procfsMgmtdGrpc]
 			if !ok {
 				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s <hostname|ip>:<grpc-port>for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
 			}
-			foundMgmtdAddr := net.JoinHostPort(sysMgmtdHost, connMgmtdGrpcPort)
-			log.Debug("found client mount point", zap.String("mgmtdAddr", foundMgmtdAddr), zap.String("mountPoint", c.Mount.Path), zap.String("procfsDir", c.ProcDir))
+
+			selectedMgmtdAddr := net.JoinHostPort(sysMgmtdHostFromProcfs, connMgmtdGrpcPort)
+			if sysMgmtdHostFromCfgFile != "" {
+				selectedMgmtdAddr = net.JoinHostPort(sysMgmtdHostFromCfgFile, connMgmtdGrpcPort)
+			}
+			log.Debug("found client mount point",
+				zap.String("selectedMgmtdAddr", selectedMgmtdAddr),
+				zap.String("mountPoint", c.Mount.Path),
+				zap.String("procfsDir", c.ProcDir),
+				zap.String("sysMgmtdHostFromProcfs", sysMgmtdHostFromProcfs),
+				zap.String(procfsCfgFile, cfgFilePath),
+				zap.String("sysMgmtdHostFromCfgFile", sysMgmtdHostFromCfgFile),
+			)
 			if mgmtdAddr == BeeGFSMgmtdAddrAuto {
-				mgmtdAddr = foundMgmtdAddr
+				mgmtdAddr = selectedMgmtdAddr
 			} else if len(clients) > 1 {
 				// Generally CTL shouldn't care if the same BeeGFS is mounted multiple times. The
 				// only time it might matter is if someone tries to run a command against multiple
 				// paths in different BeeGFS mount points. But that needs to be handled elsewhere
 				// anyway since users can always manually configure the mgmtd and do the same thing.
-				if mgmtdAddr != foundMgmtdAddr {
+				if mgmtdAddr != selectedMgmtdAddr {
 					// Note the mgmtd address extracted from procfs should always be an IP address
 					// because when the client is mounted it handles resolving any hostnames first.
 					// However if the mgmtd service was available to this machine from multiple IPs
