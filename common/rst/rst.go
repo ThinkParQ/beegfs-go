@@ -746,13 +746,16 @@ func restorePolicyToDataState(p flex.RestorePolicy) beegfs.DataState {
 // AutoRestore, or DelayedRestore).
 func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool, dataState beegfs.DataState) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
+	// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
+	// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
+	// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
+	// future fix for the O_TRUNC window must reapply that metadata to the new inode.
 	if err := mountPoint.CreateWriteClose(path, rstUrl, 0644, overwrite); err != nil {
 		return err
 	}
 	if err := entry.SetFileDataState(ctx, path, dataState); err != nil {
 		return fmt.Errorf("unable to set offloaded data state: %w", err)
 	}
-
 	return nil
 }
 
