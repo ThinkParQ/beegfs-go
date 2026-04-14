@@ -143,6 +143,15 @@ func (s *WorkerNodeServer) UpdateWork(ctx context.Context, request *flex.UpdateW
 	s.log.Debug("attempting to update existing work request", zap.Any("request", request))
 	work, err := s.workMgr.UpdateWork(request)
 	if err != nil {
+		if work != nil {
+			// The manager returned a work result alongside the error (e.g., work is COMPLETED and
+			// cannot be cancelled). Return the result without a gRPC error so the caller (Remote)
+			// can see the actual work state instead of only seeing a generic gRPC error.
+			s.log.Debug("returning work result despite error from work manager",
+				zap.Error(err),
+				zap.String("state", work.GetStatus().GetState().String()))
+			return flex.UpdateWorkResponse_builder{Work: work}.Build(), nil
+		}
 		return nil, err
 	}
 	return flex.UpdateWorkResponse_builder{Work: work}.Build(), nil

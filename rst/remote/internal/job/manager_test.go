@@ -849,6 +849,140 @@ func TestUpdateJobResults(t *testing.T) {
 
 }
 
+// TestUpdateWorkIgnoresTerminalStateJob verifies that a late-arriving COMPLETED work result does
+// not re-trigger job completion on an already-cancelled job. The work result should be persisted
+// for inspection but the job state must remain CANCELLED.
+func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
+	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err, "error setting up for test")
+	defer cleanupPathDBPath(t)
+
+	logger := zaptest.NewLogger(t)
+	workerMgrConfig := workermgr.Config{}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
+	workerConfigs := []worker.Config{
+		{
+			ID:                  "0",
+			Name:                "test-node-0",
+			Type:                worker.Mock,
+			MaxReconnectBackOff: 5,
+			MockConfig: worker.MockConfig{
+				Expectations: []worker.MockExpectation{
+					{
+						MethodName: "connect",
+						ReturnArgs: []any{false, nil},
+					},
+					{
+						MethodName: "SubmitWork",
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
+							flex.Work_Status_builder{
+								State:   flex.Work_SCHEDULED,
+								Message: "test expects a scheduled request",
+							}.Build(),
+							nil,
+						},
+					},
+					{
+						MethodName: "disconnect",
+						ReturnArgs: []any{nil},
+					},
+				},
+			},
+		},
+	}
+
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
+
+	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	jobMgrConfig := Config{
+		PathDBPath: tmpPathDBPath,
+	}
+
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	require.NoError(t, jobManager.Start())
+
+	testJobRequest := beeremote.JobRequest_builder{
+		Path:                "/test/myfile",
+		Name:                "test job terminal guard",
+		Priority:            3,
+		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+
+	js, err := jobManager.SubmitJobRequest(testJobRequest)
+	require.NoError(t, err)
+
+	jobID := js.GetJob().GetId()
+	jobPath := js.GetJob().GetRequest().GetPath()
+
+	// Move the job to CANCELLED by sending CANCELLED results for both work requests.
+	for _, reqID := range []string{"0", "1"} {
+		err = jobManager.UpdateWork(flex.Work_builder{
+			Path:      jobPath,
+			JobId:     jobID,
+			RequestId: reqID,
+			Status: flex.Work_Status_builder{
+				State:   flex.Work_CANCELLED,
+				Message: "cancelled",
+			}.Build(),
+			Parts: []*flex.Work_Part{},
+		}.Build())
+		require.NoError(t, err)
+	}
+
+	// Verify the job is CANCELLED.
+	getJobsRequest := beeremote.GetJobsRequest_builder{
+		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+			JobId: jobID,
+			Path:  jobPath,
+		}.Build(),
+		IncludeWorkRequests: false,
+		IncludeWorkResults:  true,
+	}.Build()
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobsRequest, responses)
+	require.NoError(t, err)
+	resp := <-responses
+	require.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
+	cancelledMessage := resp.GetResults()[0].GetJob().GetStatus().GetMessage()
+
+	// Now send a late-arriving COMPLETED result for request "0" (simulates Sync journal replay).
+	err = jobManager.UpdateWork(flex.Work_builder{
+		Path:      jobPath,
+		JobId:     jobID,
+		RequestId: "0",
+		Status: flex.Work_Status_builder{
+			State:   flex.Work_COMPLETED,
+			Message: "all parts of this work request are completed",
+		}.Build(),
+		Parts: []*flex.Work_Part{},
+	}.Build())
+	require.NoError(t, err, "UpdateWork should return nil for terminal state jobs")
+
+	// Verify the job is STILL CANCELLED and the status message is unchanged.
+	responses = make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobsRequest, responses)
+	require.NoError(t, err)
+	resp = <-responses
+	require.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState(),
+		"job state must remain CANCELLED after a late-arriving COMPLETED work result")
+	require.Equal(t, cancelledMessage, resp.GetResults()[0].GetJob().GetStatus().GetMessage(),
+		"job status message should not change after a late-arriving work result")
+
+	// Verify the work result WAS persisted on the job for inspection.
+	for _, wr := range resp.GetResults()[0].GetWorkResults() {
+		if wr.GetWork().GetRequestId() == "0" {
+			require.Equal(t, flex.Work_COMPLETED, wr.GetWork().GetStatus().GetState(),
+				"the late-arriving work result should be persisted for inspection")
+		}
+	}
+}
+
 func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
 	require.NoError(t, err, "error setting up for test")
