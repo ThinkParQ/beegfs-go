@@ -1013,6 +1013,23 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		return status.Errorf(codes.NotFound, "path %s exists but does not have job ID %s", workResult.GetPath(), workResult.GetJobId())
 	}
 
+	// Guard: persist the work result for inspection but do not process it further if the job is
+	// already in a terminal state. This prevents a late COMPLETED result (e.g. from Sync journal
+	// replay after restart or a gRPC TOCTOU race) from triggering job completion — including file
+	// truncation via stub creation — on an already-cancelled job.
+	if job.InTerminalState() {
+		m.log.Debug("persisting work result but skipping processing for job in terminal state",
+			zap.String("jobID", workResult.GetJobId()),
+			zap.String("requestID", workResult.GetRequestId()),
+			zap.String("jobState", job.GetStatus().GetState().String()),
+			zap.String("workState", workResult.GetStatus().GetState().String()))
+		if entryToUpdate, ok := job.WorkResults[workResult.GetRequestId()]; ok {
+			entryToUpdate.WorkResult = workResult
+			job.WorkResults[workResult.GetRequestId()] = entryToUpdate
+		}
+		return nil
+	}
+
 	// Update the results entry.
 	entryToUpdate, ok := job.WorkResults[workResult.GetRequestId()]
 	if !ok {
