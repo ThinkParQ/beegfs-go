@@ -2,20 +2,27 @@ package health
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/strfmt"
 	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
 
 type Status int
@@ -90,6 +97,9 @@ The file system that is checked is determined by the --%s parameter.
 If this file system is mounted multiple times, network connections will be checked for each mount point. 
 Optionally specify one or more <mount-paths> to limit the connection checks.
 		`, config.ManagementAddrKey),
+		Annotations: map[string]string{
+			"health.SkipAlerts": "",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed(watchFlag) {
 				ticker := time.NewTicker(frontendCfg.watchInterval)
@@ -127,6 +137,9 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 	return cmd
 }
 
+// runHealthCheckCmd executes all currently defined health checks.
+//
+// When updating this function consider if QuickChecks() needs to be updated as well.
 func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg checkCfg, backendCfg procfs.GetBeeGFSClientsConfig) error {
 
 	log, _ := config.GetLogger()
@@ -146,7 +159,62 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	if err != nil {
 		return fmt.Errorf("unable to proceed without a working management node: %w", err)
 	}
-	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s", mgmtd.GetAddress()), "#")
+
+	fsUUID, err := mgmtd.GetFsUUID(ctx)
+	// If the mgmtd is not available other checks cannot proceed and fail in confusing ways.
+	if err != nil {
+		// TLS errors are vague, offer some hints for common misconfigurations:
+		if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
+		}
+		if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
+		}
+		if strings.Contains(err.Error(), "failed to verify certificate") {
+			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
+		}
+		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+	}
+	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s\n(Filesystem UUID: %s)", mgmtd.GetAddress(), fsUUID), "#")
+	printHeader(">>>>> General Checks <<<<<", "#")
+
+	log.Debug("getting target list")
+	// mgmtdPeer is extracted from the GetTargets resp to avoid a no-op gRPC to check TLS config.
+	var mgmtPeer peer.Peer
+	targets, err := tgtBackend.GetTargets(ctx, grpc.Peer(&mgmtPeer))
+	if err != nil {
+		return err
+	}
+
+	tlsStatus, tlsMsg := checkTLSCertificates(ctx, mgmtPeer)
+	if tlsStatus == Healthy {
+		fmt.Printf("\n%s Management TLS %s", Healthy, hint(fmt.Sprintf("-> %s.", tlsMsg)))
+	} else {
+		failedCheck = true
+		fmt.Printf("\n%s Management TLS %s", tlsStatus, hint(fmt.Sprintf("-> %s.", tlsMsg)))
+	}
+
+	result := license.Check(ctx, targets)
+	if result.IsHealthy() {
+		fmt.Printf("\n%s License Status %s", Healthy, hint("-> No issues detected. Run 'beegfs license' for more details."))
+	} else {
+		failedCheck = true
+		if result.Err != nil {
+			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Error checking status (%s).", err)))
+		} else if result.InvalidMsg != "" {
+			fmt.Printf("\n%s License Status %s", Critical, hint("-> No valid license found. Run 'beegfs license' for more details."))
+		} else if result.ViolationsMsg != "" {
+			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Violations found (%s). Run 'beegfs license' for more details.", result.ViolationsMsg)))
+		} else if result.ExpirationMsg != "" {
+			fmt.Printf("\n%s License Status %s", Degraded, hint(fmt.Sprintf("-> Nearing expiration (%s). Run 'beegfs license' for more details.", result.ExpirationMsg)))
+		} else {
+			// If a check failed but we couldn't map it to a known message string, a new result was
+			// probably added and the check needs to be updated.
+			fmt.Printf("\n%s License Status %s", Critical, hint("-> Unknown (run 'beegfs license' for details)."))
+		}
+	}
+	fmt.Print("\n\n")
+
 	printHeader(">>>>> Checking for Busy Nodes <<<<<", "#")
 	log.Debug("collecting meta stats")
 	metaNodes, err := stats.MultiServerNodes(ctx, beegfs.Meta)
@@ -182,11 +250,6 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	fmt.Print("\n\n")
 
 	printHeader(">>>>> Checking Targets <<<<<", "#")
-	log.Debug("getting target list")
-	targets, err := tgtBackend.GetTargets(ctx)
-	if err != nil {
-		return err
-	}
 	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
 
 	if reachabilityStatus != Healthy {
@@ -355,4 +418,97 @@ func printBusyNodes(nodes []stats.NodeStats) {
 			fmt.Printf("* %s [%s] has %d queued requests\n", n.Node.Alias, n.Node.Id, n.Stats.QueuedRequests)
 		}
 	}
+}
+
+// checkTLSCertificates checks the TLS certificates presented by a peer service and returns a health
+// status based on the earliest expiring certificate in the chain.
+func checkTLSCertificates(ctx context.Context, peer peer.Peer) (Status, string) {
+	tlsInfo, ok := peer.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return Degraded, "Not in use"
+	}
+	status, msg := tlsCertExpirationStatus(tlsInfo.State.PeerCertificates, time.Now())
+	return status, msg
+}
+
+// tlsCertExpirationStatus determines the health status based on the earliest expiring certificate.
+// It accepts the current time as a parameter to enable deterministic testing.
+func tlsCertExpirationStatus(certs []*x509.Certificate, now time.Time) (Status, string) {
+	if len(certs) == 0 {
+		return Critical, "No certificates were presented by the node"
+	}
+
+	earliest := certs[0].NotAfter
+	for _, cert := range certs[1:] {
+		if cert.NotAfter.Before(earliest) {
+			earliest = cert.NotAfter
+		}
+	}
+
+	remaining := earliest.Sub(now)
+	expirationMsg := "Certificate " + strfmt.ExpirationString(remaining)
+	switch {
+	case remaining <= 0:
+		return Critical, expirationMsg
+	case remaining < 30*24*time.Hour:
+		return Critical, expirationMsg
+	case remaining < 90*24*time.Hour:
+		return Degraded, expirationMsg
+	default:
+		return Healthy, expirationMsg
+	}
+}
+
+// QuickChecks executes a subset of the full health check returning strings of requiredAlerts and
+// dismissibleAlerts. If no alerts are present these strings are empty. If DisableAlerts is set then
+// dismissibleAlerts will always be empty. It is up to the caller to decide if errs are ignored.
+//
+// This function notably skips any health checks that require an active client mount, or involve
+// non-critical or transient conditions that might be gone before a user runs a health check (for
+// example busy node checks). When adding checks be careful not to add checks that add noticeable
+// runtime or could potentially cause commands to hang for an extended period.
+func QuickChecks(ctx context.Context) (requiredAlerts string, dismissibleAlerts string, err error) {
+
+	var mgmtdPeer peer.Peer
+	targets, err := tgtBackend.GetTargets(ctx, grpc.Peer(&mgmtdPeer))
+	if err != nil {
+		return requiredAlerts, dismissibleAlerts, fmt.Errorf("unable to execute quick checks: %w", err)
+	}
+
+	result := license.Check(ctx, targets)
+	if result.Err != nil {
+		return requiredAlerts, dismissibleAlerts, fmt.Errorf("unable to execute quick checks: %w", result.Err)
+	}
+
+	if !result.IsHealthy() {
+		if result.InvalidMsg != "" {
+			requiredAlerts = fmt.Sprintf(`WARNING: This system does not have a valid license installed.
+To avoid disruptions, run 'beegfs license' and follow the required steps.
+Reason: %s.
+`, result.InvalidMsg)
+		}
+		if result.ExpirationMsg != "" {
+			requiredAlerts += fmt.Sprintf("WARNING: License is nearing expiration (%s). Run 'beegfs license' for more details.\n", result.ExpirationMsg)
+		}
+		if result.ViolationsMsg != "" {
+			requiredAlerts += fmt.Sprintf("WARNING: License violations found (%s). Run 'beegfs license' for more details.\n", result.ViolationsMsg)
+		}
+	}
+
+	if viper.GetBool(config.DisableAlerts) {
+		return requiredAlerts, dismissibleAlerts, nil
+	}
+
+	dismissibleWarning := false
+	if tlsStatus, _ := checkTLSCertificates(ctx, mgmtdPeer); tlsStatus != Healthy {
+		dismissibleWarning = true
+	}
+	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
+	if reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy {
+		dismissibleWarning = true
+	}
+	if dismissibleWarning {
+		dismissibleAlerts = fmt.Sprintf("WARNING: One or more health checks are failing, run 'beegfs health check' for more details. Set the global %s flag to turn off this message.\n", config.DisableAlerts)
+	}
+	return requiredAlerts, dismissibleAlerts, nil
 }
