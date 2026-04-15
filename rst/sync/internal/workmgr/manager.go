@@ -377,23 +377,8 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 		return
 	}
 
-	// Keep activeWorkMu across adjacent ready requests to reduce lock churn, but release it before
-	// rescheduling delayed work so journal I/O does not block active work admission and
-	// cancellation.
-	lockHeld := false
-	lockActive := func() {
-		if !lockHeld {
-			m.activeWorkMu.Lock()
-			lockHeld = true
-		}
-	}
-	unlockActive := func() {
-		if lockHeld {
-			m.activeWorkMu.Unlock()
-			lockHeld = false
-		}
-	}
-	defer unlockActive()
+	m.activeWorkMu.Lock()
+	defer m.activeWorkMu.Unlock()
 
 	nextItem, cleanupNext, err := m.workJournal.GetEntries(
 		kvstore.WithStartingKey(start),
@@ -427,12 +412,10 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 		}
 
 		if currentTime.Before(entry.ExecuteAfter) {
-			unlockActive()
 			if err = m.rescheduleWork(workId); err != nil {
 				return
 			}
 		} else {
-			lockActive()
 			if _, ok := m.activeWork[workId]; !ok {
 				// Check based on the work identifier if there is already an existing workContext in the
 				// activeWork map. If so skip adding it to the map or queue again as we could block a worker
