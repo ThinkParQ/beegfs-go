@@ -35,6 +35,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// s3ApiClient is the low-level s3 transport layer used by S3Client. Provider specific wrappers can
+// customize SDK calls here without reimplementing the higher-level RST behavior.
 type s3ApiClient interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error
@@ -48,6 +50,7 @@ type s3ApiClient interface {
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
+// defaultS3ApiClient is the default s3ApiClient backed by the AWS SDK's s3 client.
 type defaultS3ApiClient struct {
 	client *s3.Client
 }
@@ -108,67 +111,6 @@ func (d *defaultS3ApiClient) GetObject(ctx context.Context, params *s3.GetObject
 	return d.client.GetObject(ctx, params, optFns...)
 }
 
-type s3Provider interface {
-	Provider
-}
-type defaultS3Provider struct {
-	provider *S3Client
-}
-
-var _ Provider = &defaultS3Provider{}
-
-func (d *defaultS3Provider) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
-	return d.provider.GetJobRequest(cfg)
-}
-
-func (d *defaultS3Provider) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
-	return d.provider.GenerateWorkRequests(ctx, lastJob, job, availableWorkers)
-}
-
-func (d *defaultS3Provider) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error) {
-	return d.provider.ExecuteJobBuilderRequest(ctx, workRequest, jobSubmissionChan)
-}
-
-func (d *defaultS3Provider) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
-	return d.provider.ExecuteWorkRequestPart(ctx, request, part)
-}
-
-func (d *defaultS3Provider) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
-	return d.provider.CompleteWorkRequests(ctx, job, workResults, abort)
-}
-
-func (d *defaultS3Provider) GetConfig() *flex.RemoteStorageTarget {
-	return d.provider.GetConfig()
-}
-
-func (d *defaultS3Provider) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
-	return d.provider.GetWalk(ctx, path, chanSize, resumeToken, maxRequests)
-}
-
-func (d *defaultS3Provider) SanitizeRemotePath(remotePath string) string {
-	return d.provider.SanitizeRemotePath(remotePath)
-}
-
-func (d *defaultS3Provider) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error) {
-	return d.provider.GetRemotePathInfo(ctx, cfg)
-}
-
-func (d *defaultS3Provider) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error) {
-	return d.provider.GenerateExternalId(ctx, cfg)
-}
-
-func (d *defaultS3Provider) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
-	return d.provider.IsWorkRequestReady(ctx, request)
-}
-
-func (d *defaultS3Provider) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
-	return d.provider.IncludeInBulkRequest(ctx, request)
-}
-
-func (d *defaultS3Provider) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
-	return d.provider.BuildBulkRequest(ctx)
-}
-
 type S3StorageClass struct {
 	retrievalTier types.Tier
 	archival      bool
@@ -178,13 +120,14 @@ type S3StorageClass struct {
 	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
 }
 
+// S3Client implements the shared Provider behavior for s3 compatible backends and uses s3ApiClient
+// to perform the low-level s3 operations.
 type S3Client struct {
 	config *flex.RemoteStorageTarget
 	// s3Config holds provider-specific S3 options used by this client. This allows providers such
 	// as xtreemstore to reuse the S3 implementation while keeping their own top-level RST type.
 	s3Config                       *flex.RemoteStorageTarget_S3
 	apiClient                      s3ApiClient
-	provider                       s3Provider
 	mountPoint                     filesystem.Provider
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
@@ -200,14 +143,12 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 type s3ProviderOption func(*s3ProviderBuildCfg)
 type s3ProviderBuildCfg struct {
 	apiClient func(base s3ApiClient) s3ApiClient
-	provider  func(base s3Provider) s3Provider
 	s3Options []func(*s3.Options)
 }
 
 func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
 	return s3ProviderBuildCfg{
 		apiClient: func(base s3ApiClient) s3ApiClient { return base },
-		provider:  func(base s3Provider) s3Provider { return base },
 	}
 }
 
@@ -215,14 +156,6 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 	return func(cfg *s3ProviderBuildCfg) {
 		if fn != nil {
 			cfg.apiClient = fn
-		}
-	}
-}
-
-func withS3Provider(fn func(s3Provider) s3Provider) s3ProviderOption {
-	return func(cfg *s3ProviderBuildCfg) {
-		if fn != nil {
-			cfg.provider = fn
 		}
 	}
 }
@@ -237,13 +170,9 @@ func withS3Options(optFns ...func(*s3.Options)) s3ProviderOption {
 	}
 }
 
-func newS3WithOptions(
-	ctx context.Context,
-	rstConfig *flex.RemoteStorageTarget,
-	s3Config *flex.RemoteStorageTarget_S3,
-	mountPoint filesystem.Provider,
-	opts ...s3ProviderOption,
-) (Provider, error) {
+// newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
+// created, so shared wrapper state can rely on apiClient already being populated.
+func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (Provider, error) {
 	if s3Config == nil {
 		return nil, fmt.Errorf("s3 configuration must be specified")
 	}
@@ -302,14 +231,6 @@ func newS3WithOptions(
 		isListStartAfterKeySupportedMu: sync.Mutex{},
 	}
 
-	// Use the s3
-	baseProvider := s3Provider(&defaultS3Provider{provider: s3Client})
-	provider := buildCfg.provider(baseProvider)
-	if provider == nil {
-		return nil, fmt.Errorf("s3 provider wrapper returned nil")
-	}
-	s3Client.provider = provider
-
 	for _, class := range s3Config.StorageClass {
 		name := types.StorageClass(class.GetName())
 		if name == "" {
@@ -349,7 +270,7 @@ func newS3WithOptions(
 		}
 	}
 
-	return provider, nil
+	return s3Client, nil
 }
 
 func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
