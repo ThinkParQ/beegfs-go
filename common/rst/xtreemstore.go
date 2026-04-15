@@ -12,7 +12,7 @@ import (
 )
 
 type xtreemstoreS3Provider struct {
-	s3Provider
+	Provider
 	s3ApiClient
 }
 
@@ -26,13 +26,9 @@ func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mo
 	}
 
 	wrapper := &xtreemstoreS3Provider{}
-	provider, err := newS3WithOptions(ctx, rstConfig, xtreemstore.GetS3(), mountPoint,
+	s3Client, err := newS3WithOptions(ctx, rstConfig, xtreemstore.GetS3(), mountPoint,
 		withS3ApiClient(func(base s3ApiClient) s3ApiClient {
 			wrapper.s3ApiClient = base
-			return wrapper
-		}),
-		withS3Provider(func(base s3Provider) s3Provider {
-			wrapper.s3Provider = base
 			return wrapper
 		}),
 	)
@@ -40,7 +36,8 @@ func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mo
 		return nil, fmt.Errorf("unable to initialize xtreemstore provider: %w", err)
 	}
 
-	return provider, nil
+	wrapper.Provider = s3Client
+	return wrapper, nil
 }
 
 func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
