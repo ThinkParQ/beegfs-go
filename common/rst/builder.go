@@ -262,7 +262,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			}
 
 			for _, jobRequest := range jobRequests {
-
 				status := jobRequest.GetGenerationStatus()
 				if isStatusError(status) {
 					errorCount++
@@ -356,6 +355,12 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 		g.Go(func() error {
 			errorCount := int32(0)
 			submitted := int32(0)
+			defer func() {
+				builderStateMu.Lock()
+				builder.Submitted += submitted
+				builder.Errors += errorCount
+				builderStateMu.Unlock()
+			}()
 
 			for _, jobRequest := range state.submit(bulkRequestCtx) {
 				status := jobRequest.GetGenerationStatus()
@@ -370,11 +375,6 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 					submitted++
 				}
 			}
-
-			builderStateMu.Lock()
-			builder.Submitted += submitted
-			builder.Errors += errorCount
-			builderStateMu.Unlock()
 			return nil
 		})
 	}
