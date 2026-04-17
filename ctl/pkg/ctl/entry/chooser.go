@@ -10,10 +10,18 @@ import (
 )
 
 var (
-	// This can happen in a system with hard links where a rebalance is started for the first link
-	// and we encounter additional links to the same inode. Testing shows target IDs will be empty
-	// when this happens.
+	// ErrEntryHasNoTargets is returned when the stripe pattern has no target IDs. Historically this
+	// was the primary indicator that an inode was locked during chunk rebalancing, because the old
+	// code path silently populated Entry fields from a failed GetEntryInfoResponse, resulting in a
+	// zero-value (empty) stripe pattern. Now that Entry.Details is nil when the response fails,
+	// ErrEntryDetailsUnavailable should be returned in that case instead. This error is retained
+	// for any scenario where the RPC succeeds but the stripe pattern is genuinely empty.
 	ErrEntryHasNoTargets = errors.New("stripe pattern is currently empty")
+	// ErrEntryDetailsUnavailable is returned when Entry.Details is nil, meaning the
+	// GetEntryInfoResponse did not succeed (e.g., the inode was locked during chunk rebalancing).
+	// This replaces the previous behavior where a locked inode would silently produce zero-value
+	// fields, causing ErrEntryHasNoTargets to be returned instead.
+	ErrEntryDetailsUnavailable = errors.New("entry details unavailable")
 )
 
 func getRandomIDChooser() func(fromDstIDs []uint16, idsAlreadyInStripePattern []uint16) (uint16, error) {
@@ -70,7 +78,11 @@ func getMigrationForEntry(
 	dstGroups []uint16,
 ) (rebalanceType msg.RebalanceIDType, srcIDs []uint16, dstIDs []uint16, unmodifiedIDs []uint16, err error) {
 
-	if len(entry.Entry.Pattern.TargetIDs) == 0 {
+	if entry.Entry.Details == nil {
+		return 0, nil, nil, nil, fmt.Errorf("%w: %s", ErrEntryDetailsUnavailable, entry.Entry.EntryInfoPopulated)
+	}
+
+	if len(entry.Entry.Details.Pattern.TargetIDs) == 0 {
 		return 0, nil, nil, nil, ErrEntryHasNoTargets
 	}
 
@@ -81,14 +93,14 @@ func getMigrationForEntry(
 	dstIDs = make([]uint16, 0, 4)
 	unmodifiedIDs = make([]uint16, 0, 4)
 	var rebalanceIDType msg.RebalanceIDType = msg.RebalanceIDTypeInvalid
-	switch entry.Entry.Pattern.Type {
+	switch entry.Entry.Details.Pattern.Type {
 	case beegfs.StripePatternBuddyMirror:
 		rebalanceIDType = msg.RebalanceIDTypeGroup
-		for _, group := range entry.Entry.Pattern.TargetIDs {
+		for _, group := range entry.Entry.Details.Pattern.TargetIDs {
 			if _, ok := srcGroups[group]; ok {
-				randomID, err := targetChooser(dstGroups, entry.Entry.Pattern.TargetIDs)
+				randomID, err := targetChooser(dstGroups, entry.Entry.Details.Pattern.TargetIDs)
 				if err != nil {
-					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination groups to migrate entry away from the specified groups (entry is currently assigned to groups %v)", entry.Entry.Pattern.TargetIDs)
+					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination groups to migrate entry away from the specified groups (entry is currently assigned to groups %v)", entry.Entry.Details.Pattern.TargetIDs)
 				}
 				srcIDs = append(srcIDs, group)
 				dstIDs = append(dstIDs, randomID)
@@ -98,11 +110,11 @@ func getMigrationForEntry(
 		}
 	case beegfs.StripePatternRaid0:
 		rebalanceIDType = msg.RebalanceIDTypeTarget
-		for _, target := range entry.Entry.Pattern.TargetIDs {
+		for _, target := range entry.Entry.Details.Pattern.TargetIDs {
 			if _, ok := srcTargets[target]; ok {
-				randomID, err := targetChooser(dstTargets, entry.Entry.Pattern.TargetIDs)
+				randomID, err := targetChooser(dstTargets, entry.Entry.Details.Pattern.TargetIDs)
 				if err != nil {
-					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination targets to migrate entry away from the specified targets (entry is currently assigned to targets %v)", entry.Entry.Pattern.TargetIDs)
+					return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("insufficient available destination targets to migrate entry away from the specified targets (entry is currently assigned to targets %v)", entry.Entry.Details.Pattern.TargetIDs)
 				}
 				srcIDs = append(srcIDs, target)
 				dstIDs = append(dstIDs, randomID)
@@ -111,7 +123,7 @@ func getMigrationForEntry(
 			}
 		}
 	default:
-		return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("unsupported pattern type: %s", entry.Entry.Pattern.Type)
+		return msg.RebalanceIDTypeInvalid, nil, nil, nil, fmt.Errorf("unsupported pattern type: %s", entry.Entry.Details.Pattern.Type)
 	}
 
 	return rebalanceIDType, srcIDs, dstIDs, unmodifiedIDs, nil

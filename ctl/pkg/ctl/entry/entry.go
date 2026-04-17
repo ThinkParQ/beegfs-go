@@ -71,8 +71,27 @@ type Entry struct {
 	FileName       string
 	Type           beegfs.EntryType
 	FeatureFlags   beegfs.EntryFeatureFlags
-	Pattern        patternConfig
-	Remote         remoteConfig
+	// Details contains fields populated from the GetEntryInfoResponse. It is nil when the response
+	// did not succeed (check EntryInfoPopulated for the specific error code). This notably occurs
+	// when the inode is in the metadata's inode lock store (e.g., during chunk rebalancing).
+	Details *EntryDetails
+	// Only populated if GetEntryConfig.Verbose.
+	Verbose Verbose
+	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
+	// modes like set pattern that need to include the EntryInfo message so they don't need to recreate
+	// the message from scratch.
+	origEntryInfoMsg *msg.EntryInfo
+	// EntryInfoPopulated indicates whether the GetEntryInfoResponse was successfully populated.
+	// When not OpsErr_SUCCESS, Details will be nil.
+	EntryInfoPopulated beegfs.OpsErr
+}
+
+// EntryDetails contains fields populated from the GetEntryInfoResponse RPC. This struct is nil on
+// Entry when the response did not succeed. All new fields derived from GetEntryInfoResponse should
+// be added here so the display layer automatically handles the unavailable case.
+type EntryDetails struct {
+	Pattern patternConfig
+	Remote  remoteConfig
 	// NumSessionsRead is only applicable for regular files. Note sessions is the number of clients
 	// that have this file open for reading at least once. If the same file has the a file opened
 	// multiple times, it is still treated as a single session for that client.
@@ -86,12 +105,6 @@ type Entry struct {
 	// operations or if access is restricted. The data state value is arbitrary and meaningful only to the
 	// data management application (or users).
 	FileState beegfs.FileState
-	// Only populated if GetEntryConfig.Verbose.
-	Verbose Verbose
-	// Only populated if getEntries() is called with includeOrigMsg. This is mostly useful for other
-	// modes like set pattern that need to include the EntryInfo message so they don't need to recreate
-	// the message from scratch.
-	origEntryInfoMsg *msg.EntryInfo
 }
 
 // patternConfig embeds the BeeMsg defined stripe pattern alongside fields that map various
@@ -129,12 +142,24 @@ func (entryInfo *GetEntryCombinedInfo) GetOrigEntryInfo() *msg.EntryInfo {
 func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo, ownerNode beegfs.Node, entryInfo msg.GetEntryInfoResponse) Entry {
 
 	e := Entry{
-		MetaOwnerNode: ownerNode,
-		ParentEntryID: string(entry.ParentEntryID),
-		EntryID:       string(entry.EntryID),
-		FileName:      string(entry.FileName),
-		Type:          entry.EntryType,
-		FeatureFlags:  entry.FeatureFlags,
+		MetaOwnerNode:      ownerNode,
+		ParentEntryID:      string(entry.ParentEntryID),
+		EntryID:            string(entry.EntryID),
+		FileName:           string(entry.FileName),
+		Type:               entry.EntryType,
+		FeatureFlags:       entry.FeatureFlags,
+		EntryInfoPopulated: entryInfo.Result,
+	}
+
+	if entry.FeatureFlags.IsBuddyMirrored() {
+		e.MetaBuddyGroup = int(entry.OwnerID)
+	}
+
+	if entryInfo.Result != beegfs.OpsErr_SUCCESS {
+		return e
+	}
+
+	e.Details = &EntryDetails{
 		Pattern: patternConfig{
 			StripePattern:   entryInfo.Pattern,
 			StoragePoolName: "<unknown>",
@@ -147,10 +172,6 @@ func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo,
 		NumSessionsRead:  entryInfo.NumSessionsRead,
 		NumSessionsWrite: entryInfo.NumSessionsWrite,
 		FileState:        entryInfo.FileState,
-	}
-
-	if entry.FeatureFlags.IsBuddyMirrored() {
-		e.MetaBuddyGroup = int(entry.OwnerID)
 	}
 
 	fetchedMappings := false
@@ -174,7 +195,7 @@ func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo,
 		pool, err = mappings.StoragePoolToConfig.Get(beegfs.LegacyId{NumId: beegfs.NumId(entryInfo.Pattern.StoragePoolID), NodeType: beegfs.Storage})
 	}
 	if err == nil {
-		e.Pattern.StoragePoolName = pool.Pool.Alias.String()
+		e.Details.Pattern.StoragePoolName = pool.Pool.Alias.String()
 	}
 
 	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 {
@@ -185,9 +206,9 @@ func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo,
 				node, err = mappings.TargetToNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
 			}
 			if err != nil {
-				e.Pattern.StorageTargets[beegfs.NumId(tgt)] = nil
+				e.Details.Pattern.StorageTargets[beegfs.NumId(tgt)] = nil
 			} else {
-				e.Pattern.StorageTargets[beegfs.NumId(tgt)] = &node
+				e.Details.Pattern.StorageTargets[beegfs.NumId(tgt)] = &node
 			}
 		}
 	}
@@ -200,9 +221,9 @@ func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo,
 				rst, ok = mappings.RstIdToConfig[id]
 			}
 			if !ok {
-				e.Remote.Targets[id] = nil
+				e.Details.Remote.Targets[id] = nil
 			} else {
-				e.Remote.Targets[id] = rst
+				e.Details.Remote.Targets[id] = rst
 			}
 		}
 	}
@@ -890,6 +911,9 @@ func SetDirRstIds(ctx context.Context, path string, rstIds []uint32) error {
 	if entryInfo.Entry.Type != beegfs.EntryDirectory {
 		return fmt.Errorf("entry is not a directory: %s", path)
 	}
+	if entryInfo.Entry.Details == nil {
+		return fmt.Errorf("full entry details unavailable for %s: %s", path, entryInfo.Entry.EntryInfoPopulated)
+	}
 	euid := syscall.Geteuid()
 	if euid < 0 || euid > math.MaxUint32 {
 		return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", euid)
@@ -897,8 +921,8 @@ func SetDirRstIds(ctx context.Context, path string, rstIds []uint32) error {
 
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
-		Pattern:   entryInfo.Entry.Pattern.StripePattern,
-		RST:       entryInfo.Entry.Remote.RemoteStorageTarget,
+		Pattern:   entryInfo.Entry.Details.Pattern.StripePattern,
+		RST:       entryInfo.Entry.Details.Remote.RemoteStorageTarget,
 	}
 	request.SetUID(uint32(euid))
 	request.RST.RSTIDs = rstIds
