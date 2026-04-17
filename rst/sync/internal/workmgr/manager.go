@@ -712,8 +712,9 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	wr.SetPriority(priority)
 	workEntry.Value.WorkRequest = &workRequest{WorkRequest: wr}
 	workResult := newWorkFromRequest(workEntry.Value.WorkRequest)
-	if wr.ExecuteAfter != nil {
-		workEntry.Value.ExecuteAfter = wr.ExecuteAfter.AsTime()
+	if wr.GetDelayExecution() != nil {
+		executeAfter := time.Now().Add(wr.GetDelayExecution().AsDuration())
+		workEntry.Value.ExecuteAfter = executeAfter
 	}
 	workEntry.Value.WorkResult = workResult
 	job.Value[workRequestId] = submissionId
