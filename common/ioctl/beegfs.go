@@ -237,4 +237,7 @@ type getEntryInfoV2Arg struct {
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
 	FileDataState    uint8
+	// 1 if the inode was locked during GetEntryInfo RPC (e.g. chunk rebalancing)
+	// only basic entry info fields are valid when set.
+	BasicOnly uint8
 }
