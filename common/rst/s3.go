@@ -407,7 +407,7 @@ func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.
 	return false
 }
 
-func (r *S3Client) BuildBulkRequest(ctx context.Context) (submit SubmitBulkRequestFn, append AppendBulkRequestCfgFn, err error) {
+func (r *S3Client) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }
 

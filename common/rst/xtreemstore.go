@@ -53,6 +53,6 @@ func (x *xtreemstoreS3Provider) IncludeInBulkRequest(ctx context.Context, reques
 	return false
 }
 
-func (x *xtreemstoreS3Provider) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (x *xtreemstoreS3Provider) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }

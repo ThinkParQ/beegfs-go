@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -124,15 +125,15 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
 }
 
-func (r *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
 	return false
 }
 
-func (r *JobBuilderClient) BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error) {
+func (c *JobBuilderClient) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }
 
-func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
 	return true, 0, nil
 }
 
@@ -182,11 +183,12 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	}
 
 	type bulkRequestState struct {
-		submit SubmitBulkRequestFn
-		append AppendBulkRequestCfgFn
-		mu     sync.Mutex // for concurrent append operations
+		submit         SubmitBulkRequestFn
+		append         AppendBulkRequestFn
+		appendMu       sync.Mutex
+		jobsWithErrors atomic.Int32
+		jobsSubmitted  atomic.Int32
 	}
-
 	builder := request.GetBuilder()
 	walkLocal := walkLocalPathInsteadOfRemote(cfg)
 	getPaths := c.getPathsFn(cfg, walkLocal)
@@ -200,12 +202,12 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	walkDoneChan := make(chan struct{}, maxWorkers)
 	defer close(walkDoneChan)
 	createJobRequests := func() error {
-		errorCount := int32(0)
-		submitted := int32(0)
+		jobsWithErrors := int32(0)
+		jobsSubmitted := int32(0)
 		defer func() {
 			builderStateMu.Lock()
-			builder.Submitted += submitted
-			builder.Errors += errorCount
+			builder.Submitted += jobsSubmitted
+			builder.Errors += jobsWithErrors
 			builderStateMu.Unlock()
 		}()
 
@@ -245,9 +247,9 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			if cfg.GetUpdate() {
 				if stat, statErr := c.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
 					dirErr := updateDirRstConfig(walkCtx, cfg.RemoteStorageTarget, inMountPath)
-					submitted++
+					jobsSubmitted++
 					if dirErr != nil {
-						errorCount++
+						jobsWithErrors++
 					}
 					continue
 				}
@@ -262,9 +264,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 			}
 
 			for _, jobRequest := range jobRequests {
+				jobWithError := false
 				status := jobRequest.GetGenerationStatus()
 				if isStatusError(status) {
-					errorCount++
+					jobWithError = true
 				} else if status == nil || status.State == beeremote.JobRequest_GenerationStatus_UNSPECIFIED {
 					client := c.rstMap[jobRequest.GetRemoteStorageTarget()]
 					if client.IncludeInBulkRequest(walkCtx, jobRequest) {
@@ -273,29 +276,46 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 						bulkRequestStatesMu.Lock()
 						state, ok := bulkRequestStates[rstId]
 						if !ok {
-							submitBulkRequest, appendBulkRequestCfg, err := client.BuildBulkRequest(walkCtx)
+
+							emit := func(ctx context.Context, request *beeremote.JobRequest) {
+								jobWithError := false
+								status := request.GetGenerationStatus()
+								if isStatusError(status) {
+									jobWithError = true
+								}
+								select {
+								case <-ctx.Done():
+									return
+								case jobSubmissionChan <- request:
+									if jobWithError {
+										state.jobsWithErrors.Add(1)
+									}
+									state.jobsSubmitted.Add(1)
+								}
+							}
+
+							submitBulkRequest, appendBulkRequest, err := client.BuildBulkRequest(walkCtx, emit)
 							if err != nil {
 								bulkRequestStatesMu.Unlock()
 								return fmt.Errorf("job builder request was aborted: %w", err)
 							}
-							if submitBulkRequest == nil || appendBulkRequestCfg == nil {
+							if submitBulkRequest == nil || appendBulkRequest == nil {
 								bulkRequestStatesMu.Unlock()
 								return fmt.Errorf("job builder request was aborted: RST client %T for target %d returned invalid bulk request callbacks: submit and append functions must both be non-nil", client, rstId)
 							}
 
 							state = &bulkRequestState{
 								submit: submitBulkRequest,
-								append: appendBulkRequestCfg,
+								append: appendBulkRequest,
 							}
 							bulkRequestStates[rstId] = state
 						}
 						bulkRequestStatesMu.Unlock()
 
-						state.mu.Lock()
-						state.append(jobRequest)
-						state.mu.Unlock()
+						state.appendMu.Lock()
+						state.append(walkCtx, jobRequest)
+						state.appendMu.Unlock()
 						continue
-
 					}
 				}
 
@@ -303,7 +323,10 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				case <-walkCtx.Done():
 					return walkCtx.Err()
 				case jobSubmissionChan <- jobRequest:
-					submitted++
+					if jobWithError {
+						jobsWithErrors++
+					}
+					jobsSubmitted++
 				}
 			}
 		}
@@ -345,41 +368,30 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 	})
 
 	err := g.Wait()
+
+	if len(bulkRequestStates) > 0 {
+		// Finalize and submit provider bulk requests.
+		wg := sync.WaitGroup{}
+		for _, state := range bulkRequestStates {
+			wg.Go(func() {
+				state.submit(ctx)
+			})
+		}
+		wg.Wait()
+
+		jobsWithErrors := int32(0)
+		jobsSubmitted := int32(0)
+		for _, state := range bulkRequestStates {
+			jobsWithErrors += state.jobsWithErrors.Load()
+			jobsSubmitted += state.jobsSubmitted.Load()
+		}
+		builderStateMu.Lock()
+		builder.Submitted += jobsSubmitted
+		builder.Errors += jobsWithErrors
+		builderStateMu.Unlock()
+	}
+
 	if err != nil {
-		return false, fmt.Errorf("job builder request was aborted: %w", err)
-	}
-
-	// Finalize and submit provider bulk requests.
-	g, bulkRequestCtx := errgroup.WithContext(ctx)
-	for _, state := range bulkRequestStates {
-		g.Go(func() error {
-			errorCount := int32(0)
-			submitted := int32(0)
-			defer func() {
-				builderStateMu.Lock()
-				builder.Submitted += submitted
-				builder.Errors += errorCount
-				builderStateMu.Unlock()
-			}()
-
-			for _, jobRequest := range state.submit(bulkRequestCtx) {
-				status := jobRequest.GetGenerationStatus()
-				if isStatusError(status) {
-					errorCount++
-				}
-
-				select {
-				case <-bulkRequestCtx.Done():
-					return bulkRequestCtx.Err()
-				case jobSubmissionChan <- jobRequest:
-					submitted++
-				}
-			}
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
 		return false, fmt.Errorf("job builder request was aborted: %w", err)
 	}
 
