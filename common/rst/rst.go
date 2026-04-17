@@ -70,8 +70,9 @@ var SupportedRSTTypes = map[string]func() (any, any){
 	// Mock could be included here if it ever made sense to allow configuration using a file.
 }
 
-type SubmitBulkRequestFn func(ctx context.Context) []*beeremote.JobRequest
-type AppendBulkRequestCfgFn func(*beeremote.JobRequest)
+type SubmitBulkRequestFn func(ctx context.Context)
+type EmitBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
+type AppendBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
 	GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest
@@ -131,14 +132,18 @@ type Provider interface {
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
 	// IncludeInBulkRequest determines whether a request should be added to a bulk request.
 	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool
-	// BuildBulkRequest initializes provider-specific bulk request construction. It returns an
-	// append callback for requests selected for bulk processing and a submit callback that receives
-	// its own context to finalize and submit the bulk request after all appends have completed.
+	// BuildBulkRequest initializes bulk request construction. It returns an append callback for
+	// requests selected for bulk processing and a submit callback to finalize and submit the bulk
+	// request after all appends have completed.
 	//
-	// Return an error only for fatal setup failures that must abort the builder job entirely.
-	// submitBulkRequest should surface fatal finalization or submission failures through the
-	// returned job requests.
-	BuildBulkRequest(ctx context.Context) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequestCfg AppendBulkRequestCfgFn, err error)
+	// The provided context is for setup only and must not be retained or used by the returned
+	// callbacks. The append and submit callbacks receive their own contexts. emit may only be
+	// called from within the returned append or submit callbacks.
+	//
+	// Return an error only for fatal setup failures that must abort the builder job entirely. All
+	// other errors must be surfaced by emitting job requests with the appropriate generation
+	// status.
+	BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
