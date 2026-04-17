@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -186,6 +187,7 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 // request IDs.
 func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segment) (requests []*flex.WorkRequest) {
 	request := job.GetRequest()
+	delayExecution := job.Request.GetDelayExecution()
 
 	// Ensure when adding new fields that all reference types are cloned to ensure WRs are
 	// initialized properly and don't share references with anything else. Otherwise this can lead
@@ -206,8 +208,11 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			RemoteStorageTarget: 0,
 			Type:                &flex.WorkRequest_Builder{Builder: proto.Clone(request.GetBuilder()).(*flex.BuilderJob)},
 			Priority:            new(request.GetPriority()),
-			ExecuteAfter:        GetJobExecuteAfter(job),
 		}
+		if delayExecution != nil {
+			jobBuilderWorkRequest.SetDelayExecution(proto.Clone(delayExecution).(*durationpb.Duration))
+		}
+
 		return []*flex.WorkRequest{jobBuilderWorkRequest}
 	}
 
@@ -225,7 +230,9 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
 			Priority:            new(request.GetPriority()),
-			ExecuteAfter:        GetJobExecuteAfter(job),
+		}
+		if delayExecution != nil {
+			wr.SetDelayExecution(proto.Clone(delayExecution).(*durationpb.Duration))
 		}
 
 		switch request.WhichType() {
@@ -241,18 +248,6 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 		workRequests = append(workRequests, wr)
 	}
 	return workRequests
-}
-
-func GetJobExecuteAfter(job *beeremote.Job) *timestamppb.Timestamp {
-	if job == nil || job.Created == nil || job.Request == nil {
-		return nil
-	}
-
-	delay := job.Request.GetDelayNs()
-	if delay <= 0 {
-		return nil
-	}
-	return timestamppb.New(job.Created.AsTime().Add(time.Duration(delay)))
 }
 
 // generateSegments() implements a common strategy for generating segments for all RST types. Note
