@@ -55,9 +55,9 @@ type Provider interface {
 	// file when it is no longer required.
 	Open(name string) (io.ReadCloser, error)
 	// ReadFilePart reads the part of the named file from offsetStart up to and including offsetStop
-	// into a new bytes buffer, calculates the sha256 checksum, then returns an io.Reader that
-	// allows limited access to the file and the base64 encoded sha256 checksum of the part.
-	ReadFilePart(name string, offsetStart int64, offsetStop int64) (reader io.Reader, checksumSHA256 string, err error)
+	// into a new bytes buffer, calculates a CRC32C checksum, then returns an io.Reader that allows
+	// limited access to the file and the base64 encoded checksum of the part.
+	ReadFilePart(name string, offsetStart int64, offsetStop int64) (reader io.Reader, checksum string, err error)
 	// Recursively create any missing portion of the directory structure.
 	CreateDir(path string, mode uint32) error
 	// WriteFilePart will open the file at the specified path for writing, and immediately return an
@@ -242,7 +242,7 @@ func (fs BeeGFS) ReadFilePart(path string, offsetStart int64, offsetStop int64) 
 		return nil, "", err
 	}
 
-	return bytes.NewReader(filePart), getFilePartChecksumSHA256(filePart), nil
+	return bytes.NewReader(filePart), getFilePartChecksumCRC32C(filePart), nil
 }
 
 func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64) (io.WriteCloser, error) {
