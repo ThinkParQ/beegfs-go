@@ -237,7 +237,7 @@ type getEntryInfoV2Arg struct {
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
 	FileDataState    uint8
-	// 1 if the inode was locked during GetEntryInfo RPC (e.g. chunk rebalancing)
-	// only basic entry info fields are valid when set.
-	BasicOnly uint8
+	// Result of the GetEntryInfo RPC. 0 = success (full data populated). Non-zero = partial
+	// result (only basic entry info valid); value is the FhgfsOpsErr code from the metadata RPC.
+	GetEntryInfoResult uint8
 }

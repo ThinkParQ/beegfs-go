@@ -308,12 +308,11 @@ func GetEntryInfoV2(path string) (msg.EntryInfo, msg.GetEntryInfoResponse, error
 		FeatureFlags:  featFlags,
 	}
 
-	// arg.BasicOnly is set by the kernel when the inode is held in the global lock store (e.g.
-	// during chunk rebalancing). The ioctl still succeeds and the basic entry info fields populated
-	// above are valid, but stripe pattern, PathInfo, RST, and session fields are not populated.
-	// Return OpsErr_INODELOCKED in the response so callers can distinguish a partial result.
-	if arg.BasicOnly != 0 {
-		return entryInfo, msg.GetEntryInfoResponse{Result: beegfs.OpsErr_INODELOCKED}, nil
+	// A non-zero GetEntryInfoResult means the metadata RPC returned a non-success code; the ioctl
+	// still succeeds and the basic entry info fields above are valid, but stripe pattern, PathInfo,
+	// RST, and session fields are not populated. Pass the exact RPC result to the caller.
+	if arg.GetEntryInfoResult != 0 {
+		return entryInfo, msg.GetEntryInfoResponse{Result: beegfs.OpsErr(arg.GetEntryInfoResult)}, nil
 	}
 
 	// This matches the same checks done in common/beemsg/msg/entry.go if we were assembling
