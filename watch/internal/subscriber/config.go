@@ -8,9 +8,11 @@ import (
 // subscriber. It embeds the configuration for each type of subscriber to standardize
 // and simplify unmarshalling configuration and initializing subscribers.
 type Config struct {
-	Type string `mapstructure:"type"`
-	ID   int    `mapstructure:"id"`
-	Name string `mapstructure:"name"`
+	Type                        string `mapstructure:"type"`
+	ID                          int    `mapstructure:"id"`
+	Name                        string `mapstructure:"name"`
+	SkipNodeIDDetection         bool   `mapstructure:"skip-node-id-detection"`
+	WaitForResponseAfterConnect *int   `mapstructure:"wait-for-response-after-connect"`
 	// All embedded subscriber types must specify `mapstructure:",squash"` to tell
 	// Viper to squash the fields of the embedded struct into the subscriber Config.
 	// Without this viper.Unmarshal(&newConfig) will omit their configuration.

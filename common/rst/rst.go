@@ -40,14 +40,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const (
-	// LockedAccessFlags defines the access flags applied when locking or unlocking job request and stub files.
-	// Always use this constant when managing RST locks.
-	LockedAccessFlags  beegfs.AccessFlags = beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock
-	DataStateNone      beegfs.DataState   = 0
-	DataStateOffloaded beegfs.DataState   = 1
-)
-
 // SupportedRSTTypes is used with SetRSTTypeHook in the config package to allows configuring with
 // multiple RST types without writing repetitive code. The map contains the all lowercase string
 // identifier of the prefix key of the TOML table used to indicate the configuration options for a
@@ -204,6 +196,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Segment:             s,
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
+			RestorePolicy:       new(request.GetRestorePolicy()),
 			Priority:            new(request.GetPriority()),
 		}
 
@@ -264,7 +257,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 
 	defer func() {
 		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -495,13 +488,14 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	lockedInfo := cfg.LockedInfo
 
 	fileDataStateCleared := false
+	originalDataState := beegfs.DataState(beegfs.DataStateManualRestore) // safe default; updated before clearing
 	filePreallocated := false
 	fileCreated := false
 	defer func() {
 		if err != nil {
 			if IsFileOffloaded(lockedInfo) {
 				if fileDataStateCleared {
-					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, DataStateOffloaded); restoreErr != nil {
+					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, originalDataState); restoreErr != nil {
 						err = fmt.Errorf("%w: unable to restore offloaded data state: %s", err, restoreErr.Error())
 					}
 				}
@@ -525,7 +519,7 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 		if cfg.GetUpdate() {
 			if err := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfo, ownerNode); err != nil {
 				if sentinel != nil {
-					return fmt.Errorf("%s but unable to update rst configuration: %w", sentinel.Error(), err)
+					return fmt.Errorf("%w but unable to update rst configuration: %w", sentinel, err)
 				}
 				return err
 			}
@@ -536,11 +530,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
 		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
-			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
+			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
 				err = fmt.Errorf("failed to create stub file: %w", err)
 				return
 			}
-			err = entry.SetAccessFlags(ctx, cfg.Path, LockedAccessFlags)
+			err = entry.SetAccessFlags(ctx, cfg.Path, beegfs.LockedContentAccessFlags)
 			if err != nil {
 				return
 			}
@@ -552,6 +546,11 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
 				err = ErrOffloadFileUrlMismatch
 				return
+			}
+			if cfg.HasRestorePolicy() {
+				if err = entry.SetFileDataState(ctx, cfg.Path, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
+					return
+				}
 			}
 			return updateRstCfg(ErrJobAlreadyOffloaded)
 		}
@@ -573,7 +572,10 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 					return
 				}
 
-				if err = entry.SetFileDataState(ctx, cfg.Path, DataStateNone); err != nil {
+				if ds, dsErr := entry.GetFileDataState(ctx, cfg.Path); dsErr == nil {
+					originalDataState = ds
+				}
+				if err = entry.SetFileDataState(ctx, cfg.Path, beegfs.DataStateAvailable); err != nil {
 					return
 				}
 				fileDataStateCleared = true
@@ -675,7 +677,7 @@ func GetLockedInfo(
 
 	if !skipAccessLock {
 		if !entryInfo.Entry.FileState.IsReadWriteLocked() {
-			err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
+			err = entry.SetAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
 			if err != nil {
 				return
 			}
@@ -692,7 +694,7 @@ func GetLockedInfo(
 	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	lockedInfo.Mode = uint32(stat.Mode())
 
-	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
+	if beegfs.IsDataStateOffloaded(entryInfo.Entry.FileState.GetDataState()) {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, ErrOffloadFileNotReadable
@@ -720,16 +722,34 @@ func GetLockedInfo(
 	return
 }
 
+// restorePolicyToDataState maps a RestorePolicy enum value to the corresponding beegfs.DataState.
+// UNSPECIFIED and MANUAL both map to DataStateManualRestore as the safe default.
+func restorePolicyToDataState(p flex.RestorePolicy) beegfs.DataState {
+	switch p {
+	case flex.RestorePolicy_RESTORE_POLICY_AUTO:
+		return beegfs.DataStateAutoRestore
+	case flex.RestorePolicy_RESTORE_POLICY_DELAYED:
+		return beegfs.DataStateDelayedRestore
+	default:
+		return beegfs.DataStateManualRestore
+	}
+}
+
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
-func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool) error {
+// The dataState parameter controls which BeeGFS data state is set on the stub (e.g. ManualRestore,
+// AutoRestore, or DelayedRestore).
+func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider, path string, remotePath string, rstId uint32, overwrite bool, dataState beegfs.DataState) error {
 	rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", rstId, remotePath)
+	// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
+	// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
+	// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
+	// future fix for the O_TRUNC window must reapply that metadata to the new inode.
 	if err := mountPoint.CreateWriteClose(path, rstUrl, 0644, overwrite); err != nil {
 		return err
 	}
-	if err := entry.SetFileDataState(ctx, path, DataStateOffloaded); err != nil {
+	if err := entry.SetFileDataState(ctx, path, dataState); err != nil {
 		return fmt.Errorf("unable to set offloaded data state: %w", err)
 	}
-
 	return nil
 }
 

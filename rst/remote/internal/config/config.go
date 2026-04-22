@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
@@ -27,6 +28,7 @@ type AppConfig struct {
 	Server               server.Config               `mapstructure:"server"`
 	Log                  logger.Config               `mapstructure:"log"`
 	Job                  job.Config                  `mapstructure:"job"`
+	Dispatch             dispatch.Config             `mapstructure:"dispatch"`
 	WorkerMgr            workermgr.Config            `mapstructure:"worker-mgr"`
 	Workers              []worker.Config             `mapstructure:"worker"`
 	RemoteStorageTargets []*flex.RemoteStorageTarget `mapstructure:"remote-storage-target"`

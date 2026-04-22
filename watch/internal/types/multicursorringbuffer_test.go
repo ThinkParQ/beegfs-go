@@ -470,6 +470,89 @@ func TestAckEvent(t *testing.T) {
 
 }
 
+func TestSeekToEnd(t *testing.T) {
+	t.Run("returns error for non-existent subscriber", func(t *testing.T) {
+		rb := NewMultiCursorRingBuffer(10, 5)
+		_, err := rb.SeekToEnd(99)
+		assert.Error(t, err)
+	})
+
+	t.Run("empty buffer returns zero lastSeqID with cursors at start", func(t *testing.T) {
+		rb := NewMultiCursorRingBuffer(10, 5)
+		rb.AddCursor(1)
+		lastSeqID, err := rb.SeekToEnd(1)
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(0), lastSeqID)
+		assert.Equal(t, 0, rb.cursors[1].sendCursor)
+		assert.Equal(t, 0, rb.cursors[1].ackCursor)
+	})
+
+	t.Run("returns last event seqID with cursors pointing at end", func(t *testing.T) {
+		rb := NewMultiCursorRingBuffer(10, 5)
+		rb.AddCursor(1)
+		for i := 1; i <= 5; i++ {
+			rb.Push(&pb.Event{SeqId: uint64(i)})
+		}
+		lastSeqID, err := rb.SeekToEnd(1)
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(5), lastSeqID)
+		assert.Equal(t, rb.end, rb.cursors[1].sendCursor)
+		assert.Equal(t, rb.end, rb.cursors[1].ackCursor)
+	})
+
+	t.Run("pre-seek events are not delivered, next pushed event is", func(t *testing.T) {
+		rb := NewMultiCursorRingBuffer(10, 5)
+		rb.AddCursor(1)
+		for i := 1; i <= 5; i++ {
+			rb.Push(&pb.Event{SeqId: uint64(i)})
+		}
+		_, err := rb.SeekToEnd(1)
+		assert.NoError(t, err)
+
+		// Nothing buffered before the seek should be visible.
+		event, err := rb.GetEvent(1)
+		assert.NoError(t, err)
+		assert.Nil(t, event)
+
+		// The first event pushed after the seek should be the first one delivered.
+		rb.Push(&pb.Event{SeqId: 6})
+		event, err = rb.GetEvent(1)
+		assert.NoError(t, err)
+		assert.NotNil(t, event)
+		assert.Equal(t, uint64(6), event.SeqId)
+	})
+
+	t.Run("clears ackError", func(t *testing.T) {
+		rb := NewMultiCursorRingBuffer(10, 5)
+		rb.AddCursor(1)
+		rb.cursors[1].ackError = true
+		_, err := rb.SeekToEnd(1)
+		assert.NoError(t, err)
+		assert.False(t, rb.cursors[1].ackError)
+	})
+
+	t.Run("returns correct lastSeqID when end wraps to index 0", func(t *testing.T) {
+		// Construct a buffer where end has wrapped around to index 0 so that the last
+		// event is at the highest index. SeekToEnd must use modular arithmetic to find it.
+		rb := &MultiCursorRingBuffer{
+			buffer: []*pb.Event{nil, {SeqId: 1}, {SeqId: 2}, {SeqId: 3}, {SeqId: 4}},
+			start:  1,
+			end:    0,
+			cursors: map[int]*SubscriberCursor{
+				1: {sendCursor: 1, ackCursor: 1},
+			},
+			gcFrequency: 10,
+			gcCounter:   10,
+		}
+		rb.endSnapshot.Store(int64(rb.end))
+		lastSeqID, err := rb.SeekToEnd(1)
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(4), lastSeqID)
+		assert.Equal(t, 0, rb.cursors[1].sendCursor)
+		assert.Equal(t, 0, rb.cursors[1].ackCursor)
+	})
+}
+
 func TestSearchIndexOfSeqID(t *testing.T) {
 	rb := NewMultiCursorRingBuffer(10, 5)
 

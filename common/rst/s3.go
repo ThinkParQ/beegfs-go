@@ -177,6 +177,7 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 		Path:                cfg.Path,
 		RemoteStorageTarget: cfg.RemoteStorageTarget,
 		StubLocal:           cfg.StubLocal,
+		RestorePolicy:       cfg.RestorePolicy,
 		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Sync{
@@ -204,6 +205,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		RemotePath:          sync.RemotePath,
 		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
 		StubLocal:           request.StubLocal,
+		RestorePolicy:       request.RestorePolicy,
 		Overwrite:           sync.Overwrite,
 		Flatten:             sync.Flatten,
 		Priority:            &request.Priority,
@@ -243,7 +245,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -696,7 +698,7 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 		}
 
 		if request.StubLocal {
-			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
+			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy()))
 			if err != nil {
 				return fmt.Errorf("upload successful but failed to create stub file: %w", err)
 			}
@@ -735,7 +737,7 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
-			entry.SetFileDataState(ctx, request.Path, DataStateNone)
+			entry.SetFileDataState(ctx, request.Path, beegfs.DataStateAvailable)
 		}
 	}
 

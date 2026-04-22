@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
+	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
@@ -39,10 +40,11 @@ type BeeRemoteServer struct {
 	log *zap.Logger
 	wg  *sync.WaitGroup
 	Config
-	grpcServer *grpc.Server
-	jobMgr     *job.Manager
-	registry   *registry.ComponentRegistry
-	startTime  time.Time
+	grpcServer      *grpc.Server
+	jobMgr          *job.Manager
+	registry        *registry.ComponentRegistry
+	startTime       time.Time
+	eventSubscriber *subscriber.Service
 }
 
 // New() creates a new BeeRemoteServer that can be used with ListenAndServe().
@@ -72,8 +74,12 @@ func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.Bu
 	}
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	beeremote.RegisterBeeRemoteServer(s.grpcServer, &s)
-
 	return &s, nil
+}
+
+// GetGRPCServer returns the underlying gRPC server to enable additional services to be attached.
+func (s *BeeRemoteServer) GetGRPCServer() *grpc.Server {
+	return s.grpcServer
 }
 
 // ListenAndServe should be called against a BeeRemoteServer initialized with New(). It spawns a new
