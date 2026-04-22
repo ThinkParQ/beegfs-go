@@ -308,6 +308,13 @@ func GetEntryInfoV2(path string) (msg.EntryInfo, msg.GetEntryInfoResponse, error
 		FeatureFlags:  featFlags,
 	}
 
+	// A non-zero GetEntryInfoResult means the metadata RPC returned a non-success code; the ioctl
+	// still succeeds and the basic entry info fields above are valid, but stripe pattern, PathInfo,
+	// RST, and session fields are not populated. Pass the exact RPC result to the caller.
+	if arg.GetEntryInfoResult != 0 {
+		return entryInfo, msg.GetEntryInfoResponse{Result: beegfs.OpsErr(arg.GetEntryInfoResult)}, nil
+	}
+
 	// This matches the same checks done in common/beemsg/msg/entry.go if we were assembling
 	// GetEntryInfoResponse from an RPC response.
 	if arg.RSTMajorVersion > 1 || arg.RSTMinorVersion != 0 {

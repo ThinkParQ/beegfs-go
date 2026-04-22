@@ -237,4 +237,8 @@ type getEntryInfoV2Arg struct {
 	NumSessionsRead  uint32
 	NumSessionsWrite uint32
 	FileDataState    uint8
+	// Result of the GetEntryInfo RPC. 0 = success (full data populated). Non-zero = partial
+	// result (only basic entry info valid); value is the FhgfsOpsErr code from the metadata RPC.
+	// Matches the signed 32-bit wire type of FhgfsOpsErr.
+	GetEntryInfoResult int32
 }
