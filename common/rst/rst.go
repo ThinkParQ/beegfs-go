@@ -669,12 +669,17 @@ func GetLockedInfo(
 	}
 	lockedInfo.Exists = true
 
+	if entryInfo.Entry.Details == nil {
+		return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode,
+			fmt.Errorf("%w: entry details unavailable (%s)", ErrGetLockedInfoFatal, entryInfo.Entry.EntryInfoPopulated)
+	}
+
 	if rstIds == nil {
-		rstIds = entryInfo.Entry.Remote.RSTIDs
+		rstIds = entryInfo.Entry.Details.Remote.RSTIDs
 	}
 
 	if !skipAccessLock {
-		if !entryInfo.Entry.FileState.IsReadWriteLocked() {
+		if !entryInfo.Entry.Details.FileState.IsReadWriteLocked() {
 			err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
 			if err != nil {
 				return
@@ -692,7 +697,7 @@ func GetLockedInfo(
 	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	lockedInfo.Mode = uint32(stat.Mode())
 
-	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
+	if entryInfo.Entry.Details.FileState.GetDataState() == DataStateOffloaded {
 		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				return lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, ErrOffloadFileNotReadable
@@ -771,12 +776,15 @@ func parseRstUrl(url []byte) (uint32, string, error) {
 	return uint32(num), s3Key, nil
 }
 
-func CheckEntry(entry entry.Entry, ignoreReaders bool, ignoreWriters bool) error {
+func CheckEntry(e entry.Entry, ignoreReaders bool, ignoreWriters bool) error {
+	if e.Details == nil {
+		return fmt.Errorf("entry details unavailable (%s)", e.EntryInfoPopulated)
+	}
 	var err error
-	if !ignoreWriters && entry.NumSessionsWrite > 0 {
+	if !ignoreWriters && e.Details.NumSessionsWrite > 0 {
 		err = ErrFileOpenForWriting
 	}
-	if !ignoreReaders && entry.NumSessionsRead > 0 {
+	if !ignoreReaders && e.Details.NumSessionsRead > 0 {
 		// Not using errors.Join because it adds a newline when printing each error which looks
 		// awkward in the CTL output.
 		if err != nil {

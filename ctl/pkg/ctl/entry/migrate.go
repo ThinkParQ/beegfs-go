@@ -386,17 +386,21 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		return result, nil
 	}
 
-	result.StartingIDs = fmt.Sprintf("%v", entry.Entry.Pattern.TargetIDs)
+	if entry.Entry.Details != nil {
+		result.StartingIDs = fmt.Sprintf("%v", entry.Entry.Details.Pattern.TargetIDs)
+	} else {
+		result.StartingIDs = "(unavailable)"
+	}
 	// Non-directory entries that are not inlined (into a dentry) may have have multiple links
 	// (i.e., hard links). This means the migration might encounter the same entry multiple times
 	// through different paths. When this happens one of three scenarios is possible:
 	//
 	// (1) The entry is still being rebalanced and is in the inode lock store. When this happens
-	// entry.Entry.Pattern.TargetIDs is empty so getMigrationForEntry returns ErrEntryHasNoTargets
-	// which is caught below and the result for the entry is MigrateNotNeeded.
+	// entry.Entry.Details is nil (returning ErrEntryDetailsUnavailable) or
+	// Details.Pattern.TargetIDs is empty (returning ErrEntryHasNoTargets). Both are caught below.
 	//
 	// (2) The entry has already been rebalanced so none of the srcTargets/Groups will be in
-	// entry.Entry.Pattern.TargetIDs causing getMigrationForEntry() to return an empty srcIDs slice,
+	// Details.Pattern.TargetIDs causing getMigrationForEntry() to return an empty srcIDs slice,
 	// and the result for the entry is MigrateNotNeeded.
 	//
 	// (3) The entry still needs to be rebalanced but is not in the inode lock store by the time the
@@ -438,7 +442,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 	// Determine if the entry needs migration and if so, if there are enough targets/groups:
 	rebalanceType, srcIDs, destIDs, unmodifiedIDs, err := getMigrationForEntry(entry, migration.srcTargets, migration.srcGroups, migration.dstTargets, migration.dstGroups)
 	if err != nil {
-		if errors.Is(err, ErrEntryHasNoTargets) {
+		if errors.Is(err, ErrEntryHasNoTargets) || errors.Is(err, ErrEntryDetailsUnavailable) {
 			result.StartingIDs = "(unavailable)"
 			result.Status = MigrateNotNeeded
 			result.Message = fmt.Sprintf("a migration appears to already be in progress: %s", err)
@@ -570,7 +574,7 @@ func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
 	// tempFile is the full absolute path to the temp file.
 	tempFile := filepath.Join(filepath.Dir(migration.entry.Path), tempFileBase)
 
-	newPattern := migration.entry.Entry.Pattern.StripePattern
+	newPattern := migration.entry.Entry.Details.Pattern.StripePattern
 	if migration.storagePool != 0 {
 		// Clear the target IDs from the original stripe pattern and update the storage pool ID to
 		// the one being migrated to. This will cause the metadata server to automatically handle
@@ -580,13 +584,13 @@ func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
 	} else {
 		newPattern.TargetIDs = migration.unmodifiedIDs
 		newPattern.TargetIDs = append(newPattern.TargetIDs, migration.dstIDs...)
-		if len(newPattern.TargetIDs) != len(migration.entry.Entry.Pattern.StripePattern.TargetIDs) {
+		if len(newPattern.TargetIDs) != len(migration.entry.Entry.Details.Pattern.StripePattern.TargetIDs) {
 			// With temp files we could technically change the stripe width, but we shouldn't
 			// implicitly do so until we add explicit support for migrating between different
 			// numbers of targets with https://github.com/ThinkParQ/beegfs-go/issues/76. WARNING:
 			// Whenever we do so, ensure to set the newPattern.Length correctly, its is not just the
 			// number of TargetIDs.
-			return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newPattern.TargetIDs, migration.entry.Entry.Pattern.StripePattern.TargetIDs)
+			return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newPattern.TargetIDs, migration.entry.Entry.Details.Pattern.StripePattern.TargetIDs)
 		}
 	}
 
@@ -603,7 +607,7 @@ func tmpFileMigrate(ctx context.Context, migration tmpFileMigration) error {
 		ParentInfo:  *migration.entry.Parent.origEntryInfoMsg,
 		NewFileName: []byte(tempFileBase),
 		Pattern:     newPattern,
-		RST:         migration.entry.Entry.Remote.RemoteStorageTarget,
+		RST:         migration.entry.Entry.Details.Remote.RemoteStorageTarget,
 	}
 
 	var resp = &msg.MakeFileWithPatternResponse{}

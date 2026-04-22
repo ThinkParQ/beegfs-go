@@ -165,41 +165,48 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		printMetaNodeInfo(info.Entry, false)
 	}
 
+	if info.Entry.Details == nil {
+		fmt.Fprintf(entryToPrint, "Entry details: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
+		return entryToPrint.String()
+	}
+
+	d := info.Entry.Details
+
 	fmt.Fprintf(entryToPrint, "Stripe pattern details:\n")
-	fmt.Fprintf(entryToPrint, "+ Type: %s\n", info.Entry.Pattern.Type)
+	fmt.Fprintf(entryToPrint, "+ Type: %s\n", d.Pattern.Type)
 	if viper.GetBool(config.RawKey) {
-		fmt.Fprintf(entryToPrint, "+ Chunksize: %d\n", info.Entry.Pattern.Chunksize)
+		fmt.Fprintf(entryToPrint, "+ Chunksize: %d\n", d.Pattern.Chunksize)
 	} else {
-		fmt.Fprintf(entryToPrint, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0))
+		fmt.Fprintf(entryToPrint, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(d.Pattern.Chunksize), unitconv.Base1024, 0))
 	}
 	fmt.Fprintf(entryToPrint, "+ Number of storage targets: ")
-	actualNumStorageTgts := len(info.Entry.Pattern.TargetIDs)
+	actualNumStorageTgts := len(d.Pattern.TargetIDs)
 	if actualNumStorageTgts == 0 {
 		// Expected if this is a directory.
-		fmt.Fprintf(entryToPrint, "desired: %d\n", info.Entry.Pattern.DefaultNumTargets)
+		fmt.Fprintf(entryToPrint, "desired: %d\n", d.Pattern.DefaultNumTargets)
 	} else {
-		fmt.Fprintf(entryToPrint, "desired: %d; actual: %d\n", info.Entry.Pattern.DefaultNumTargets, actualNumStorageTgts)
+		fmt.Fprintf(entryToPrint, "desired: %d; actual: %d\n", d.Pattern.DefaultNumTargets, actualNumStorageTgts)
 	}
 
 	if info.Entry.Type == beegfs.EntryDirectory {
-		fmt.Fprintf(entryToPrint, "+ Storage Pool: %d  (%s)\n", info.Entry.Pattern.StoragePoolID, info.Entry.Pattern.StoragePoolName)
+		fmt.Fprintf(entryToPrint, "+ Storage Pool: %d  (%s)\n", d.Pattern.StoragePoolID, d.Pattern.StoragePoolName)
 	}
 
 	if actualNumStorageTgts != 0 {
-		if info.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
+		if d.Pattern.Type == beegfs.StripePatternBuddyMirror {
 			fmt.Fprintf(entryToPrint, "+ Storage mirror buddy groups:\n")
-			for _, tgt := range info.Entry.Pattern.TargetIDs {
+			for _, tgt := range d.Pattern.TargetIDs {
 				fmt.Fprintf(entryToPrint, "  + %d\n", tgt)
 			}
 		} else {
 			fmt.Fprintf(entryToPrint, "+ Storage targets:\n")
-			for _, tgt := range info.Entry.Pattern.TargetIDs {
+			for _, tgt := range d.Pattern.TargetIDs {
 				// This differs slightly from the v7 CTL. The v7 method of getting target mappings
 				// first determined the node ID, then used this to determine the alias. It was
 				// possible to get the node ID but not the alias which printed <unknown(nodeNumID)>.
 				// The new target mapper works differently, looking up the node ID and alias at
 				// once, so if anything goes wrong we can't even print the node ID.
-				node, ok := info.Entry.Pattern.StorageTargets[beegfs.NumId(tgt)]
+				node, ok := d.Pattern.StorageTargets[beegfs.NumId(tgt)]
 				if ok && node != nil {
 					fmt.Fprintf(entryToPrint, "+ %d @ %s [ID: %d]\n", tgt, node.Alias, node.LegacyId.NumId)
 				} else {
@@ -210,11 +217,11 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		}
 	}
 
-	if len(info.Entry.Remote.Targets) != 0 {
+	if len(d.Remote.Targets) != 0 {
 		fmt.Fprintf(entryToPrint, "Remote Storage Target Details:\n")
-		fmt.Fprintf(entryToPrint, "+ CoolDown: %d\n", info.Entry.Remote.CoolDownPeriod)
+		fmt.Fprintf(entryToPrint, "+ CoolDown: %d\n", d.Remote.CoolDownPeriod)
 		fmt.Fprintf(entryToPrint, "+ Remote Storage Targets:\n")
-		for rstID, rst := range info.Entry.Remote.Targets {
+		for rstID, rst := range d.Remote.Targets {
 			if rst == nil {
 				fmt.Fprintf(entryToPrint, "  + <not available> [ID: %d]\n", rstID)
 			} else {
@@ -235,7 +242,7 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		}
 
 		if info.Entry.Type == beegfs.EntryRegularFile {
-			fmt.Fprintf(entryToPrint, "File state: %s\n", info.Entry.FileState)
+			fmt.Fprintf(entryToPrint, "File state: %s\n", d.FileState)
 		}
 
 		if info.Entry.EntryID != "root" && len(info.Entry.Verbose.DentryPath) != 0 {
@@ -250,7 +257,7 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		}
 		if info.Entry.Type == beegfs.EntryRegularFile {
 			fmt.Fprintf(entryToPrint, "Client Sessions\n")
-			fmt.Fprintf(entryToPrint, "+ Reading: %d\n+ Writing: %d\n", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite)
+			fmt.Fprintf(entryToPrint, "+ Reading: %d\n+ Writing: %d\n", d.NumSessionsRead, d.NumSessionsWrite)
 		}
 	}
 	return entryToPrint.String()
@@ -278,16 +285,28 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 		row = append(row, "(unmirrored)")
 	}
 
+	if info.Entry.Details == nil {
+		// Entry details from GetEntryInfoResponse are unavailable (e.g., inode locked during
+		// rebalancing). Fill all remaining columns with "(unavailable)".
+		unavailable := fmt.Sprintf("(unavailable: %s)", info.Entry.EntryInfoPopulated)
+		for len(row) < rowLen {
+			row = append(row, unavailable)
+		}
+		return row
+	}
+
+	d := info.Entry.Details
+
 	if info.Entry.Type == beegfs.EntryDirectory {
-		row = append(row, fmt.Sprintf("%s (%d)", info.Entry.Pattern.StoragePoolName, info.Entry.Pattern.StoragePoolID))
+		row = append(row, fmt.Sprintf("%s (%d)", d.Pattern.StoragePoolName, d.Pattern.StoragePoolID))
 	} else {
 		row = append(row, fmt.Sprintf("(%s)", info.Entry.Type))
 	}
 
 	if viper.GetBool(config.RawKey) {
-		row = append(row, fmt.Sprintf("%s (%dx%d)", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, info.Entry.Pattern.Chunksize))
+		row = append(row, fmt.Sprintf("%s (%dx%d)", d.Pattern.Type, d.Pattern.DefaultNumTargets, d.Pattern.Chunksize))
 	} else {
-		row = append(row, fmt.Sprintf("%s (%dx%s)", info.Entry.Pattern.Type, info.Entry.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(info.Entry.Pattern.Chunksize), unitconv.Base1024, 0)))
+		row = append(row, fmt.Sprintf("%s (%dx%s)", d.Pattern.Type, d.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(d.Pattern.Chunksize), unitconv.Base1024, 0)))
 	}
 
 	fmtTgtIDsFunc := func(targetIDs []uint16) string {
@@ -311,17 +330,17 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 	if info.Entry.Type == beegfs.EntryDirectory {
 		row = append(row, "(directory)", "(directory)")
 	} else {
-		if info.Entry.Pattern.Type == beegfs.StripePatternBuddyMirror {
-			row = append(row, "(mirrored)", fmtTgtIDsFunc(info.Entry.Pattern.TargetIDs))
+		if d.Pattern.Type == beegfs.StripePatternBuddyMirror {
+			row = append(row, "(mirrored)", fmtTgtIDsFunc(d.Pattern.TargetIDs))
 		} else {
-			row = append(row, fmtTgtIDsFunc(info.Entry.Pattern.TargetIDs), "(unmirrored)")
+			row = append(row, fmtTgtIDsFunc(d.Pattern.TargetIDs), "(unmirrored)")
 		}
 	}
 
-	if len(info.Entry.Remote.Targets) != 0 {
+	if len(d.Remote.Targets) != 0 {
 		i := 0
 		var rstBuilder strings.Builder
-		for rstID, rst := range info.Entry.Remote.Targets {
+		for rstID, rst := range d.Remote.Targets {
 			if i > 0 {
 				rstBuilder.WriteString(",")
 			}
@@ -332,15 +351,15 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 			}
 			i++
 		}
-		row = append(row, rstBuilder.String(), fmt.Sprintf("%ds", info.Entry.Remote.CoolDownPeriod))
+		row = append(row, rstBuilder.String(), fmt.Sprintf("%ds", d.Remote.CoolDownPeriod))
 	} else {
 		row = append(row, "(none)", "(n/a)")
 	}
 
 	if info.Entry.Type == beegfs.EntryRegularFile {
 		row = append(row,
-			fmt.Sprintf("Reading: %d, Writing: %d", info.Entry.NumSessionsRead, info.Entry.NumSessionsWrite),
-			info.Entry.FileState.GetAccessFlags(), info.Entry.FileState.GetDataState())
+			fmt.Sprintf("Reading: %d, Writing: %d", d.NumSessionsRead, d.NumSessionsWrite),
+			d.FileState.GetAccessFlags(), d.FileState.GetDataState())
 	} else {
 		row = append(row, fmt.Sprintf("(%s)", info.Entry.Type.String()), "(n/a)", "(n/a)")
 	}
