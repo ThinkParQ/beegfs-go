@@ -395,13 +395,29 @@ type RemoteStorageTarget struct {
 	CoolDownPeriod uint16
 	Reserved       uint16
 	FilePolicies   uint16
-	RSTIDs         []uint32
+	// RSTIDs distinguishes three caller intents that Serialize translates into wire state:
+	//   nil          - caller isn't expressing any RST config (combined with zero-valued
+	//                  CoolDownPeriod/Reserved/FilePolicies and majorVersion still 0, Serialize
+	//                  leaves majorVersion at 0 and the server skips RST processing).
+	//   []uint32{}   - non-nil but empty; caller wants to clear RST config. Serialize bumps
+	//                  majorVersion to 1 so the server treats it as a clear rather than skipping.
+	//   [x, y, ...]  - caller wants to set RST config to these IDs.
+	RSTIDs []uint32
 }
 
 func (m *RemoteStorageTarget) Serialize(s *beeserde.Serializer) {
+	// The server distinguishes "this message carries RST intent" from "it doesn't" by looking at
+	// the major/minor version: when both are 0, meta handlers (e.g. SetDirPatternMsgEx /
+	// SetFilePatternMsgEx) skip RST processing entirely. That sentinel is why a chunksize-only
+	// update doesn't accidentally rewrite RST config.
+	//
+	// If the caller populated any RST-carrying field we need to bump the version so the server
+	// actually processes the message. Important: the RSTIDs check below is "!= nil" rather than
+	// "len() > 0" because a non-nil empty slice is a meaningful state (clear RST) that must still
+	// bump the version — otherwise the clear request gets silently dropped on the server side. Do
+	// not simplify it.
 	if m.majorVersion == 0 && m.minorVersion == 0 {
-		if m.CoolDownPeriod != 0 || m.Reserved != 0 || m.FilePolicies != 0 || len(m.RSTIDs) > 0 {
-			// Handle setting the initial major and minor versions
+		if m.CoolDownPeriod != 0 || m.Reserved != 0 || m.FilePolicies != 0 || m.RSTIDs != nil {
 			m.majorVersion = 1
 			m.minorVersion = 0
 		}
