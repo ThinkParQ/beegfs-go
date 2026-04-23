@@ -49,11 +49,11 @@ type MockClient struct {
 
 var _ Provider = &MockClient{}
 
-func (r *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+func (m *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
 	return nil
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (m *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
@@ -64,14 +64,14 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beerem
 		return workRequests, nil
 	}
 
-	args := rst.Called(job, availableWorkers)
+	args := m.Called(job, availableWorkers)
 	if args.Error(2) != nil {
 		return nil, args.Error(2)
 	}
 	return args.Get(0).([]*flex.WorkRequest), nil
 }
 
-func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
+func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
 
 	if request.GetMock() != nil {
 		if request.GetMock().ShouldFail {
@@ -81,7 +81,7 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 		return nil
 	}
 
-	args := rst.Called(ctx, request, part)
+	args := m.Called(ctx, request, part)
 	err := args.Error(0)
 	if err == nil {
 		part.Completed = true
@@ -90,11 +90,19 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
 	return false, ErrUnsupportedOpForRST
 }
 
-func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
+	return false
+}
+
+func (m *MockClient) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
+}
+
+func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
@@ -103,32 +111,32 @@ func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.
 		return nil
 	}
 
-	args := rst.Called(job, workResults, abort)
+	args := m.Called(job, workResults, abort)
 	return args.Error(0)
 }
 
-func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
-	args := rst.Called()
+func (m *MockClient) GetConfig() *flex.RemoteStorageTarget {
+	args := m.Called()
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
+func (m *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
 	return nil, ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) SanitizeRemotePath(remotePath string) string {
+func (m *MockClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+func (m *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
 	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+func (m *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	return "", ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
-	args := r.Called(request)
+func (m *MockClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	args := m.Called(request)
 	return args.Bool(0), args.Get(1).(time.Duration), args.Error(2)
 }

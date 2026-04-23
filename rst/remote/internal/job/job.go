@@ -110,7 +110,6 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 			seg := proto.Clone(wr.GetSegment()).(*flex.WorkRequest_Segment)
 			j.Segments = append(j.Segments, &Segment{segment: seg})
 		}
-
 	} else {
 		workRequests = rst.RecreateWorkRequests(j.Get(), j.GetSegments())
 	}

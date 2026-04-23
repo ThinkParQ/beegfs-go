@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -59,11 +60,19 @@ const (
 // initialized but empty struct of the correct type.
 var SupportedRSTTypes = map[string]func() (any, any){
 	"s3": func() (any, any) { t := new(flex.RemoteStorageTarget_S3_); return t, &t.S3 },
+	// XtreemStore is S3-compatible and uses the existing S3 implementation.
+	"xtreemstore": func() (any, any) {
+		t := &flex.RemoteStorageTarget_Xtreemstore{Xtreemstore: &flex.RemoteStorageTarget_XtreemStore{}}
+		return t, &t.Xtreemstore.S3
+	},
 	// Azure is not currently supported, but this is how an Azure type could be added:
 	// "azure": func() (any, any) { t := new(flex.RemoteStorageTarget_Azure_); return t, &t.Azure },
 	// Mock could be included here if it ever made sense to allow configuration using a file.
 }
 
+type SubmitBulkRequestFn func(ctx context.Context)
+type EmitBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
+type AppendBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
 	GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest
@@ -121,6 +130,20 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
+	// IncludeInBulkRequest determines whether a request should be added to a bulk request.
+	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool
+	// BuildBulkRequest initializes bulk request construction. It returns an append callback for
+	// requests selected for bulk processing and a submit callback to finalize and submit the bulk
+	// request after all appends have completed.
+	//
+	// The provided context is for setup only and must not be retained or used by the returned
+	// callbacks. The append and submit callbacks receive their own contexts. emit may only be
+	// called from within the returned append or submit callbacks.
+	//
+	// Return an error only for fatal setup failures that must abort the builder job entirely. All
+	// other errors must be surfaced by emitting job requests with the appropriate generation
+	// status.
+	BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -135,6 +158,8 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 	switch config.Type.(type) {
 	case *flex.RemoteStorageTarget_S3_:
 		return newS3(ctx, config, mountPoint)
+	case *flex.RemoteStorageTarget_Xtreemstore:
+		return newXtreemstore(ctx, config, mountPoint)
 	case *flex.RemoteStorageTarget_Mock:
 		// This handles setting up a Mock RST for testing from external packages like WorkerMgr. See
 		// the documentation ion `MockClient` in mock.go for how to setup expectations.
@@ -167,6 +192,7 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 // request IDs.
 func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segment) (requests []*flex.WorkRequest) {
 	request := job.GetRequest()
+	delayExecution := job.Request.GetDelayExecution()
 
 	// Ensure when adding new fields that all reference types are cloned to ensure WRs are
 	// initialized properly and don't share references with anything else. Otherwise this can lead
@@ -188,6 +214,10 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Type:                &flex.WorkRequest_Builder{Builder: proto.Clone(request.GetBuilder()).(*flex.BuilderJob)},
 			Priority:            new(request.GetPriority()),
 		}
+		if delayExecution != nil {
+			jobBuilderWorkRequest.SetDelayExecution(proto.Clone(delayExecution).(*durationpb.Duration))
+		}
+
 		return []*flex.WorkRequest{jobBuilderWorkRequest}
 	}
 
@@ -205,6 +235,9 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			RemoteStorageTarget: request.GetRemoteStorageTarget(),
 			StubLocal:           request.GetStubLocal(),
 			Priority:            new(request.GetPriority()),
+		}
+		if delayExecution != nil {
+			wr.SetDelayExecution(proto.Clone(delayExecution).(*durationpb.Duration))
 		}
 
 		switch request.WhichType() {
@@ -258,7 +291,14 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 //
 // A returned error indicates that one or more job request were not able to be built. However, if
 // a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
+func BuildJobRequests(
+	ctx context.Context,
+	rstMap map[uint32]Provider,
+	mountPoint filesystem.Provider,
+	inMountPath string,
+	remotePath string,
+	cfg *flex.JobRequestCfg,
+) ([]*beeremote.JobRequest, error) {
 	keepLock := false
 	lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
 
@@ -339,7 +379,6 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 				keepLock = true
 			}
 		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
-
 		requests = append(requests, request)
 	}
 
