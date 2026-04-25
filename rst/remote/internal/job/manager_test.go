@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -26,11 +28,18 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
 	testDBBasePath = "/tmp"
 )
+
+// counterKey identifies a job counter dimension (state label + RST ID).
+type counterKey struct {
+	state string
+	rstID int
+}
 
 // Helper function to create a temporary path for testing under the provided
 // path. Returns the full path that should be used for BadgerDB and a function
@@ -996,15 +1005,28 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	t.Helper()
 	core, observed := observer.New(zapcore.DebugLevel)
 	noopMeter := noop.NewMeterProvider().Meter("test")
+	jobRequests, err := noopMeter.Int64Counter("test.requests")
+	require.NoError(t, err)
+	workRequests, err := noopMeter.Int64Counter("test.work")
+	require.NoError(t, err)
 	jobTerminal, err := noopMeter.Int64Counter("test.terminal")
 	require.NoError(t, err)
 	jobDuration, err := noopMeter.Float64Histogram("test.duration")
 	require.NoError(t, err)
+	jobCount, err := noopMeter.Int64UpDownCounter("test.count")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	return &Manager{
-		log: &logger.Logger{Logger: zap.New(core)},
+		log:       &logger.Logger{Logger: zap.New(core)},
+		ctx:       ctx,
+		ctxCancel: cancel,
 		metrics: managerMetrics{
-			jobTerminal: jobTerminal,
-			jobDuration: jobDuration,
+			jobRequests:  jobRequests,
+			workRequests: workRequests,
+			jobTerminal:  jobTerminal,
+			jobDuration:  jobDuration,
+			jobCount:     jobCount,
 		},
 	}, observed
 }
@@ -1126,105 +1148,818 @@ func TestJobStateString(t *testing.T) {
 	}
 }
 
-// TestCollectJobCounts verifies that collectJobCounts emits the correct per-(state, rst_id)
-// counts and that it skips observation before the manager is ready.
-func TestCollectJobCounts(t *testing.T) {
+// newCountingManager creates a Manager backed by a real Badger pathStore and a
+// real OTel ManualReader, suitable for verifying counter behavior. It does NOT
+// start the manager or wire up a workerManager — callers invoke methods directly.
+func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()) {
+	t.Helper()
 	tmpPath, cleanupPath, err := tempPathForTesting(testDBBasePath)
 	require.NoError(t, err)
-	defer cleanupPath(t)
 
-	// Set up a real OTel SDK meter with a ManualReader so we can read back observations.
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { require.NoError(t, mp.Shutdown(context.Background())) }()
-	meter := mp.Meter("test")
 
-	jobCount, err := meter.Int64ObservableGauge("beeremote.job.count")
+	meter := mp.Meter("job")
+	jobTerminal, err := meter.Int64Counter("beeremote.job.terminal")
+	require.NoError(t, err)
+	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
+	require.NoError(t, err)
+	jobCount, err := meter.Int64UpDownCounter("beeremote.job.count")
 	require.NoError(t, err)
 
-	// Build a minimal Manager with a real pathStore.
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
 	pathStore, closeDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, closeDB()) }()
 
+	noopMeter := noop.NewMeterProvider().Meter("noop")
+	jobRequests, err := noopMeter.Int64Counter("noop.requests")
+	require.NoError(t, err)
+	workRequests, err := noopMeter.Int64Counter("noop.work")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		log:       &logger.Logger{Logger: zap.NewNop()},
+		ctx:       ctx,
+		ctxCancel: cancel,
 		pathStore: pathStore,
-		metrics:   managerMetrics{jobCount: jobCount},
+		metrics: managerMetrics{
+			jobRequests:  jobRequests,
+			workRequests: workRequests,
+			jobTerminal:  jobTerminal,
+			jobDuration:  jobDuration,
+			jobCount:     jobCount,
+		},
+		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
+	m.ready = true
 
-	// Before ready: callback must emit nothing.
-	_, regErr := meter.RegisterCallback(m.collectJobCounts, jobCount)
-	require.NoError(t, regErr)
+	cleanup := func() {
+		cancel()
+		require.NoError(t, mp.Shutdown(context.Background()))
+		require.NoError(t, closeDB())
+		cleanupPath(t)
+	}
+	return m, reader, cleanup
+}
 
+// jobCounterValues collects metric data and returns a map of (state, rstID) → value
+// for the beeremote.job.count UpDownCounter.
+func jobCounterValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
+	t.Helper()
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
-	assert.Empty(t, gaugeDataPoints(t, rm, "beeremote.job.count"), "no observations expected before ready")
 
-	// Mark ready and insert test jobs.
-	m.readyMu.Lock()
-	m.ready = true
-	m.readyMu.Unlock()
+	result := make(map[counterKey]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.job.count" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "beeremote.job.count should be a Sum[int64] (UpDownCounter)")
+			for _, dp := range data.DataPoints {
+				s, _ := dp.Attributes.Value(attrState)
+				r, _ := dp.Attributes.Value(attrRSTID)
+				result[counterKey{s.AsString(), int(r.AsInt64())}] = dp.Value
+			}
+		}
+	}
+	return result
+}
 
-	insertJob := func(path string, rstID uint32, state beeremote.Job_State) {
-		_, entry, commit, err := pathStore.CreateAndLockEntry(path)
+// TestJobCounterOnDelete verifies that explicitly deleting a terminal job
+// decrements the counter for its state and RST ID (scenarios 13 and 14).
+func TestJobCounterOnDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state beeremote.Job_State
+	}{
+		{"completed", beeremote.Job_COMPLETED},
+		{"cancelled", beeremote.Job_CANCELLED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reader, cleanup := newCountingManager(t)
+			defer cleanup()
+
+			// Insert a terminal job directly into the store.
+			_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
+			require.NoError(t, err)
+			entry.Value = map[string]*Job{
+				"job-1": {
+					Job: beeremote.Job_builder{
+						Id:      "job-1",
+						Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+						Status:  beeremote.Job_Status_builder{State: tc.state}.Build(),
+					}.Build(),
+				},
+			}
+			require.NoError(t, commit())
+
+			// Simulate what the counter tracks: +1 for the added job.
+			stateStr := jobStateString(tc.state)
+			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(1)))
+
+			// Delete the job.
+			req := beeremote.UpdateJobsRequest_builder{
+				Path:        "/test/file",
+				NewState:    beeremote.UpdateJobsRequest_DELETED,
+				ForceUpdate: true,
+			}.Build()
+			resp, err := m.UpdateJobs(req)
+			require.NoError(t, err)
+			require.True(t, resp.GetOk(), resp.GetMessage())
+
+			counts := jobCounterValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{stateStr, 1}], "counter should be zero after delete")
+		})
+	}
+}
+
+// TestJobCounterNoopTransitions verifies that operations that do not change job
+// state do not modify the counter (scenarios 15 and 16).
+func TestJobCounterNoopTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		state       beeremote.Job_State
+		newState    beeremote.UpdateJobsRequest_NewState
+		forceUpdate bool
+	}{
+		// Already cancelled + no force → returned as success with a warning; state unchanged.
+		{"cancelled_noop", beeremote.Job_CANCELLED, beeremote.UpdateJobsRequest_CANCELLED, false},
+		// Completed + no force cancel → ok=true but state unchanged (not a semantic rejection).
+		{"completed_cancel_noop", beeremote.Job_COMPLETED, beeremote.UpdateJobsRequest_CANCELLED, false},
+		// Offloaded + no force cancel → ok=true but state unchanged.
+		{"offloaded_cancel_noop", beeremote.Job_OFFLOADED, beeremote.UpdateJobsRequest_CANCELLED, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reader, cleanup := newCountingManager(t)
+			defer cleanup()
+
+			_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
+			require.NoError(t, err)
+			entry.Value = map[string]*Job{
+				"job-1": {
+					Job: beeremote.Job_builder{
+						Id:      "job-1",
+						Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+						Status:  beeremote.Job_Status_builder{State: tc.state}.Build(),
+					}.Build(),
+				},
+			}
+			require.NoError(t, commit())
+
+			stateStr := jobStateString(tc.state)
+			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(1)))
+
+			req := beeremote.UpdateJobsRequest_builder{
+				Path:        "/test/file",
+				NewState:    tc.newState,
+				ForceUpdate: tc.forceUpdate,
+			}.Build()
+			resp, err := m.UpdateJobs(req)
+			require.NoError(t, err)
+			assert.True(t, resp.GetOk(), "no-op update should return ok=true")
+			require.Len(t, resp.GetResults(), 1)
+			assert.Equal(t, tc.state, resp.GetResults()[0].GetJob().GetStatus().GetState(), "job state must not change for a no-op transition")
+
+			counts := jobCounterValues(t, reader)
+			assert.Equal(t, int64(1), counts[counterKey{stateStr, 1}], "counter must not change for a no-op transition")
+		})
+	}
+}
+
+// TestJobCounterRSTIsolation verifies that counters for different RST IDs never
+// bleed into each other (scenario 18).
+func TestJobCounterRSTIsolation(t *testing.T) {
+	m, reader, cleanup := newCountingManager(t)
+	defer cleanup()
+
+	addJob := func(path, id string, rstID uint32, state beeremote.Job_State) {
+		_, entry, commit, err := m.pathStore.CreateAndLockEntry(path)
 		if err == kvstore.ErrEntryAlreadyExistsInDB {
-			entry, commit, err = pathStore.GetAndLockEntry(path)
+			entry, commit, err = m.pathStore.GetAndLockEntry(path)
 		}
 		require.NoError(t, err)
 		if entry.Value == nil {
 			entry.Value = make(map[string]*Job)
 		}
-		jobID := strconv.Itoa(len(entry.Value))
-		entry.Value[jobID] = &Job{
+		entry.Value[id] = &Job{
 			Job: beeremote.Job_builder{
-				Request: beeremote.JobRequest_builder{RemoteStorageTarget: rstID}.Build(),
+				Id:      id,
+				Request: beeremote.JobRequest_builder{Path: path, RemoteStorageTarget: rstID}.Build(),
 				Status:  beeremote.Job_Status_builder{State: state}.Build(),
 			}.Build(),
 		}
 		require.NoError(t, commit())
+		stateStr := jobStateString(state)
+		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(int(rstID))))
 	}
 
-	// RST 1: 2 RUNNING, 1 FAILED. RST 2: 1 COMPLETED.
-	insertJob("/a", 1, beeremote.Job_RUNNING)
-	insertJob("/b", 1, beeremote.Job_RUNNING)
-	insertJob("/c", 1, beeremote.Job_FAILED)
-	insertJob("/d", 2, beeremote.Job_COMPLETED)
+	addJob("/a", "j1", 1, beeremote.Job_SCHEDULED)
+	addJob("/b", "j2", 1, beeremote.Job_SCHEDULED)
+	addJob("/c", "j3", 2, beeremote.Job_COMPLETED)
 
-	rm = metricdata.ResourceMetrics{}
-	require.NoError(t, reader.Collect(context.Background(), &rm))
-	points := gaugeDataPoints(t, rm, "beeremote.job.count")
+	counts := jobCounterValues(t, reader)
+	assert.Equal(t, int64(2), counts[counterKey{"scheduled", 1}])
+	assert.Equal(t, int64(1), counts[counterKey{"completed", 2}])
+	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 2}], "RST 2 should have no scheduled jobs")
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "RST 1 should have no completed jobs")
 
-	type key struct {
-		state string
-		rstID int
-	}
-	observed := make(map[key]int64)
-	for _, dp := range points {
-		state, _ := dp.Attributes.Value(attrState)
-		rstID, _ := dp.Attributes.Value(attrRSTID)
-		observed[key{state.AsString(), int(rstID.AsInt64())}] = dp.Value
-	}
+	// Delete the RST-2 completed job via the production UpdateJobs path and
+	// verify RST-1 counters are unaffected. ForceUpdate bypasses the "don't
+	// delete completed jobs" guard.
+	delResp, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+		Path:        "/c",
+		NewState:    beeremote.UpdateJobsRequest_DELETED,
+		ForceUpdate: true,
+	}.Build())
+	require.NoError(t, err)
+	require.True(t, delResp.GetOk(), delResp.GetMessage())
 
-	assert.Equal(t, int64(2), observed[key{"running", 1}])
-	assert.Equal(t, int64(1), observed[key{"failed", 1}])
-	assert.Equal(t, int64(1), observed[key{"completed", 2}])
-	assert.Len(t, observed, 3, "unexpected extra label sets observed")
+	counts = jobCounterValues(t, reader)
+	assert.Equal(t, int64(2), counts[counterKey{"scheduled", 1}], "RST 1 scheduled count unchanged after RST 2 deletion")
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 2}], "RST 2 completed count should be zero after deletion")
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "RST 1 completed count must still be zero (no cross-RST bleed)")
 }
 
-// gaugeDataPoints extracts the data points from an Int64 gauge named metricName
-// from a ResourceMetrics snapshot.
-func gaugeDataPoints(t *testing.T, rm metricdata.ResourceMetrics, metricName string) []metricdata.DataPoint[int64] {
-	t.Helper()
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == metricName {
-				data, ok := m.Data.(metricdata.Gauge[int64])
-				require.True(t, ok, "metric %q is not a Gauge[int64]", metricName)
-				return data.DataPoints
-			}
-		}
+// TestJobCounterOnSubmitAndWork verifies counter behavior across the full
+// SubmitJobRequest → UpdateWork lifecycle (scenarios 1, 6, 7, 8, 9).
+func TestJobCounterOnSubmitAndWork(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		workState     flex.Work_State
+		expectedState beeremote.Job_State
+	}{
+		{"completed", flex.Work_COMPLETED, beeremote.Job_COMPLETED},
+		{"cancelled", flex.Work_CANCELLED, beeremote.Job_CANCELLED},
+		{"failed", flex.Work_FAILED, beeremote.Job_FAILED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workerConfigs := []worker.Config{{
+				ID:                  "0",
+				Name:                "test-node-0",
+				Type:                worker.Mock,
+				MaxReconnectBackOff: 5,
+				MockConfig: worker.MockConfig{
+					Expectations: []worker.MockExpectation{
+						{MethodName: "connect", ReturnArgs: []any{false, nil}},
+						{
+							MethodName: "SubmitWork",
+							Args:       []any{mock.Anything},
+							ReturnArgs: []any{
+								flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil,
+							},
+						},
+						{MethodName: "disconnect", ReturnArgs: []any{nil}},
+					},
+				},
+			}}
+			mountPoint := filesystem.NewMockFS()
+			mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+			m, reader, cleanup := newFullCountingManager(t, workerConfigs, []*flex.RemoteStorageTarget{
+				flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+			}, mountPoint, Config{})
+			defer cleanup()
+
+			jr := beeremote.JobRequest_builder{
+				Path:                "/test/myfile",
+				Name:                "test",
+				Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+				RemoteStorageTarget: 1,
+			}.Build()
+
+			// Baseline: all counters start at zero.
+			counts := jobCounterValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "baseline: counter must start at zero")
+
+			js, err := m.SubmitJobRequest(jr)
+			require.NoError(t, err)
+
+			// After submit: should be +1 scheduled.
+			counts = jobCounterValues(t, reader)
+			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should be counted as scheduled after submit")
+
+			// Send first work result — job should still be scheduled (not all WRs done).
+			require.NoError(t, m.UpdateWork(flex.Work_builder{
+				Path: js.GetJob().GetRequest().GetPath(), JobId: js.GetJob().GetId(), RequestId: "0",
+				Status: flex.Work_Status_builder{State: tc.workState}.Build(), Parts: []*flex.Work_Part{},
+			}.Build()))
+
+			counts = jobCounterValues(t, reader)
+			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should still be scheduled after first WR")
+
+			// Send second (final) work result — job should transition.
+			require.NoError(t, m.UpdateWork(flex.Work_builder{
+				Path: js.GetJob().GetRequest().GetPath(), JobId: js.GetJob().GetId(), RequestId: "1",
+				Status: flex.Work_Status_builder{State: tc.workState}.Build(), Parts: []*flex.Work_Part{},
+			}.Build()))
+
+			expectedStateStr := jobStateString(tc.expectedState)
+			counts = jobCounterValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count should drop to 0 after terminal WRs")
+			assert.Equal(t, int64(1), counts[counterKey{expectedStateStr, 1}], "job should be counted as %s", expectedStateStr)
+		})
 	}
-	return nil
+}
+
+// TestJobCounterMixedWorkResults verifies that a job whose work requests reach
+// different terminal states is counted as unknown (scenario 9).
+func TestJobCounterMixedWorkResults(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "SubmitWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}, mountPoint, Config{})
+	defer cleanup()
+
+	jr := beeremote.JobRequest_builder{
+		Path:                "/test/myfile",
+		Name:                "test",
+		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+	js, err := m.SubmitJobRequest(jr)
+	require.NoError(t, err)
+
+	// Send mismatched terminal results: WR 0 completes, WR 1 is cancelled.
+	require.NoError(t, m.UpdateWork(flex.Work_builder{
+		Path: js.GetJob().GetRequest().GetPath(), JobId: js.GetJob().GetId(), RequestId: "0",
+		Status: flex.Work_Status_builder{State: flex.Work_COMPLETED}.Build(), Parts: []*flex.Work_Part{},
+	}.Build()))
+	require.NoError(t, m.UpdateWork(flex.Work_builder{
+		Path: js.GetJob().GetRequest().GetPath(), JobId: js.GetJob().GetId(), RequestId: "1",
+		Status: flex.Work_Status_builder{State: flex.Work_CANCELLED}.Build(), Parts: []*flex.Work_Part{},
+	}.Build()))
+
+	counts := jobCounterValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}])
+	assert.Equal(t, int64(1), counts[counterKey{"unknown", 1}], "mixed WR states should yield UNKNOWN job")
+}
+
+// TestJobCounterOnSubmitSentinelErrors verifies Add(+1) is called for the
+// special-case job additions in SubmitJobRequest (scenarios 2–5). Each
+// sub-test gets its own manager and reader so counter state does not
+// accumulate across cases.
+func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
+	// No SubmitWork expectation: sentinel paths never reach the worker.
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}
+
+	for _, tc := range []struct {
+		name          string
+		genStatus     *beeremote.JobRequest_GenerationStatus
+		expectedState string
+		expectedErr   error
+	}{
+		{
+			name: "already_complete",
+			genStatus: &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+				Message: "2024-01-01T00:00:00Z",
+			},
+			expectedState: "completed",
+			expectedErr:   rst.ErrJobAlreadyComplete,
+		},
+		{
+			name: "already_offloaded",
+			genStatus: &beeremote.JobRequest_GenerationStatus{
+				State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
+			},
+			expectedState: "offloaded",
+			expectedErr:   rst.ErrJobAlreadyOffloaded,
+		},
+		{
+			name: "failed_precondition",
+			genStatus: &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: "test precondition failure",
+			},
+			expectedState: "cancelled",
+			expectedErr:   rst.ErrJobFailedPrecondition,
+		},
+		{
+			name: "generic_error",
+			genStatus: &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_ERROR,
+				Message: "test error",
+			},
+			expectedState: "failed",
+			expectedErr:   nil, // generic errors are not sentinel typed
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, filesystem.NewMockFS(), Config{})
+			defer cleanup()
+
+			req := &beeremote.JobRequest{
+				Path:                "/sentinel/" + tc.name,
+				RemoteStorageTarget: 1,
+				Type:                &beeremote.JobRequest_Mock{Mock: &flex.MockJob{NumTestSegments: 1}},
+			}
+			req.SetGenerationStatus(tc.genStatus)
+
+			_, err := m.SubmitJobRequest(req)
+			if tc.expectedErr != nil {
+				require.ErrorIs(t, err, tc.expectedErr)
+			} else {
+				require.Error(t, err, "sentinel paths always return a non-nil error")
+			}
+
+			counts := jobCounterValues(t, reader)
+			assert.Equal(t, int64(1), counts[counterKey{tc.expectedState, 1}],
+				"job should be counted as %s after sentinel error %s", tc.expectedState, tc.name)
+		})
+	}
+}
+
+// newFullCountingManager creates a Manager wired with a real workerManager
+// and a real OTel ManualReader. It is used for counter tests that need to
+// exercise code paths requiring workerManager (cancel, force-cancel, etc.).
+func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteStorageTargets []*flex.RemoteStorageTarget, mountPoint filesystem.Provider, cfg Config) (*Manager, *sdkmetric.ManualReader, func()) {
+	t.Helper()
+
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
+
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	tmpPath, cleanupPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	meter := mp.Meter("job")
+	jobRequests, err := meter.Int64Counter("beeremote.job.requests")
+	require.NoError(t, err)
+	workRequestsMeter, err := meter.Int64Counter("beeremote.work.requests")
+	require.NoError(t, err)
+	jobTerminal, err := meter.Int64Counter("beeremote.job.terminal")
+	require.NoError(t, err)
+	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
+	require.NoError(t, err)
+	jobCount, err := meter.Int64UpDownCounter("beeremote.job.count")
+	require.NoError(t, err)
+
+	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
+	pathStore, closeDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{
+		log:           log,
+		ctx:           ctx,
+		ctxCancel:     cancel,
+		config:        cfg,
+		pathStore:     pathStore,
+		workerManager: workerManager,
+		metrics: managerMetrics{
+			jobRequests:  jobRequests,
+			workRequests: workRequestsMeter,
+			jobTerminal:  jobTerminal,
+			jobDuration:  jobDuration,
+			jobCount:     jobCount,
+		},
+		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
+	}
+	m.ready = true
+
+	cleanup := func() {
+		workerManager.Stop()
+		cancel()
+		require.NoError(t, mp.Shutdown(context.Background()))
+		require.NoError(t, closeDB())
+		cleanupPath(t)
+	}
+	return m, reader, cleanup
+}
+
+// TestJobCounterCancelFromFailed verifies counter behavior when cancelling a job
+// that is already in FAILED state (scenario 10: RST reachable → CANCELLED;
+// scenario 11: RST gone → stays FAILED, no counter change).
+func TestJobCounterCancelFromFailed(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}
+
+	t.Run("scenario10_rst_reachable", func(t *testing.T) {
+		m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, filesystem.NewMockFS(), Config{})
+		defer cleanup()
+
+		// Insert a FAILED job directly and set the counter. The Mock job type
+		// is required so that the Mock RST's CompleteWorkRequests returns nil.
+		_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/failed")
+		require.NoError(t, err)
+		entry.Value = map[string]*Job{
+			"job-1": {
+				Job: beeremote.Job_builder{
+					Id:      "job-1",
+					Request: beeremote.JobRequest_builder{Path: "/test/failed", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
+					Status:  beeremote.Job_Status_builder{State: beeremote.Job_FAILED}.Build(),
+				}.Build(),
+				WorkResults: map[string]worker.WorkResult{},
+			},
+		}
+		require.NoError(t, commit())
+		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("failed"), attrRSTID.Int(1)))
+
+		// Cancel it (RST is reachable — the Mock RST supports abort).
+		req := beeremote.UpdateJobsRequest_builder{
+			Path:     "/test/failed",
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build()
+		resp, err := m.UpdateJobs(req)
+		require.NoError(t, err)
+		require.True(t, resp.GetOk(), resp.GetMessage())
+		assert.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
+
+		counts := jobCounterValues(t, reader)
+		assert.Equal(t, int64(0), counts[counterKey{"failed", 1}], "failed count must drop to 0 after cancel")
+		assert.Equal(t, int64(1), counts[counterKey{"cancelled", 1}], "cancelled count must be 1 after cancel")
+	})
+
+	t.Run("scenario11_rst_gone", func(t *testing.T) {
+		m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, filesystem.NewMockFS(), Config{})
+		defer cleanup()
+
+		// Insert a FAILED job and set the counter.
+		_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/failed")
+		require.NoError(t, err)
+		entry.Value = map[string]*Job{
+			"job-1": {
+				Job: beeremote.Job_builder{
+					Id:      "job-1",
+					Request: beeremote.JobRequest_builder{Path: "/test/failed", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
+					Status:  beeremote.Job_Status_builder{State: beeremote.Job_FAILED}.Build(),
+				}.Build(),
+				WorkResults: map[string]worker.WorkResult{},
+			},
+		}
+		require.NoError(t, commit())
+		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("failed"), attrRSTID.Int(1)))
+
+		// Remove the RST so the cancel path detects it is gone.
+		delete(m.workerManager.RemoteStorageTargets, 1)
+
+		req := beeremote.UpdateJobsRequest_builder{
+			Path:     "/test/failed",
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build()
+		resp, err := m.UpdateJobs(req)
+		require.NoError(t, err)
+		require.False(t, resp.GetOk(), "cancel should fail when RST is gone")
+		assert.Equal(t, beeremote.Job_FAILED, resp.GetResults()[0].GetJob().GetStatus().GetState())
+
+		counts := jobCounterValues(t, reader)
+		assert.Equal(t, int64(1), counts[counterKey{"failed", 1}], "failed count must stay at 1 when RST is gone")
+		assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must stay at 0 when RST is gone")
+
+		// Verify the persisted state was not modified.
+		stored, releaseFn, err := m.pathStore.GetAndLockEntry("/test/failed")
+		require.NoError(t, err)
+		defer func() { require.NoError(t, releaseFn()) }()
+		require.Len(t, stored.Value, 1)
+		assert.Equal(t, beeremote.Job_FAILED, stored.Value["job-1"].GetStatus().GetState(),
+			"persisted state must remain FAILED after failed cancel")
+	})
+}
+
+// TestJobCounterForceCancelUnknown verifies that force-cancelling an UNKNOWN job
+// transitions the counter from unknown to cancelled (scenario 12).
+func TestJobCounterForceCancelUnknown(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "UpdateWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{
+						flex.Work_Status_builder{State: flex.Work_CANCELLED}.Build(), nil,
+					},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}
+
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, filesystem.NewMockFS(), Config{})
+	defer cleanup()
+
+	// Insert an UNKNOWN job with one work result (needed for UpdateJob call).
+	// The Mock job type is required so CompleteWorkRequests returns nil.
+	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/unknown")
+	require.NoError(t, err)
+	entry.Value = map[string]*Job{
+		"job-1": {
+			Job: beeremote.Job_builder{
+				Id:      "job-1",
+				Request: beeremote.JobRequest_builder{Path: "/test/unknown", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_UNKNOWN}.Build(),
+			}.Build(),
+			WorkResults: map[string]worker.WorkResult{
+				"wr-0": {WorkResult: flex.Work_builder{
+					Path:      "/test/unknown",
+					JobId:     "job-1",
+					RequestId: "wr-0",
+					Status:    flex.Work_Status_builder{State: flex.Work_UNKNOWN}.Build(),
+					Parts:     []*flex.Work_Part{},
+				}.Build()},
+			},
+		},
+	}
+	require.NoError(t, commit())
+	m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("unknown"), attrRSTID.Int(1)))
+
+	req := beeremote.UpdateJobsRequest_builder{
+		Path:        "/test/unknown",
+		NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+		ForceUpdate: true,
+	}.Build()
+	resp, err := m.UpdateJobs(req)
+	require.NoError(t, err)
+	require.True(t, resp.GetOk(), resp.GetMessage())
+	assert.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
+
+	counts := jobCounterValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "unknown count must drop to 0 after force-cancel")
+	assert.Equal(t, int64(1), counts[counterKey{"cancelled", 1}], "cancelled count must be 1 after force-cancel")
+}
+
+// TestJobCounterGC verifies that the GC path in SubmitJobRequest decrements the
+// counter for each historical terminal job it removes (scenario 17).
+func TestJobCounterGC(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "SubmitWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/file", make([]byte, 10), 0644, false)
+
+	// MinJobEntriesPerRST=1, MaxJobEntriesPerRST=2: GC triggers when len>2,
+	// deletes jobsForRST[:MinJobEntriesPerRST+1] = 2 oldest entries.
+	cfg := Config{MinJobEntriesPerRST: 1, MaxJobEntriesPerRST: 2}
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, mountPoint, cfg)
+	defer cleanup()
+
+	// Pre-insert 3 terminal completed jobs for the same path+RST so GC triggers on next submit.
+	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
+	require.NoError(t, err)
+	entry.Value = map[string]*Job{}
+	for i := range 3 {
+		id := strconv.Itoa(i)
+		entry.Value[id] = &Job{
+			Job: beeremote.Job_builder{
+				Id:      id,
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_COMPLETED}.Build(),
+				Created: &timestamppb.Timestamp{Seconds: int64(i)},
+			}.Build(),
+		}
+		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("completed"), attrRSTID.Int(1)))
+	}
+	require.NoError(t, commit())
+
+	// Baseline: 3 completed jobs tracked.
+	counts := jobCounterValues(t, reader)
+	assert.Equal(t, int64(3), counts[counterKey{"completed", 1}], "baseline: 3 completed jobs before GC")
+
+	// Submit a new job — GC fires and removes 2 oldest, then new job is added as scheduled.
+	jr := beeremote.JobRequest_builder{
+		Path:                "/test/file",
+		Name:                "new job",
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+	_, err = m.SubmitJobRequest(jr)
+	require.NoError(t, err)
+
+	counts = jobCounterValues(t, reader)
+	// GC deleted 2 completed jobs: 3 - 2 = 1 remaining, plus new job is scheduled.
+	assert.Equal(t, int64(1), counts[counterKey{"completed", 1}], "GC must decrement counter for 2 deleted completed jobs")
+	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "new submitted job should be counted as scheduled")
+
+	// Verify GC removed the two oldest jobs (IDs "0" and "1") and kept the newest ("2").
+	storedEntry, releaseFn, err := m.pathStore.GetAndLockEntry("/test/file")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, releaseFn()) }()
+	assert.NotContains(t, storedEntry.Value, "0", "oldest job (id=0) must have been GC'd")
+	assert.NotContains(t, storedEntry.Value, "1", "second oldest job (id=1) must have been GC'd")
+	assert.Contains(t, storedEntry.Value, "2", "newest historical job (id=2) must be retained")
+}
+
+// TestJobCounterOnSubmitWorkError verifies that when the worker returns an error
+// from SubmitWork, the counter is incremented at UNKNOWN (not "scheduled").
+//
+// NOTE: this test takes ~4s. assignToLeastBusyWorker (pool.go) performs
+// 4 retry iterations each sleeping 1s when all workers return errors.
+// This is the real production retry path; there is no shortcut.
+func TestJobCounterOnSubmitWorkError(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "SubmitWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{nil, fmt.Errorf("simulated submit failure")},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}, mountPoint, Config{})
+	defer cleanup()
+
+	jr := beeremote.JobRequest_builder{
+		Path:                "/test/myfile",
+		Name:                "test",
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+
+	_, err := m.SubmitJobRequest(jr)
+	require.Error(t, err, "SubmitJobRequest must return an error when SubmitWork fails")
+
+	counts := jobCounterValues(t, reader)
+	assert.Equal(t, int64(1), counts[counterKey{"unknown", 1}], "job should be counted as unknown when SubmitWork error leads to failed cancellation cleanup")
+	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count must be zero after SubmitWork error")
+	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must be zero: job lands in UNKNOWN, not CANCELLED, when SubmitWork fails")
 }
