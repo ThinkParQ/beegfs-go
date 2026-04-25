@@ -42,7 +42,7 @@ type managerMetrics struct {
 	workRequests metric.Int64Counter
 	jobTerminal  metric.Int64Counter
 	jobDuration  metric.Float64Histogram
-	jobCount     metric.Int64ObservableGauge
+	jobCount     metric.Int64UpDownCounter
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -151,7 +151,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		metric.WithDescription("Time from job creation to terminal state"),
 		metric.WithUnit("s"),
 	)
-	jobCount, _ := meter.Int64ObservableGauge("beeremote.job.count",
+	jobCount, _ := meter.Int64UpDownCounter("beeremote.job.count",
 		metric.WithDescription("Current number of jobs in each state"),
 		metric.WithUnit("{job}"),
 	)
@@ -178,59 +178,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 			jobCount:     jobCount,
 		},
 	}
-	if _, err := meter.RegisterCallback(m.collectJobCounts, jobCount); err != nil {
-		log.Warn("failed to register job count gauge callback", zap.Error(err))
-	}
 	return m
-}
-
-// collectJobCounts is an OTel observable gauge callback that iterates the job
-// store and reports the current count of jobs per state and RST ID.
-func (m *Manager) collectJobCounts(_ context.Context, o metric.Observer) error {
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return nil
-	}
-
-	type stateKey struct {
-		state string
-		rstID int
-	}
-	counts := make(map[stateKey]int64)
-
-	nextEntry, cleanup, err := m.pathStore.GetEntries(kvstore.WithKeyPrefix("/"))
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	for {
-		entry, err := nextEntry()
-		if err != nil {
-			return err
-		}
-		if entry == nil {
-			break
-		}
-		for _, job := range entry.Entry.Value {
-			k := stateKey{
-				state: jobStateString(job.GetStatus().GetState()),
-				rstID: int(job.Request.GetRemoteStorageTarget()),
-			}
-			counts[k]++
-		}
-	}
-
-	for k, n := range counts {
-		o.ObserveInt64(m.metrics.jobCount, n,
-			metric.WithAttributes(
-				attrState.String(k.state),
-				attrRSTID.Int(k.rstID),
-			),
-		)
-	}
-	return nil
 }
 
 // Start handles initializing all databases and starting a goroutine that
@@ -505,7 +453,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
 	// that are idempotent it is used to check if the current request is needed. Note this is NOT
 	// set if there is a conflictingJob.
-	var lastJob *Job
+ 	var lastJob *Job
 	if len(pathEntry.Value) != 0 {
 
 		// Set if we can't start a new job due to a conflict.
@@ -545,10 +493,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// It would be inefficient if we only cleaned up one entry at a time so we set a max
 			// number of entries before we start GC.
 			if len(jobsForRST) > m.config.MaxJobEntriesPerRST {
-				// Delete old jobs based on the oldest job by creation time until we reach
-				// minJobEntriesPerRST.
+				// Delete the oldest MinJobEntriesPerRST+1 entries. The +1 accounts for the
+				// new job about to be added, so that after insertion the RST has at most
+				// len(jobsForRST)-MinJobEntriesPerRST entries remaining.
 				sortFunc()
 				for _, gcJob := range jobsForRST[:m.config.MinJobEntriesPerRST+1] {
+					m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(gcJob.GetStatus().GetState())), attrRSTID.Int(int(gcJob.Request.GetRemoteStorageTarget()))))
 					delete(pathEntry.Value, gcJob.GetId())
 				}
 			}
@@ -622,10 +572,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// deletion, forced cancellations, or manual cleanup.
 			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_OFFLOADED {
 				status := job.GetStatus()
-				pathEntry.Value[job.GetId()] = job
 				status.State = beeremote.Job_OFFLOADED
 				status.Message = "job already offloaded (detailed work requests/results are not available)"
 				pathEntry.Value[job.GetId()] = job
+				m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 				return beeremote.JobResult_builder{
 					Job:          job.Get(),
 					WorkRequests: []*flex.WorkRequest{},
@@ -657,6 +607,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				}
 
 				pathEntry.Value[job.GetId()] = job
+				m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 				return beeremote.JobResult_builder{
 					Job:          job.Get(),
 					WorkRequests: []*flex.WorkRequest{},
@@ -689,6 +640,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status.SetState(beeremote.Job_FAILED)
 			}
 			pathEntry.Value[job.GetId()] = job
+			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 			return beeremote.JobResult_builder{
 				Job:          beeremoteJob,
 				WorkRequests: rst.RecreateWorkRequests(beeremoteJob, job.GetSegments()),
@@ -704,6 +656,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
+	// Count at the resulting state (CANCELLED/FAILED on error, SCHEDULED on success) — the job is persisted above.
+	m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
 	// Decide if this concern is valid enough to do anything about.
@@ -938,6 +892,16 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	// Handle when additional cleanup is needed as part of deleting jobs:
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED {
 		for _, deletedJobID := range jobsSafeToDelete {
+			// jobsSafeToDelete is built from pathEntry under this lock, so the
+			// job is guaranteed to be present here.
+			//
+			// Two-site counter contract: updateJobState's deferred -1/+1 is a
+			// no-op for DELETED requests because it never calls status.SetState
+			// for that new-state value, so initialState == finalState in the
+			// defer. This loop is therefore the sole counter adjustment for
+			// deletion.
+			job := pathEntry.Value[deletedJobID]
+			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 			delete(pathEntry.Value, deletedJobID)
 		}
 	}
@@ -996,6 +960,15 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	status := job.GetStatus()
 	state := status.GetState()
 	initialState := state
+
+	// Update the job count gauge. Declared first (runs last in LIFO):
+	// runs after recordJobTerminal, which is declared second and fires first.
+	defer func() {
+		if finalState := status.GetState(); finalState != initialState {
+			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		}
+	}()
 
 	// Records metrics and a log only when this call transitions the job FROM a
 	// non-terminal state TO a terminal state. Force-updates that move between
@@ -1145,12 +1118,21 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	status := job.GetStatus()
 	initialState := status.GetState()
 
-	// This defer must see the job's final state after lock cleanup, which may
-	// change COMPLETED to FAILED if the lock cannot be released. It must
-	// therefore run after the lock-cleanup defer below (declared first = runs last).
+	// Defer #1 (declared first, runs last in LIFO). Lock-cleanup (defer #3,
+	// declared last, runs first) may downgrade COMPLETED→FAILED before this fires.
 	defer func() {
 		if !isTerminalState(initialState) && isTerminalState(status.GetState()) {
 			m.recordJobTerminal(job, terminalStateString(status.GetState()))
+		}
+	}()
+
+	// Update the job count gauge. Declared second (runs second in LIFO): after
+	// lock-cleanup has potentially downgraded COMPLETED→FAILED, and before
+	// recordJobTerminal fires — so it always sees the final committed state.
+	defer func() {
+		if finalState := status.GetState(); finalState != initialState {
+			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 		}
 	}()
 
@@ -1335,6 +1317,8 @@ func jobStateString(state beeremote.Job_State) string {
 		return "cancelled"
 	case beeremote.Job_FAILED:
 		return "failed"
+	case beeremote.Job_UNKNOWN:
+		return "unknown"
 	default:
 		return "unknown"
 	}
