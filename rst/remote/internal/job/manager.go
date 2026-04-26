@@ -42,7 +42,7 @@ type managerMetrics struct {
 	workRequests metric.Int64Counter
 	jobTerminal  metric.Int64Counter
 	jobDuration  metric.Float64Histogram
-	jobCount     metric.Int64UpDownCounter
+	jobActive    metric.Int64UpDownCounter
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -151,8 +151,8 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		metric.WithDescription("Time from job creation to terminal state"),
 		metric.WithUnit("s"),
 	)
-	jobCount, _ := meter.Int64UpDownCounter("beeremote.job.count",
-		metric.WithDescription("Current number of jobs in each state"),
+	jobActive, _ := meter.Int64UpDownCounter("beeremote.job.active",
+		metric.WithDescription("Current number of jobs in non-terminal states"),
 		metric.WithUnit("{job}"),
 	)
 
@@ -175,7 +175,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 			workRequests: workRequests,
 			jobTerminal:  jobTerminal,
 			jobDuration:  jobDuration,
-			jobCount:     jobCount,
+			jobActive:    jobActive,
 		},
 	}
 	return m
@@ -453,7 +453,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
 	// that are idempotent it is used to check if the current request is needed. Note this is NOT
 	// set if there is a conflictingJob.
- 	var lastJob *Job
+	var lastJob *Job
 	if len(pathEntry.Value) != 0 {
 
 		// Set if we can't start a new job due to a conflict.
@@ -498,7 +498,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				// len(jobsForRST)-MinJobEntriesPerRST entries remaining.
 				sortFunc()
 				for _, gcJob := range jobsForRST[:m.config.MinJobEntriesPerRST+1] {
-					m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(gcJob.GetStatus().GetState())), attrRSTID.Int(int(gcJob.Request.GetRemoteStorageTarget()))))
 					delete(pathEntry.Value, gcJob.GetId())
 				}
 			}
@@ -575,7 +574,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status.State = beeremote.Job_OFFLOADED
 				status.Message = "job already offloaded (detailed work requests/results are not available)"
 				pathEntry.Value[job.GetId()] = job
-				m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 				return beeremote.JobResult_builder{
 					Job:          job.Get(),
 					WorkRequests: []*flex.WorkRequest{},
@@ -607,7 +605,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				}
 
 				pathEntry.Value[job.GetId()] = job
-				m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 				return beeremote.JobResult_builder{
 					Job:          job.Get(),
 					WorkRequests: []*flex.WorkRequest{},
@@ -640,7 +637,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status.SetState(beeremote.Job_FAILED)
 			}
 			pathEntry.Value[job.GetId()] = job
-			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(status.GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 			return beeremote.JobResult_builder{
 				Job:          beeremoteJob,
 				WorkRequests: rst.RecreateWorkRequests(beeremoteJob, job.GetSegments()),
@@ -656,8 +652,9 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
-	// Count at the resulting state (CANCELLED/FAILED on error, SCHEDULED on success) — the job is persisted above.
-	m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+	if !isTerminalState(job.GetStatus().GetState()) {
+		m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
 	// Decide if this concern is valid enough to do anything about.
@@ -892,16 +889,6 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	// Handle when additional cleanup is needed as part of deleting jobs:
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED {
 		for _, deletedJobID := range jobsSafeToDelete {
-			// jobsSafeToDelete is built from pathEntry under this lock, so the
-			// job is guaranteed to be present here.
-			//
-			// Two-site counter contract: updateJobState's deferred -1/+1 is a
-			// no-op for DELETED requests because it never calls status.SetState
-			// for that new-state value, so initialState == finalState in the
-			// defer. This loop is therefore the sole counter adjustment for
-			// deletion.
-			job := pathEntry.Value[deletedJobID]
-			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 			delete(pathEntry.Value, deletedJobID)
 		}
 	}
@@ -961,12 +948,16 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	state := status.GetState()
 	initialState := state
 
-	// Update the job count gauge. Declared first (runs last in LIFO):
+	// Update the job active gauge. Declared first (runs last in LIFO):
 	// runs after recordJobTerminal, which is declared second and fires first.
 	defer func() {
 		if finalState := status.GetState(); finalState != initialState {
-			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			if !isTerminalState(initialState) {
+				m.metrics.jobActive.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			}
+			if !isTerminalState(finalState) {
+				m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			}
 		}
 	}()
 
@@ -1126,13 +1117,17 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 	}()
 
-	// Update the job count gauge. Declared second (runs second in LIFO): after
+	// Update the job active gauge. Declared second (runs second in LIFO): after
 	// lock-cleanup has potentially downgraded COMPLETED→FAILED, and before
 	// recordJobTerminal fires — so it always sees the final committed state.
 	defer func() {
 		if finalState := status.GetState(); finalState != initialState {
-			m.metrics.jobCount.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			if !isTerminalState(initialState) {
+				m.metrics.jobActive.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			}
+			if !isTerminalState(finalState) {
+				m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+			}
 		}
 	}()
 

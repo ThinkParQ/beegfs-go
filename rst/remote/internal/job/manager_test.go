@@ -1013,7 +1013,7 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	require.NoError(t, err)
 	jobDuration, err := noopMeter.Float64Histogram("test.duration")
 	require.NoError(t, err)
-	jobCount, err := noopMeter.Int64UpDownCounter("test.count")
+	jobActive, err := noopMeter.Int64UpDownCounter("test.active")
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1026,7 +1026,7 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 			workRequests: workRequests,
 			jobTerminal:  jobTerminal,
 			jobDuration:  jobDuration,
-			jobCount:     jobCount,
+			jobActive:    jobActive,
 		},
 	}, observed
 }
@@ -1164,7 +1164,7 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	require.NoError(t, err)
 	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
 	require.NoError(t, err)
-	jobCount, err := meter.Int64UpDownCounter("beeremote.job.count")
+	jobActive, err := meter.Int64UpDownCounter("beeremote.job.active")
 	require.NoError(t, err)
 
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
@@ -1188,7 +1188,7 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 			workRequests: workRequests,
 			jobTerminal:  jobTerminal,
 			jobDuration:  jobDuration,
-			jobCount:     jobCount,
+			jobActive:    jobActive,
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
@@ -1203,9 +1203,9 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	return m, reader, cleanup
 }
 
-// jobCounterValues collects metric data and returns a map of (state, rstID) → value
-// for the beeremote.job.count UpDownCounter.
-func jobCounterValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
+// jobActiveValues collects metric data and returns a map of (state, rstID) → value
+// for the beeremote.job.active UpDownCounter.
+func jobActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -1213,11 +1213,11 @@ func jobCounterValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterK
 	result := make(map[counterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.job.count" {
+			if m.Name != "beeremote.job.active" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.job.count should be a Sum[int64] (UpDownCounter)")
+			require.True(t, ok, "beeremote.job.active should be a Sum[int64] (UpDownCounter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -1228,8 +1228,8 @@ func jobCounterValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterK
 	return result
 }
 
-// TestJobCounterOnDelete verifies that explicitly deleting a terminal job
-// decrements the counter for its state and RST ID (scenarios 13 and 14).
+// TestJobCounterOnDelete verifies that deleting a terminal job does not affect
+// jobActive (terminal jobs are never tracked) (scenarios 13 and 14).
 func TestJobCounterOnDelete(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1256,10 +1256,6 @@ func TestJobCounterOnDelete(t *testing.T) {
 			}
 			require.NoError(t, commit())
 
-			// Simulate what the counter tracks: +1 for the added job.
-			stateStr := jobStateString(tc.state)
-			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(1)))
-
 			// Delete the job.
 			req := beeremote.UpdateJobsRequest_builder{
 				Path:        "/test/file",
@@ -1270,8 +1266,9 @@ func TestJobCounterOnDelete(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, resp.GetOk(), resp.GetMessage())
 
-			counts := jobCounterValues(t, reader)
-			assert.Equal(t, int64(0), counts[counterKey{stateStr, 1}], "counter should be zero after delete")
+			stateStr := jobStateString(tc.state)
+			counts := jobActiveValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{stateStr, 1}], "terminal job never tracked; counter must stay zero after delete")
 		})
 	}
 }
@@ -1310,7 +1307,6 @@ func TestJobCounterNoopTransitions(t *testing.T) {
 			require.NoError(t, commit())
 
 			stateStr := jobStateString(tc.state)
-			m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(1)))
 
 			req := beeremote.UpdateJobsRequest_builder{
 				Path:        "/test/file",
@@ -1323,8 +1319,8 @@ func TestJobCounterNoopTransitions(t *testing.T) {
 			require.Len(t, resp.GetResults(), 1)
 			assert.Equal(t, tc.state, resp.GetResults()[0].GetJob().GetStatus().GetState(), "job state must not change for a no-op transition")
 
-			counts := jobCounterValues(t, reader)
-			assert.Equal(t, int64(1), counts[counterKey{stateStr, 1}], "counter must not change for a no-op transition")
+			counts := jobActiveValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{stateStr, 1}], "terminal job never tracked; counter must stay zero for no-op transition")
 		})
 	}
 }
@@ -1353,16 +1349,18 @@ func TestJobCounterRSTIsolation(t *testing.T) {
 		}
 		require.NoError(t, commit())
 		stateStr := jobStateString(state)
-		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(int(rstID))))
+		if !isTerminalState(state) {
+			m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(stateStr), attrRSTID.Int(int(rstID))))
+		}
 	}
 
 	addJob("/a", "j1", 1, beeremote.Job_SCHEDULED)
 	addJob("/b", "j2", 1, beeremote.Job_SCHEDULED)
 	addJob("/c", "j3", 2, beeremote.Job_COMPLETED)
 
-	counts := jobCounterValues(t, reader)
+	counts := jobActiveValues(t, reader)
 	assert.Equal(t, int64(2), counts[counterKey{"scheduled", 1}])
-	assert.Equal(t, int64(1), counts[counterKey{"completed", 2}])
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 2}], "terminal job never tracked")
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 2}], "RST 2 should have no scheduled jobs")
 	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "RST 1 should have no completed jobs")
 
@@ -1377,9 +1375,9 @@ func TestJobCounterRSTIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, delResp.GetOk(), delResp.GetMessage())
 
-	counts = jobCounterValues(t, reader)
+	counts = jobActiveValues(t, reader)
 	assert.Equal(t, int64(2), counts[counterKey{"scheduled", 1}], "RST 1 scheduled count unchanged after RST 2 deletion")
-	assert.Equal(t, int64(0), counts[counterKey{"completed", 2}], "RST 2 completed count should be zero after deletion")
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 2}], "RST 2 completed count never tracked")
 	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "RST 1 completed count must still be zero (no cross-RST bleed)")
 }
 
@@ -1430,14 +1428,14 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			}.Build()
 
 			// Baseline: all counters start at zero.
-			counts := jobCounterValues(t, reader)
+			counts := jobActiveValues(t, reader)
 			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "baseline: counter must start at zero")
 
 			js, err := m.SubmitJobRequest(jr)
 			require.NoError(t, err)
 
 			// After submit: should be +1 scheduled.
-			counts = jobCounterValues(t, reader)
+			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should be counted as scheduled after submit")
 
 			// Send first work result — job should still be scheduled (not all WRs done).
@@ -1446,19 +1444,19 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 				Status: flex.Work_Status_builder{State: tc.workState}.Build(), Parts: []*flex.Work_Part{},
 			}.Build()))
 
-			counts = jobCounterValues(t, reader)
+			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should still be scheduled after first WR")
 
-			// Send second (final) work result — job should transition.
+			// Send second (final) work result — job transitions to terminal; no longer tracked.
 			require.NoError(t, m.UpdateWork(flex.Work_builder{
 				Path: js.GetJob().GetRequest().GetPath(), JobId: js.GetJob().GetId(), RequestId: "1",
 				Status: flex.Work_Status_builder{State: tc.workState}.Build(), Parts: []*flex.Work_Part{},
 			}.Build()))
 
 			expectedStateStr := jobStateString(tc.expectedState)
-			counts = jobCounterValues(t, reader)
+			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count should drop to 0 after terminal WRs")
-			assert.Equal(t, int64(1), counts[counterKey{expectedStateStr, 1}], "job should be counted as %s", expectedStateStr)
+			assert.Equal(t, int64(0), counts[counterKey{expectedStateStr, 1}], "terminal job not tracked in jobActive")
 		})
 	}
 }
@@ -1510,15 +1508,14 @@ func TestJobCounterMixedWorkResults(t *testing.T) {
 		Status: flex.Work_Status_builder{State: flex.Work_CANCELLED}.Build(), Parts: []*flex.Work_Part{},
 	}.Build()))
 
-	counts := jobCounterValues(t, reader)
+	counts := jobActiveValues(t, reader)
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}])
-	assert.Equal(t, int64(1), counts[counterKey{"unknown", 1}], "mixed WR states should yield UNKNOWN job")
+	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; not tracked in jobActive")
 }
 
-// TestJobCounterOnSubmitSentinelErrors verifies Add(+1) is called for the
-// special-case job additions in SubmitJobRequest (scenarios 2–5). Each
-// sub-test gets its own manager and reader so counter state does not
-// accumulate across cases.
+// TestJobCounterOnSubmitSentinelErrors verifies that sentinel-path jobs
+// (completed, offloaded, cancelled, failed) are not tracked in jobActive
+// because all sentinel states are terminal (scenarios 2–5).
 func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
 	// No SubmitWork expectation: sentinel paths never reach the worker.
 	workerConfigs := []worker.Config{{
@@ -1597,9 +1594,9 @@ func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
 				require.Error(t, err, "sentinel paths always return a non-nil error")
 			}
 
-			counts := jobCounterValues(t, reader)
-			assert.Equal(t, int64(1), counts[counterKey{tc.expectedState, 1}],
-				"job should be counted as %s after sentinel error %s", tc.expectedState, tc.name)
+			counts := jobActiveValues(t, reader)
+			assert.Equal(t, int64(0), counts[counterKey{tc.expectedState, 1}],
+				"sentinel state %s is terminal; must not be tracked in jobActive", tc.expectedState)
 		})
 	}
 }
@@ -1632,7 +1629,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	require.NoError(t, err)
 	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
 	require.NoError(t, err)
-	jobCount, err := meter.Int64UpDownCounter("beeremote.job.count")
+	jobActive, err := meter.Int64UpDownCounter("beeremote.job.active")
 	require.NoError(t, err)
 
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
@@ -1652,7 +1649,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 			workRequests: workRequestsMeter,
 			jobTerminal:  jobTerminal,
 			jobDuration:  jobDuration,
-			jobCount:     jobCount,
+			jobActive:    jobActive,
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
@@ -1707,7 +1704,6 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 			},
 		}
 		require.NoError(t, commit())
-		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("failed"), attrRSTID.Int(1)))
 
 		// Cancel it (RST is reachable — the Mock RST supports abort).
 		req := beeremote.UpdateJobsRequest_builder{
@@ -1719,16 +1715,16 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 		require.True(t, resp.GetOk(), resp.GetMessage())
 		assert.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
 
-		counts := jobCounterValues(t, reader)
-		assert.Equal(t, int64(0), counts[counterKey{"failed", 1}], "failed count must drop to 0 after cancel")
-		assert.Equal(t, int64(1), counts[counterKey{"cancelled", 1}], "cancelled count must be 1 after cancel")
+		counts := jobActiveValues(t, reader)
+		assert.Equal(t, int64(0), counts[counterKey{"failed", 1}], "FAILED is terminal; never tracked")
+		assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "CANCELLED is terminal; never tracked")
 	})
 
 	t.Run("scenario11_rst_gone", func(t *testing.T) {
 		m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, filesystem.NewMockFS(), Config{})
 		defer cleanup()
 
-		// Insert a FAILED job and set the counter.
+		// Insert a FAILED job.
 		_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/failed")
 		require.NoError(t, err)
 		entry.Value = map[string]*Job{
@@ -1742,7 +1738,6 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 			},
 		}
 		require.NoError(t, commit())
-		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("failed"), attrRSTID.Int(1)))
 
 		// Remove the RST so the cancel path detects it is gone.
 		delete(m.workerManager.RemoteStorageTargets, 1)
@@ -1756,9 +1751,9 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 		require.False(t, resp.GetOk(), "cancel should fail when RST is gone")
 		assert.Equal(t, beeremote.Job_FAILED, resp.GetResults()[0].GetJob().GetStatus().GetState())
 
-		counts := jobCounterValues(t, reader)
-		assert.Equal(t, int64(1), counts[counterKey{"failed", 1}], "failed count must stay at 1 when RST is gone")
-		assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must stay at 0 when RST is gone")
+		counts := jobActiveValues(t, reader)
+		assert.Equal(t, int64(0), counts[counterKey{"failed", 1}], "FAILED is terminal; never tracked")
+		assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "CANCELLED is terminal; never tracked")
 
 		// Verify the persisted state was not modified.
 		stored, releaseFn, err := m.pathStore.GetAndLockEntry("/test/failed")
@@ -1771,7 +1766,7 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 }
 
 // TestJobCounterForceCancelUnknown verifies that force-cancelling an UNKNOWN job
-// transitions the counter from unknown to cancelled (scenario 12).
+// does not affect jobActive — both UNKNOWN and CANCELLED are terminal (scenario 12).
 func TestJobCounterForceCancelUnknown(t *testing.T) {
 	workerConfigs := []worker.Config{{
 		ID:                  "0",
@@ -1822,7 +1817,6 @@ func TestJobCounterForceCancelUnknown(t *testing.T) {
 		},
 	}
 	require.NoError(t, commit())
-	m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("unknown"), attrRSTID.Int(1)))
 
 	req := beeremote.UpdateJobsRequest_builder{
 		Path:        "/test/unknown",
@@ -1834,13 +1828,13 @@ func TestJobCounterForceCancelUnknown(t *testing.T) {
 	require.True(t, resp.GetOk(), resp.GetMessage())
 	assert.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
 
-	counts := jobCounterValues(t, reader)
-	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "unknown count must drop to 0 after force-cancel")
-	assert.Equal(t, int64(1), counts[counterKey{"cancelled", 1}], "cancelled count must be 1 after force-cancel")
+	counts := jobActiveValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; never tracked")
+	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "CANCELLED is terminal; never tracked")
 }
 
-// TestJobCounterGC verifies that the GC path in SubmitJobRequest decrements the
-// counter for each historical terminal job it removes (scenario 17).
+// TestJobCounterGC verifies that GC removes terminal jobs from the store without
+// affecting jobActive, and that the new submitted job is tracked as scheduled (scenario 17).
 func TestJobCounterGC(t *testing.T) {
 	workerConfigs := []worker.Config{{
 		ID:                  "0",
@@ -1885,13 +1879,12 @@ func TestJobCounterGC(t *testing.T) {
 				Created: &timestamppb.Timestamp{Seconds: int64(i)},
 			}.Build(),
 		}
-		m.metrics.jobCount.Add(context.Background(), +1, metric.WithAttributes(attrState.String("completed"), attrRSTID.Int(1)))
 	}
 	require.NoError(t, commit())
 
-	// Baseline: 3 completed jobs tracked.
-	counts := jobCounterValues(t, reader)
-	assert.Equal(t, int64(3), counts[counterKey{"completed", 1}], "baseline: 3 completed jobs before GC")
+	// Baseline: terminal jobs not tracked.
+	counts := jobActiveValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "baseline: terminal jobs never tracked")
 
 	// Submit a new job — GC fires and removes 2 oldest, then new job is added as scheduled.
 	jr := beeremote.JobRequest_builder{
@@ -1903,9 +1896,8 @@ func TestJobCounterGC(t *testing.T) {
 	_, err = m.SubmitJobRequest(jr)
 	require.NoError(t, err)
 
-	counts = jobCounterValues(t, reader)
-	// GC deleted 2 completed jobs: 3 - 2 = 1 remaining, plus new job is scheduled.
-	assert.Equal(t, int64(1), counts[counterKey{"completed", 1}], "GC must decrement counter for 2 deleted completed jobs")
+	counts = jobActiveValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"completed", 1}], "completed jobs never tracked regardless of GC")
 	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "new submitted job should be counted as scheduled")
 
 	// Verify GC removed the two oldest jobs (IDs "0" and "1") and kept the newest ("2").
@@ -1918,7 +1910,7 @@ func TestJobCounterGC(t *testing.T) {
 }
 
 // TestJobCounterOnSubmitWorkError verifies that when the worker returns an error
-// from SubmitWork, the counter is incremented at UNKNOWN (not "scheduled").
+// from SubmitWork, jobActive is not incremented (UNKNOWN is terminal).
 //
 // NOTE: this test takes ~4s. assignToLeastBusyWorker (pool.go) performs
 // 4 retry iterations each sleeping 1s when all workers return errors.
@@ -1958,8 +1950,8 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 	_, err := m.SubmitJobRequest(jr)
 	require.Error(t, err, "SubmitJobRequest must return an error when SubmitWork fails")
 
-	counts := jobCounterValues(t, reader)
-	assert.Equal(t, int64(1), counts[counterKey{"unknown", 1}], "job should be counted as unknown when SubmitWork error leads to failed cancellation cleanup")
+	counts := jobActiveValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; not tracked in jobActive")
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count must be zero after SubmitWork error")
 	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must be zero: job lands in UNKNOWN, not CANCELLED, when SubmitWork fails")
 }
