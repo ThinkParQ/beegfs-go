@@ -77,7 +77,7 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 
 	logMgr := Logger{}
 
-	effectiveCfg := telemetry.Config{Enabled: false}
+	effectiveCfg := telemetry.Config{}
 	if telemetryCfg != nil {
 		effectiveCfg = *telemetryCfg
 	}

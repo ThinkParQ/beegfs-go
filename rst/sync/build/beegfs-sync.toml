@@ -41,7 +41,6 @@ tls-disable = false
 #
 
 [telemetry]
-enabled = false
 
 # [telemetry.otlp]
 # enabled = false
@@ -170,9 +169,6 @@ enabled = false
 # scraped by Prometheus. Log export via OTLP is configured independently under [telemetry.logs]
 # and does not require metrics to be enabled.
 
-# enabled: Set to true to enable metrics export. At least one of [telemetry.otlp] or
-# [telemetry.prometheus] must also be enabled.
-
 # service-name: Identifies this service in exported metrics and logs. Appears as the
 # service.name resource attribute in all telemetry data.
 
@@ -226,7 +222,7 @@ enabled = false
 
 # [telemetry.logs] — OTLP log export (independent of metrics):
 
-# enabled: Set to true to export logs via OTLP. Does not require telemetry.enabled.
+# enabled: Set to true to export logs via OTLP.
 
 # protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same
 # semantics as the corresponding [telemetry.otlp] fields, but applied to log export.
