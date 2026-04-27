@@ -59,7 +59,6 @@ func TestNewWithTelemetryEnabled(t *testing.T) {
 	// endpoint is reachable.
 	port := findFreePort(t)
 	telCfg := &telemetry.Config{
-		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
@@ -88,16 +87,6 @@ func TestNewWithTelemetryEnabled(t *testing.T) {
 	assert.Contains(t, string(body), "logger_test_counter")
 }
 
-func TestNewWithTelemetryError(t *testing.T) {
-	// An invalid telemetry config (enabled but no exporters) should propagate
-	// the telemetry.New error.
-	_, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled: true,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unable to initialize telemetry")
-}
-
 func TestWith(t *testing.T) {
 	log, err := New(Config{Type: "stdout", Level: 3}, nil)
 	require.NoError(t, err)
@@ -119,7 +108,6 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	// Verify Shutdown tears down an active telemetry provider cleanly.
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
@@ -148,7 +136,6 @@ func TestDeferredShutdown(t *testing.T) {
 	// the telemetry provider when invoked.
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
@@ -229,7 +216,7 @@ func TestUpdateConfigurationDelegatesToTelemetry(t *testing.T) {
 	// Use a zap observer so we can verify both the log level change AND that
 	// telemetry delegation happened without error (no warning logged).
 	core, logs := observer.New(zapcore.DebugLevel)
-	tp, err := telemetry.New(telemetry.Config{Enabled: false})
+	tp, err := telemetry.New(telemetry.Config{})
 	require.NoError(t, err)
 	log := &Logger{
 		Logger:    zap.New(core),
@@ -239,7 +226,7 @@ func TestUpdateConfigurationDelegatesToTelemetry(t *testing.T) {
 
 	cfg := &testFullConfig{
 		logConfig:       Config{Level: 4, Type: "stdout"},
-		telemetryConfig: telemetry.Config{Enabled: false},
+		telemetryConfig: telemetry.Config{},
 	}
 
 	err = log.UpdateConfiguration(cfg)
@@ -258,8 +245,8 @@ func TestUpdateConfigurationSkipsTelemetryWithoutConfigurer(t *testing.T) {
 	// When the config implements logger.Configurer but NOT telemetry.Configurer,
 	// UpdateConfiguration should skip telemetry delegation and still apply the
 	// log-level change from the config.
-	core, _ := observer.New(zapcore.DebugLevel)
-	tp, err := telemetry.New(telemetry.Config{Enabled: false})
+	core, logs := observer.New(zapcore.DebugLevel)
+	tp, err := telemetry.New(telemetry.Config{})
 	require.NoError(t, err)
 	log := &Logger{
 		Logger:    zap.New(core),
@@ -274,6 +261,11 @@ func TestUpdateConfigurationSkipsTelemetryWithoutConfigurer(t *testing.T) {
 	assert.NoError(t, err)
 	// The log level must be updated even though telemetry delegation was skipped.
 	assert.Equal(t, zapcore.DebugLevel, log.level.Level())
+	// No telemetry-related error should be logged when delegation is skipped.
+	for _, entry := range logs.All() {
+		assert.NotContains(t, entry.Message, "unable to update telemetry configuration",
+			"telemetry skip must not log an error")
+	}
 }
 
 func TestUpdateConfigurationTelemetryDelegationError(t *testing.T) {
@@ -282,30 +274,38 @@ func TestUpdateConfigurationTelemetryDelegationError(t *testing.T) {
 	log, err := New(Config{Type: "stdout", Level: 3}, nil)
 	require.NoError(t, err)
 
-	// Enabled=true with no exporters configured fails ValidateConfig inside
+	// An OTLP config with an invalid protocol fails ValidateConfig inside
 	// telemetry.UpdateConfiguration, which should propagate back to the caller.
 	badTelemetryCfg := &testFullConfig{
 		logConfig: Config{Level: 3, Type: "stdout"},
 		telemetryConfig: telemetry.Config{
-			Enabled: true,
-			// No OTLP or Prometheus configured — ValidateConfig will reject this.
+			OTLP: telemetry.OTLPConfig{
+				Enabled:  true,
+				Protocol: "invalid",
+				Endpoint: "localhost:4317",
+			},
 		},
 	}
 
 	err = log.UpdateConfiguration(badTelemetryCfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unable to update telemetry configuration")
+	assert.Contains(t, err.Error(), "protocol")
 }
 
-func TestNewWithOtelLogsDisabled(t *testing.T) {
-	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Logs: telemetry.LogsConfig{Enabled: false},
+func TestNewWithInvalidTelemetryConfigReturnsError(t *testing.T) {
+	// Verify that logger.New propagates a telemetry construction error to the caller.
+	// OTLP with an invalid protocol fails ValidateConfig inside telemetry.New.
+	_, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
+		OTLP: telemetry.OTLPConfig{
+			Enabled:  true,
+			Protocol: "invalid",
+			Endpoint: "localhost:4317",
+		},
 	})
-	require.NoError(t, err)
-	require.NotNil(t, log)
-	assert.Nil(t, log.LogProvider(), "log provider must be nil when logs are disabled")
-	// Sync on stdout may fail in test environments; not checked.
-	_ = log.Shutdown(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unable to initialize telemetry")
+	assert.Contains(t, err.Error(), "protocol")
 }
 
 func TestGetLevel(t *testing.T) {

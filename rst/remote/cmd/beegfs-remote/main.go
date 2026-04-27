@@ -63,7 +63,6 @@ func main() {
 	pflag.Int("log.max-size", 1000, "When log.type is 'logfile' the maximum size of the log.file in megabytes before it is rotated.")
 	pflag.Int("log.num-rotated-files", 5, "When log.type is 'logfile' the maximum number old log.file(s) to keep when log.max-size is reached and the log is rotated.")
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
-	pflag.Bool("telemetry.enabled", false, "Enable telemetry metrics export.")
 	pflag.Bool("telemetry.otlp.enabled", false, "Enable pushing metrics via OTLP.")
 	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
 	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")

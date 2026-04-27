@@ -24,7 +24,6 @@ const (
 
 // Config represents the telemetry configuration.
 type Config struct {
-	Enabled    bool             `mapstructure:"enabled"`
 	OTLP       OTLPConfig       `mapstructure:"otlp"`
 	Prometheus PrometheusConfig `mapstructure:"prometheus"`
 	Histograms HistogramConfig  `mapstructure:"histograms"`
@@ -63,8 +62,8 @@ type HistogramConfig struct {
 
 // Logs are always push-based (OTLP only) — there is no pull-based log
 // collection equivalent to Prometheus in the OTel ecosystem.
-// This config is independent of Config.Enabled: enabling logs does not
-// require enabling OTLP metrics, and they may use different endpoints.
+// Enabling logs does not require enabling OTLP metrics; they may use
+// different endpoints.
 type LogsConfig struct {
 	Enabled                bool              `mapstructure:"enabled"`
 	Protocol               string            `mapstructure:"protocol"`
@@ -80,38 +79,30 @@ type LogsConfig struct {
 
 // ValidateConfig checks telemetry configuration for consistency.
 func (c *Config) ValidateConfig() error {
-	if c.Enabled {
-		if !c.OTLP.Enabled && !c.Prometheus.Enabled {
-			return fmt.Errorf("telemetry is enabled but no exporter is configured: " +
-				"enable at least one of [telemetry.otlp] or [telemetry.prometheus]")
+	if c.OTLP.Enabled {
+		if err := validateOTLPTransport("telemetry.otlp", c.OTLP.Protocol, c.OTLP.Endpoint,
+			c.OTLP.Compression, c.OTLP.Timeout, c.OTLP.TLSDisable, c.OTLP.TLSDisableVerification); err != nil {
+			return err
 		}
-		if c.OTLP.Enabled {
-			if err := validateOTLPTransport("telemetry.otlp", c.OTLP.Protocol, c.OTLP.Endpoint,
-				c.OTLP.Compression, c.OTLP.Timeout, c.OTLP.TLSDisable, c.OTLP.TLSDisableVerification); err != nil {
-				return err
-			}
-			if c.OTLP.Interval < time.Second {
-				return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
-			}
+		if c.OTLP.Interval < time.Second {
+			return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
 		}
-		if c.Prometheus.Enabled {
-			if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
-				return fmt.Errorf("telemetry.prometheus.port must be between 1 and 65535 (got %d)", c.Prometheus.Port)
-			}
-			if c.Prometheus.Path == "" {
-				return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
-			}
-			if !c.Prometheus.TLSDisable {
-				certSet := c.Prometheus.TLSCertFile != ""
-				keySet := c.Prometheus.TLSKeyFile != ""
-				if certSet != keySet {
-					return fmt.Errorf("telemetry.prometheus: tls-cert-file and tls-key-file must both be set or both be empty")
-				}
+	}
+	if c.Prometheus.Enabled {
+		if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
+			return fmt.Errorf("telemetry.prometheus.port must be between 1 and 65535 (got %d)", c.Prometheus.Port)
+		}
+		if c.Prometheus.Path == "" {
+			return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
+		}
+		if !c.Prometheus.TLSDisable {
+			certSet := c.Prometheus.TLSCertFile != ""
+			keySet := c.Prometheus.TLSKeyFile != ""
+			if certSet != keySet {
+				return fmt.Errorf("telemetry.prometheus: tls-cert-file and tls-key-file must both be set or both be empty")
 			}
 		}
 	}
-	// Log export validation is independent of c.Enabled: a user can enable logs
-	// without enabling OTLP metrics.
 	if c.Logs.Enabled {
 		if err := validateOTLPTransport("telemetry.logs", c.Logs.Protocol, c.Logs.Endpoint,
 			c.Logs.Compression, c.Logs.Timeout, c.Logs.TLSDisable, c.Logs.TLSDisableVerification); err != nil {
@@ -206,7 +197,8 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 		return nil, err
 	}
 
-	if !cfg.Enabled && !cfg.Logs.Enabled {
+	metricsEnabled := cfg.OTLP.Enabled || cfg.Prometheus.Enabled
+	if !metricsEnabled && !cfg.Logs.Enabled {
 		p.meterProvider = noop.NewMeterProvider()
 		return p, nil
 	}
@@ -236,7 +228,7 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 		return nil, fmt.Errorf("failed to build telemetry resource: %w", err)
 	}
 
-	if cfg.Enabled {
+	if metricsEnabled {
 		if err := p.initMetrics(cfg, res, &cleanupFns); err != nil {
 			cleanup()
 			return nil, err
