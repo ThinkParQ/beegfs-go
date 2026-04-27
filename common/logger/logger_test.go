@@ -60,9 +60,9 @@ func TestNewWithTelemetryEnabled(t *testing.T) {
 	port := findFreePort(t)
 	telCfg := &telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}
 	log, err := New(Config{Type: "stdout", Level: 3}, telCfg, telemetry.WithServiceName("logger-test"))
@@ -109,9 +109,9 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
@@ -137,9 +137,9 @@ func TestDeferredShutdown(t *testing.T) {
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}, telemetry.WithServiceName("deferred-shutdown-test"))
 	require.NoError(t, err)
