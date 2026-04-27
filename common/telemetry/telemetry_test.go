@@ -39,7 +39,7 @@ func findFreePort(t *testing.T) int {
 
 // TestNewDisabled verifies that a disabled provider returns a no-op meter.
 func TestNewDisabled(t *testing.T) {
-	p, err := telemetry.New(telemetry.Config{Enabled: false})
+	p, err := telemetry.New(telemetry.Config{})
 	require.NoError(t, err)
 	require.NotNil(t, p)
 
@@ -59,8 +59,7 @@ func TestNewDisabled(t *testing.T) {
 // TestNewEnabledNoExporters verifies that enabling telemetry with no exporters returns an error.
 func TestNewEnabledNoExporters(t *testing.T) {
 	_, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "test",
+		Enabled: true,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no exporter")
@@ -76,33 +75,19 @@ func TestValidateConfig(t *testing.T) {
 	}{
 		{
 			name:    "disabled config always valid",
-			cfg:     telemetry.Config{Enabled: false},
+			cfg:     telemetry.Config{},
 			wantErr: false,
 		},
 		{
 			name:    "enabled with no exporters",
-			cfg:     telemetry.Config{Enabled: true, ServiceName: "test"},
+			cfg:     telemetry.Config{Enabled: true},
 			wantErr: true,
 			errMsg:  "no exporter",
 		},
 		{
-			name: "metrics enabled without service name",
-			cfg: telemetry.Config{
-				Enabled: true,
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    9090,
-					Path:    "/metrics",
-				},
-			},
-			wantErr: true,
-			errMsg:  "telemetry.service-name must be set when metrics are enabled",
-		},
-		{
 			name: "invalid OTLP protocol",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "tcp",
@@ -116,8 +101,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "missing OTLP endpoint",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -130,8 +114,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP interval too short",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -145,8 +128,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "Prometheus port 0",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    0,
@@ -159,8 +141,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "Prometheus port too high",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    70000,
@@ -173,8 +154,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "empty Prometheus path",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -187,8 +167,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid OTLP-only config",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -201,8 +180,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP compression gzip valid",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -216,8 +194,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP compression none valid",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -231,8 +208,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP compression empty valid",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -246,8 +222,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP compression invalid",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -262,8 +237,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP timeout too short",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -278,8 +252,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "OTLP timeout zero valid (SDK default)",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -293,8 +266,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid Prometheus-only config",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -306,8 +278,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid both enabled",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: "http",
@@ -325,8 +296,6 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs only (metrics disabled)",
 			cfg: telemetry.Config{
-				Enabled:     false,
-				ServiceName: "test-service",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -338,8 +307,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs and metrics both enabled",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test-service",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    9090,
@@ -354,22 +322,9 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "logs enabled without service name",
-			cfg: telemetry.Config{
-				Logs: telemetry.LogsConfig{
-					Enabled:  true,
-					Protocol: "grpc",
-					Endpoint: "localhost:4317",
-				},
-			},
-			wantErr: true,
-			errMsg:  "telemetry.service-name must be set",
-		},
-		{
 			name: "OTLP TLS disable and disable-verification are mutually exclusive",
 			cfg: telemetry.Config{
-				Enabled:     true,
-				ServiceName: "test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:                true,
 					Protocol:               "grpc",
@@ -385,7 +340,6 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs TLS disable and disable-verification are mutually exclusive",
 			cfg: telemetry.Config{
-				ServiceName: "test",
 				Logs: telemetry.LogsConfig{
 					Enabled:                true,
 					Protocol:               "grpc",
@@ -418,14 +372,14 @@ func TestWithOptions(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(
 		telemetry.Config{
-			Enabled:     true,
-			ServiceName: "options-test",
+			Enabled: true,
 			Prometheus: telemetry.PrometheusConfig{
 				Enabled: true,
 				Port:    port,
 				Path:    "/metrics",
 			},
 		},
+		telemetry.WithServiceName("options-test"),
 		telemetry.WithInstanceID("my-host:9000"),
 		telemetry.WithVersion("v2.0.0"),
 	)
@@ -454,9 +408,42 @@ func TestWithOptions(t *testing.T) {
 	assert.Contains(t, bodyStr, `service_version="v2.0.0"`, "service.version should appear in target_info")
 }
 
+// TestWithServiceName verifies that WithServiceName sets the service.name resource
+// attribute that appears in exported metrics (via the Prometheus target_info metric).
+func TestWithServiceName(t *testing.T) {
+	port := findFreePort(t)
+	p, err := telemetry.New(
+		telemetry.Config{
+			Enabled: true,
+			Prometheus: telemetry.PrometheusConfig{
+				Enabled: true,
+				Port:    port,
+				Path:    "/metrics",
+			},
+		},
+		telemetry.WithServiceName("my-service"),
+	)
+	require.NoError(t, err)
+	defer p.Shutdown(context.Background())
+
+	counter, err := p.Meter("test").Int64Counter("service_name_test_counter")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	url := fmt.Sprintf("http://localhost:%d/metrics", port)
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `service_name="my-service"`, "service name should appear in target_info labels")
+}
+
 // TestShutdownDisabled verifies that Shutdown on a disabled provider returns nil.
 func TestShutdownDisabled(t *testing.T) {
-	p, err := telemetry.New(telemetry.Config{Enabled: false})
+	p, err := telemetry.New(telemetry.Config{})
 	require.NoError(t, err)
 	assert.NoError(t, p.Shutdown(context.Background()))
 }
@@ -466,15 +453,14 @@ func TestShutdownDisabled(t *testing.T) {
 func TestPrometheusEndpoint(t *testing.T) {
 	port := findFreePort(t)
 	cfg := telemetry.Config{
-		Enabled:     true,
-		ServiceName: "test-service",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
 	}
-	p, err := telemetry.New(cfg)
+	p, err := telemetry.New(cfg, telemetry.WithServiceName("test-service"))
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 
@@ -511,15 +497,14 @@ func TestPrometheusPortAlreadyInUse(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	cfg := telemetry.Config{
-		Enabled:     true,
-		ServiceName: "test-service",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
 	}
-	_, err = telemetry.New(cfg)
+	_, err = telemetry.New(cfg, telemetry.WithServiceName("test-service"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bind")
 }
@@ -529,14 +514,13 @@ func TestPrometheusPortAlreadyInUse(t *testing.T) {
 func TestShutdownEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "shutdown-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
-	})
+	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
 	assert.NoError(t, p.Shutdown(context.Background()))
 }
@@ -577,7 +561,7 @@ func (c *testTelemetryConfig) GetTelemetryConfig() telemetry.Config {
 
 // TestUpdateConfiguration verifies the UpdateConfiguration behavior for various scenarios.
 func TestUpdateConfiguration(t *testing.T) {
-	baseCfg := telemetry.Config{Enabled: false}
+	baseCfg := telemetry.Config{}
 
 	t.Run("non-Configurer returns error", func(t *testing.T) {
 		p, err := telemetry.New(baseCfg)
@@ -604,8 +588,7 @@ func TestUpdateConfiguration(t *testing.T) {
 		// UpdateConfiguration stores the new config but does NOT restart the
 		// provider, so no server is actually started here.
 		newCfg := telemetry.Config{
-			Enabled:     true,
-			ServiceName: "toggled",
+			Enabled: true,
 			Prometheus: telemetry.PrometheusConfig{
 				Enabled: true,
 				Port:    findFreePort(t),
@@ -619,7 +602,7 @@ func TestUpdateConfiguration(t *testing.T) {
 		// and logProvider remain nil) must also succeed without a restart warning,
 		// regardless of whether the config changed.
 		differentCfg := newCfg
-		differentCfg.ServiceName = "toggled-again"
+		differentCfg.Prometheus.Path = "/other-metrics"
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: differentCfg})
 		assert.NoError(t, err)
 		for _, entry := range logs.All() {
@@ -632,20 +615,19 @@ func TestUpdateConfiguration(t *testing.T) {
 		logs := observeGlobalLogger(t, zapcore.WarnLevel)
 		port := findFreePort(t)
 		cfg := telemetry.Config{
-			Enabled:     true,
-			ServiceName: "update-test",
+			Enabled: true,
 			Prometheus: telemetry.PrometheusConfig{
 				Enabled: true,
 				Port:    port,
 				Path:    "/metrics",
 			},
 		}
-		p, err := telemetry.New(cfg)
+		p, err := telemetry.New(cfg, telemetry.WithServiceName("update-test"))
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 
 		changedCfg := cfg
-		changedCfg.ServiceName = "changed-name"
+		changedCfg.Prometheus.Path = "/other-metrics"
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: changedCfg})
 		assert.NoError(t, err)
 
@@ -664,8 +646,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		port := findFreePort(t)
 		customBounds := []float64{0.01, 0.05, 0.1, 0.5, 1.0}
 		p, err := telemetry.New(telemetry.Config{
-			Enabled:     true,
-			ServiceName: "histogram-test",
+			Enabled: true,
 			Prometheus: telemetry.PrometheusConfig{
 				Enabled: true,
 				Port:    port,
@@ -674,7 +655,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 			Histograms: telemetry.HistogramConfig{
 				DurationBoundaries: customBounds,
 			},
-		})
+		}, telemetry.WithServiceName("histogram-test"))
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 
@@ -706,8 +687,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		port := findFreePort(t)
 		customBounds := []float64{1024, 65536, 1048576}
 		p, err := telemetry.New(telemetry.Config{
-			Enabled:     true,
-			ServiceName: "histogram-bytes-test",
+			Enabled: true,
 			Prometheus: telemetry.PrometheusConfig{
 				Enabled: true,
 				Port:    port,
@@ -716,7 +696,7 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 			Histograms: telemetry.HistogramConfig{
 				BytesBoundaries: customBounds,
 			},
-		})
+		}, telemetry.WithServiceName("histogram-bytes-test"))
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 
@@ -750,8 +730,7 @@ func TestOTLPReaderNewFields(t *testing.T) {
 	for _, protocol := range []string{"grpc", "http"} {
 		t.Run(protocol+"/compression-gzip", func(t *testing.T) {
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     true,
-				ServiceName: "otlp-fields-test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:     true,
 					Protocol:    protocol,
@@ -760,14 +739,13 @@ func TestOTLPReaderNewFields(t *testing.T) {
 					Compression: "gzip",
 					TLSDisable:  true,
 				},
-			})
+			}, telemetry.WithServiceName("otlp-fields-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 		})
 		t.Run(protocol+"/timeout", func(t *testing.T) {
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     true,
-				ServiceName: "otlp-fields-test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:    true,
 					Protocol:   protocol,
@@ -776,15 +754,14 @@ func TestOTLPReaderNewFields(t *testing.T) {
 					Timeout:    5 * time.Second,
 					TLSDisable: true,
 				},
-			})
+			}, telemetry.WithServiceName("otlp-fields-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 		})
 	}
 	t.Run("http/url-path", func(t *testing.T) {
 		p, err := telemetry.New(telemetry.Config{
-			Enabled:     true,
-			ServiceName: "otlp-fields-test",
+			Enabled: true,
 			OTLP: telemetry.OTLPConfig{
 				Enabled:    true,
 				Protocol:   "http",
@@ -793,7 +770,7 @@ func TestOTLPReaderNewFields(t *testing.T) {
 				URLPath:    "/otlp/v1/metrics",
 				TLSDisable: true,
 			},
-		})
+		}, telemetry.WithServiceName("otlp-fields-test"))
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 	})
@@ -804,14 +781,13 @@ func TestOTLPReaderNewFields(t *testing.T) {
 func TestLogsDisabledWhenMetricsEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "logs-disabled-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
-	})
+	}, telemetry.WithServiceName("logs-disabled-test"))
 	require.NoError(t, err)
 	require.NoError(t, p.Shutdown(context.Background()))
 	assert.Nil(t, p.LogProvider())
@@ -838,7 +814,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "invalid protocol",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "udp",
@@ -850,7 +825,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "missing endpoint",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -861,7 +835,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "invalid compression",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -874,7 +847,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "timeout too short",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
 					Protocol: "grpc",
@@ -893,7 +865,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "compression gzip valid",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -905,7 +876,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "compression none valid",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -917,7 +887,6 @@ func TestLogsValidation(t *testing.T) {
 		{
 			name: "compression empty valid",
 			cfg: telemetry.Config{
-				ServiceName: "test-svc",
 				Logs: telemetry.LogsConfig{
 					Enabled:     true,
 					Protocol:    "grpc",
@@ -947,15 +916,13 @@ func TestLogsValidation(t *testing.T) {
 // This is the key use case: logs-only mode where metrics telemetry is disabled.
 func TestLogsIndependentOfMetrics(t *testing.T) {
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     false,
-		ServiceName: "logs-only",
 		Logs: telemetry.LogsConfig{
 			Enabled:    true,
 			Protocol:   "grpc",
 			Endpoint:   "localhost:4317",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("logs-only"))
 	require.NoError(t, err)
 
 	assert.NotNil(t, p.LogProvider(), "log provider must be non-nil when logs are enabled")
@@ -973,8 +940,7 @@ func TestLogsIndependentOfMetrics(t *testing.T) {
 func TestLogsAndMetricsEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "both-signals",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
@@ -986,7 +952,7 @@ func TestLogsAndMetricsEnabled(t *testing.T) {
 			Endpoint:   "localhost:4317",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("both-signals"))
 	require.NoError(t, err)
 
 	assert.NotNil(t, p.LogProvider(), "log provider must be non-nil")
@@ -1011,15 +977,13 @@ func TestLogsAndMetricsEnabled(t *testing.T) {
 // TestShutdownWithLogsEnabled verifies that Shutdown flushes the log provider cleanly.
 func TestShutdownWithLogsEnabled(t *testing.T) {
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     false,
-		ServiceName: "log-shutdown-test",
 		Logs: telemetry.LogsConfig{
 			Enabled:    true,
 			Protocol:   "grpc",
 			Endpoint:   "localhost:4317",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("log-shutdown-test"))
 	require.NoError(t, err)
 	assert.NoError(t, p.Shutdown(context.Background()))
 }
@@ -1030,15 +994,13 @@ func TestLogsExporterConstruction(t *testing.T) {
 	for _, protocol := range []string{"grpc", "http"} {
 		t.Run(protocol, func(t *testing.T) {
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     false,
-				ServiceName: "log-exporter-test",
 				Logs: telemetry.LogsConfig{
 					Enabled:    true,
 					Protocol:   protocol,
 					Endpoint:   "localhost:4317",
 					TLSDisable: true,
 				},
-			})
+			}, telemetry.WithServiceName("log-exporter-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			assert.NotNil(t, p.LogProvider())
@@ -1054,8 +1016,7 @@ func TestTLSDisableVerification(t *testing.T) {
 		t.Run("otlp/"+protocol, func(t *testing.T) {
 			logs := observeGlobalLogger(t, zapcore.WarnLevel)
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     true,
-				ServiceName: "tls-skip-verify-test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:                true,
 					Protocol:               protocol,
@@ -1063,7 +1024,7 @@ func TestTLSDisableVerification(t *testing.T) {
 					Interval:               30 * time.Second,
 					TLSDisableVerification: true,
 				},
-			})
+			}, telemetry.WithServiceName("tls-skip-verify-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			// A security-relevant warning must be emitted when verification is disabled.
@@ -1073,15 +1034,13 @@ func TestTLSDisableVerification(t *testing.T) {
 		t.Run("logs/"+protocol, func(t *testing.T) {
 			logs := observeGlobalLogger(t, zapcore.WarnLevel)
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     false,
-				ServiceName: "tls-skip-verify-test",
 				Logs: telemetry.LogsConfig{
 					Enabled:                true,
 					Protocol:               protocol,
 					Endpoint:               "localhost:4317",
 					TLSDisableVerification: true,
 				},
-			})
+			}, telemetry.WithServiceName("tls-skip-verify-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 			assert.NotNil(t, p.LogProvider())
@@ -1095,8 +1054,7 @@ func TestTLSDisableVerification(t *testing.T) {
 func TestTLSCertFileErrors(t *testing.T) {
 	t.Run("non-existent cert file returns error", func(t *testing.T) {
 		_, err := telemetry.New(telemetry.Config{
-			Enabled:     true,
-			ServiceName: "cert-err-test",
+			Enabled: true,
 			OTLP: telemetry.OTLPConfig{
 				Enabled:     true,
 				Protocol:    "grpc",
@@ -1104,7 +1062,7 @@ func TestTLSCertFileErrors(t *testing.T) {
 				Interval:    30 * time.Second,
 				TLSCertFile: "/nonexistent/cert.pem",
 			},
-		})
+		}, telemetry.WithServiceName("cert-err-test"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reading certificate file failed")
 	})
@@ -1117,15 +1075,13 @@ func TestTLSCertFileErrors(t *testing.T) {
 		f.Close()
 
 		_, err = telemetry.New(telemetry.Config{
-			Enabled:     false,
-			ServiceName: "cert-err-test",
 			Logs: telemetry.LogsConfig{
 				Enabled:     true,
 				Protocol:    "grpc",
 				Endpoint:    "localhost:4317",
 				TLSCertFile: f.Name(),
 			},
-		})
+		}, telemetry.WithServiceName("cert-err-test"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "appending provided certificate to pool failed")
 	})
@@ -1139,15 +1095,13 @@ func TestTLSCertFileErrors(t *testing.T) {
 		f.Close()
 
 		p, err := telemetry.New(telemetry.Config{
-			Enabled:     false,
-			ServiceName: "cert-ok-test",
 			Logs: telemetry.LogsConfig{
 				Enabled:     true,
 				Protocol:    "grpc",
 				Endpoint:    "localhost:4317",
 				TLSCertFile: f.Name(),
 			},
-		})
+		}, telemetry.WithServiceName("cert-ok-test"))
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 		assert.NotNil(t, p.LogProvider())
@@ -1173,8 +1127,7 @@ func TestPrometheusEndpointTLS(t *testing.T) {
 
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "tls-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled:     true,
 			Port:        port,
@@ -1182,7 +1135,7 @@ func TestPrometheusEndpointTLS(t *testing.T) {
 			TLSCertFile: certFile.Name(),
 			TLSKeyFile:  keyFile.Name(),
 		},
-	})
+	}, telemetry.WithServiceName("tls-test"))
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 
@@ -1237,8 +1190,7 @@ func TestPrometheusPartialTLSConfig(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := telemetry.Config{
-				Enabled:     true,
-				ServiceName: "partial-tls-test",
+				Enabled: true,
 				Prometheus: telemetry.PrometheusConfig{
 					Enabled: true,
 					Port:    findFreePort(t),
@@ -1280,8 +1232,7 @@ func TestPrometheusTLSMismatchedKeyPair(t *testing.T) {
 
 	port := findFreePort(t)
 	_, err = telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "mismatched-tls-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled:     true,
 			Port:        port,
@@ -1289,7 +1240,7 @@ func TestPrometheusTLSMismatchedKeyPair(t *testing.T) {
 			TLSCertFile: certFile.Name(),
 			TLSKeyFile:  keyFile.Name(),
 		},
-	})
+	}, telemetry.WithServiceName("mismatched-tls-test"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to load TLS cert/key")
 
@@ -1309,8 +1260,7 @@ func TestOTLPDefaultTLSConstruction(t *testing.T) {
 	for _, protocol := range []string{"grpc", "http"} {
 		t.Run(protocol, func(t *testing.T) {
 			p, err := telemetry.New(telemetry.Config{
-				Enabled:     true,
-				ServiceName: "tls-nil-test",
+				Enabled: true,
 				OTLP: telemetry.OTLPConfig{
 					Enabled:  true,
 					Protocol: protocol,
@@ -1319,7 +1269,7 @@ func TestOTLPDefaultTLSConstruction(t *testing.T) {
 					// No TLSDisable, no TLSCertFile, no TLSDisableVerification —
 					// exercises buildClientTLSConfig("", false) -> nil, nil.
 				},
-			})
+			}, telemetry.WithServiceName("tls-nil-test"))
 			require.NoError(t, err)
 			defer p.Shutdown(context.Background())
 		})
@@ -1331,8 +1281,7 @@ func TestOTLPDefaultTLSConstruction(t *testing.T) {
 func TestOTLPReaderGRPCURLPathWarning(t *testing.T) {
 	logs := observeGlobalLogger(t, zapcore.WarnLevel)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "grpc-urlpath-test",
+		Enabled: true,
 		OTLP: telemetry.OTLPConfig{
 			Enabled:    true,
 			Protocol:   "grpc",
@@ -1341,7 +1290,7 @@ func TestOTLPReaderGRPCURLPathWarning(t *testing.T) {
 			URLPath:    "/custom",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("grpc-urlpath-test"))
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 	assertLogContains(t, logs, "telemetry.otlp.url-path is ignored for gRPC protocol",
@@ -1353,8 +1302,6 @@ func TestOTLPReaderGRPCURLPathWarning(t *testing.T) {
 func TestLogsGRPCURLPathWarning(t *testing.T) {
 	logs := observeGlobalLogger(t, zapcore.WarnLevel)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     false,
-		ServiceName: "logs-grpc-urlpath-test",
 		Logs: telemetry.LogsConfig{
 			Enabled:    true,
 			Protocol:   "grpc",
@@ -1362,7 +1309,7 @@ func TestLogsGRPCURLPathWarning(t *testing.T) {
 			URLPath:    "/custom",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("logs-grpc-urlpath-test"))
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 	assertLogContains(t, logs, "telemetry.logs.url-path is ignored for gRPC protocol",
@@ -1375,15 +1322,14 @@ func TestPrometheusServerTLSDisableLog(t *testing.T) {
 	logs := observeGlobalLogger(t, zapcore.InfoLevel)
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Enabled:     true,
-		ServiceName: "tls-disable-log-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled:    true,
 			Port:       port,
 			Path:       "/metrics",
 			TLSDisable: true,
 		},
-	})
+	}, telemetry.WithServiceName("tls-disable-log-test"))
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 	assertLogContains(t, logs, "prometheus metrics server TLS explicitly disabled",

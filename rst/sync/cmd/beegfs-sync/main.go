@@ -47,6 +47,7 @@ func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
 	pflag.String("cfg-file", "", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables).")
 	pflag.String("mount-point", "", "The path where BeeGFS is mounted.")
+	pflag.String("service-name", "beegfs-sync", "Service name used in telemetry resource attributes.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-sync.log", "The path to the desired log file when logType is 'log.file' (if needed the directory and all parent directories will be created).")
 	pflag.Int8("log.level", 3, "Adjust the logging level (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
@@ -54,7 +55,6 @@ func main() {
 	pflag.Int("log.num-rotated-files", 5, "When log.type is 'logfile' the maximum number old log.file(s) to keep when log.max-size is reached and the log is rotated.")
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
 	pflag.Bool("telemetry.enabled", false, "Enable telemetry metrics export.")
-	pflag.String("telemetry.service-name", "beegfs-sync", "Service name for metric identification.")
 	pflag.Bool("telemetry.otlp.enabled", false, "Enable pushing metrics via OTLP.")
 	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
 	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
@@ -148,6 +148,7 @@ Using environment variables:
 	}
 
 	logger, err := logger.New(initialCfg.Log, &initialCfg.Telemetry,
+		telemetry.WithServiceName(initialCfg.ServiceName),
 		telemetry.WithInstanceID(initialCfg.Server.Address),
 		telemetry.WithVersion(version),
 	)

@@ -15,6 +15,7 @@
 #
 
 mount-point = "/mnt/beegfs"
+service-name = "beegfs-sync"
 
 [log]
 level = 3
@@ -41,7 +42,6 @@ tls-disable = false
 
 [telemetry]
 enabled = false
-service-name = "beegfs-sync"
 
 # [telemetry.otlp]
 # enabled = false

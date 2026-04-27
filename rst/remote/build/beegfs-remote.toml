@@ -27,6 +27,7 @@
 #
 
 mount-point = "/mnt/beegfs"
+service-name = "beegfs-remote"
 
 [management]
 address = "127.0.0.1:8010"
@@ -125,7 +126,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 
 [telemetry]
 enabled = false
-service-name = "beegfs-remote"
 
 # [telemetry.otlp]
 # enabled = false

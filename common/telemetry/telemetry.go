@@ -24,12 +24,11 @@ const (
 
 // Config represents the telemetry configuration.
 type Config struct {
-	Enabled     bool             `mapstructure:"enabled"`
-	ServiceName string           `mapstructure:"service-name"`
-	OTLP        OTLPConfig       `mapstructure:"otlp"`
-	Prometheus  PrometheusConfig `mapstructure:"prometheus"`
-	Histograms  HistogramConfig  `mapstructure:"histograms"`
-	Logs        LogsConfig       `mapstructure:"logs"`
+	Enabled    bool             `mapstructure:"enabled"`
+	OTLP       OTLPConfig       `mapstructure:"otlp"`
+	Prometheus PrometheusConfig `mapstructure:"prometheus"`
+	Histograms HistogramConfig  `mapstructure:"histograms"`
+	Logs       LogsConfig       `mapstructure:"logs"`
 }
 
 type OTLPConfig struct {
@@ -81,12 +80,6 @@ type LogsConfig struct {
 
 // ValidateConfig checks telemetry configuration for consistency.
 func (c *Config) ValidateConfig() error {
-	if c.Enabled && c.ServiceName == "" {
-		return fmt.Errorf("telemetry.service-name must be set when metrics are enabled")
-	}
-	if c.Logs.Enabled && c.ServiceName == "" {
-		return fmt.Errorf("telemetry.service-name must be set when log export is enabled")
-	}
 	if c.Enabled {
 		if !c.OTLP.Enabled && !c.Prometheus.Enabled {
 			return fmt.Errorf("telemetry is enabled but no exporter is configured: " +
@@ -176,8 +169,9 @@ var _ configmgr.Listener = &Provider{}
 type Option func(*options)
 
 type options struct {
-	instanceID string
-	version    string
+	instanceID  string
+	version     string
+	serviceName string
 }
 
 // WithInstanceID sets the OTel service.instance.id resource attribute.
@@ -192,6 +186,13 @@ func WithInstanceID(id string) Option {
 func WithVersion(v string) Option {
 	return func(o *options) {
 		o.version = v
+	}
+}
+
+// WithServiceName sets the OTel service.name resource attribute.
+func WithServiceName(name string) Option {
+	return func(o *options) {
+		o.serviceName = name
 	}
 }
 
@@ -230,7 +231,7 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 
 	// Build resource whenever any signal is enabled; it is shared by both metrics
 	// and log providers to identify the service in exported telemetry.
-	res, err := buildResource(cfg, opts)
+	res, err := buildResource(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build telemetry resource: %w", err)
 	}

@@ -59,15 +59,14 @@ func TestNewWithTelemetryEnabled(t *testing.T) {
 	// endpoint is reachable.
 	port := findFreePort(t)
 	telCfg := &telemetry.Config{
-		Enabled:     true,
-		ServiceName: "logger-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
 	}
-	log, err := New(Config{Type: "stdout", Level: 3}, telCfg)
+	log, err := New(Config{Type: "stdout", Level: 3}, telCfg, telemetry.WithServiceName("logger-test"))
 	require.NoError(t, err)
 	defer log.Shutdown(context.Background())
 
@@ -93,8 +92,7 @@ func TestNewWithTelemetryError(t *testing.T) {
 	// An invalid telemetry config (enabled but no exporters) should propagate
 	// the telemetry.New error.
 	_, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled:     true,
-		ServiceName: "bad-config",
+		Enabled: true,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unable to initialize telemetry")
@@ -121,14 +119,13 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	// Verify Shutdown tears down an active telemetry provider cleanly.
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled:     true,
-		ServiceName: "shutdown-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
-	})
+	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
 
 	// Endpoint should be reachable before shutdown.
@@ -151,14 +148,13 @@ func TestDeferredShutdown(t *testing.T) {
 	// the telemetry provider when invoked.
 	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Enabled:     true,
-		ServiceName: "deferred-shutdown-test",
+		Enabled: true,
 		Prometheus: telemetry.PrometheusConfig{
 			Enabled: true,
 			Port:    port,
 			Path:    "/metrics",
 		},
-	})
+	}, telemetry.WithServiceName("deferred-shutdown-test"))
 	require.NoError(t, err)
 
 	url := fmt.Sprintf("http://localhost:%d/metrics", port)
@@ -291,8 +287,7 @@ func TestUpdateConfigurationTelemetryDelegationError(t *testing.T) {
 	badTelemetryCfg := &testFullConfig{
 		logConfig: Config{Level: 3, Type: "stdout"},
 		telemetryConfig: telemetry.Config{
-			Enabled:     true,
-			ServiceName: "test",
+			Enabled: true,
 			// No OTLP or Prometheus configured — ValidateConfig will reject this.
 		},
 	}
