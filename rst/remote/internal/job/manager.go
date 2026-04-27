@@ -40,7 +40,7 @@ type managerMetrics struct {
 	jobRequests metric.Int64Counter
 	jobTerminal metric.Int64Counter
 	jobDuration metric.Float64Histogram
-	jobActive   metric.Int64UpDownCounter
+	jobActive   metric.Int64Counter
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -146,11 +146,10 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		metric.WithDescription("Time from job creation to terminal state"),
 		metric.WithUnit("s"),
 	)
-	jobActive, _ := meter.Int64UpDownCounter("beeremote.job.active",
-		metric.WithDescription("Current number of jobs in non-terminal states"),
+	jobActive, _ := meter.Int64Counter("beeremote.job.active",
+		metric.WithDescription("Number of times jobs entered each non-terminal state; use rate() for throughput or subtract beeremote.job.terminal from beeremote.job.requests for current active count"),
 		metric.WithUnit("{job}"),
 	)
-
 	m := &Manager{
 		log:                       log,
 		ctx:                       ctx,
@@ -172,6 +171,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 			jobActive:   jobActive,
 		},
 	}
+
 	return m
 }
 
@@ -647,7 +647,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
 	if !isTerminalState(job.GetStatus().GetState()) {
-		m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
@@ -939,16 +939,11 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	state := status.GetState()
 	initialState := state
 
-	// Update the job active gauge. Declared first (runs last in LIFO):
+	// Increment the counter when a job enters a non-terminal state. Declared first (runs last in LIFO):
 	// runs after recordJobTerminal, which is declared second and fires first.
 	defer func() {
-		if finalState := status.GetState(); finalState != initialState {
-			if !isTerminalState(initialState) {
-				m.metrics.jobActive.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			}
-			if !isTerminalState(finalState) {
-				m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			}
+		if currentState := status.GetState(); currentState != initialState && !isTerminalState(currentState) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(currentState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 		}
 	}()
 
@@ -1117,17 +1112,12 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 	}()
 
-	// Update the job active gauge. Declared second (runs second in LIFO): after
+	// Increment the counter when a job enters a non-terminal state. Declared second (runs second in LIFO): after
 	// lock-cleanup has potentially downgraded COMPLETED→FAILED, and before
 	// recordJobTerminal fires — so it always sees the final committed state.
 	defer func() {
-		if finalState := status.GetState(); finalState != initialState {
-			if !isTerminalState(initialState) {
-				m.metrics.jobActive.Add(context.Background(), -1, metric.WithAttributes(attrState.String(jobStateString(initialState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			}
-			if !isTerminalState(finalState) {
-				m.metrics.jobActive.Add(context.Background(), +1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-			}
+		if finalState := status.GetState(); finalState != initialState && !isTerminalState(finalState) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 		}
 	}()
 
