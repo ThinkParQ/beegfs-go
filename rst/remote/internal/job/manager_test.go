@@ -1011,7 +1011,7 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	require.NoError(t, err)
 	jobDuration, err := noopMeter.Float64Histogram("test.duration")
 	require.NoError(t, err)
-	jobActive, err := noopMeter.Int64UpDownCounter("test.active")
+	jobActive, err := noopMeter.Int64Counter("test.active")
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1161,7 +1161,7 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	require.NoError(t, err)
 	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
 	require.NoError(t, err)
-	jobActive, err := meter.Int64UpDownCounter("beeremote.job.active")
+	jobActive, err := meter.Int64Counter("beeremote.job.active")
 	require.NoError(t, err)
 
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
@@ -1197,8 +1197,8 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	return m, reader, cleanup
 }
 
-// jobActiveValues collects metric data and returns a map of (state, rstID) → value
-// for the beeremote.job.active UpDownCounter.
+// jobActiveValues collects metric data and returns a map of (state, rstID) → cumulative value
+// for the beeremote.job.active counter (counts state entries, never decrements).
 func jobActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -1211,7 +1211,7 @@ func jobActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKe
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.job.active should be a Sum[int64] (UpDownCounter)")
+			require.True(t, ok, "beeremote.job.active should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -1456,8 +1456,8 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			expectedStateStr := jobStateString(tc.expectedState)
 			workStateStr := workermgr.WorkStateString(tc.workState)
 			counts = jobActiveValues(t, reader)
-			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count should drop to 0 after terminal WRs")
-			assert.Equal(t, int64(0), counts[counterKey{expectedStateStr, 1}], "terminal job not tracked in jobActive")
+			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "scheduled count stays at 1 after terminal — cumulative counter never decrements")
+			assert.Equal(t, int64(0), counts[counterKey{expectedStateStr, 1}], "terminal state never incremented in jobActive")
 			workActive = workActiveValues(t, reader)
 			assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "all WRs done; WorkActive{scheduled} should be 0")
 			workTerm := workTerminalValues(t, reader)
@@ -1514,7 +1514,7 @@ func TestJobCounterMixedWorkResults(t *testing.T) {
 	}.Build()))
 
 	counts := jobActiveValues(t, reader)
-	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}])
+	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job entered scheduled once; cumulative counter never decrements")
 	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; not tracked in jobActive")
 }
 
@@ -1632,7 +1632,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	require.NoError(t, err)
 	jobDuration, err := jobMeter.Float64Histogram("beeremote.job.duration")
 	require.NoError(t, err)
-	jobActive, err := jobMeter.Int64UpDownCounter("beeremote.job.active")
+	jobActive, err := jobMeter.Int64Counter("beeremote.job.active")
 	require.NoError(t, err)
 
 	// Wire workermgr instruments from the same provider so the shared reader
@@ -1966,6 +1966,49 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; not tracked in jobActive")
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count must be zero after SubmitWork error")
 	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must be zero: job lands in UNKNOWN, not CANCELLED, when SubmitWork fails")
+}
+
+// TestJobCounterNeverNegativeOnRestart verifies that jobs loaded from the DB on
+// restart do not cause the counter to go negative. The counter is a monotonic
+// Int64Counter: it only increments when jobs enter non-terminal states in the
+// current process run. Terminal states are never incremented. DB-loaded jobs are
+// invisible to the counter until they submit new work in the current process run.
+func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
+	m, reader, cleanup := newCountingManager(t)
+	defer cleanup()
+
+	// Pre-populate the store with SCHEDULED jobs as if they were restored from Badger on restart.
+	// These jobs have never been counted by this process's counter (counter starts at 0).
+	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
+	require.NoError(t, err)
+	entry.Value = map[string]*Job{
+		"job-1": {
+			Job: beeremote.Job_builder{
+				Id:      "job-1",
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_SCHEDULED}.Build(),
+			}.Build(),
+		},
+		"job-2": {
+			Job: beeremote.Job_builder{
+				Id:      "job-2",
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_SCHEDULED}.Build(),
+			}.Build(),
+		},
+	}
+	require.NoError(t, commit())
+
+	// Counter must start at zero — DB-restored jobs must not be pre-counted.
+	counts := jobActiveValues(t, reader)
+	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "DB-restored jobs must not be pre-counted; counter must start at zero on restart")
+
+	// Verify that the counter type itself guarantees no negative values: Int64Counter
+	// panics on negative Add — the switch from UpDownCounter to Counter is the fix.
+	// We confirm a fresh submit increments the counter correctly, independent of DB state.
+	m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String("scheduled"), attrRSTID.Int(1)))
+	counts = jobActiveValues(t, reader)
+	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "fresh submit increments counter correctly")
 }
 
 // workActiveValues collects the beeremote.work.active UpDownCounter values,
