@@ -1007,8 +1007,6 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	noopMeter := noop.NewMeterProvider().Meter("test")
 	jobRequests, err := noopMeter.Int64Counter("test.requests")
 	require.NoError(t, err)
-	workRequests, err := noopMeter.Int64Counter("test.work")
-	require.NoError(t, err)
 	jobTerminal, err := noopMeter.Int64Counter("test.terminal")
 	require.NoError(t, err)
 	jobDuration, err := noopMeter.Float64Histogram("test.duration")
@@ -1022,11 +1020,10 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 		ctx:       ctx,
 		ctxCancel: cancel,
 		metrics: managerMetrics{
-			jobRequests:  jobRequests,
-			workRequests: workRequests,
-			jobTerminal:  jobTerminal,
-			jobDuration:  jobDuration,
-			jobActive:    jobActive,
+			jobRequests: jobRequests,
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+			jobActive:   jobActive,
 		},
 	}, observed
 }
@@ -1174,8 +1171,6 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	noopMeter := noop.NewMeterProvider().Meter("noop")
 	jobRequests, err := noopMeter.Int64Counter("noop.requests")
 	require.NoError(t, err)
-	workRequests, err := noopMeter.Int64Counter("noop.work")
-	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
@@ -1184,11 +1179,10 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 		ctxCancel: cancel,
 		pathStore: pathStore,
 		metrics: managerMetrics{
-			jobRequests:  jobRequests,
-			workRequests: workRequests,
-			jobTerminal:  jobTerminal,
-			jobDuration:  jobDuration,
-			jobActive:    jobActive,
+			jobRequests: jobRequests,
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+			jobActive:   jobActive,
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
@@ -1434,9 +1428,11 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			js, err := m.SubmitJobRequest(jr)
 			require.NoError(t, err)
 
-			// After submit: should be +1 scheduled.
+			// After submit: job +1 scheduled; both WRs active as scheduled.
 			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should be counted as scheduled after submit")
+			workActive := workActiveValues(t, reader)
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "both WRs should be active as scheduled after submit")
 
 			// Send first work result — job should still be scheduled (not all WRs done).
 			require.NoError(t, m.UpdateWork(flex.Work_builder{
@@ -1446,6 +1442,10 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 
 			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should still be scheduled after first WR")
+			workActive = workActiveValues(t, reader)
+			assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 1}], "one WR done; WorkActive{scheduled} should drop to 1")
+			workTerm0 := workTerminalValues(t, reader)
+			assert.Equal(t, int64(1), workTerm0[counterKey{workermgr.WorkStateString(tc.workState), 1}], "after WR 0: WorkTerminal{%s} == 1", workermgr.WorkStateString(tc.workState))
 
 			// Send second (final) work result — job transitions to terminal; no longer tracked.
 			require.NoError(t, m.UpdateWork(flex.Work_builder{
@@ -1454,9 +1454,14 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			}.Build()))
 
 			expectedStateStr := jobStateString(tc.expectedState)
+			workStateStr := workermgr.WorkStateString(tc.workState)
 			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count should drop to 0 after terminal WRs")
 			assert.Equal(t, int64(0), counts[counterKey{expectedStateStr, 1}], "terminal job not tracked in jobActive")
+			workActive = workActiveValues(t, reader)
+			assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "all WRs done; WorkActive{scheduled} should be 0")
+			workTerm := workTerminalValues(t, reader)
+			assert.Equal(t, int64(2), workTerm[counterKey{workStateStr, 1}], "both WRs should be counted as terminal")
 		})
 	}
 }
@@ -1620,17 +1625,25 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	meter := mp.Meter("job")
-	jobRequests, err := meter.Int64Counter("beeremote.job.requests")
+	jobMeter := mp.Meter("job")
+	jobRequests, err := jobMeter.Int64Counter("beeremote.job.requests")
 	require.NoError(t, err)
-	workRequestsMeter, err := meter.Int64Counter("beeremote.work.requests")
+	jobTerminal, err := jobMeter.Int64Counter("beeremote.job.terminal")
 	require.NoError(t, err)
-	jobTerminal, err := meter.Int64Counter("beeremote.job.terminal")
+	jobDuration, err := jobMeter.Float64Histogram("beeremote.job.duration")
 	require.NoError(t, err)
-	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
+	jobActive, err := jobMeter.Int64UpDownCounter("beeremote.job.active")
 	require.NoError(t, err)
-	jobActive, err := meter.Int64UpDownCounter("beeremote.job.active")
+
+	// Wire workermgr instruments from the same provider so the shared reader
+	// captures both job and work metrics.
+	workMeter := mp.Meter("workermgr")
+	workActive, err := workMeter.Int64UpDownCounter("beeremote.work.active")
 	require.NoError(t, err)
+	workTerminal, err := workMeter.Int64Counter("beeremote.work.terminal")
+	require.NoError(t, err)
+	workerManager.WorkActive = workActive
+	workerManager.WorkTerminal = workTerminal
 
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
 	pathStore, closeDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
@@ -1645,11 +1658,10 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 		pathStore:     pathStore,
 		workerManager: workerManager,
 		metrics: managerMetrics{
-			jobRequests:  jobRequests,
-			workRequests: workRequestsMeter,
-			jobTerminal:  jobTerminal,
-			jobDuration:  jobDuration,
-			jobActive:    jobActive,
+			jobRequests: jobRequests,
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+			jobActive:   jobActive,
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
@@ -1954,4 +1966,279 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 	assert.Equal(t, int64(0), counts[counterKey{"unknown", 1}], "UNKNOWN is terminal; not tracked in jobActive")
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "scheduled count must be zero after SubmitWork error")
 	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "cancelled count must be zero: job lands in UNKNOWN, not CANCELLED, when SubmitWork fails")
+}
+
+// workActiveValues collects the beeremote.work.active UpDownCounter values,
+// keyed by (state, rstID). Uses the same counterKey type as jobActiveValues.
+func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	result := make(map[counterKey]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.work.active" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "beeremote.work.active should be a Sum[int64] (UpDownCounter)")
+			for _, dp := range data.DataPoints {
+				s, _ := dp.Attributes.Value(attrState)
+				r, _ := dp.Attributes.Value(attrRSTID)
+				result[counterKey{s.AsString(), int(r.AsInt64())}] = dp.Value
+			}
+		}
+	}
+	return result
+}
+
+// workTerminalValues collects the beeremote.work.terminal counter values,
+// keyed by (state, rstID).
+func workTerminalValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	result := make(map[counterKey]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.work.terminal" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "beeremote.work.terminal should be a Sum[int64] (Counter)")
+			for _, dp := range data.DataPoints {
+				s, _ := dp.Attributes.Value(attrState)
+				r, _ := dp.Attributes.Value(attrRSTID)
+				result[counterKey{s.AsString(), int(r.AsInt64())}] = dp.Value
+			}
+		}
+	}
+	return result
+}
+
+// submitJobWith2WRs submits a job with 2 mock work requests for RST 1 and
+// returns the result. Fails the test immediately on error.
+func submitJobWith2WRs(t *testing.T, m *Manager, path string) *beeremote.JobResult {
+	t.Helper()
+	jr := beeremote.JobRequest_builder{
+		Path:                path,
+		Name:                "test",
+		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+	js, err := m.SubmitJobRequest(jr)
+	require.NoError(t, err)
+	return js
+}
+
+// sendWorkResult sends a single work result to UpdateWork and fails the test on error.
+func sendWorkResult(t *testing.T, m *Manager, js *beeremote.JobResult, reqID string, state flex.Work_State) {
+	t.Helper()
+	require.NoError(t, m.UpdateWork(flex.Work_builder{
+		Path:      js.GetJob().GetRequest().GetPath(),
+		JobId:     js.GetJob().GetId(),
+		RequestId: reqID,
+		Status:    flex.Work_Status_builder{State: state}.Build(),
+		Parts:     []*flex.Work_Part{},
+	}.Build()))
+}
+
+// scheduledWorkerConfigs returns a single mock worker that schedules all WRs.
+func scheduledWorkerConfigs() []worker.Config {
+	return []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "SubmitWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+}
+
+// TestUpdateWorkCounters verifies that UpdateWork records per-WR metric
+// transitions correctly across all terminal work states (C1–C4) and mixed
+// states (C5), and when the RST is removed before the last WR arrives (C6).
+func TestUpdateWorkCounters(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		state0         flex.Work_State
+		state1         flex.Work_State
+		wantTerm0      string
+		wantTerm1      string
+		wantTerm1Count int64               // cumulative WorkTerminal for wantTerm1 after both WRs
+		wantJobState   beeremote.Job_State // 0 (UNSPECIFIED) = skip job-state assertion (C4: UNKNOWN WRs never trigger job-terminal logic)
+	}{
+		{"C1_completed", flex.Work_COMPLETED, flex.Work_COMPLETED, "completed", "completed", 2, beeremote.Job_COMPLETED},
+		{"C2_cancelled", flex.Work_CANCELLED, flex.Work_CANCELLED, "cancelled", "cancelled", 2, beeremote.Job_CANCELLED},
+		{"C3_failed", flex.Work_FAILED, flex.Work_FAILED, "failed", "failed", 2, beeremote.Job_FAILED},
+		{"C4_unknown", flex.Work_UNKNOWN, flex.Work_UNKNOWN, "unknown", "unknown", 2, beeremote.Job_UNSPECIFIED},
+		{"C5_mixed", flex.Work_COMPLETED, flex.Work_CANCELLED, "completed", "cancelled", 1, beeremote.Job_UNKNOWN},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountPoint := filesystem.NewMockFS()
+			mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+			m, reader, cleanup := newFullCountingManager(t, scheduledWorkerConfigs(), []*flex.RemoteStorageTarget{
+				flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+			}, mountPoint, Config{})
+			defer cleanup()
+
+			js := submitJobWith2WRs(t, m, "/test/myfile")
+
+			workActive := workActiveValues(t, reader)
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "both WRs active as scheduled after submit")
+
+			sendWorkResult(t, m, js, "0", tc.state0)
+
+			workActive = workActiveValues(t, reader)
+			assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 1}], "after WR 0: WorkActive{scheduled} decrements to 1")
+			workTerm := workTerminalValues(t, reader)
+			assert.Equal(t, int64(1), workTerm[counterKey{tc.wantTerm0, 1}], "after WR 0: WorkTerminal{%s} == 1", tc.wantTerm0)
+
+			sendWorkResult(t, m, js, "1", tc.state1)
+
+			workActive = workActiveValues(t, reader)
+			assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "after WR 1: WorkActive{scheduled} == 0")
+			workTerm = workTerminalValues(t, reader)
+			assert.Equal(t, tc.wantTerm1Count, workTerm[counterKey{tc.wantTerm1, 1}], "after WR 1: WorkTerminal{%s} == %d", tc.wantTerm1, tc.wantTerm1Count)
+			// For mixed states, verify wantTerm0 counter was not overwritten by WR1.
+			if tc.wantTerm0 != tc.wantTerm1 {
+				assert.Equal(t, int64(1), workTerm[counterKey{tc.wantTerm0, 1}], "after WR 1: WorkTerminal{%s} must still be 1", tc.wantTerm0)
+			}
+			// Verify job reached expected terminal state (skip for C4 where UNKNOWN WRs
+			// never trigger job-terminal logic because WorkResult.InTerminalState returns
+			// false for UNKNOWN and RequiresUserIntervention also returns false).
+			if tc.wantJobState != beeremote.Job_UNSPECIFIED {
+				responses := make(chan *beeremote.GetJobsResponse, 1)
+				require.NoError(t, m.GetJobs(context.Background(), beeremote.GetJobsRequest_builder{
+					ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+						JobId: js.GetJob().GetId(),
+						Path:  js.GetJob().GetRequest().GetPath(),
+					}.Build(),
+				}.Build(), responses))
+				resp := <-responses
+				assert.Equal(t, tc.wantJobState, resp.GetResults()[0].GetJob().GetStatus().GetState(), "job should be in expected terminal state")
+			}
+		})
+	}
+
+	t.Run("C6_rst_gone_before_last_wr", func(t *testing.T) {
+		mountPoint := filesystem.NewMockFS()
+		mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+		m, reader, cleanup := newFullCountingManager(t, scheduledWorkerConfigs(), []*flex.RemoteStorageTarget{
+			flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+		}, mountPoint, Config{})
+		defer cleanup()
+
+		js := submitJobWith2WRs(t, m, "/test/myfile")
+
+		sendWorkResult(t, m, js, "0", flex.Work_COMPLETED)
+
+		// Remove RST before second WR arrives.
+		delete(m.workerManager.RemoteStorageTargets, 1)
+
+		sendWorkResult(t, m, js, "1", flex.Work_COMPLETED)
+
+		// Work counters reflect actual WR terminal states regardless of job outcome.
+		workActive := workActiveValues(t, reader)
+		assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "C6: WorkActive{scheduled} == 0 after both WRs")
+		workTerm := workTerminalValues(t, reader)
+		assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "C6: WorkTerminal{completed} == 2 despite RST gone")
+
+		// Job should be FAILED because the RST was not found.
+		responses := make(chan *beeremote.GetJobsResponse, 1)
+		require.NoError(t, m.GetJobs(context.Background(), beeremote.GetJobsRequest_builder{
+			ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+				JobId: js.GetJob().GetId(),
+				Path:  js.GetJob().GetRequest().GetPath(),
+			}.Build(),
+		}.Build(), responses))
+		resp := <-responses
+		assert.Equal(t, beeremote.Job_FAILED, resp.GetResults()[0].GetJob().GetStatus().GetState(), "C6: job should be FAILED when RST removed")
+	})
+}
+
+// TestWorkCounterRSTIsolation verifies that WorkActive counters for different
+// RST IDs never contaminate each other (D1).
+func TestWorkCounterRSTIsolation(t *testing.T) {
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/file1", make([]byte, 10), 0644, false)
+	mountPoint.CreateWriteClose("/test/file2", make([]byte, 10), 0644, false)
+
+	m, reader, cleanup := newFullCountingManager(t, scheduledWorkerConfigs(), []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+		flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build(),
+	}, mountPoint, Config{})
+	defer cleanup()
+
+	// Job A: RST 1, 2 WRs.
+	jsA, err := m.SubmitJobRequest(beeremote.JobRequest_builder{
+		Path:                "/test/file1",
+		Name:                "job-a",
+		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build())
+	require.NoError(t, err)
+
+	// Job B: RST 2, 1 WR.
+	jsB, err := m.SubmitJobRequest(beeremote.JobRequest_builder{
+		Path:                "/test/file2",
+		Name:                "job-b",
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		RemoteStorageTarget: 2,
+	}.Build())
+	require.NoError(t, err)
+	// jsB is intentionally left in-progress to keep RST 2 WRs in WorkActive.
+	_ = jsB
+
+	workActive := workActiveValues(t, reader)
+	assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "D1: RST 1 should have 2 active WRs")
+	assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 2}], "D1: RST 2 should have 1 active WR")
+
+	// Complete job A's WRs and verify RST 2 unaffected.
+	sendWorkResult(t, m, jsA, "0", flex.Work_COMPLETED)
+	sendWorkResult(t, m, jsA, "1", flex.Work_COMPLETED)
+
+	workActive = workActiveValues(t, reader)
+	assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "D1: RST 1 WRs all done")
+	assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 2}], "D1: RST 2 unaffected by RST 1 completions")
+	workTerm := workTerminalValues(t, reader)
+	assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "D1: RST 1 WorkTerminal{completed} == 2")
+	assert.Equal(t, int64(0), workTerm[counterKey{"completed", 2}], "D1: RST 2 WorkTerminal{completed} must be zero (no cross-contamination)")
+}
+
+// TestWorkCounterBalance verifies that after all WRs complete the sum of all
+// WorkActive values is zero (D2).
+func TestWorkCounterBalance(t *testing.T) {
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
+	m, reader, cleanup := newFullCountingManager(t, scheduledWorkerConfigs(), []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}, mountPoint, Config{})
+	defer cleanup()
+
+	js := submitJobWith2WRs(t, m, "/test/myfile")
+
+	sendWorkResult(t, m, js, "0", flex.Work_COMPLETED)
+	sendWorkResult(t, m, js, "1", flex.Work_COMPLETED)
+
+	workActive := workActiveValues(t, reader)
+	var total int64
+	for _, v := range workActive {
+		total += v
+	}
+	assert.Equal(t, int64(0), total, "D2: sum of all WorkActive values must be zero after full lifecycle")
+	// The 2 active WRs must have moved to WorkTerminal, not vanished.
+	workTerm := workTerminalValues(t, reader)
+	assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "D2: 2 WRs must be counted in WorkTerminal{completed}")
 }

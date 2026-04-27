@@ -399,11 +399,11 @@ func (m *Manager) Stop() {
 func (m *Manager) recordInitialWork(state flex.Work_State, rstID uint32) {
 	if isTerminalWorkState(state) {
 		m.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
-			attrState.String(workStateString(state)), attrRSTID.Int(int(rstID)),
+			attrState.String(WorkStateString(state)), attrRSTID.Int(int(rstID)),
 		))
 	} else {
 		m.WorkActive.Add(context.Background(), 1, metric.WithAttributes(
-			attrState.String(workStateString(state)), attrRSTID.Int(int(rstID)),
+			attrState.String(WorkStateString(state)), attrRSTID.Int(int(rstID)),
 		))
 	}
 }
@@ -417,15 +417,15 @@ func (m *Manager) recordWorkTransition(oldState, newState flex.Work_State, rstID
 		return
 	}
 	m.WorkActive.Add(context.Background(), -1, metric.WithAttributes(
-		attrState.String(workStateString(oldState)), attrRSTID.Int(int(rstID)),
+		attrState.String(WorkStateString(oldState)), attrRSTID.Int(int(rstID)),
 	))
 	if isTerminalWorkState(newState) {
 		m.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
-			attrState.String(workStateString(newState)), attrRSTID.Int(int(rstID)),
+			attrState.String(WorkStateString(newState)), attrRSTID.Int(int(rstID)),
 		))
 	} else {
 		m.WorkActive.Add(context.Background(), 1, metric.WithAttributes(
-			attrState.String(workStateString(newState)), attrRSTID.Int(int(rstID)),
+			attrState.String(WorkStateString(newState)), attrRSTID.Int(int(rstID)),
 		))
 	}
 }
@@ -443,8 +443,8 @@ func isTerminalWorkState(state flex.Work_State) bool {
 	return false
 }
 
-// workStateString returns the metric attribute string for a work state.
-func workStateString(state flex.Work_State) string {
+// WorkStateString returns the metric attribute string for a work state.
+func WorkStateString(state flex.Work_State) string {
 	switch state {
 	case flex.Work_CREATED:
 		return "created"
