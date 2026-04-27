@@ -31,18 +31,16 @@ import (
 )
 
 var (
-	attrState  = attribute.Key("state")
-	attrStatus = attribute.Key("status")
-	attrRSTID  = attribute.Key("rst.id")
+	attrState = attribute.Key("state")
+	attrRSTID = attribute.Key("rst.id")
 )
 
 // managerMetrics holds the OTel instruments used to report job manager metrics.
 type managerMetrics struct {
-	jobRequests  metric.Int64Counter
-	workRequests metric.Int64Counter
-	jobTerminal  metric.Int64Counter
-	jobDuration  metric.Float64Histogram
-	jobActive    metric.Int64UpDownCounter
+	jobRequests metric.Int64Counter
+	jobTerminal metric.Int64Counter
+	jobDuration metric.Float64Histogram
+	jobActive   metric.Int64UpDownCounter
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -141,9 +139,6 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	jobRequests, _ := meter.Int64Counter("beeremote.job.requests",
 		metric.WithDescription("Total job requests received"),
 	)
-	workRequests, _ := meter.Int64Counter("beeremote.work.requests",
-		metric.WithDescription("Total work requests generated"),
-	)
 	jobTerminal, _ := meter.Int64Counter("beeremote.job.terminal",
 		metric.WithDescription("Jobs that reached a terminal state"),
 	)
@@ -171,11 +166,10 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
 		metrics: managerMetrics{
-			jobRequests:  jobRequests,
-			workRequests: workRequests,
-			jobTerminal:  jobTerminal,
-			jobDuration:  jobDuration,
-			jobActive:    jobActive,
+			jobRequests: jobRequests,
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+			jobActive:   jobActive,
 		},
 	}
 	return m
@@ -670,9 +664,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 
 	workRequests := rst.RecreateWorkRequests(job.Get(), job.GetSegments())
 	m.metrics.jobRequests.Add(context.Background(), 1)
-	m.metrics.workRequests.Add(context.Background(), int64(len(workRequests)),
-		metric.WithAttributes(attrStatus.String("created")),
-	)
 	return beeremote.JobResult_builder{
 		Job:          job.Get(),
 		WorkRequests: workRequests,
@@ -1016,6 +1007,7 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 				JobID:       job.GetId(),
 				WorkResults: job.WorkResults,
 				NewState:    flex.UpdateWorkRequest_CANCELLED,
+				RSTID:       job.Request.GetRemoteStorageTarget(),
 			})
 			if !success {
 				if !forceUpdate {
@@ -1093,6 +1085,14 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	}
 	entryToUpdate.WorkResult = workResult
 	job.WorkResults[workResult.GetRequestId()] = entryToUpdate
+
+	// Record per-WR transition: prior state is always SCHEDULED (CREATED work
+	// is never assigned to a node and cannot send results back).
+	rstID := int(job.Request.GetRemoteStorageTarget())
+	m.workerManager.WorkActive.Add(context.Background(), -1,
+		metric.WithAttributes(attrState.String(workermgr.WorkStateString(flex.Work_SCHEDULED)), attrRSTID.Int(rstID)))
+	m.workerManager.WorkTerminal.Add(context.Background(), 1,
+		metric.WithAttributes(attrState.String(workermgr.WorkStateString(workResult.GetStatus().GetState())), attrRSTID.Int(rstID)))
 
 	allSameState := true
 	for _, workResult := range job.WorkResults {

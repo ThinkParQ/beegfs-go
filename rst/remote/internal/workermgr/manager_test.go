@@ -251,7 +251,7 @@ func TestWorkCounterSubmitWorkError(t *testing.T) {
 // in WorkActive with state "scheduled" and WorkTerminal stays empty.
 func TestWorkCounterAllScheduled(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name    string
 		wrCount int
 	}{
 		{"one_wr", 1},
@@ -282,11 +282,11 @@ func TestWorkCounterAllScheduled(t *testing.T) {
 // unknown-type WRs fail immediately (no pool) and are not double-counted in the cascade.
 func TestWorkCounterPartialSchedulingWithUnknownType(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		mockWRCount       int
-		unknownWRCount    int
-		wantCancelled     int64
-		wantFailed        int64
+		name           string
+		mockWRCount    int
+		unknownWRCount int
+		wantCancelled  int64
+		wantFailed     int64
 	}{
 		// A5: 2 scheduled + 1 no-pool
 		{"two_scheduled_one_no_pool", 2, 1, 2, 1},
@@ -570,13 +570,13 @@ func TestRecordWorkTransitionTerminalGuard(t *testing.T) {
 	for _, terminalState := range []flex.Work_State{
 		flex.Work_COMPLETED, flex.Work_CANCELLED, flex.Work_FAILED, flex.Work_UNKNOWN,
 	} {
-		t.Run(workStateString(terminalState), func(t *testing.T) {
+		t.Run(WorkStateString(terminalState), func(t *testing.T) {
 			mgr, reader, cleanup := newWorkTestManager(t, []worker.Config{minimalWorkerConfig()})
 			defer cleanup()
 
 			// Seed WorkTerminal to simulate the WR was already counted.
 			mgr.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
-				attrState.String(workStateString(terminalState)), attrRSTID.Int(1),
+				attrState.String(WorkStateString(terminalState)), attrRSTID.Int(1),
 			))
 
 			// Any transition from a terminal state must be ignored.
@@ -587,7 +587,7 @@ func TestRecordWorkTransitionTerminalGuard(t *testing.T) {
 
 			// Guard must have fired: no WorkActive changes, WorkTerminal unchanged at seed value.
 			assert.Empty(t, active, "WorkActive must not change when oldState is terminal")
-			assert.Equal(t, int64(1), terminal[workCounterKey{workStateString(terminalState), 1}], "seed value must not increase")
+			assert.Equal(t, int64(1), terminal[workCounterKey{WorkStateString(terminalState), 1}], "seed value must not increase")
 			assert.Len(t, terminal, 1, "no new terminal entries must be added")
 		})
 	}
