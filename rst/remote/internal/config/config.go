@@ -26,6 +26,7 @@ var _ logger.Configurer = &AppConfig{}
 
 type AppConfig struct {
 	MountPoint           string                      `mapstructure:"mount-point"`
+	ServiceName          string                      `mapstructure:"service-name"`
 	Management           MgmtdConfig                 `mapstructure:"management"`
 	Server               server.Config               `mapstructure:"server"`
 	Log                  logger.Config               `mapstructure:"log"`
@@ -71,6 +72,9 @@ func (c *AppConfig) UpdateAllowed(newConfig configmgr.Configurable) error {
 }
 
 func (c *AppConfig) ValidateConfig() error {
+	if c.ServiceName == "" && (c.Telemetry.OTLP.Enabled || c.Telemetry.Prometheus.Enabled || c.Telemetry.Logs.Enabled) {
+		return fmt.Errorf("service-name must be set when telemetry is enabled")
+	}
 	if err := c.Telemetry.ValidateConfig(); err != nil {
 		return err
 	}
