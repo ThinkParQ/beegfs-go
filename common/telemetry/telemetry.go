@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"reflect"
 	"time"
@@ -47,7 +48,6 @@ type OTLPConfig struct {
 type PrometheusConfig struct {
 	Enabled       bool   `mapstructure:"enabled"`
 	ListenAddress string `mapstructure:"listen-address"`
-	Port          int    `mapstructure:"port"`
 	Path          string `mapstructure:"path"`
 	TLSCertFile   string `mapstructure:"tls-cert-file"`
 	TLSKeyFile    string `mapstructure:"tls-key-file"`
@@ -89,8 +89,11 @@ func (c *Config) ValidateConfig() error {
 		}
 	}
 	if c.Prometheus.Enabled {
-		if c.Prometheus.Port <= 0 || c.Prometheus.Port > 65535 {
-			return fmt.Errorf("telemetry.prometheus.port must be between 1 and 65535 (got %d)", c.Prometheus.Port)
+		if c.Prometheus.ListenAddress == "" {
+			return fmt.Errorf("telemetry.prometheus.listen-address must be set when Prometheus is enabled")
+		}
+		if _, err := net.ResolveTCPAddr("tcp", c.Prometheus.ListenAddress); err != nil {
+			return fmt.Errorf("telemetry.prometheus.listen-address is not a valid host:port address: %w", err)
 		}
 		if c.Prometheus.Path == "" {
 			return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")

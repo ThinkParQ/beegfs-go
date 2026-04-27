@@ -56,8 +56,7 @@ tls-disable = false
 #
 # [telemetry.prometheus]
 # enabled = false
-# listen-address = "0.0.0.0"
-# port = 9090
+# listen-address = "0.0.0.0:9090"
 # path = "/metrics"
 # tls-cert-file = ""
 # tls-key-file = ""
@@ -208,10 +207,7 @@ tls-disable = false
 
 # enabled: Set to true to expose a Prometheus /metrics endpoint.
 
-# listen-address: IP address the Prometheus HTTP server binds to. Empty string binds all
-# interfaces.
-
-# port: Port for the Prometheus HTTP server.
+# listen-address: Address:port the Prometheus HTTP server listens on (e.g. "0.0.0.0:9090").
 
 # path: URL path for the metrics endpoint (e.g. "/metrics").
 

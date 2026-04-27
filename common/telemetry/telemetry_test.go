@@ -109,36 +109,36 @@ func TestValidateConfig(t *testing.T) {
 			errMsg:  "interval must be at least 1s",
 		},
 		{
-			name: "Prometheus port 0",
+			name: "Prometheus empty listen-address returns error",
 			cfg: telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    0,
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: "",
+					Path:          "/metrics",
 				},
 			},
 			wantErr: true,
-			errMsg:  "port must be between 1 and 65535",
+			errMsg:  "listen-address must be set",
 		},
 		{
-			name: "Prometheus port too high",
+			name: "Prometheus malformed listen-address (no port) returns error",
 			cfg: telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    70000,
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: "0.0.0.0",
+					Path:          "/metrics",
 				},
 			},
 			wantErr: true,
-			errMsg:  "port must be between 1 and 65535",
+			errMsg:  "not a valid host:port address",
 		},
 		{
 			name: "empty Prometheus path",
 			cfg: telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    9090,
-					Path:    "",
+					Enabled:       true,
+					ListenAddress: "127.0.0.1:9090",
+					Path:          "",
 				},
 			},
 			wantErr: true,
@@ -240,9 +240,9 @@ func TestValidateConfig(t *testing.T) {
 			name: "valid Prometheus-only config",
 			cfg: telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    9090,
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: "127.0.0.1:9090",
+					Path:          "/metrics",
 				},
 			},
 			wantErr: false,
@@ -257,9 +257,9 @@ func TestValidateConfig(t *testing.T) {
 					Interval: 60 * time.Second,
 				},
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    9090,
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: "127.0.0.1:9090",
+					Path:          "/metrics",
 				},
 			},
 			wantErr: false,
@@ -279,9 +279,9 @@ func TestValidateConfig(t *testing.T) {
 			name: "logs and metrics both enabled",
 			cfg: telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    9090,
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: "127.0.0.1:9090",
+					Path:          "/metrics",
 				},
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
@@ -342,9 +342,9 @@ func TestWithOptions(t *testing.T) {
 	p, err := telemetry.New(
 		telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    port,
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+				Path:          "/metrics",
 			},
 		},
 		telemetry.WithServiceName("options-test"),
@@ -383,9 +383,9 @@ func TestWithServiceName(t *testing.T) {
 	p, err := telemetry.New(
 		telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    port,
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+				Path:          "/metrics",
 			},
 		},
 		telemetry.WithServiceName("my-service"),
@@ -414,9 +414,9 @@ func TestPrometheusEndpoint(t *testing.T) {
 	port := findFreePort(t)
 	cfg := telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}
 	p, err := telemetry.New(cfg, telemetry.WithServiceName("test-service"))
@@ -457,14 +457,29 @@ func TestPrometheusPortAlreadyInUse(t *testing.T) {
 
 	cfg := telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}
 	_, err = telemetry.New(cfg, telemetry.WithServiceName("test-service"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "bind")
+	assert.Contains(t, err.Error(), "prometheus server failed to bind on")
+}
+
+// TestPrometheusInvalidPort verifies that New() returns an error when the
+// listen-address contains an out-of-range port, caught by ValidateConfig.
+func TestPrometheusInvalidPort(t *testing.T) {
+	cfg := telemetry.Config{
+		Prometheus: telemetry.PrometheusConfig{
+			Enabled:       true,
+			ListenAddress: "127.0.0.1:99999",
+			Path:          "/metrics",
+		},
+	}
+	_, err := telemetry.New(cfg, telemetry.WithServiceName("test-service"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid host:port address")
 }
 
 // TestShutdownEnabled verifies that Shutdown on an enabled Prometheus provider
@@ -473,9 +488,9 @@ func TestShutdownEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
@@ -548,9 +563,9 @@ func TestUpdateConfiguration(t *testing.T) {
 		// provider, so no server is actually started here.
 		newCfg := telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    findFreePort(t),
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", findFreePort(t)),
+				Path:          "/metrics",
 			},
 		}
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: newCfg})
@@ -574,9 +589,9 @@ func TestUpdateConfiguration(t *testing.T) {
 		port := findFreePort(t)
 		cfg := telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    port,
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+				Path:          "/metrics",
 			},
 		}
 		p, err := telemetry.New(cfg, telemetry.WithServiceName("update-test"))
@@ -604,9 +619,9 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		customBounds := []float64{0.01, 0.05, 0.1, 0.5, 1.0}
 		p, err := telemetry.New(telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    port,
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+				Path:          "/metrics",
 			},
 			Histograms: telemetry.HistogramConfig{
 				DurationBoundaries: customBounds,
@@ -644,9 +659,9 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		customBounds := []float64{1024, 65536, 1048576}
 		p, err := telemetry.New(telemetry.Config{
 			Prometheus: telemetry.PrometheusConfig{
-				Enabled: true,
-				Port:    port,
-				Path:    "/metrics",
+				Enabled:       true,
+				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+				Path:          "/metrics",
 			},
 			Histograms: telemetry.HistogramConfig{
 				BytesBoundaries: customBounds,
@@ -734,9 +749,9 @@ func TestLogsDisabledWhenMetricsEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 	}, telemetry.WithServiceName("logs-disabled-test"))
 	require.NoError(t, err)
@@ -892,9 +907,9 @@ func TestLogsAndMetricsEnabled(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled: true,
-			Port:    port,
-			Path:    "/metrics",
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
 		},
 		Logs: telemetry.LogsConfig{
 			Enabled:    true,
@@ -1076,11 +1091,11 @@ func TestPrometheusEndpointTLS(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled:     true,
-			Port:        port,
-			Path:        "/metrics",
-			TLSCertFile: certFile.Name(),
-			TLSKeyFile:  keyFile.Name(),
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
+			TLSCertFile:   certFile.Name(),
+			TLSKeyFile:    keyFile.Name(),
 		},
 	}, telemetry.WithServiceName("tls-test"))
 	require.NoError(t, err)
@@ -1138,9 +1153,9 @@ func TestPrometheusPartialTLSConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := telemetry.Config{
 				Prometheus: telemetry.PrometheusConfig{
-					Enabled: true,
-					Port:    findFreePort(t),
-					Path:    "/metrics",
+					Enabled:       true,
+					ListenAddress: fmt.Sprintf("127.0.0.1:%d", findFreePort(t)),
+					Path:          "/metrics",
 				},
 			}
 			if tt.certSet {
@@ -1179,11 +1194,11 @@ func TestPrometheusTLSMismatchedKeyPair(t *testing.T) {
 	port := findFreePort(t)
 	_, err = telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled:     true,
-			Port:        port,
-			Path:        "/metrics",
-			TLSCertFile: certFile.Name(),
-			TLSKeyFile:  keyFile.Name(),
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
+			TLSCertFile:   certFile.Name(),
+			TLSKeyFile:    keyFile.Name(),
 		},
 	}, telemetry.WithServiceName("mismatched-tls-test"))
 	require.Error(t, err)
@@ -1266,10 +1281,10 @@ func TestPrometheusServerTLSDisableLog(t *testing.T) {
 	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
 		Prometheus: telemetry.PrometheusConfig{
-			Enabled:    true,
-			Port:       port,
-			Path:       "/metrics",
-			TLSDisable: true,
+			Enabled:       true,
+			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
+			Path:          "/metrics",
+			TLSDisable:    true,
 		},
 	}, telemetry.WithServiceName("tls-disable-log-test"))
 	require.NoError(t, err)

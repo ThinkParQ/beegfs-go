@@ -274,8 +274,8 @@ func buildClientTLSConfig(certFile string, disableVerification bool) (*tls.Confi
 	}, nil
 }
 
-// startPrometheusServer starts the Prometheus HTTP server on the configured port
-// and registers the metrics handler at the configured path.
+// startPrometheusServer starts the Prometheus HTTP server at the configured
+// listen address and registers the metrics handler at the configured path.
 func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 	if p.promReader == nil {
 		return fmt.Errorf("prometheus reader not initialized")
@@ -284,7 +284,7 @@ func (p *Provider) startPrometheusServer(cfg PrometheusConfig) error {
 	// Pre-bind the port synchronously so any bind error (e.g. port already in
 	// use) is returned immediately to the caller rather than being lost in a
 	// goroutine.
-	addr := fmt.Sprintf("%s:%d", cfg.ListenAddress, cfg.Port)
+	addr := cfg.ListenAddress
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("prometheus server failed to bind on %s: %w", addr, err)
