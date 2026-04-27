@@ -14,8 +14,15 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+var (
+	attrState = attribute.Key("state")
+	attrRSTID = attribute.Key("rst.id")
 )
 
 // Configuration that should apply to all nodes.
@@ -45,6 +52,12 @@ type Manager struct {
 	RemoteStorageTargets map[uint32]rst.Provider
 	mountPoint           filesystem.Provider
 	requiredFeatures     map[string]*flex.Feature
+	// WorkActive tracks work requests currently in non-terminal states.
+	// Exported so job.Manager can record transitions in UpdateWork.
+	WorkActive metric.Int64UpDownCounter
+	// WorkTerminal counts work requests that reached a terminal state.
+	// Exported so job.Manager can record transitions in UpdateWork.
+	WorkTerminal metric.Int64Counter
 }
 
 // JobSubmission is used to submit a Job and its associated work requests to be
@@ -65,6 +78,8 @@ type JobUpdate struct {
 	// The job update contains the new state for all work request(s) associated with the job. This
 	// forces the caller to map the new job state to the new worker request state.
 	NewState flex.UpdateWorkRequest_NewState
+	// RSTID is the remote storage target ID for all work requests in this update, used for metrics.
+	RSTID uint32
 }
 
 // NewManager() is also responsible for setting up RST clients. As this can involve network
@@ -129,6 +144,19 @@ func NewManager(
 		nodePools[n.GetNodeType()].nodes = append(nodePools[n.GetNodeType()].nodes, n)
 	}
 
+	meter := log.Meter("workermgr")
+	// Errors from instrument creation are only possible with misconfigured MeterProviders
+	// (e.g., duplicate instrument name with conflicting unit). The noop instruments returned
+	// on error are safe to use, so we intentionally discard the errors here.
+	workActive, _ := meter.Int64UpDownCounter("beeremote.work.active",
+		metric.WithDescription("Current work requests in non-terminal states"),
+		metric.WithUnit("{work}"),
+	)
+	workTerminal, _ := meter.Int64Counter("beeremote.work.terminal",
+		metric.WithDescription("Work requests that reached a terminal state"),
+		metric.WithUnit("{work}"),
+	)
+
 	workerManager := &Manager{
 		log:                  log,
 		nodeWG:               new(sync.WaitGroup),
@@ -137,6 +165,8 @@ func NewManager(
 		RemoteStorageTargets: rstMap,
 		mountPoint:           mountPoint,
 		requiredFeatures:     requiredFeatures,
+		WorkActive:           workActive,
+		WorkTerminal:         workTerminal,
 	}
 
 	return workerManager, nil
@@ -213,7 +243,6 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 					Message: err.Error(),
 				}.Build(),
 			}.Build()
-
 			allScheduled = false
 		} else {
 			var work *flex.Work
@@ -244,6 +273,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 		result.AssignedNode = workerID
 		result.AssignedPool = nodeType
 		workResults[workRequest.GetRequestId()] = result
+		m.recordInitialWork(result.WorkResult.GetStatus().GetState(), workRequest.GetRemoteStorageTarget())
 	}
 
 	var status beeremote.Job_Status
@@ -258,6 +288,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 			JobID:       js.JobID,
 			WorkResults: workResults,
 			NewState:    flex.UpdateWorkRequest_CANCELLED,
+			RSTID:       js.WorkRequests[0].GetRemoteStorageTarget(),
 		}
 		var allCancelled bool
 		workResults, allCancelled = m.UpdateJob(jobUpdate)
@@ -297,12 +328,14 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 	allUpdated := true
 
 	for reqID, workResult := range jobUpdate.WorkResults {
+		oldState := workResult.Status().GetState()
 
 		// If the WR was never assigned we can just cancel it.
-		if workResult.AssignedPool == "" && workResult.AssignedNode == "" && workResult.Status().GetState() == flex.Work_CREATED {
+		if workResult.AssignedPool == "" && workResult.AssignedNode == "" && oldState == flex.Work_CREATED {
 			workResult.Status().SetState(flex.Work_CANCELLED)
 			workResult.Status().SetMessage(workResult.Status().GetMessage() + "; cancelling because the request is not assigned to a pool or node")
 			newResults[reqID] = workResult
+			m.recordWorkTransition(oldState, flex.Work_CANCELLED, jobUpdate.RSTID)
 			continue
 		}
 
@@ -312,6 +345,7 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 			workResult.Status().SetMessage(workResult.Status().GetMessage() + "; " + ErrNoPoolsForNodeType.Error())
 			newResults[reqID] = workResult
 			allUpdated = false
+			m.recordWorkTransition(oldState, flex.Work_UNKNOWN, jobUpdate.RSTID)
 			continue
 		}
 
@@ -326,6 +360,7 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 				allUpdated = false
 			}
 			newResults[reqID] = workResult
+			m.recordWorkTransition(oldState, workResult.Status().GetState(), jobUpdate.RSTID)
 			continue
 		}
 
@@ -337,6 +372,7 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 		}
 
 		newResults[reqID] = workResult
+		m.recordWorkTransition(oldState, workResult.Status().GetState(), jobUpdate.RSTID)
 	}
 	return newResults, allUpdated
 }
@@ -354,5 +390,86 @@ func (m *Manager) Stop() {
 	// This ensures we can finish writing work requests/results to the DB.
 	for _, pool := range m.nodePools {
 		pool.StopAll()
+	}
+}
+
+// recordInitialWork records a work request entering the metric system for the first time.
+// Terminal initial states (e.g. FAILED when no pool exists) go directly to WorkTerminal;
+// all others enter WorkActive.
+func (m *Manager) recordInitialWork(state flex.Work_State, rstID uint32) {
+	if isTerminalWorkState(state) {
+		m.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
+			attrState.String(workStateString(state)), attrRSTID.Int(int(rstID)),
+		))
+	} else {
+		m.WorkActive.Add(context.Background(), 1, metric.WithAttributes(
+			attrState.String(workStateString(state)), attrRSTID.Int(int(rstID)),
+		))
+	}
+}
+
+// recordWorkTransition records metric transitions for a work request state change.
+// When oldState is already terminal, no recording occurs — the WR was already counted.
+// Non-terminal → terminal: decrements WorkActive, increments WorkTerminal.
+// Non-terminal → non-terminal: decrements WorkActive for old state, increments for new.
+func (m *Manager) recordWorkTransition(oldState, newState flex.Work_State, rstID uint32) {
+	if isTerminalWorkState(oldState) {
+		return
+	}
+	m.WorkActive.Add(context.Background(), -1, metric.WithAttributes(
+		attrState.String(workStateString(oldState)), attrRSTID.Int(int(rstID)),
+	))
+	if isTerminalWorkState(newState) {
+		m.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
+			attrState.String(workStateString(newState)), attrRSTID.Int(int(rstID)),
+		))
+	} else {
+		m.WorkActive.Add(context.Background(), 1, metric.WithAttributes(
+			attrState.String(workStateString(newState)), attrRSTID.Int(int(rstID)),
+		))
+	}
+}
+
+// isTerminalWorkState reports whether a work state is terminal for metric purposes.
+// COMPLETED and CANCELLED are clean terminal states. FAILED and UNKNOWN require user
+// intervention before a job can proceed, so from a metric perspective they are also
+// terminal — recording them in WorkActive would permanently inflate the active count
+// since no automatic transition out of these states occurs within workermgr.
+func isTerminalWorkState(state flex.Work_State) bool {
+	switch state {
+	case flex.Work_COMPLETED, flex.Work_CANCELLED, flex.Work_FAILED, flex.Work_UNKNOWN:
+		return true
+	}
+	return false
+}
+
+// workStateString returns the metric attribute string for a work state.
+func workStateString(state flex.Work_State) string {
+	switch state {
+	case flex.Work_CREATED:
+		return "created"
+	case flex.Work_SCHEDULED:
+		return "scheduled"
+	case flex.Work_RUNNING:
+		return "running"
+	case flex.Work_RESCHEDULED:
+		return "rescheduled"
+	case flex.Work_ERROR:
+		return "error"
+	case flex.Work_COMPLETED:
+		return "completed"
+	case flex.Work_CANCELLED:
+		return "cancelled"
+	case flex.Work_FAILED:
+		return "failed"
+	case flex.Work_UNKNOWN:
+		return "unknown"
+	case flex.Work_UNSPECIFIED:
+		// UNSPECIFIED is treated as non-terminal (WorkActive) since there is no production path
+		// that transitions a WR into this state — it is the proto zero value.
+		return "unspecified"
+	default:
+		// Use a distinct label so default-fallthrough is distinguishable from Work_UNKNOWN.
+		return "unrecognized"
 	}
 }
