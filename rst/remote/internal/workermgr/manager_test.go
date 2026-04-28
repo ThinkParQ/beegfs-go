@@ -45,7 +45,7 @@ func newWorkTestManager(t *testing.T, workerConfigs []worker.Config) (*Manager, 
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	meter := mp.Meter("workermgr")
 
-	workActive, err := meter.Int64UpDownCounter("beeremote.work.active")
+	workActive, err := meter.Int64Counter("beeremote.work.active")
 	require.NoError(t, err)
 	workTerminal, err := meter.Int64Counter("beeremote.work.terminal")
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[workCoun
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.active must be Sum[int64] (UpDownCounter)")
+			require.True(t, ok, "beeremote.work.active must be Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -239,11 +239,9 @@ func TestWorkCounterSubmitWorkError(t *testing.T) {
 	active := workActiveValues(t, reader)
 	terminal := workTerminalValues(t, reader)
 
-	// WorkActive{created} was +1 in SubmitJob, then -1 in cascade → net 0.
+	// WorkActive{created} was +1 in SubmitJob. No decrement on transition to terminal.
 	// Cascade fails with ErrWorkerNotInPool (AssignedNode="" → not in nodeMap) → UNKNOWN terminal.
-	// require.Contains verifies a data point was actually recorded (not just a missing-key zero).
-	require.Contains(t, active, workCounterKey{"created", 1}, "WorkActive{created} must be present: decrement requires a prior increment")
-	assert.Equal(t, int64(0), active[workCounterKey{"created", 1}])
+	assert.Equal(t, int64(1), active[workCounterKey{"created", 1}])
 	assert.Equal(t, int64(1), terminal[workCounterKey{"unknown", 1}])
 }
 
@@ -311,9 +309,8 @@ func TestWorkCounterPartialSchedulingWithUnknownType(t *testing.T) {
 			active := workActiveValues(t, reader)
 			terminal := workTerminalValues(t, reader)
 
-			for k, v := range active {
-				assert.Equal(t, int64(0), v, "WorkActive must be zero for key %v", k)
-			}
+			// WorkActive{scheduled} counts entries into scheduled state; no decrement on cancel.
+			assert.Equal(t, int64(tc.mockWRCount), active[workCounterKey{"scheduled", 1}], "WorkActive{scheduled} == mockWRCount (monotonic)")
 			assert.Equal(t, tc.wantCancelled, terminal[workCounterKey{"cancelled", 1}], "scheduled WRs cancelled by cascade")
 			assert.Equal(t, tc.wantFailed, terminal[workCounterKey{"failed", 1}], "no-pool WRs counted as failed at submit time")
 		})
@@ -361,9 +358,8 @@ func TestWorkCounterUpdateJobUnassigned(t *testing.T) {
 	active := workActiveValues(t, reader)
 	terminal := workTerminalValues(t, reader)
 
-	// Net: WorkActive{created} +1 (pre-populate) -1 (transition) = 0.
-	require.Contains(t, active, workCounterKey{"created", 1}, "WorkActive{created} must be present after transition")
-	assert.Equal(t, int64(0), active[workCounterKey{"created", 1}])
+	// WorkActive{created} pre-seeded at 1; no decrement on transition to terminal. Stays at 1.
+	assert.Equal(t, int64(1), active[workCounterKey{"created", 1}])
 	assert.Equal(t, int64(1), terminal[workCounterKey{"cancelled", 1}])
 }
 
@@ -409,9 +405,8 @@ func TestWorkCounterUpdateJobPoolNotFound(t *testing.T) {
 	active := workActiveValues(t, reader)
 	terminal := workTerminalValues(t, reader)
 
-	// Net: WorkActive{scheduled} +1 (pre-populate) -1 (transition) = 0.
-	require.Contains(t, active, workCounterKey{"scheduled", 1}, "WorkActive{scheduled} must be present after transition")
-	assert.Equal(t, int64(0), active[workCounterKey{"scheduled", 1}])
+	// WorkActive{scheduled} pre-seeded at 1; no decrement on transition to terminal. Stays at 1.
+	assert.Equal(t, int64(1), active[workCounterKey{"scheduled", 1}])
 	assert.Equal(t, int64(1), terminal[workCounterKey{"unknown", 1}])
 }
 
@@ -470,11 +465,8 @@ func TestWorkCounterUpdateJobNodeResponse(t *testing.T) {
 			active := workActiveValues(t, reader)
 			terminal := workTerminalValues(t, reader)
 
-			// After SubmitJob: WorkActive{scheduled}=+1.
-			// After UpdateJob: WorkActive{scheduled}=-1, WorkTerminal{tc.wantTermState}=+1.
-			// Net: WorkActive{scheduled}=0, WorkTerminal{tc.wantTermState}=1.
-			require.Contains(t, active, workCounterKey{"scheduled", 1}, "WorkActive{scheduled} must be present after SubmitJob+UpdateJob")
-			assert.Equal(t, int64(0), active[workCounterKey{"scheduled", 1}])
+			// After SubmitJob: WorkActive{scheduled}=+1. No decrement on UpdateJob transition.
+			assert.Equal(t, int64(1), active[workCounterKey{"scheduled", 1}])
 			assert.Equal(t, int64(1), terminal[workCounterKey{tc.wantTermState, 1}])
 		})
 	}
@@ -493,7 +485,7 @@ func minimalWorkerConfig() worker.Config {
 }
 
 // TestRecordWorkTransitionNonTerminalToNonTerminal verifies that non-terminal → non-terminal
-// transitions decrement WorkActive for the old state and increment it for the new state.
+// transitions increment WorkActive for the new state and leave the old state unchanged.
 // Covers states that exist in workStateString but are not exercised via SubmitJob/UpdateJob.
 func TestRecordWorkTransitionNonTerminalToNonTerminal(t *testing.T) {
 	for _, tc := range []struct {
@@ -521,8 +513,9 @@ func TestRecordWorkTransitionNonTerminalToNonTerminal(t *testing.T) {
 			active := workActiveValues(t, reader)
 			terminal := workTerminalValues(t, reader)
 
-			require.Contains(t, active, workCounterKey{tc.oldLabel, 1})
-			assert.Equal(t, int64(0), active[workCounterKey{tc.oldLabel, 1}])
+			// Old state unchanged (no decrement); new state incremented; no other keys.
+			assert.Len(t, active, 2, "only oldLabel and newLabel keys expected")
+			assert.Equal(t, int64(1), active[workCounterKey{tc.oldLabel, 1}])
 			assert.Equal(t, int64(1), active[workCounterKey{tc.newLabel, 1}])
 			assert.Empty(t, terminal)
 		})
@@ -530,7 +523,7 @@ func TestRecordWorkTransitionNonTerminalToNonTerminal(t *testing.T) {
 }
 
 // TestRecordWorkTransitionNonTerminalToTerminal verifies that a non-terminal → terminal
-// transition decrements WorkActive and increments WorkTerminal. Covers Work_COMPLETED which
+// transition increments WorkTerminal and leaves WorkActive unchanged. Covers Work_COMPLETED which
 // is the normal success terminal state and not reachable via UpdateJob (only via UpdateWork
 // in Commit 2).
 func TestRecordWorkTransitionNonTerminalToTerminal(t *testing.T) {
@@ -555,8 +548,8 @@ func TestRecordWorkTransitionNonTerminalToTerminal(t *testing.T) {
 			active := workActiveValues(t, reader)
 			terminal := workTerminalValues(t, reader)
 
-			require.Contains(t, active, workCounterKey{"running", 1})
-			assert.Equal(t, int64(0), active[workCounterKey{"running", 1}])
+			// WorkActive{running} pre-seeded at 1; no decrement on transition to terminal. Stays at 1.
+			assert.Equal(t, int64(1), active[workCounterKey{"running", 1}])
 			assert.Equal(t, int64(1), terminal[workCounterKey{tc.wantLabel, 1}])
 		})
 	}

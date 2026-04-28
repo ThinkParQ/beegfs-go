@@ -1081,11 +1081,11 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	entryToUpdate.WorkResult = workResult
 	job.WorkResults[workResult.GetRequestId()] = entryToUpdate
 
-	// Record per-WR transition: prior state is always SCHEDULED (CREATED work
-	// is never assigned to a node and cannot send results back).
+	// Record terminal transition: prior state is always SCHEDULED (CREATED work
+	// is never assigned to a node and cannot send results back). WorkActive is
+	// not touched here — it is monotonic (Int64Counter) and was already incremented
+	// when the WR entered SCHEDULED state.
 	rstID := int(job.Request.GetRemoteStorageTarget())
-	m.workerManager.WorkActive.Add(context.Background(), -1,
-		metric.WithAttributes(attrState.String(workermgr.WorkStateString(flex.Work_SCHEDULED)), attrRSTID.Int(rstID)))
 	m.workerManager.WorkTerminal.Add(context.Background(), 1,
 		metric.WithAttributes(attrState.String(workermgr.WorkStateString(workResult.GetStatus().GetState())), attrRSTID.Int(rstID)))
 

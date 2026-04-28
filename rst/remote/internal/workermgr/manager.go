@@ -52,9 +52,9 @@ type Manager struct {
 	RemoteStorageTargets map[uint32]rst.Provider
 	mountPoint           filesystem.Provider
 	requiredFeatures     map[string]*flex.Feature
-	// WorkActive tracks work requests currently in non-terminal states.
+	// WorkActive counts entries into non-terminal work states.
 	// Exported so job.Manager can record transitions in UpdateWork.
-	WorkActive metric.Int64UpDownCounter
+	WorkActive metric.Int64Counter
 	// WorkTerminal counts work requests that reached a terminal state.
 	// Exported so job.Manager can record transitions in UpdateWork.
 	WorkTerminal metric.Int64Counter
@@ -148,8 +148,12 @@ func NewManager(
 	// Errors from instrument creation are only possible with misconfigured MeterProviders
 	// (e.g., duplicate instrument name with conflicting unit). The noop instruments returned
 	// on error are safe to use, so we intentionally discard the errors here.
-	workActive, _ := meter.Int64UpDownCounter("beeremote.work.active",
-		metric.WithDescription("Current work requests in non-terminal states"),
+	workActive, _ := meter.Int64Counter("beeremote.work.active",
+		metric.WithDescription("Number of times work requests entered each non-terminal state. "+
+			"Use rate() for throughput. To compute current occupancy of state S: "+
+			"increase(work.active{state=S}) minus the sum of increase(work.active{state=T}) "+
+			"for all states T directly reachable from S, minus increase(beeremote.work.terminal) "+
+			"for WRs whose last non-terminal state was S."),
 		metric.WithUnit("{work}"),
 	)
 	workTerminal, _ := meter.Int64Counter("beeremote.work.terminal",
@@ -410,15 +414,12 @@ func (m *Manager) recordInitialWork(state flex.Work_State, rstID uint32) {
 
 // recordWorkTransition records metric transitions for a work request state change.
 // When oldState is already terminal, no recording occurs — the WR was already counted.
-// Non-terminal → terminal: decrements WorkActive, increments WorkTerminal.
-// Non-terminal → non-terminal: decrements WorkActive for old state, increments for new.
+// Non-terminal → terminal: increments WorkTerminal only; WorkActive is monotonic and not decremented.
+// Non-terminal → non-terminal: increments WorkActive for the new state; old state entry is not decremented.
 func (m *Manager) recordWorkTransition(oldState, newState flex.Work_State, rstID uint32) {
 	if isTerminalWorkState(oldState) {
 		return
 	}
-	m.WorkActive.Add(context.Background(), -1, metric.WithAttributes(
-		attrState.String(WorkStateString(oldState)), attrRSTID.Int(int(rstID)),
-	))
 	if isTerminalWorkState(newState) {
 		m.WorkTerminal.Add(context.Background(), 1, metric.WithAttributes(
 			attrState.String(WorkStateString(newState)), attrRSTID.Int(int(rstID)),
