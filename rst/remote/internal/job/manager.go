@@ -21,7 +21,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -238,6 +240,70 @@ func (m *Manager) Start() error {
 		}
 	}()
 	return nil
+}
+
+func (m *Manager) GetEventDispatchFunc(ctx context.Context, log *zap.Logger) dispatch.DispatchFunc {
+	log = log.With(zap.String("component", "eventDispatcher"))
+	return func(event *beewatch.Event) bool {
+		// The dispatcher ensures we receive V2 events.
+		e := event.EventData.(*beewatch.Event_V2)
+		if e.V2.Type != beewatch.V2Event_OPEN_BLOCKED {
+			log.Debug("filtered out event type (ignoring)", zap.Any("type", e.V2.GetType()), zap.Any("seq", event.SeqId))
+			return false
+		}
+
+		path := e.V2.GetPath()
+
+		log.Debug("detected a blocked open event, checking if the stub file is eligible for automatic restore",
+			zap.String("path", path), zap.Any("type", e.V2.GetType()))
+
+		entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, e.V2.Path)
+		if err != nil {
+			log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(err))
+			return false
+		}
+
+		if !(entryInfo.Entry.FileState.GetDataState() == beegfs.DataStateAutoRestore ||
+			entryInfo.Entry.FileState.GetDataState() == beegfs.DataStateDelayedRestore) {
+			log.Debug("stub file's data state does not allow an automatic restore",
+				zap.String("path", path), zap.Any("dataState", entryInfo.Entry.FileState.GetDataState()))
+			return false
+		}
+
+		// If a restore is currently in progress this will fail for "stub file is malformed". If a
+		// restore was already requested but not yet started, then the job submission below is
+		// rejected. We could add a dedupe map here, but if we set to short a TTL duplicates will
+		// slip through anyway, and too long and we might suppress legitimate retries after a failed
+		// restore or scenarios where a file was offloaded/restored/offloaded (weird, but possible).
+		// We already have a three layer defense against races between the data state check,
+		// GetStubContents failure, and SubmitJobRequest rejecting duplicate requests, no need to
+		// add extra complexity.
+		id, url, err := m.GetStubContents(path)
+		if err != nil {
+			log.Debug("skipping automatic restore as the stub file's contents could not be retrieved", zap.String("path", path), zap.Error(err))
+			return false
+		}
+
+		result, err := m.SubmitJobRequest(&beeremote.JobRequest{
+			Path:                path,
+			Priority:            1,
+			RemoteStorageTarget: id,
+			Type: &beeremote.JobRequest_Sync{
+				Sync: &flex.SyncJob{
+					Operation:  flex.SyncJob_DOWNLOAD,
+					RemotePath: url,
+					Overwrite:  true,
+				},
+			},
+		})
+		if err != nil {
+			log.Debug("unable to create sync job to restore the specified stub file's contents", zap.String("path", path), zap.Error(err))
+			return false
+		}
+
+		log.Debug("stub file restore triggered", zap.Any("result", result))
+		return true
+	}
 }
 
 func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest, responses chan<- *beeremote.GetJobsResponse) error {

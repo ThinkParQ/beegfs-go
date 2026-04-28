@@ -76,6 +76,11 @@ func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.Bu
 	return &s, nil
 }
 
+// GetGRPCServer returns the underlying gRPC server to enable additional services to be attached.
+func (s *BeeRemoteServer) GetGRPCServer() *grpc.Server {
+	return s.grpcServer
+}
+
 // ListenAndServe should be called against a BeeRemoteServer initialized with New(). It spawns a new
 // goroutine to handle serving requests until an an error occurs or Stop() is called against the
 // BeeRemoteServer. It accepts an errChan where any errors will be returned if the gRPC server
