@@ -9,6 +9,7 @@
 #   1.2) Worker Settings
 #   1.3) Remote Storage Target Settings
 #   1.4) Telemetry Settings
+#   1.5) Automatic Sync and Restore Settings
 # 2) Command Line Arguments
 # 3) Basic Settings Documentation
 #   3.1) Management Settings
@@ -16,6 +17,7 @@
 #   3.3) Server Settings
 #   3.4) Job Settings
 #   3.5) Telemetry Settings
+#   3.6) Automatic Sync and Restore Settings
 # 4) Worker Settings Documentation
 #   4.1) Advanced Worker Settings
 # 5) Remote Storage Target Settings Documentation
@@ -151,6 +153,34 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # # headers = { Authorization = "Bearer <token>" }
 
 #
+# --- Section 1.5: [Automatic Sync and Restore Settings] ---
+#
+
+[dispatch]
+enabled = false
+workers = 0
+checkpoint-path = "/var/lib/beegfs/remote/dispatch/events.ckpt"
+checkpoint-frequency = "1s"
+rate-limit-window = "10m"
+rate-limit-max-events = 0
+rate-limit-event-types = ["*"]
+
+# [[dispatch.rate-limit-override]]
+# user-ids="0"
+# max-events=100000
+# event-types = ["OPEN_BLOCKED"]
+
+# [[dispatch.rate-limit-override]]
+# user-ids="1000-2000,3000,4000"
+# max-events=1000
+# event-types = ["OPEN_BLOCKED"]
+
+# [[dispatch.ignore-files]]
+# event-types = ["LAST_WRITER_CLOSED"]
+# glob-patterns = ["*.swp", "*.swx", "*.tmp", "*~", "#*#", ".#*"]
+
+
+#
 # --- Section 2: [Command Line Arguments] ---
 #
 
@@ -265,7 +295,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # max-job-entries-per-rst: Once this threshold is exceeded, older jobs will be deleted
 # (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.
 
-
 #
 # --- Section 3.5: [Telemetry Settings] ---
 #
@@ -318,6 +347,84 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # The url-path default for logs is "/v1/logs". For Loki direct ingestion use
 # "/otlp/v1/logs".
 
+#
+# --- Section 3.6: [Automatic Sync and Restore Settings] ---
+#
+
+# Automatically syncing and restoring files works by configuring Remote to dispatch jobs in response
+# to certain file system modification events sent by the Watch service on behalf of a BeeGFS
+# metadata node. These settings must be specified under [dispatch].
+
+# enabled: By default event dispatch is disabled. When first enabling event dispatch historical
+# events are ignored and only future file system modifications will trigger jobs.
+
+# workers: The number of worker threads used to process events and dispatch job requests. By default
+# this is the number of CPUs available to the Remote process.
+
+# checkpoint-path: This allows Remote to be restarted and resume dispatching events from where it
+# left off. The checkpoint file can be deleted to cause Remote to discard all historical events and
+# start dispatching from the next file system modification event from each metadata node.
+
+# checkpoint-frequency: This controls how often Remote acknowledges what events it has processed to
+# Watch, and writes out the local event checkpoint file. More frequent checkpoints reduce the number
+# of duplicate events Remote has to process after an unexpected restart. Duplicate events do not
+# cause duplicate job submissions, as Remote will detect if there is already an existing equivalent
+# job (in progress or completed) and ignore the duplicate event.
+
+# rate-limit-window: The number of events that trigger jobs is tracked on a per user ID and event
+# type basis for this rolling time window and limited based on rate-limit-max-events.
+
+# rate-limit-max-events: The default max number of events for a particular user ID during the
+# rate-limit-window that can trigger jobs. Only events that trigger jobs count against the max. If
+# set to "0" or omitted then by default no events for users without an override will be dispatched.
+
+# rate-limit-event-types: Specifies which event types should be subject to rate-limit-max-events.
+# Use ["*"] or omit to rate limit all event types. Event types not in this list are ignored and
+# never dispatched. Rate limiting the OPEN_BLOCKED event determines how many file restores a user
+# can trigger when a file's contents is offloaded and the file's data state is set to `AutoRestore`
+# or `DelayedRestore`. Rate limiting the LAST_WRITER_CLOSED event determines how frequently users
+# can trigger file synchronization after closing a file for writing.
+
+#
+# --- Section 3.6.1: [Dispatch Rate Limit Override Settings] ---
+#
+
+# One or more more rate limit overrides can be specified under [[dispatch.rate-limit-override]]
+# headers. If a range includes a user ID that is also specified individually in a different
+# override, the individual override will take precedence for that user ID.
+
+# user-ids: One or more comma separated ranges or individual user IDs the override applies to. For
+# example "1000,2000-3000,4000".
+
+# max-events: Override the default rate-limit-max-events for the specified user-ids. If set to "0"
+# or omitted then no event-types for these user-ids will be dispatched.
+
+# event-types: Optionally override which event types are subject to rate limiting for the specified
+# user-ids. Use ["*"] or omit to rate limit all event types. Accepts the same event type names as
+# rate-limit-event-types.
+
+#
+# --- Section 3.6.2: [Dispatch Ignore Files Settings] ---
+#
+
+# One or more ignore rules can be specified under [[dispatch.ignore-files]] headers. Events for
+# files matching an ignore rule are acknowledged but never dispatched, and do not count against the
+# rate limit. This is useful to drop noise from short-lived files such as editor swap/temp files
+# (for example nano creates files like ".filename.swp"). Rules are evaluated independently; an event
+# is ignored if it matches any rule that applies to its event type.
+
+# event-types: Which event types the rule applies to. Use ["*"] or omit to apply the rule to all
+# event types. Accepts the same event type names as rate-limit-event-types.
+
+# glob-patterns: One or more glob patterns matched against the file path. Patterns without a "/" are
+# matched against the file name only (for example "*.swp" or "*.tmp"), so they match regardless of
+# the file's directory. Note that "*" also matches a leading dot, so "*.swp" matches hidden swap
+# files such as ".notes.txt.swp". Patterns containing a "/" are matched against the full BeeGFS path
+# and may use "**" to match across directories (for example "scratch/**"). Avoid overly broad
+# patterns like ".*" that would suppress all hidden files. A rule matches if any of its patterns
+# match. Every event is checked against each pattern that applies to its type, so prefer a few
+# patterns over many narrowly scoped ones; the cost is negligible for typical lists but can add up
+# at very high event rates with larger numbers of patterns.
 
 #
 # --- Section 4: [Worker Settings] ---
