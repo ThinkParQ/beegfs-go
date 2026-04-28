@@ -1443,7 +1443,7 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			counts = jobActiveValues(t, reader)
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "job should still be scheduled after first WR")
 			workActive = workActiveValues(t, reader)
-			assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 1}], "one WR done; WorkActive{scheduled} should drop to 1")
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "WorkActive is monotonic; stays at 2 after first WR completes")
 			workTerm0 := workTerminalValues(t, reader)
 			assert.Equal(t, int64(1), workTerm0[counterKey{workermgr.WorkStateString(tc.workState), 1}], "after WR 0: WorkTerminal{%s} == 1", workermgr.WorkStateString(tc.workState))
 
@@ -1459,7 +1459,7 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "scheduled count stays at 1 after terminal — cumulative counter never decrements")
 			assert.Equal(t, int64(0), counts[counterKey{expectedStateStr, 1}], "terminal state never incremented in jobActive")
 			workActive = workActiveValues(t, reader)
-			assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "all WRs done; WorkActive{scheduled} should be 0")
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "WorkActive is monotonic; stays at 2 after both WRs complete")
 			workTerm := workTerminalValues(t, reader)
 			assert.Equal(t, int64(2), workTerm[counterKey{workStateStr, 1}], "both WRs should be counted as terminal")
 		})
@@ -1638,7 +1638,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	// Wire workermgr instruments from the same provider so the shared reader
 	// captures both job and work metrics.
 	workMeter := mp.Meter("workermgr")
-	workActive, err := workMeter.Int64UpDownCounter("beeremote.work.active")
+	workActive, err := workMeter.Int64Counter("beeremote.work.active")
 	require.NoError(t, err)
 	workTerminal, err := workMeter.Int64Counter("beeremote.work.terminal")
 	require.NoError(t, err)
@@ -2011,7 +2011,7 @@ func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
 	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "fresh submit increments counter correctly")
 }
 
-// workActiveValues collects the beeremote.work.active UpDownCounter values,
+// workActiveValues collects the beeremote.work.active counter values,
 // keyed by (state, rstID). Uses the same counterKey type as jobActiveValues.
 func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
 	t.Helper()
@@ -2025,7 +2025,7 @@ func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterK
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.active should be a Sum[int64] (UpDownCounter)")
+			require.True(t, ok, "beeremote.work.active should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -2144,14 +2144,14 @@ func TestUpdateWorkCounters(t *testing.T) {
 			sendWorkResult(t, m, js, "0", tc.state0)
 
 			workActive = workActiveValues(t, reader)
-			assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 1}], "after WR 0: WorkActive{scheduled} decrements to 1")
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "WorkActive is monotonic; stays at 2 after first WR completes")
 			workTerm := workTerminalValues(t, reader)
 			assert.Equal(t, int64(1), workTerm[counterKey{tc.wantTerm0, 1}], "after WR 0: WorkTerminal{%s} == 1", tc.wantTerm0)
 
 			sendWorkResult(t, m, js, "1", tc.state1)
 
 			workActive = workActiveValues(t, reader)
-			assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "after WR 1: WorkActive{scheduled} == 0")
+			assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "WorkActive is monotonic; stays at 2 after both WRs complete")
 			workTerm = workTerminalValues(t, reader)
 			assert.Equal(t, tc.wantTerm1Count, workTerm[counterKey{tc.wantTerm1, 1}], "after WR 1: WorkTerminal{%s} == %d", tc.wantTerm1, tc.wantTerm1Count)
 			// For mixed states, verify wantTerm0 counter was not overwritten by WR1.
@@ -2194,7 +2194,7 @@ func TestUpdateWorkCounters(t *testing.T) {
 
 		// Work counters reflect actual WR terminal states regardless of job outcome.
 		workActive := workActiveValues(t, reader)
-		assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "C6: WorkActive{scheduled} == 0 after both WRs")
+		assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "C6: WorkActive is monotonic; stays at 2 after both WRs complete")
 		workTerm := workTerminalValues(t, reader)
 		assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "C6: WorkTerminal{completed} == 2 despite RST gone")
 
@@ -2253,15 +2253,15 @@ func TestWorkCounterRSTIsolation(t *testing.T) {
 	sendWorkResult(t, m, jsA, "1", flex.Work_COMPLETED)
 
 	workActive = workActiveValues(t, reader)
-	assert.Equal(t, int64(0), workActive[counterKey{"scheduled", 1}], "D1: RST 1 WRs all done")
+	assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "D1: RST 1 WorkActive monotonic; stays at 2 after completion")
 	assert.Equal(t, int64(1), workActive[counterKey{"scheduled", 2}], "D1: RST 2 unaffected by RST 1 completions")
 	workTerm := workTerminalValues(t, reader)
 	assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "D1: RST 1 WorkTerminal{completed} == 2")
 	assert.Equal(t, int64(0), workTerm[counterKey{"completed", 2}], "D1: RST 2 WorkTerminal{completed} must be zero (no cross-contamination)")
 }
 
-// TestWorkCounterBalance verifies that after all WRs complete the sum of all
-// WorkActive values is zero (D2).
+// TestWorkCounterBalance verifies that after all WRs complete WorkActive equals the number
+// of WR state entries (monotonic; never decrements) and WorkTerminal accounts for all WRs (D2).
 func TestWorkCounterBalance(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 10), 0644, false)
@@ -2276,12 +2276,8 @@ func TestWorkCounterBalance(t *testing.T) {
 	sendWorkResult(t, m, js, "1", flex.Work_COMPLETED)
 
 	workActive := workActiveValues(t, reader)
-	var total int64
-	for _, v := range workActive {
-		total += v
-	}
-	assert.Equal(t, int64(0), total, "D2: sum of all WorkActive values must be zero after full lifecycle")
-	// The 2 active WRs must have moved to WorkTerminal, not vanished.
+	// Each of the 2 WRs entered scheduled state once; WorkActive is monotonic (never decrements).
+	assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "D2: WorkActive{scheduled} == 2 (one entry per WR, no decrements)")
 	workTerm := workTerminalValues(t, reader)
 	assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "D2: 2 WRs must be counted in WorkTerminal{completed}")
 }
