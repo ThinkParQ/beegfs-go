@@ -10,12 +10,14 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
@@ -54,12 +56,38 @@ func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
 	pflag.String("cfg-file", "", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). When Remote Storage Targets are configured using a file, they can be updated without restarting the application.")
 	pflag.String("mount-point", "", "The path where BeeGFS is mounted.")
+	pflag.String("service-name", "beegfs-remote", "Service name used in telemetry resource attributes.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-remote.log", "The path to the desired log file when logType is 'log.file' (if needed the directory and all parent directories will be created).")
 	pflag.Int8("log.level", 3, "Adjust the logging level (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
 	pflag.Int("log.max-size", 1000, "When log.type is 'logfile' the maximum size of the log.file in megabytes before it is rotated.")
 	pflag.Int("log.num-rotated-files", 5, "When log.type is 'logfile' the maximum number old log.file(s) to keep when log.max-size is reached and the log is rotated.")
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
+	pflag.Bool("telemetry.otlp.enabled", false, "Enable pushing metrics via OTLP.")
+	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
+	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
+	pflag.Duration("telemetry.otlp.interval", 30*time.Second, "OTLP export interval.")
+	pflag.String("telemetry.otlp.url-path", "/v1/metrics", "OTLP HTTP URL path. HTTP only; Loki-compatible backends use '/otlp/v1/metrics'.")
+	pflag.String("telemetry.otlp.compression", "gzip", "OTLP export compression ('gzip' or 'none').")
+	pflag.Duration("telemetry.otlp.timeout", 10*time.Second, "OTLP export timeout.")
+	pflag.String("telemetry.otlp.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP traffic. Leave empty to only use the system's default certificate pool.")
+	pflag.Bool("telemetry.otlp.tls-disable-verification", false, "Disable TLS server verification for OTLP connections.")
+	pflag.Bool("telemetry.otlp.tls-disable", false, "Disable TLS entirely for OTLP connections.")
+	pflag.Bool("telemetry.prometheus.enabled", false, "Enable Prometheus /metrics endpoint.")
+	pflag.String("telemetry.prometheus.listen-address", "0.0.0.0:9091", "Address:port the Prometheus HTTP server listens on.")
+	pflag.String("telemetry.prometheus.path", "/metrics", "Prometheus metrics HTTP path.")
+	pflag.String("telemetry.prometheus.tls-cert-file", "", "Path to the TLS certificate file for the Prometheus endpoint.")
+	pflag.String("telemetry.prometheus.tls-key-file", "", "Path to the TLS key file for the Prometheus endpoint.")
+	pflag.Bool("telemetry.prometheus.tls-disable", false, "Disable TLS for the Prometheus metrics endpoint.")
+	pflag.Bool("telemetry.logs.enabled", false, "Enable exporting logs via OTLP.")
+	pflag.String("telemetry.logs.protocol", "grpc", "OTLP logs transport ('grpc' or 'http').")
+	pflag.String("telemetry.logs.endpoint", "localhost:4317", "OTLP logs collector endpoint.")
+	pflag.String("telemetry.logs.url-path", "/v1/logs", "OTLP logs HTTP URL path. HTTP only; Loki direct ingestion uses '/otlp/v1/logs'.")
+	pflag.String("telemetry.logs.compression", "gzip", "OTLP logs export compression ('gzip' or 'none').")
+	pflag.Duration("telemetry.logs.timeout", 10*time.Second, "OTLP logs export timeout.")
+	pflag.String("telemetry.logs.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP log traffic. Leave empty to only use the system's default certificate pool.")
+	pflag.Bool("telemetry.logs.tls-disable-verification", false, "Disable TLS server verification for OTLP log connections.")
+	pflag.Bool("telemetry.logs.tls-disable", false, "Disable TLS entirely for OTLP log connections.")
 	pflag.String("management.address", "127.0.0.1:8010", "The hostname:port of the BeeGFS management node.")
 	pflag.String("management.tls-cert-file", "/etc/beegfs/cert.pem", "Use the specified certificate to verify and encrypt gRPC traffic to the Management node. Leave empty to only use the system's default certificate pool.")
 	pflag.Bool("management.tls-disable-verification", false, "Disable TLS verification for gRPC communication to the Management node.")
@@ -136,16 +164,25 @@ Using environment variables:
 		}()
 	}
 
-	logger, err := logger.New(initialCfg.Log)
+	logger, err := logger.New(initialCfg.Log, &initialCfg.Telemetry,
+		telemetry.WithServiceName(initialCfg.ServiceName),
+		telemetry.WithInstanceID(initialCfg.Server.Address),
+		telemetry.WithVersion(version),
+	)
 	if err != nil {
 		log.Fatalf("unable to initialize logger: %s", err)
 	}
-	defer logger.Sync()
+	// 10s gives the OTel SDK time to flush the last metrics window. If
+	// telemetry.otlp.timeout is configured above 10s, the final flush may be
+	// cut short; adjust this value accordingly in that case.
+	defer logger.DeferredShutdown(10 * time.Second)()
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {
 		logger.Fatal("unable to initialize ctl logging", zap.Error(err))
 	}
+
+	cfgMgr.AddListener(logger)
 
 	err = ctl.InitViperFromExternal(
 		ctl.GlobalConfig{
@@ -267,7 +304,7 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger.Logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
+	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}
@@ -277,14 +314,14 @@ Using environment variables:
 		logger.Fatal("unable to start worker manager", zap.Error(err))
 	}
 
-	jobManager := job.NewManager(logger.Logger, initialCfg.Job, workerManager)
+	jobManager := job.NewManager(logger, initialCfg.Job, workerManager)
 	err = jobManager.Start()
 	if err != nil {
 		logger.Fatal("unable to start job manager", zap.Error(err))
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	jobServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
 	}

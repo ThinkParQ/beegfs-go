@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
@@ -36,7 +37,7 @@ var _ beeremote.BeeRemoteServer = &BeeRemoteServer{}
 
 type BeeRemoteServer struct {
 	beeremote.UnimplementedBeeRemoteServer
-	log *zap.Logger
+	log *logger.Logger
 	wg  *sync.WaitGroup
 	Config
 	grpcServer *grpc.Server
@@ -47,7 +48,7 @@ type BeeRemoteServer struct {
 
 // New() creates a new BeeRemoteServer that can be used with ListenAndServe().
 // It requires a channel where it can send job requests to JobMgr.
-func New(log *zap.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*BeeRemoteServer, error) {
+func New(log *logger.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*BeeRemoteServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[BeeRemoteServer]().PkgPath())))
 

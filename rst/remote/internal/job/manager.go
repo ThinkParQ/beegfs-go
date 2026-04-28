@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
-	"expvar"
 	"fmt"
 	"io/fs"
 	"path"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+	stdtime "time"
 
 	"github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
@@ -22,14 +22,26 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var beeRemoteJobRequest = expvar.NewInt("beeremote_job_requests")
-var beeRemoteWorkRequest = expvar.NewInt("beeremote_work_requests")
+var (
+	attrState = attribute.Key("state")
+	attrRSTID = attribute.Key("rst.id")
+)
+
+// managerMetrics holds the OTel instruments used to report job manager metrics.
+type managerMetrics struct {
+	jobRequests metric.Int64Counter
+	jobTerminal metric.Int64Counter
+	jobDuration metric.Float64Histogram
+	jobActive   metric.Int64Counter
+}
 
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
@@ -46,7 +58,7 @@ type Config struct {
 }
 
 type Manager struct {
-	log       *zap.Logger
+	log       *logger.Logger
 	wg        sync.WaitGroup
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -88,6 +100,7 @@ type Manager struct {
 	workerManager *workermgr.Manager
 	// function to release the file's access locks when no longer needed.
 	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	metrics                   managerMetrics
 }
 
 type managerOptConfig struct {
@@ -105,8 +118,9 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 }
 
 // NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
-func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
+func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	meter := log.Meter("job")
 	ctx, cancel := context.WithCancel(context.Background())
 	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
 	jobUpdatesChan := make(chan *beeremote.UpdateJobsRequest, config.RequestQueueDepth)
@@ -119,7 +133,24 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		opt(cfg)
 	}
 
-	return &Manager{
+	// The OTel API always returns a valid (no-op) instrument even on error; errors
+	// only occur for invalid names or incompatible re-registration, neither of which
+	// can happen with these compile-time constants.
+	jobRequests, _ := meter.Int64Counter("beeremote.job.requests",
+		metric.WithDescription("Total job requests received"),
+	)
+	jobTerminal, _ := meter.Int64Counter("beeremote.job.terminal",
+		metric.WithDescription("Jobs that reached a terminal state"),
+	)
+	jobDuration, _ := meter.Float64Histogram("beeremote.job.duration",
+		metric.WithDescription("Time from job creation to terminal state"),
+		metric.WithUnit("s"),
+	)
+	jobActive, _ := meter.Int64Counter("beeremote.job.active",
+		metric.WithDescription("Number of times jobs entered each non-terminal state; use rate() for throughput or subtract beeremote.job.terminal from beeremote.job.requests for current active count"),
+		metric.WithUnit("{job}"),
+	)
+	m := &Manager{
 		log:                       log,
 		ctx:                       ctx,
 		ctxCancel:                 cancel,
@@ -133,7 +164,15 @@ func NewManager(log *zap.Logger, config Config, workerManager *workermgr.Manager
 		WorkResults:               workResultsChan,
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
+		metrics: managerMetrics{
+			jobRequests: jobRequests,
+			jobTerminal: jobTerminal,
+			jobDuration: jobDuration,
+			jobActive:   jobActive,
+		},
 	}
+
+	return m
 }
 
 // Start handles initializing all databases and starting a goroutine that
@@ -167,7 +206,7 @@ func (m *Manager) Start() error {
 
 	// We initialize databases in Manage() so we can ensure the DBs are closed properly when shutting down.
 	pathDBOpts := badger.DefaultOptions(m.config.PathDBPath)
-	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log))
+	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log.Logger))
 	pathStore, closePathDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
 	if err != nil {
 		return fmt.Errorf("unable to setup paths DB: %w", err)
@@ -448,8 +487,9 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// It would be inefficient if we only cleaned up one entry at a time so we set a max
 			// number of entries before we start GC.
 			if len(jobsForRST) > m.config.MaxJobEntriesPerRST {
-				// Delete old jobs based on the oldest job by creation time until we reach
-				// minJobEntriesPerRST.
+				// Delete the oldest MinJobEntriesPerRST+1 entries. The +1 accounts for the
+				// new job about to be added, so that after insertion the RST has at most
+				// len(jobsForRST)-MinJobEntriesPerRST entries remaining.
 				sortFunc()
 				for _, gcJob := range jobsForRST[:m.config.MinJobEntriesPerRST+1] {
 					delete(pathEntry.Value, gcJob.GetId())
@@ -525,7 +565,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			// deletion, forced cancellations, or manual cleanup.
 			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_OFFLOADED {
 				status := job.GetStatus()
-				pathEntry.Value[job.GetId()] = job
 				status.State = beeremote.Job_OFFLOADED
 				status.Message = "job already offloaded (detailed work requests/results are not available)"
 				pathEntry.Value[job.GetId()] = job
@@ -607,6 +646,9 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
+	if !isTerminalState(job.GetStatus().GetState()) {
+		m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
 	// Decide if this concern is valid enough to do anything about.
@@ -621,8 +663,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	m.log.Debug("created job", zap.Any("job", job))
 
 	workRequests := rst.RecreateWorkRequests(job.Get(), job.GetSegments())
-	beeRemoteJobRequest.Add(1)
-	beeRemoteWorkRequest.Add(int64(len(workRequests)))
+	m.metrics.jobRequests.Add(context.Background(), 1)
 	return beeremote.JobResult_builder{
 		Job:          job.Get(),
 		WorkRequests: workRequests,
@@ -896,6 +937,25 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool) (success bool, safeToDelete bool, message string) {
 	status := job.GetStatus()
 	state := status.GetState()
+	initialState := state
+
+	// Increment the counter when a job enters a non-terminal state. Declared first (runs last in LIFO):
+	// runs after recordJobTerminal, which is declared second and fires first.
+	defer func() {
+		if currentState := status.GetState(); currentState != initialState && !isTerminalState(currentState) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(currentState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		}
+	}()
+
+	// Records metrics and a log only when this call transitions the job FROM a
+	// non-terminal state TO a terminal state. Force-updates that move between
+	// two terminal states (e.g., COMPLETED → CANCELLED) are not re-recorded.
+	defer func() {
+		if !isTerminalState(initialState) && isTerminalState(status.GetState()) {
+			m.recordJobTerminal(job, terminalStateString(status.GetState()))
+		}
+	}()
+
 	if (state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED) && !forceUpdate {
 		return true, false, fmt.Sprintf("rejecting update for completed job ID %s (use the force update flag to attempt anyway)", job.GetId())
 	}
@@ -942,6 +1002,7 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 				JobID:       job.GetId(),
 				WorkResults: job.WorkResults,
 				NewState:    flex.UpdateWorkRequest_CANCELLED,
+				RSTID:       job.Request.GetRemoteStorageTarget(),
 			})
 			if !success {
 				if !forceUpdate {
@@ -1020,6 +1081,14 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	entryToUpdate.WorkResult = workResult
 	job.WorkResults[workResult.GetRequestId()] = entryToUpdate
 
+	// Record terminal transition: prior state is always SCHEDULED (CREATED work
+	// is never assigned to a node and cannot send results back). WorkActive is
+	// not touched here — it is monotonic (Int64Counter) and was already incremented
+	// when the WR entered SCHEDULED state.
+	rstID := int(job.Request.GetRemoteStorageTarget())
+	m.workerManager.WorkTerminal.Add(context.Background(), 1,
+		metric.WithAttributes(attrState.String(workermgr.WorkStateString(workResult.GetStatus().GetState())), attrRSTID.Int(rstID)))
+
 	allSameState := true
 	for _, workResult := range job.WorkResults {
 		if !workResult.InTerminalState() && !workResult.RequiresUserIntervention() {
@@ -1033,6 +1102,24 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 	}
 	status := job.GetStatus()
+	initialState := status.GetState()
+
+	// Defer #1 (declared first, runs last in LIFO). Lock-cleanup (defer #3,
+	// declared last, runs first) may downgrade COMPLETED→FAILED before this fires.
+	defer func() {
+		if !isTerminalState(initialState) && isTerminalState(status.GetState()) {
+			m.recordJobTerminal(job, terminalStateString(status.GetState()))
+		}
+	}()
+
+	// Increment the counter when a job enters a non-terminal state. Declared second (runs second in LIFO): after
+	// lock-cleanup has potentially downgraded COMPLETED→FAILED, and before
+	// recordJobTerminal fires — so it always sees the final committed state.
+	defer func() {
+		if finalState := status.GetState(); finalState != initialState && !isTerminalState(finalState) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(finalState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		}
+	}()
 
 	// From here on out we'll modify the job state, ensure the timestamp is also updated.
 	attemptToClearLock := false
@@ -1120,6 +1207,106 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	}
 	m.log.Debug("job result", zap.Any("job", job))
 	return nil
+}
+
+// recordJobTerminal records metrics and emits a structured log when a job
+// reaches a terminal state.
+func (m *Manager) recordJobTerminal(job *Job, terminalState string) {
+	logFields := []zap.Field{
+		zap.String("state", terminalState),
+		zap.Int("rst_id", int(job.Request.GetRemoteStorageTarget())),
+		zap.String("job_id", job.GetId()),
+		zap.String("path", job.Request.GetPath()),
+		zap.String("message", job.GetStatus().GetMessage()),
+	}
+	switch terminalState {
+	case "failed", "unknown":
+		m.log.Warn("job reached terminal state", logFields...)
+	case "cancelled":
+		m.log.Info("job reached terminal state", logFields...)
+	default: // "completed", "offloaded"
+		m.log.Debug("job reached terminal state", logFields...)
+	}
+
+	attrs := metric.WithAttributes(
+		attrState.String(terminalState),
+		attrRSTID.Int(int(job.Request.GetRemoteStorageTarget())),
+	)
+	m.metrics.jobTerminal.Add(context.Background(), 1, attrs)
+	if created := job.GetCreated(); created != nil && created.IsValid() {
+		duration := stdtime.Since(created.AsTime()).Seconds()
+		m.metrics.jobDuration.Record(context.Background(), duration, attrs)
+	}
+}
+
+// isTerminalState reports whether state is a terminal job state for metrics and
+// logging purposes. This is broader than Job.InTerminalState(), which covers
+// only COMPLETED, OFFLOADED, and CANCELLED — the "clean" states where a job
+// can be deleted without orphaned requests. FAILED and UNKNOWN are terminal
+// here because no further work is running, but they require user intervention
+// before deletion.
+func isTerminalState(state beeremote.Job_State) bool {
+	switch state {
+	case beeremote.Job_COMPLETED,
+		beeremote.Job_CANCELLED,
+		beeremote.Job_FAILED,
+		beeremote.Job_OFFLOADED,
+		beeremote.Job_UNKNOWN:
+		return true
+	}
+	return false
+}
+
+// terminalStateString maps a terminal job state to the string used for
+// metrics attributes and log fields.
+func terminalStateString(state beeremote.Job_State) string {
+	switch state {
+	case beeremote.Job_COMPLETED:
+		return "completed"
+	case beeremote.Job_CANCELLED:
+		return "cancelled"
+	case beeremote.Job_OFFLOADED:
+		return "offloaded"
+	case beeremote.Job_UNKNOWN:
+		return "unknown"
+	case beeremote.Job_FAILED:
+		return "failed"
+	default:
+		// Unreachable: callers must guard with isTerminalState before calling.
+		// Panic here so contract violations surface immediately rather than
+		// silently miscounting metrics as "failed".
+		panic(fmt.Sprintf("terminalStateString called with non-terminal state: %v", state))
+	}
+}
+
+// jobStateString returns the metric attribute string for any job state.
+// If a new proto state is added and this switch is not updated, counts will
+// accumulate under "unknown" as a visible signal rather than crashing the process.
+func jobStateString(state beeremote.Job_State) string {
+	switch state {
+	case beeremote.Job_UNSPECIFIED:
+		return "unspecified"
+	case beeremote.Job_UNASSIGNED:
+		return "unassigned"
+	case beeremote.Job_SCHEDULED:
+		return "scheduled"
+	case beeremote.Job_RUNNING:
+		return "running"
+	case beeremote.Job_ERROR:
+		return "error"
+	case beeremote.Job_COMPLETED:
+		return "completed"
+	case beeremote.Job_OFFLOADED:
+		return "offloaded"
+	case beeremote.Job_CANCELLED:
+		return "cancelled"
+	case beeremote.Job_FAILED:
+		return "failed"
+	case beeremote.Job_UNKNOWN:
+		return "unknown"
+	default:
+		return "unknown"
+	}
 }
 
 func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {

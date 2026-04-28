@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"expvar"
 	"fmt"
 	"math"
 	"runtime"
@@ -12,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/zap"
 )
 
@@ -19,13 +20,9 @@ const (
 	DefaultPriority = 3
 	priorityLevels  = 5
 	tolerance       = 1e-6
-)
 
-var (
-	schedulerMetricsOnce          sync.Once
-	schedulerCompletedWorkHz      *expvar.Float
-	schedulerTokensAllowedHz      *expvar.Float
-	schedulerPriorityFairnessMode *expvar.String
+	metricCompletedWorkRate = "beesync.scheduler.completed.work.rate"
+	metricTokensAllowedRate = "beesync.scheduler.tokens.allowed.rate"
 )
 
 type schedulerConfig struct {
@@ -57,6 +54,7 @@ type schedulerConfig struct {
 	releasesPerStatUpdate int
 	// releaseTokensTick defines the periodic release of work tokens.
 	releaseTokensTick time.Duration
+	meter             metric.Meter
 }
 
 type schedulerOpt func(*schedulerConfig)
@@ -104,6 +102,16 @@ func WithAllowedTokensMin(tokens int) schedulerOpt {
 	}
 }
 
+// WithMeter sets the OTel metric.Meter used to register observable gauges for scheduler metrics.
+// If m is nil the default noop meter is kept, making the option a graceful no-op.
+func WithMeter(m metric.Meter) schedulerOpt {
+	return func(cfg *schedulerConfig) {
+		if m != nil {
+			cfg.meter = m
+		}
+	}
+}
+
 type PriorityToken struct {
 	Priority int
 	Tokens   int
@@ -112,6 +120,9 @@ type PriorityToken struct {
 type Scheduler struct {
 	ctx context.Context
 	log *zap.Logger
+	// completedWorkHz and tokensAllowedHz store float64 bits atomically for OTel observable gauges.
+	completedWorkHz atomic.Uint64
+	tokensAllowedHz atomic.Uint64
 	// workTokens maintains the number of alloted work workTokens for each priority. workTokens and
 	// rescheduledWorkTokens are used by the manager's work scheduler in order to maintain fairness
 	// between priority queues and back-pressure on the activeWorkQueue. The priority workTokens are
@@ -139,6 +150,7 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 		allowedTokensMultiplier:    2.0,
 		allowedTokensGrowthRateMax: 0.8,
 		allowedTokensMin:           runtime.GOMAXPROCS(0),
+		meter:                      noop.NewMeterProvider().Meter("scheduler"),
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -148,15 +160,6 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	cfg.allowedTokensMin = max(allowedTokensAbsoluteMinimum, cfg.allowedTokensMin)
 	cfg.nodeName = strings.ReplaceAll(cfg.nodeName, " ", "")
 
-	// Expvars are registered globally and duplication registrations panic. This should never be
-	// done except the benchmark tests in rst/sync/internal/workmgr/manager_test.go which create
-	// many schedulers.
-	schedulerMetricsOnce.Do(func() {
-		schedulerCompletedWorkHz = expvar.NewFloat(cfg.nodeName + "_scheduler_completedWorkHz")
-		schedulerTokensAllowedHz = expvar.NewFloat(cfg.nodeName + "_scheduler_tokensAllowedHz")
-		schedulerPriorityFairnessMode = expvar.NewString(cfg.nodeName + "_priority_fairness_mode")
-		schedulerPriorityFairnessMode.Set(cfg.priorityFairness.String())
-	})
 	s = &Scheduler{
 		ctx:              ctx,
 		log:              log,
@@ -168,9 +171,30 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 		s.SetNextSubmissionId(submissionIdPriorityStarts[priority], priority)
 	}
 
+	// Register OTel observable gauges for scheduler throughput metrics.
+	// The OTel API always returns a valid (no-op) instrument even on error; errors
+	// only occur for invalid names or incompatible re-registration, neither of which
+	// can happen with these compile-time constants.
+	completedWorkGauge, _ := cfg.meter.Float64ObservableGauge(
+		metricCompletedWorkRate,
+		metric.WithDescription("Work completion rate (Hz)"),
+	)
+	tokensAllowedGauge, _ := cfg.meter.Float64ObservableGauge(
+		metricTokensAllowedRate,
+		metric.WithDescription("Token release rate (Hz)"),
+	)
+	// RegisterCallback only errors when given a nil callback, zero instruments, or instruments
+	// from a different meter — none of which can happen here.
+	reg, _ := cfg.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveFloat64(completedWorkGauge, math.Float64frombits(s.completedWorkHz.Load()))
+		o.ObserveFloat64(tokensAllowedGauge, math.Float64frombits(s.tokensAllowedHz.Load()))
+		return nil
+	}, completedWorkGauge, tokensAllowedGauge)
+
 	releaseTokensTicker := time.NewTicker(cfg.releaseTokensTick)
 	close = func() error {
 		releaseTokensTicker.Stop()
+		_ = reg.Unregister()
 		return nil
 	}
 
@@ -411,8 +435,8 @@ func (s *Scheduler) getUpdateStatsFunc(
 			zap.Int("tokensAllowedMs", int(RoundToMillis(tokensAllowedPerMs))),
 		)
 
-		schedulerCompletedWorkHz.Set(completedWorkPerMs * 1000)
-		schedulerTokensAllowedHz.Set(tokensAllowedPerMs * 1000)
+		s.completedWorkHz.Store(math.Float64bits(completedWorkPerMs * 1000))
+		s.tokensAllowedHz.Store(math.Float64bits(tokensAllowedPerMs * 1000))
 
 		return max(tokensAllowedPerMs, minTokensMs)
 	}

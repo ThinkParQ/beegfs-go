@@ -13,6 +13,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
@@ -131,6 +132,7 @@ type worker struct {
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
+	metrics              managerMetrics
 }
 
 func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
@@ -183,9 +185,13 @@ func (w *worker) process(work workAssignment) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
-	mappedPriorityId := priorityIdMap[request.GetPriority()]
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID), zap.Any("workRequest", request))
-	beeSyncProcessed.Add(mappedPriorityId, 1)
+	w.metrics.workRequests.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attrState.String("processed"),
+			attrPriority.Int(normalizedPriority(request.GetPriority())),
+		),
+	)
 
 	// By default we just commit the updated journal entry to the database. However if we sent the
 	// results to BeeRemote and there is nothing left to do with this work request then
@@ -241,7 +247,12 @@ func (w *worker) process(work workAssignment) {
 				log.Warn("error releasing journal work entry", zap.Error(err))
 			}
 
-			beeSyncComplete.Add(mappedPriorityId, 1)
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("completed"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
 			return
 		}
 		// Otherwise just commit the work entries to the database.
@@ -299,7 +310,12 @@ func (w *worker) process(work workAssignment) {
 		status.SetMessage("waiting for work request to be ready")
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
-		beeSyncRescheduled.Add(mappedPriorityId, 1)
+		w.metrics.workRequests.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attrState.String("rescheduled"),
+				attrPriority.Int(normalizedPriority(request.GetPriority())),
+			),
+		)
 		return
 	}
 
@@ -391,7 +407,6 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
-	mappedPriorityId := priorityIdMap[request.GetPriority()]
 
 	var reschedule bool
 	var err error
@@ -440,7 +455,12 @@ processJobs:
 		entry.ExecuteAfter = time.Now()
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
-		beeSyncRescheduled.Add(mappedPriorityId, 1)
+		w.metrics.workRequests.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attrState.String("rescheduled"),
+				attrPriority.Int(normalizedPriority(request.GetPriority())),
+			),
+		)
 		return
 	} else if totalErrors > 0 {
 		status.SetState(flex.Work_CANCELLED)

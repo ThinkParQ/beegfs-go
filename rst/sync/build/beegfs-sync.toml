@@ -5,6 +5,8 @@
 # --- [Table of Contents] ---
 #
 # 1) Settings
+#   1.1) Basic Settings
+#   1.2) Telemetry Settings
 # 2) Command Line Arguments
 # 3) Basic Settings Documentation
 
@@ -13,6 +15,7 @@
 #
 
 mount-point = "/mnt/beegfs"
+service-name = "beegfs-sync"
 
 [log]
 level = 3
@@ -32,6 +35,44 @@ job-db = "/var/lib/beegfs/sync/job.badger"
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-disable-verification = false
 tls-disable = false
+
+#
+# --- Section 1.2: [Telemetry Settings] ---
+#
+
+[telemetry]
+
+# [telemetry.otlp]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# interval = "30s"
+# url-path = "/v1/metrics"
+# compression = "gzip"
+# timeout = "10s"
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
+#
+# [telemetry.prometheus]
+# enabled = false
+# listen-address = "0.0.0.0:9090"
+# path = "/metrics"
+# tls-cert-file = ""
+# tls-key-file = ""
+# tls-disable = false
+#
+# [telemetry.logs]
+# enabled = false
+# protocol = "grpc"
+# endpoint = "localhost:4317"
+# url-path = "/v1/logs"
+# compression = "gzip"
+# timeout = "10s"
+# tls-cert-file = ""
+# tls-disable-verification = false
+# tls-disable = false
+# # headers = { Authorization = "Bearer <token>" }
 
 #
 # --- Section 2: [Command Line Arguments] ---
@@ -117,6 +158,73 @@ tls-disable = false
 #
 # --- Section 3.4: [Remote Settings] ---
 #
+
+#
+# --- Section 3.5: [Telemetry Settings] ---
+#
+
+# Telemetry configuration must be specified under [telemetry]. Metrics can be exported via OTLP
+# (push to a collector such as OpenTelemetry Collector, Grafana Alloy, or Grafana Mimir) and/or
+# scraped by Prometheus. Log export via OTLP is configured independently under [telemetry.logs]
+# and does not require metrics to be enabled.
+
+# service-name: Identifies this service in exported metrics and logs. Appears as the
+# service.name resource attribute in all telemetry data.
+
+# [telemetry.otlp] — push-based metrics export via OTLP:
+
+# enabled: Set to true to enable OTLP metrics export.
+
+# protocol: Transport to use when sending metrics. Must be "grpc" or "http".
+
+# endpoint: Address of the OTLP collector (e.g. "localhost:4317" for gRPC,
+# "localhost:4318" for HTTP).
+
+# interval: How often metrics are pushed to the collector (e.g. "30s").
+
+# url-path: URL path for the metrics endpoint. Only applies when protocol is "http".
+# Default is "/v1/metrics". Some backends use different paths; for example
+# Loki-compatible backends that accept OTLP metrics use "/otlp/v1/metrics".
+
+# compression: Compression to apply when sending metrics. Must be "gzip" or "none".
+
+# timeout: Maximum time to wait for a single export attempt. If not set the OTLP default
+# applies. Must be at least 1s if set.
+
+# tls-cert-file: PEM certificate to add to the TLS trust pool when connecting to the
+# OTLP endpoint. Leave empty to use only the system's default certificate pool.
+
+# tls-disable-verification: Skip TLS server certificate verification. Enables encryption
+# but leaves the connection vulnerable to man-in-the-middle attacks.
+
+# tls-disable: Disable TLS entirely for OTLP connections (sends data in clear text).
+
+# headers: Additional HTTP/gRPC headers to send with every export request. Commonly used
+# to pass authentication tokens (e.g. Authorization: Bearer <token>). Can only be set
+# via config file; not available as a command line flag.
+
+# [telemetry.prometheus] — pull-based metrics export via Prometheus:
+
+# enabled: Set to true to expose a Prometheus /metrics endpoint.
+
+# listen-address: Address:port the Prometheus HTTP server listens on (e.g. "0.0.0.0:9090").
+
+# path: URL path for the metrics endpoint (e.g. "/metrics").
+
+# tls-cert-file / tls-key-file: Certificate and key for TLS on the Prometheus endpoint.
+# Both must be set together, or both left empty for plain HTTP.
+
+# tls-disable: Disable TLS for the Prometheus endpoint.
+
+# [telemetry.logs] — OTLP log export (independent of metrics):
+
+# enabled: Set to true to export logs via OTLP.
+
+# protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same
+# semantics as the corresponding [telemetry.otlp] fields, but applied to log export.
+# The url-path default for logs is "/v1/logs". For Loki direct ingestion use
+# "/otlp/v1/logs".
+
 
 # Configuration for the BeeGFS Remote node must be specified under [remote]. Most configuration such
 # as the address/port are synced automatically from the Remote node (see Worker node settings on the
