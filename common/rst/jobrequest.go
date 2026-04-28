@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
@@ -122,6 +123,16 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		}
 	}
 
+	if cfg.GetRestorePolicy() != flex.RestorePolicy_RESTORE_POLICY_UNSPECIFIED {
+		remoteRegistry, err := config.BeeRemoteRegistry(ctx, false)
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve BeeGFS remote registry: %w", err)
+		}
+		if err := remoteRegistry.RequireFeature(ctx, registry.FeatureRestorePolicy); err != nil {
+			return nil, err
+		}
+	}
+
 	jobBuilder := false
 	if pathInfo.IsGlob {
 		jobBuilder = true
@@ -191,7 +202,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 	entry := entryInfo.Entry
 
-	if entry.FileState.GetDataState() == DataStateOffloaded {
+	if beegfs.IsDataStateOffloaded(entry.FileState.GetDataState()) {
 		// Attempt to retrieve the stub file content from remote and use the rstId to create the job
 		// requests. Otherwise, send the request to job-builder to complete.
 		resp, err := remote.GetStubContents(ctx, &beeremote.GetStubContentsRequest{Path: pathInfo.Path})

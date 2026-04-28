@@ -22,6 +22,9 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
+	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )
@@ -42,7 +45,8 @@ var (
 )
 
 var capabilities = map[string]*flex.Feature{
-	registry.FeatureFilterFiles: nil,
+	registry.FeatureFilterFiles:   nil,
+	registry.FeatureRestorePolicy: nil,
 }
 
 func main() {
@@ -284,16 +288,35 @@ Using environment variables:
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	remoteServer, err := server.New(logger.Logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
-		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
+		logger.Fatal("unable to initialize Remote gRPC server", zap.Error(err))
 	}
+
+	// Setup the event dispatcher and wire it into the existing Remote gRPC server.
+	dispatchManager, err := dispatch.New(
+		initialCfg.Dispatch,
+		logger.Logger,
+		[]subscriber.ServiceOption{
+			subscriber.WithEventFilter(&beewatch.EventFilter{
+				V2Types: []beewatch.V2Event_Type{
+					beewatch.V2Event_OPEN_BLOCKED,
+				},
+			}),
+		},
+		dispatch.WithDefaultDispatchFn(jobManager.GetEventDispatchFunc(ctx, logger.Logger)),
+		dispatch.WithExistingGRPCServer(remoteServer.GetGRPCServer()),
+	)
+	if err != nil {
+		logger.Fatal("unable to initialize dispatcher", zap.Error(err))
+	}
+	dispatchManager.Start()
 
 	// Most components should not shutdown unexpectedly once they are started, but anything that
 	// might should return an error on this channel signalling the application to shutdown. Increase
 	// the channel size as needed if other components may also use this channel to log errors.
 	errChan := make(chan error, 2)
-	jobServer.ListenAndServe(errChan)
+	remoteServer.ListenAndServe(errChan)
 
 	// Block and wait for a shutdown signal:
 	select {
@@ -302,7 +325,8 @@ Using environment variables:
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-	jobServer.Stop()
+	remoteServer.Stop()
+	dispatchManager.Stop()
 	jobManager.Stop()
 	workerManager.Stop()
 

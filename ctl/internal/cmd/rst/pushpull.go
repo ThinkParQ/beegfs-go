@@ -75,6 +75,10 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 				backendCfg.Priority = &priority
 			}
 
+			if cmd.Flags().Changed(rst.RestorePolicyFlag) && !backendCfg.StubLocal {
+				return fmt.Errorf("--%s requires --%s", rst.RestorePolicyFlag, rst.StubLocalFlag)
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -89,12 +93,13 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().MarkHidden("force")
 	cmd.Flags().BoolVarP(&frontendCfg.verbose, "verbose", "v", false, "Print additional details about each job (use --debug) to also print work requests and results.")
 	cmd.Flags().IntVar(&frontendCfg.width, "column-width", 35, "Set the maximum width of some columns before they overflow.")
-	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Replace with a stub after the file is uploaded.")
+	cmd.Flags().BoolVarP(&backendCfg.StubLocal, rst.StubLocalFlag, "s", false, "Replace with a stub after the file is uploaded.")
 	cmd.Flags().BoolVar(backendCfg.Update, rst.UpdateFlag, false, fmt.Sprintf("Set the file's persistent remote target. Requires --%s.", rst.RemoteTargetFlag))
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
 	cmd.Flags().StringVar(backendCfg.FilterExpr, filesystem.FilterExprFlag, "", filesystem.FilterFilesHelp)
+	cmd.Flags().Var(rst.NewRestorePolicyFlag(&backendCfg.RestorePolicy), rst.RestorePolicyFlag, rst.RestorePolicyFlagHelp)
 	cmd.Flags().MarkHidden("metadata")
 	cmd.Flags().MarkHidden("tagging")
 	cmd.Flags().MarkHidden(rst.StorageClassFlag)
@@ -134,6 +139,10 @@ func newPullCmd() *cobra.Command {
 			if allowRestoreFlag.Changed {
 				backendCfg.AllowRestore = &allowRestore
 			}
+
+			if cmd.Flags().Changed(rst.RestorePolicyFlag) && !backendCfg.StubLocal {
+				return fmt.Errorf("--%s requires --%s", rst.RestorePolicyFlag, rst.StubLocalFlag)
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -144,7 +153,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
 	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
 	cmd.Flags().StringVarP(&backendCfg.RemotePath, rst.RemotePathFlag, "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
-	cmd.Flags().BoolVarP(&backendCfg.StubLocal, "stub-local", "s", false, "Create stub files for the remote objects or files.")
+	cmd.Flags().BoolVarP(&backendCfg.StubLocal, rst.StubLocalFlag, "s", false, "Create stub files for the remote objects or files.")
 	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Force pulling file(s) from the remote target even if the file is already in sync or another client currently has them open for reading or writing (note other clients may see errors, the job may later fail, or the downloaded file may not be the latest version).")
 	cmd.Flags().Int32Var(&priority, rst.PriorityFlag, 0, "Set job priority (1-5, 1 is the highest)")
@@ -155,6 +164,7 @@ func newPullCmd() *cobra.Command {
 	cmd.Flags().BoolVar(backendCfg.Update, rst.UpdateFlag, false, fmt.Sprintf("Set the file's persistent remote target. Requires --%s.", rst.RemoteTargetFlag))
 	cmd.Flags().BoolVar(&allowRestore, rst.AllowRestoreFlag, false, "Allow archived requests to be restored.")
 	cmd.Flags().Lookup(rst.AllowRestoreFlag).DefValue = "auto"
+	cmd.Flags().Var(rst.NewRestorePolicyFlag(&backendCfg.RestorePolicy), rst.RestorePolicyFlag, rst.RestorePolicyFlagHelp)
 	return cmd
 }
 
