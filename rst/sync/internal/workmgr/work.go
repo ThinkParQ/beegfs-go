@@ -386,6 +386,15 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 		if work.ctx.Err() != nil {
 			status.SetState(flex.Work_CANCELLED)
 			status.SetMessage("the work context was cancelled before all parts can be synced")
+			// Note: this only counts cancellations that occur after a worker has started executing
+			// parts. Cancellations of work that hasn't yet been picked up (SCHEDULED/RESCHEDULED)
+			// are handled by UpdateWork and not counted here.
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("cancelled"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
 			// Don't send the work result and don't try to cleanup entries. We don't know why we
 			// were asked to be done early so we'll let the caller handle either sending the result
 			// or retrying the request later.

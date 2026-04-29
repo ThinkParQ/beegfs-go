@@ -397,6 +397,78 @@ func TestUpdateRequests(t *testing.T) {
 	mockBeeRemote.AssertExpectations(t)
 }
 
+// TestProcessWorkCancelledMidTransfer verifies that when a work context is cancelled mid-transfer
+// (while ExecuteWorkRequestPart is running), processWork sets the CANCELLED state and returns
+// without calling BeeRemote. The "cancelled" metric is recorded at this point. UpdateWork then
+// obtains the journal lock (released by the worker's deferred commit) and deletes the entry.
+func TestProcessWorkCancelledMidTransfer(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	// NoAutoComplete forces tests to manage part.Completed manually, enabling the mid-transfer
+	// cancellation scenario where a part is not completed when the context is cancelled.
+	mockRST := &rst.MockClient{NoAutoComplete: true}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	testRequest := proto.Clone(baseTestRequest).(*flex.WorkRequest)
+	testRequest.SetJobId("cancel-mid")
+	testRequest.SetRequestId("0")
+
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("cancel-mid", "0")).
+		Return(true, time.Duration(0), nil).Times(1)
+
+	// First part: complete normally.
+	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("cancel-mid", "0"), mock.Anything).
+		Run(func(args mock.Arguments) {
+			args.Get(2).(*flex.Work_Part).Completed = true
+		}).
+		Return(nil).Once()
+
+	// Second part: signal the test goroutine, block until the context is cancelled, then return nil
+	// without completing the part. This simulates an RST that returns nil without marking the part
+	// done when the context is cancelled mid-transfer.
+	secondPartStarted := make(chan struct{})
+	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("cancel-mid", "0"), mock.Anything).
+		Run(func(args mock.Arguments) {
+			close(secondPartStarted)
+			<-args.Get(0).(interface{ Done() <-chan struct{} }).Done()
+		}).
+		Return(nil).Once()
+
+	resp, err := mgr.SubmitWorkRequest(testRequest)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// Wait for second part to start, then cancel the request via UpdateWork.
+	<-secondPartStarted
+	cancelReq := flex.UpdateWorkRequest_builder{
+		JobId:     "cancel-mid",
+		RequestId: "0",
+		NewState:  flex.UpdateWorkRequest_CANCELLED,
+	}.Build()
+	cancelResult, err := mgr.UpdateWork(cancelReq)
+	require.NoError(t, err)
+	// UpdateWork waits synchronously for the worker to release the journal lock (which happens after
+	// processWork sets CANCELLED state and returns), then deletes the entry itself. The result must
+	// reflect the CANCELLED state the worker wrote before releasing the lock.
+	require.Equal(t, flex.Work_CANCELLED, cancelResult.GetStatus().GetState())
+
+	// UpdateWork cleaned up the journal entry after the worker released the lock.
+	require.NoError(t, assertDBEntriesLenForTesting(mgr, 0))
+
+	// The worker must NOT have called BeeRemote: processWork's CANCELLED path returns without
+	// calling sendWorkResult, leaving result delivery to UpdateWork's caller.
+	mockBeeRemote.AssertNotCalled(t, "updateWork")
+	mockRST.AssertExpectations(t)
+}
+
 func BenchmarkSubmitWorkRequests(b *testing.B) {
 	// Intentionally set the activeWQSize to 1 so we can test update behavior when requests are both
 	// active and inactive.

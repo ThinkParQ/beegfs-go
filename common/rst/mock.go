@@ -45,6 +45,11 @@ import (
 //   - You CANNOT use `Mock.On` with the `MockJob` request type.
 type MockClient struct {
 	mock.Mock
+	// NoAutoComplete disables automatic part.Completed = true on nil return in ExecuteWorkRequestPart.
+	// Only affects calls that go through mock.Called (i.e., SyncJob and other non-MockJob requests).
+	// MockJob requests have their own fast path and are unaffected. Tests using this field must set
+	// part.Completed manually in mock.Run funcs where needed.
+	NoAutoComplete bool
 }
 
 var _ Provider = &MockClient{}
@@ -83,7 +88,7 @@ func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex
 
 	args := rst.Called(ctx, request, part)
 	err := args.Error(0)
-	if err == nil {
+	if err == nil && !rst.NoAutoComplete {
 		part.Completed = true
 	}
 	return err
