@@ -48,6 +48,7 @@ type s3ApiClient interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
 // defaultS3ApiClient is the default s3ApiClient backed by the AWS SDK's s3 client.
@@ -109,6 +110,10 @@ func (d *defaultS3ApiClient) UploadPart(ctx context.Context, params *s3.UploadPa
 
 func (d *defaultS3ApiClient) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 	return d.client.GetObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	return d.client.DeleteObject(ctx, params, optFns...)
 }
 
 type S3StorageClass struct {
