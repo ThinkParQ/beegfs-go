@@ -129,7 +129,7 @@ func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *be
 	return false
 }
 
-func (c *JobBuilderClient) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
+func (c *JobBuilderClient) BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }
 
@@ -294,7 +294,7 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 								}
 							}
 
-							submitBulkRequest, appendBulkRequest, err := client.BuildBulkRequest(walkCtx, emit)
+							submitBulkRequest, appendBulkRequest, err := client.BuildBulkRequest(walkCtx, request.JobId, emit)
 							if err != nil {
 								bulkRequestStatesMu.Unlock()
 								return fmt.Errorf("job builder request was aborted: %w", err)

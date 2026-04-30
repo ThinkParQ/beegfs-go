@@ -98,7 +98,7 @@ func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremot
 	return false
 }
 
-func (m *MockClient) BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
+func (m *MockClient) BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
 	return nil, nil, ErrUnsupportedOpForRST
 }
 
