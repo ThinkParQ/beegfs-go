@@ -143,7 +143,7 @@ type Provider interface {
 	// Return an error only for fatal setup failures that must abort the builder job entirely. All
 	// other errors must be surfaced by emitting job requests with the appropriate generation
 	// status.
-	BuildBulkRequest(ctx context.Context, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error)
+	BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error)
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
