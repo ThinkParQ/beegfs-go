@@ -87,7 +87,7 @@ type Provider interface {
 	// any new requests into jobSubmissionChan. If building jobs is long running, return
 	// rescheduled==true to reschedule the remaining work for later which allows other work time to
 	// complete.
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -130,20 +130,40 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
-	// IncludeInBulkRequest determines whether a request should be added to a bulk request.
-	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool
-	// BuildBulkRequest initializes bulk request construction. It returns an append callback for
-	// requests selected for bulk processing and a submit callback to finalize and submit the bulk
-	// request after all appends have completed.
+
+	// IncludeInBulkRequest indicates whether the request should be included in a provider-defined
+	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
+	// requests within provider bulk request.
+	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
+	// ExecuteBulkRequest manages the lifecycle of a provider-defined bulk operation for the specified
+	// stateMountPath and operation.
 	//
-	// The provided context is for setup only and must not be retained or used by the returned
-	// callbacks. The append and submit callbacks receive their own contexts. emit may only be
-	// called from within the returned append or submit callbacks.
+	// requests contains the requests selected for this bulk operation in the current builder pass.
+	// These requests will be submitted immediately after ExecuteBulkRequest returns. On later builder
+	// passes after a reschedule, requests may be empty if the walk has already completed or there
+	// are no newly discovered requests to add to the bulk operation.
 	//
-	// Return an error only for fatal setup failures that must abort the builder job entirely. All
-	// other errors must be surfaced by emitting job requests with the appropriate generation
-	// status.
-	BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error)
+	// Providers are responsible for persisting and recovering any provider-side state needed to
+	// resume ExecuteBulkRequest or later complete/cancel the bulk operation after the builder job is
+	// rescheduled. stateMountPath, operation, and the provider itself identify the bulk operation.
+	//
+	// stateMountPath is builder-maintained workflow metadata. It is a provider-specific in-mount
+	// path that identifies where provider-side bulk state should be stored and later recovered from
+	// during rescheduled builder passes.
+	//
+	// Use reschedule and delay to reschedule the builder job while bulk work continues. If there are
+	// multiple bulk operations associated with a single builder job then the shortest delay will be
+	// chosen.
+	//
+	// Errors should only be returned to abort the builder job. Report all non-fatal errors through
+	// the included job requests.
+	ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error)
+	// CompleteBulkRequest completes any final provider-side actions needed to finish the bulk
+	// operation identified by stateMountPath and operation.
+	CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error
+	// CancelBulkRequest cancels the remaining provider-side work for the bulk operation identified by
+	// stateMountPath and operation and signals the included job requests to abort if needed.
+	CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
