@@ -404,16 +404,24 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
-	return false, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
+	return false, 0, ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
-	return false
+func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	return false, ""
 }
 
-func (r *S3Client) BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
+	return false, 0, ErrUnsupportedOpForRST
+}
+
+func (r *S3Client) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
+	return ErrUnsupportedOpForRST
+}
+
+func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error {
+	return ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {

@@ -399,11 +399,12 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	mappedPriorityId := priorityIdMap[request.GetPriority()]
 
 	var reschedule bool
+	var rescheduleDelay time.Duration
 	var err error
 	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionChan)
-		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		reschedule, rescheduleDelay, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 	}()
 
 	total := 0
@@ -442,7 +443,7 @@ processJobs:
 			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
 		}
 		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now()
+		entry.ExecuteAfter = time.Now().Add(rescheduleDelay)
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		beeSyncRescheduled.Add(mappedPriorityId, 1)

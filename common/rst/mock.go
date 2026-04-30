@@ -90,16 +90,24 @@ func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
-	return false, ErrUnsupportedOpForRST
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
+	return false, 0, ErrUnsupportedOpForRST
 }
 
-func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) bool {
-	return false
+func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	return false, ""
 }
 
-func (m *MockClient) BuildBulkRequest(ctx context.Context, jobId string, emit EmitBulkRequestFn) (submitBulkRequest SubmitBulkRequestFn, appendBulkRequest AppendBulkRequestFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
+func (m *MockClient) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
+	return false, 0, ErrUnsupportedOpForRST
+}
+
+func (m *MockClient) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
+	return nil
+}
+
+func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error {
+	return nil
 }
 
 func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
