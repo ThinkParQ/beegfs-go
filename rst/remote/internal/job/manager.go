@@ -495,22 +495,20 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	var jobSubmission workermgr.JobSubmission
 	if jr.GenerationStatus != nil {
 		status := jr.GenerationStatus
-		if status != nil {
-			switch status.State {
-			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
-				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
-				// mark the job as complete so ignore the err.
-				mtime, _ := time.ParseDateTime(status.Message)
-				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
-			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
-				err = rst.ErrJobAlreadyOffloaded
-			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
-				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
-			case beeremote.JobRequest_GenerationStatus_ERROR:
-				err = errors.New(status.Message)
-			default:
-				err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
-			}
+		switch status.GetState() {
+		case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
+			// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
+			// mark the job as complete so ignore the err.
+			mtime, _ := time.ParseDateTime(status.Message)
+			err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
+		case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
+			err = rst.ErrJobAlreadyOffloaded
+		case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
+			err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+		case beeremote.JobRequest_GenerationStatus_ERROR:
+			err = errors.New(status.Message)
+		default:
+			err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
 		}
 	} else {
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
@@ -1024,6 +1022,15 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	for _, workResult := range job.WorkResults {
 		if !workResult.InTerminalState() && !workResult.RequiresUserIntervention() {
 			// Don't do anything else if all work requests haven't reached a terminal state or aren't failed.
+			// Reflect active execution once any worker reports progress, but don't finalize job state
+			// until all work requests have finished or need intervention.
+			if entryToUpdate.Status().GetState() == flex.Work_RUNNING {
+				status := job.GetStatus()
+				status.SetState(beeremote.Job_RUNNING)
+				status.SetMessage("one or more work requests are in progress")
+				status.SetUpdated(timestamppb.Now())
+			}
+
 			return nil
 		}
 		// Verify all work requests have reached the same terminal state.

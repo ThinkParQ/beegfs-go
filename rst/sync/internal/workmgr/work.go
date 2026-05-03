@@ -303,10 +303,15 @@ func (w *worker) process(work workAssignment) {
 		return
 	}
 
-	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
+	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
 	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(work, client, entry)
 	} else {
@@ -394,11 +399,12 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	mappedPriorityId := priorityIdMap[request.GetPriority()]
 
 	var reschedule bool
+	var rescheduleDelay time.Duration
 	var err error
 	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionChan)
-		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		reschedule, rescheduleDelay, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 	}()
 
 	total := 0
@@ -437,7 +443,7 @@ processJobs:
 			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
 		}
 		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now()
+		entry.ExecuteAfter = time.Now().Add(rescheduleDelay)
 		w.sendWorkResult(work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		beeSyncRescheduled.Add(mappedPriorityId, 1)
