@@ -169,20 +169,26 @@ func newXtreemstoreS3BulkRetrieveManager(s3ApiClient s3ApiClient, bucket string,
 	}
 }
 
-func xtreemstoreS3BulkMarkRequestComplete(mountPath string, bulkInfo *flex.BulkJobRequestInfo) error {
+func xtreemstoreS3BulkMarkRequestComplete(mountPath string, bulkInfo *flex.BulkJobRequestInfo) (err error) {
 	stateMountPath := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
 	manager := &xtreemstoreS3BulkRetrieveManager{
 		operation:      bulkInfo.Operation,
 		stateMountPath: stateMountPath,
 	}
-	f, err := os.OpenFile(manager.getStatusPath(), os.O_WRONLY, os.FileMode(0600))
-	if err != nil {
-		return err
+
+	var f *os.File
+	if f, err = os.OpenFile(manager.getStatusPath(), os.O_WRONLY, os.FileMode(0600)); err != nil {
+		return
 	}
-	defer f.Close()
+
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	_, err = f.WriteAt([]byte{xtreemstoreS3BulkRequestComplete}, bulkInfo.JobIndex)
-	return err
+	return
 
 }
 
@@ -339,32 +345,42 @@ func (x *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (resched
 	return false, 0, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) AddRequests(requests []*beeremote.JobRequest) error {
-	if err := os.MkdirAll(x.stateMountPath, os.FileMode(0700)); err != nil {
-		return err
+func (x *xtreemstoreS3BulkRetrieveManager) AddRequests(requests []*beeremote.JobRequest) (err error) {
+	if err = os.MkdirAll(x.stateMountPath, os.FileMode(0700)); err != nil {
+		return
 	}
 
 	queueStatusPath := x.getStatusPath()
-	if info, err := os.Stat(queueStatusPath); err != nil {
+	var info os.FileInfo
+	if info, err = os.Stat(queueStatusPath); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return err
+			return
 		}
 		x.state.IncludedJobs = 0
 	} else {
 		x.state.IncludedJobs = info.Size()
 	}
 
-	status, err := os.OpenFile(queueStatusPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600))
-	if err != nil {
+	var status *os.File
+	if status, err = os.OpenFile(queueStatusPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return err
 	}
-	defer status.Close()
 
-	record, err := os.OpenFile(x.getRecordPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600))
-	if err != nil {
+	defer func() {
+		if closeErr := status.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	var record *os.File
+	if record, err = os.OpenFile(x.getRecordPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return err
 	}
-	defer record.Close()
+	defer func() {
+		if closeErr := record.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	for _, request := range requests {
 		if err = x.insertRequest(status, record, request); err != nil {
@@ -387,14 +403,20 @@ func (x *xtreemstoreS3BulkRetrieveManager) LoadManagerState() error {
 	return json.NewDecoder(f).Decode(x.state)
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) saveManagerState() error {
-	f, err := os.OpenFile(x.getManagerPath(), os.O_WRONLY|os.O_CREATE, os.FileMode(0600))
-	if err != nil {
-		return err
+func (x *xtreemstoreS3BulkRetrieveManager) saveManagerState() (err error) {
+	var f *os.File
+	if f, err = os.OpenFile(x.getManagerPath(), os.O_WRONLY|os.O_CREATE, os.FileMode(0600)); err != nil {
+		return
 	}
-	defer f.Close()
 
-	return json.NewEncoder(f).Encode(x.state)
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	err = json.NewEncoder(f).Encode(x.state)
+	return
 }
 
 func (x *xtreemstoreS3BulkRetrieveManager) getStatusPath() string {
@@ -511,20 +533,20 @@ func (x *xtreemstoreS3BulkRetrieveManager) getSessionBatchKeys(ctx context.Conte
 	return keys, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) createBatchReferenceFiles(ctx context.Context, batchInfos []xtreemstoreS3BulkRetrieveBatchInfo) ([]string, error) {
-	keyMap, err := x.getActiveRecordsMap()
-	if err != nil {
-		return nil, err
+func (x *xtreemstoreS3BulkRetrieveManager) createBatchReferenceFiles(ctx context.Context, batchInfos []xtreemstoreS3BulkRetrieveBatchInfo) (paths []string, err error) {
+	var keyMap map[string]int64
+	if keyMap, err = x.getActiveRecordsMap(); err != nil {
+		return
 	}
 
-	paths := []string{}
 	for _, batchInfo := range batchInfos {
-		keys, err := x.getSessionBatchKeys(ctx, batchInfo)
-		if err != nil {
+		var keys []string
+		if keys, err = x.getSessionBatchKeys(ctx, batchInfo); err != nil {
 			return nil, err
 		}
 		if len(keys) != int(batchInfo.Objects) {
-			return nil, fmt.Errorf("key count does not match the expected number of objects")
+			err = fmt.Errorf("key count does not match the expected number of objects")
+			return
 		}
 
 		references := make([]uint64, 0, len(keys))
@@ -532,16 +554,17 @@ func (x *xtreemstoreS3BulkRetrieveManager) createBatchReferenceFiles(ctx context
 			if index, ok := keyMap[key]; ok {
 				references = append(references, uint64(index))
 			} else {
-				return nil, fmt.Errorf("key was not found in the key map")
+				err = fmt.Errorf("key was not found in the key map")
+				return
 			}
 		}
 
 		path := x.getBatchPath(batchInfo.Number)
-		paths = append(paths, path)
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(0600))
-		if err != nil {
-			return nil, err
+		var f *os.File
+		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(0600)); err != nil {
+			return
 		}
+
 		batchFile := &xtreemstoreS3BulkRetrieveBatchFile{
 			Version:             xtreemstoreS3BulkRetrieveBatchFileVersion,
 			BatchInfo:           batchInfo,
@@ -550,16 +573,21 @@ func (x *xtreemstoreS3BulkRetrieveManager) createBatchReferenceFiles(ctx context
 			ActiveJobEnd:        x.state.ActiveJobEnd,
 			ActiveJobReferences: references,
 		}
-		if err := json.NewEncoder(f).Encode(batchFile); err != nil {
-			f.Close()
-			return nil, err
+
+		if err = json.NewEncoder(f).Encode(batchFile); err != nil {
+			if closeErr := f.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+			return
 		}
-		if err := f.Close(); err != nil {
-			return nil, err
+		if err = f.Close(); err != nil {
+			return
 		}
+
+		paths = append(paths, path)
 	}
 
-	return paths, nil
+	return
 }
 
 func (x *xtreemstoreS3BulkRetrieveManager) ensureBatchReferenceFiles(ctx context.Context) ([]string, error) {
