@@ -177,8 +177,11 @@ CREATE VIEW vsummarygroup AS SELECT * FROM summary WHERE rectype = 2;
 	return dbPath
 }
 
-// createNewBDMDB creates a new-format .bdm.db that has the correct GUFI schema
-// but is missing the vrpentries view (the "simple" migration case).
+// createNewBDMDB creates a new-format .bdm.db with the GUFI-compatible schema
+// and old-plugin beegfs_* tables (11-column beegfs_entries, 9-column
+// beegfs_stripe_targets with node columns, no beegfs_rst_targets). This
+// represents databases indexed with an older plugin version that need the
+// simple migration to update to the current schema.
 func createNewBDMDB(t *testing.T, dir string) string {
 	t.Helper()
 	dbPath := filepath.Join(dir, ".bdm.db")
@@ -410,6 +413,25 @@ func TestMigrateIndex_FullMigration(t *testing.T) {
 	isRootVal := sqliteQuery(t, dbPath, "SELECT isroot FROM summary WHERE rectype = 0;")
 	assert.Equal(t, "1", isRootVal)
 
+	// Verify beegfs_entries has new plugin columns.
+	hasNumRstIds := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM pragma_table_info('beegfs_entries') WHERE name='num_rst_ids';")
+	assert.Equal(t, "1", hasNumRstIds)
+
+	hasStoragePoolId := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM pragma_table_info('beegfs_entries') WHERE name='storage_pool_id';")
+	assert.Equal(t, "1", hasStoragePoolId)
+
+	// Verify beegfs_stripe_targets does not have old node columns.
+	hasPrimaryNodeId := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM pragma_table_info('beegfs_stripe_targets') WHERE name='primary_node_id';")
+	assert.Equal(t, "0", hasPrimaryNodeId)
+
+	// Verify beegfs_rst_targets table exists.
+	hasRstTable := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='beegfs_rst_targets';")
+	assert.Equal(t, "1", hasRstTable)
+
 	// Verify views exist.
 	for _, view := range []string{"beegfs_file_view", "beegfs_file_targets_view", "pentries", "vrpentries", "vrsummary"} {
 		exists := sqliteQuery(t, dbPath,
@@ -447,6 +469,28 @@ func TestMigrateIndex_SimpleMigration(t *testing.T) {
 	exists := sqliteQuery(t, dbPath,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='vrpentries';")
 	assert.Equal(t, "1", exists)
+
+	// Verify beegfs_entries was updated to the new plugin schema.
+	hasNumRstIds := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM pragma_table_info('beegfs_entries') WHERE name='num_rst_ids';")
+	assert.Equal(t, "1", hasNumRstIds)
+
+	// Verify beegfs_stripe_targets no longer has old node columns.
+	hasPrimaryNodeId := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM pragma_table_info('beegfs_stripe_targets') WHERE name='primary_node_id';")
+	assert.Equal(t, "0", hasPrimaryNodeId)
+
+	// Verify beegfs_rst_targets table was created.
+	hasRstTable := sqliteQuery(t, dbPath,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='beegfs_rst_targets';")
+	assert.Equal(t, "1", hasRstTable)
+
+	// Verify beegfs views were recreated with the updated schema.
+	for _, view := range []string{"beegfs_file_view", "beegfs_file_targets_view"} {
+		viewExists := sqliteQuery(t, dbPath,
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='"+view+"';")
+		assert.Equal(t, "1", viewExists, "view %s should exist", view)
+	}
 }
 
 func TestMigrateIndex_SkipExisting(t *testing.T) {

@@ -314,6 +314,8 @@ DROP VIEW IF EXISTS vtsummaryuser;
 DROP VIEW IF EXISTS vtsummarygroup;
 
 -- Step 1: Create beegfs_entries from old embedded BeeGFS columns in entries.
+-- New plugin columns (stripe_default_num_targets through num_rst_ids) are not
+-- present in old indexes and will be NULL until re-indexed with the current plugin.
 CREATE TABLE IF NOT EXISTS beegfs_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -326,7 +328,18 @@ CREATE TABLE IF NOT EXISTS beegfs_entries (
     feature_flags INTEGER,
     stripe_pattern_type INTEGER,
     stripe_chunk_size INTEGER,
-    stripe_num_targets INTEGER
+    stripe_num_targets INTEGER,
+    stripe_default_num_targets INTEGER,
+    storage_pool_id INTEGER,
+    path_info_flags INTEGER,
+    orig_parent_uid INTEGER,
+    orig_parent_entry_id TEXT,
+    file_data_state INTEGER,
+    rst_major_version INTEGER,
+    rst_minor_version INTEGER,
+    rst_cool_down_period INTEGER,
+    rst_file_policies INTEGER,
+    num_rst_ids INTEGER
 );
 
 INSERT INTO beegfs_entries (name, type, inode, owner_id, parent_entry_id,
@@ -345,16 +358,8 @@ CREATE TABLE IF NOT EXISTS beegfs_stripe_targets (
     entry_rowid INTEGER NOT NULL,
     target_index INTEGER NOT NULL,
     target_or_group INTEGER NOT NULL,
-    primary_target INTEGER NOT NULL DEFAULT 0,
-    secondary_target INTEGER NOT NULL DEFAULT 0,
-    primary_node_id INTEGER NOT NULL DEFAULT 0,
-    secondary_node_id INTEGER NOT NULL DEFAULT 0,
-    primary_node_strid TEXT DEFAULT '',
-    secondary_node_strid TEXT DEFAULT '',
     PRIMARY KEY (entry_rowid, target_index)
 );
-
-CREATE INDEX IF NOT EXISTS beegfs_targets_primary_node_idx ON beegfs_stripe_targets(primary_node_id);
 
 -- Parse the colon-separated target_info into individual rows.
 -- Example: "101:202:" -> row(target_or_group=101, index=0), row(target_or_group=202, index=1)
@@ -379,13 +384,18 @@ WITH RECURSIVE split(entry_rowid, target_index, target_or_group, rest) AS (
     WHERE rest != ''
       AND INSTR(rest, ':') > 0
 )
-INSERT INTO beegfs_stripe_targets
-    (entry_rowid, target_index, target_or_group, primary_target,
-     secondary_target, primary_node_id, secondary_node_id,
-     primary_node_strid, secondary_node_strid)
-SELECT entry_rowid, target_index, target_or_group, 0, 0, 0, 0, '', ''
+INSERT INTO beegfs_stripe_targets (entry_rowid, target_index, target_or_group)
+SELECT entry_rowid, target_index, target_or_group
 FROM split
 WHERE target_or_group IS NOT NULL;
+
+-- Step 2b: Create beegfs_rst_targets (empty; old schema has no RST data).
+CREATE TABLE IF NOT EXISTS beegfs_rst_targets (
+    entry_rowid INTEGER NOT NULL,
+    rst_index INTEGER NOT NULL,
+    rst_id INTEGER NOT NULL,
+    PRIMARY KEY (entry_rowid, rst_index)
+);
 
 -- Step 3: Update entries in-place (rename xattrs -> xattr_names; other columns are already correct).
 -- Old BeeGFS-specific columns (ownerID, entryID, etc.) are left in place; GUFI ignores them.
@@ -425,16 +435,18 @@ SELECT
         WHEN 0 THEN 'INVALID'
         ELSE 'UNKNOWN'
     END AS stripe_pattern_name,
-    e.stripe_chunk_size, e.stripe_num_targets
+    e.stripe_chunk_size, e.stripe_num_targets,
+    e.stripe_default_num_targets, e.storage_pool_id,
+    e.path_info_flags, e.orig_parent_uid, e.orig_parent_entry_id,
+    e.file_data_state,
+    e.rst_major_version, e.rst_minor_version, e.rst_cool_down_period,
+    e.rst_file_policies, e.num_rst_ids
 FROM beegfs_entries AS e WHERE e.type = 'f';
 
 CREATE VIEW IF NOT EXISTS beegfs_file_targets_view AS
 SELECT
     e.id AS beegfs_rowid, e.name, e.inode,
-    t.target_index, t.target_or_group,
-    t.primary_target, t.secondary_target,
-    t.primary_node_id, t.secondary_node_id,
-    t.primary_node_strid, t.secondary_node_strid
+    t.target_index, t.target_or_group
 FROM beegfs_entries AS e
 JOIN beegfs_stripe_targets AS t ON t.entry_rowid = e.id
 WHERE e.type = 'f';
@@ -532,11 +544,74 @@ COMMIT;
 PRAGMA journal_mode=DELETE;
 `
 
-// simpleMigrationSQL is applied to new-format .bdm.db files that already have
-// the GUFI-compatible schema (22-column entries, INT64 aggregates, beegfs_*
-// tables) but are missing the vrpentries view.
+// simpleMigrationSQL is applied to new-format .bdm.db files that have the
+// GUFI-compatible schema (22-column entries, INT64 aggregates) and beegfs_*
+// tables from an older plugin version. It updates beegfs_entries to the
+// current 23-column schema, simplifies beegfs_stripe_targets to remove the
+// node columns that are no longer in the plugin, creates beegfs_rst_targets,
+// recreates the beegfs views, and adds the missing vrpentries view.
 const simpleMigrationSQL = `
 BEGIN TRANSACTION;
+
+-- Add new columns to beegfs_entries introduced in the updated plugin schema.
+ALTER TABLE beegfs_entries ADD COLUMN stripe_default_num_targets INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN storage_pool_id INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN path_info_flags INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN orig_parent_uid INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN orig_parent_entry_id TEXT;
+ALTER TABLE beegfs_entries ADD COLUMN file_data_state INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN rst_major_version INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN rst_minor_version INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN rst_cool_down_period INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN rst_file_policies INTEGER;
+ALTER TABLE beegfs_entries ADD COLUMN num_rst_ids INTEGER;
+
+-- Remove node columns from beegfs_stripe_targets (no longer in the plugin schema).
+ALTER TABLE beegfs_stripe_targets DROP COLUMN primary_target;
+ALTER TABLE beegfs_stripe_targets DROP COLUMN secondary_target;
+ALTER TABLE beegfs_stripe_targets DROP COLUMN primary_node_id;
+ALTER TABLE beegfs_stripe_targets DROP COLUMN secondary_node_id;
+ALTER TABLE beegfs_stripe_targets DROP COLUMN primary_node_strid;
+ALTER TABLE beegfs_stripe_targets DROP COLUMN secondary_node_strid;
+
+-- Create beegfs_rst_targets.
+CREATE TABLE IF NOT EXISTS beegfs_rst_targets (
+    entry_rowid INTEGER NOT NULL,
+    rst_index INTEGER NOT NULL,
+    rst_id INTEGER NOT NULL,
+    PRIMARY KEY (entry_rowid, rst_index)
+);
+
+-- Recreate beegfs views to match the updated schema.
+DROP VIEW IF EXISTS beegfs_file_view;
+CREATE VIEW beegfs_file_view AS
+SELECT
+    e.id AS beegfs_rowid, e.name, e.type, e.inode,
+    e.owner_id, e.parent_entry_id, e.entry_id, e.entry_type,
+    e.feature_flags, e.stripe_pattern_type,
+    CASE e.stripe_pattern_type
+        WHEN 1 THEN 'RAID0'
+        WHEN 2 THEN 'RAID10'
+        WHEN 3 THEN 'BUDDYMIRROR'
+        WHEN 0 THEN 'INVALID'
+        ELSE 'UNKNOWN'
+    END AS stripe_pattern_name,
+    e.stripe_chunk_size, e.stripe_num_targets,
+    e.stripe_default_num_targets, e.storage_pool_id,
+    e.path_info_flags, e.orig_parent_uid, e.orig_parent_entry_id,
+    e.file_data_state,
+    e.rst_major_version, e.rst_minor_version, e.rst_cool_down_period,
+    e.rst_file_policies, e.num_rst_ids
+FROM beegfs_entries AS e WHERE e.type = 'f';
+
+DROP VIEW IF EXISTS beegfs_file_targets_view;
+CREATE VIEW beegfs_file_targets_view AS
+SELECT
+    e.id AS beegfs_rowid, e.name, e.inode,
+    t.target_index, t.target_or_group
+FROM beegfs_entries AS e
+JOIN beegfs_stripe_targets AS t ON t.entry_rowid = e.id
+WHERE e.type = 'f';
 
 DROP VIEW IF EXISTS vrpentries;
 CREATE VIEW vrpentries AS SELECT

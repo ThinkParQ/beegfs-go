@@ -28,13 +28,14 @@ func newMigrateCmd() *cobra.Command {
 This command walks the index tree starting at --index-root, finds all old
 database files, detects the schema version, and applies the appropriate
 migration SQL. BeeGFS metadata columns are extracted into separate plugin
-tables (beegfs_entries, beegfs_stripe_targets) with views for querying.
+tables (beegfs_entries, beegfs_stripe_targets, beegfs_rst_targets) with views
+for querying.
 
-Note: old index databases (.bdm.db) do not contain primary or secondary node
-information. The primary_node_id, secondary_node_id, primary_node_strid, and
-secondary_node_strid columns in beegfs_stripe_targets will be zero/empty for
-entries migrated from old indexes. This information is only populated after
-re-indexing with the current BeeGFS plugin (beegfs index rescan or create).
+Note: fields introduced in newer plugin versions (stripe_default_num_targets,
+storage_pool_id, path_info_flags, orig_parent_uid, orig_parent_entry_id,
+file_data_state, and the RST columns) will be NULL for entries migrated from
+old indexes. These are populated only after re-indexing with the current
+BeeGFS plugin (beegfs index rescan or create).
 
 The treesummary table is dropped during migration and is automatically rebuilt
 by running gufi_treesummary on the index root afterward. Use --skip-treesummary
