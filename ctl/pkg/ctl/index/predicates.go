@@ -13,6 +13,7 @@ type PredicateSet struct {
 	Clauses      []string
 	NeedsBeeGFS  bool
 	NeedsTargets bool
+	NeedsSummary bool // type='d': directories live in summary, not entries
 }
 
 // WhereClause joins all accumulated clauses with AND.
@@ -103,7 +104,9 @@ func BuildFindPredicates(cfg FindCfg) PredicateSet {
 			p.add(clause)
 		}
 	}
-	if cfg.Type != "" {
+	if cfg.Type == "d" {
+		p.NeedsSummary = true // directories live in summary, not entries
+	} else if cfg.Type != "" {
 		p.add(fmt.Sprintf("type = %s", sqlQuote(cfg.Type)))
 	}
 	if cfg.Uid >= 0 {

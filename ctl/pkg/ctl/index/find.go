@@ -13,26 +13,8 @@ import (
 func Find(ctx context.Context, exec Executor, cfg FindCfg, indexPath string) (<-chan []string, func() error, error) {
 	preds := BuildFindPredicates(cfg)
 
-	tmpl := FindCoreE
-	if preds.NeedsTargets {
-		tmpl = FindTargetsE
-	} else if preds.NeedsBeeGFS || cfg.BeeGFS {
-		tmpl = FindBeeGFSE
-	}
-
-	entriesSQL := fmt.Sprintf(tmpl, preds.WhereClause())
-	if cfg.Smallest {
-		entriesSQL += " ORDER BY size ASC"
-	} else if cfg.Largest {
-		entriesSQL += " ORDER BY size DESC"
-	}
-	if cfg.NumResults > 0 {
-		entriesSQL += fmt.Sprintf(" LIMIT %d", cfg.NumResults)
-	}
-
 	spec := QuerySpec{
 		IndexRoot:  indexPath,
-		SQLEntries: entriesSQL,
 		Threads:    viper.GetInt(ThreadsKey),
 		PluginPath: QueryPluginPath,
 		Delimiter:  "|",
@@ -43,6 +25,31 @@ func Find(ctx context.Context, exec Executor, cfg FindCfg, indexPath string) (<-
 	}
 	if cfg.MinDepth > 0 {
 		spec.MinLevel = cfg.MinDepth
+	}
+
+	if preds.NeedsSummary {
+		summarySQL := fmt.Sprintf(FindDirS, preds.WhereClause())
+		if cfg.NumResults > 0 {
+			summarySQL += fmt.Sprintf(" LIMIT %d", cfg.NumResults)
+		}
+		spec.SQLSummary = summarySQL
+	} else {
+		tmpl := FindCoreE
+		if preds.NeedsTargets {
+			tmpl = FindTargetsE
+		} else if preds.NeedsBeeGFS || cfg.BeeGFS {
+			tmpl = FindBeeGFSE
+		}
+		entriesSQL := fmt.Sprintf(tmpl, preds.WhereClause())
+		if cfg.Smallest {
+			entriesSQL += " ORDER BY size ASC"
+		} else if cfg.Largest {
+			entriesSQL += " ORDER BY size DESC"
+		}
+		if cfg.NumResults > 0 {
+			entriesSQL += fmt.Sprintf(" LIMIT %d", cfg.NumResults)
+		}
+		spec.SQLEntries = entriesSQL
 	}
 
 	return exec.Execute(ctx, spec)

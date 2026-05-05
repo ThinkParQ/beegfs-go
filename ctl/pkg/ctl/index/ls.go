@@ -26,6 +26,22 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, indexPath string) (<-chan
 	threads := viper.GetInt(ThreadsKey)
 
 	if cfg.Recursive {
+		if cfg.Type == "d" {
+			dirPreds := BuildLsDirPredicates(cfg)
+			dirSQL := fmt.Sprintf(LsRecursiveDirS, dirPreds.WhereClause()) + lsOrderBy(cfg)
+			if cfg.NumResults > 0 {
+				dirSQL += fmt.Sprintf(" LIMIT %d", cfg.NumResults)
+			}
+			return exec.Execute(ctx, QuerySpec{
+				IndexRoot:  indexPath,
+				SQLSummary: dirSQL,
+				MinLevel:   1,
+				MaxLevel:   MaxLevelUnlimited,
+				Threads:    threads,
+				PluginPath: QueryPluginPath,
+				Delimiter:  "|",
+			})
+		}
 		tmpl := LsCoreRecursiveE
 		if cfg.BeeGFS {
 			tmpl = LsBeeGFSRecursiveE

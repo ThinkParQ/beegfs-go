@@ -28,6 +28,15 @@ const FindTargetsE = `` +
 	`t.target_or_group ` +
 	`FROM (SELECT * FROM vrpentries WHERE %s) AS v INNER JOIN beegfs_file_targets_view AS t ON t.inode = v.inode`
 
+// FindDirS queries directories from vrsummary (isroot=1 gives each db.db's
+// own directory row). sname IS the full path — no rpath() call needed.
+const FindDirS = `` +
+	`SELECT sname AS path, name, type, inode, size, mtime, atime, ctime, mode, uid, gid, nlink ` +
+	`FROM vrsummary WHERE isroot=1 AND %s`
+
+// LsRecursiveDirS is FindDirS reused for recursive ls --type d.
+const LsRecursiveDirS = FindDirS
+
 // ── ls ──────────────────────────────────────────────────────────────────────
 // Non-recursive: query entries in the given directory only (--max-level 0)
 // for files/symlinks, and summary at --min-level 1 --max-level 1 for
