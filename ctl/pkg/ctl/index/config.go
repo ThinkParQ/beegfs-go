@@ -24,8 +24,8 @@ const (
 // Hardcoded plugin specs installed by the GUFI BeeGFS package.
 // Format required by gufi_dir2index --plugin: "entrypoint:path/to/lib.so"
 const (
-	IndexPluginPath = "beegfs_index_ops:/usr/local/lib/libbeegfs_index_plugin.so"
-	QueryPluginPath = "beegfs_query_ops:/usr/local/lib/libbeegfs_query_plugin.so"
+	IndexPluginPath = "beegfs_index_ops:/opt/beegfs/lib/libbeegfs_index_plugin.so"
+	QueryPluginPath = "beegfs_query_ops:/opt/beegfs/lib/libbeegfs_query_plugin.so"
 )
 
 // DotIndexFileName is the per-mount TOML config file that stores index location info.
@@ -100,9 +100,9 @@ func pathHasPrefix(path, prefix string) bool {
 func LoadGUFIConfig() {
 	viper.SetDefault(IndexAddrKey, "")
 	viper.SetDefault(IndexRootKey, "/search")
-	viper.SetDefault(QueryBinKey, "gufi_query")
-	viper.SetDefault(Sqlite3BinKey, "gufi_sqlite3")
+	viper.SetDefault(QueryBinKey, "/opt/beegfs/bin/index/gufi_query")
+	viper.SetDefault(Sqlite3BinKey, "/opt/beegfs/bin/index/gufi_sqlite3")
 	viper.SetDefault(ThreadsKey, runtime.NumCPU())
-	viper.SetDefault(IndexBinKey, "gufi_dir2index")
-	viper.SetDefault(TreesumBinKey, "gufi_treesummary")
+	viper.SetDefault(IndexBinKey, "/opt/beegfs/bin/index/gufi_dir2index")
+	viper.SetDefault(TreesumBinKey, "/opt/beegfs/bin/index/gufi_treesummary")
 }
