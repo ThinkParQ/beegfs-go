@@ -561,13 +561,16 @@ func getPathStatusFromDatabase(
 		if err != nil {
 			return nil, err
 		}
-		if len(entry.Entry.Remote.RSTIDs) != 0 {
-			for _, tgt := range entry.Entry.Remote.RSTIDs {
+		if entry.Entry.Details == nil {
+			return nil, fmt.Errorf("entry details unavailable for %s: %s", fsPath, entry.Entry.EntryInfoPopulated)
+		}
+		if len(entry.Entry.Details.Remote.RSTIDs) != 0 {
+			for _, tgt := range entry.Entry.Details.Remote.RSTIDs {
 				remoteTargets[tgt] = nil
 			}
 		} else {
 			syncReason := "No remote targets were specified or configured on this entry."
-			if entry.Entry.FileState.GetDataState() == rst.DataStateOffloaded {
+			if entry.Entry.Details.FileState.GetDataState() == rst.DataStateOffloaded {
 				syncReason = "No remote targets were specified or configured on this entry. The contents are offloaded."
 			}
 			return &GetStatusResult{

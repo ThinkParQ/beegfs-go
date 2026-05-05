@@ -25,10 +25,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "Raid0 Rebalance Needed",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{2},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{2},
+							},
 						},
 					},
 				},
@@ -42,10 +44,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "Raid0 Rebalance Needed (out-of-order targets)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{101, 103, 104, 102},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{101, 103, 104, 102},
+							},
 						},
 					},
 				},
@@ -59,10 +63,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "Raid0 Rebalance Needed (out-of-order targets / insufficient dstTargets)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{101, 103, 104, 102},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{101, 103, 104, 102},
+							},
 						},
 					},
 				},
@@ -77,10 +83,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "Raid0 Rebalance Needed (insufficient dstTargets)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{1, 2},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{1, 2},
+							},
 						},
 					},
 				},
@@ -95,10 +103,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "Raid0 Rebalance Needed (insufficient dstTargets due to dstTargets already in stripe)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{1, 2, 3, 4},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{1, 2, 3, 4},
+							},
 						},
 					},
 				},
@@ -113,10 +123,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "BuddyMirror Rebalance Needed",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternBuddyMirror,
-							TargetIDs: []uint16{4, 5, 6},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternBuddyMirror,
+								TargetIDs: []uint16{4, 5, 6},
+							},
 						},
 					},
 				},
@@ -130,10 +142,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "BuddyMirror Rebalance Needed (insufficient dstGroups)",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternBuddyMirror,
-							TargetIDs: []uint16{5, 6, 7},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternBuddyMirror,
+								TargetIDs: []uint16{5, 6, 7},
+							},
 						},
 					},
 				},
@@ -148,10 +162,12 @@ func TestStartRebalancingJobs(t *testing.T) {
 			name: "No Rebalance Needed",
 			entry: &GetEntryCombinedInfo{
 				Entry: Entry{
-					Pattern: patternConfig{
-						StripePattern: msg.StripePattern{
-							Type:      beegfs.StripePatternRaid0,
-							TargetIDs: []uint16{9},
+					Details: &EntryDetails{
+						Pattern: patternConfig{
+							StripePattern: msg.StripePattern{
+								Type:      beegfs.StripePatternRaid0,
+								TargetIDs: []uint16{9},
+							},
 						},
 					},
 				},
