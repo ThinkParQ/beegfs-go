@@ -2,99 +2,100 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 	"go.uber.org/zap"
 )
 
-const statCmd = "stat"
+func newStatCmd() *cobra.Command {
+	backendCfg := indexPkg.StatCfg{}
 
-func newGenericStatCmd() *cobra.Command {
-	var bflagSet *bflag.FlagSet
-
-	var cmd = &cobra.Command{
+	cmd := &cobra.Command{
+		Use:         "stat <path>",
+		Short:       "Displays file or directory metadata information.",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("missing <path> argument")
+			}
+			return nil
+		},
+		Long: `Retrieve metadata for a specific file or directory from the GUFI index.
+
+Example: display metadata for a file
+
+  beegfs index stat /mnt/beegfs/data/README.md
+
+Example: display BeeGFS-specific metadata
+
+  beegfs index stat --beegfs /mnt/beegfs/data/README.md
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			log, _ := config.GetLogger()
+
+			exec, err := newExecutor()
+			if err != nil {
 				return err
 			}
-			if len(args) > 0 {
-				path = args[0]
-			} else {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return err
-				}
-				path = cwd
+			// resolveIndexPath converts the full path to an index path;
+			// Stat() will split it into parent dir + basename internally.
+			indexPath, err := resolveIndexPath(args)
+			if err != nil {
+				return err
 			}
-			return runPythonStatIndex(bflagSet, path)
+			if err := checkIndexExists(filepath.Dir(indexPath)); err != nil {
+				return err
+			}
+
+			log.Debug("running beegfs index stat",
+				zap.String("indexPath", indexPath),
+				zap.Any("cfg", backendCfg),
+			)
+
+			rows, errWait, err := indexPkg.Stat(cmd.Context(), exec, backendCfg, indexPath)
+			if err != nil {
+				return err
+			}
+
+			allColumns := []string{"name", "type", "size", "mtime", "atime", "ctime", "mode", "uid", "gid", "nlink"}
+			defaultColumns := []string{"name", "type", "size", "mtime", "mode", "uid", "gid"}
+			if backendCfg.BeeGFS {
+				allColumns = append(allColumns,
+					"owner_id", "parent_entry_id", "entry_id",
+					"stripe_pattern_type", "stripe_chunk_size", "stripe_num_targets",
+				)
+				defaultColumns = append(defaultColumns, "entry_id", "owner_id", "stripe_num_targets")
+			}
+			if viper.GetBool(config.DebugKey) {
+				defaultColumns = allColumns
+			}
+
+			tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
+			defer tbl.PrintRemaining()
+
+		run:
+			for {
+				select {
+				case <-cmd.Context().Done():
+					return cmd.Context().Err()
+				case row, ok := <-rows:
+					if !ok {
+						break run
+					}
+					tbl.AddItem(toAny(row)...)
+				}
+			}
+
+			return errWait()
 		},
 	}
-	copyFlags := []bflag.FlagWrapper{
-		bflag.Flag("beegfs", "b", "Print BeeGFS Metadata for the File", "--beegfs", false),
-		bflag.Flag("debug-values", "H", "Show assigned input values (for debugging)", "-H", false),
-		bflag.Flag("terse", "j", "Print the information in terse form", "-j", false),
-		bflag.Flag("format", "f", "Use the specified FORMAT instead of the default; output a newline after each use of FORMAT", "-f", ""),
-	}
-	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+
+	cmd.Flags().BoolVar(&backendCfg.BeeGFS, "beegfs", false, "Include BeeGFS-specific metadata.")
 
 	return cmd
-}
-
-func newStatCmd() *cobra.Command {
-	s := newGenericStatCmd()
-	s.Use = "stat"
-	s.Short = "Displays file or directory metadata information."
-
-	s.Long = `Retrieve metadata information for files and directories.
-
-This command displays detailed status information, similar to the standard "stat" command, 
-including metadata attributes for files and directories. Additional options allow retrieval 
-of BeeGFS-specific metadata if available.
-
-Example: Display the status of a file
-
-$ beegfs index stat README
-
-Example: Display BeeGFS-specific metadata for a file
-
-$ beegfs index stat --beegfs README
-`
-	return s
-}
-
-func runPythonStatIndex(bflagSet *bflag.FlagSet, path string) error {
-	log, _ := config.GetLogger()
-	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+3)
-	allArgs = append(allArgs, statCmd)
-	allArgs = append(allArgs, wrappedArgs...)
-	allArgs = append(allArgs, path)
-	outputFormat := viper.GetString(config.OutputKey)
-	if outputFormat != "" && outputFormat != config.OutputTable.String() {
-		allArgs = append(allArgs, "-Q", outputFormat)
-	}
-	log.Debug("Running BeeGFS Hive Index stat command",
-		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("statCmd", statCmd),
-		zap.String("path", path),
-		zap.Any("allArgs", allArgs),
-	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }
