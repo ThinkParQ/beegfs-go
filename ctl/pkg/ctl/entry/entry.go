@@ -343,7 +343,9 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 					Err: types.MultiError{Errors: []error{err}},
 				}
 			} else {
-				entryWithParent.Parent = newEntry(ctx, mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{})
+				entryWithParent.Parent = newEntry(ctx, mappings, parentEntry, parentOwner, msg.GetEntryInfoResponse{
+					Result: beegfs.OpsErr_NODATA,
+				})
 				entryWithParent.Entry.Verbose = newVerbose(resp.Path, entryWithParent.Entry, entryWithParent.Parent)
 				if cfg.IncludeOrigMsg {
 					entryWithParent.Parent.origEntryInfoMsg = &parentEntry

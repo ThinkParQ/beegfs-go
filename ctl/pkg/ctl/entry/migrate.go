@@ -755,13 +755,13 @@ func tmpFileMigrateLink(migration tmpFileMigration) error {
 
 		// newTargets := migration.unmodifiedIDs
 		// newTargets = append(newTargets, migration.dstIDs...)
-		// if len(newTargets) != len(migration.entry.Entry.Pattern.StripePattern.TargetIDs) {
+		// if len(newTargets) != len(migration.entry.Entry.Details.Pattern.StripePattern.TargetIDs) {
 		// 	// With temp files we could technically change the stripe width, but we shouldn't
 		// 	// implicitly do so until we add explicit support for migrating between different
 		// 	// numbers of targets with https://github.com/ThinkParQ/beegfs-go/issues/76. WARNING:
 		// 	// Whenever we do so, ensure to set the newPattern.Length correctly, its is not just the
 		// 	// number of TargetIDs.
-		// 	return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newTargets, migration.entry.Entry.Pattern.StripePattern.TargetIDs)
+		// 	return fmt.Errorf("length of the new pattern (%v) does not match the length of the original pattern (%v)", newTargets, migration.entry.Entry.Details.Pattern.StripePattern.TargetIDs)
 		// }
 		// err = ioctl.CreateFile(
 		// 	client.GetMountPath()+tempFile,
@@ -775,7 +775,7 @@ func tmpFileMigrateLink(migration tmpFileMigration) error {
 		// )
 
 		// log, _ := config.GetLogger()
-		// log.Debug("migrating using preferred targets", zap.Any("newTargets", newTargets), zap.Any("oldTargets", migration.entry.Entry.Pattern.StripePattern.TargetIDs))
+		// log.Debug("migrating using preferred targets", zap.Any("newTargets", newTargets), zap.Any("oldTargets", migration.entry.Entry.Details.Pattern.StripePattern.TargetIDs))
 	}
 
 	if err != nil {

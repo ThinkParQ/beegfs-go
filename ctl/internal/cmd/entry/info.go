@@ -165,67 +165,68 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		printMetaNodeInfo(info.Entry, false)
 	}
 
+	var details *entry.EntryDetails
 	if info.Entry.Details == nil {
-		fmt.Fprintf(entryToPrint, "Entry details: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
-		return entryToPrint.String()
-	}
-
-	d := info.Entry.Details
-
-	fmt.Fprintf(entryToPrint, "Stripe pattern details:\n")
-	fmt.Fprintf(entryToPrint, "+ Type: %s\n", d.Pattern.Type)
-	if viper.GetBool(config.RawKey) {
-		fmt.Fprintf(entryToPrint, "+ Chunksize: %d\n", d.Pattern.Chunksize)
+		fmt.Fprintf(entryToPrint, "Stripe pattern details: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
+		fmt.Fprintf(entryToPrint, "Remote Storage Target Details: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
 	} else {
-		fmt.Fprintf(entryToPrint, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(d.Pattern.Chunksize), unitconv.Base1024, 0))
-	}
-	fmt.Fprintf(entryToPrint, "+ Number of storage targets: ")
-	actualNumStorageTgts := len(d.Pattern.TargetIDs)
-	if actualNumStorageTgts == 0 {
-		// Expected if this is a directory.
-		fmt.Fprintf(entryToPrint, "desired: %d\n", d.Pattern.DefaultNumTargets)
-	} else {
-		fmt.Fprintf(entryToPrint, "desired: %d; actual: %d\n", d.Pattern.DefaultNumTargets, actualNumStorageTgts)
-	}
+		details = info.Entry.Details
 
-	if info.Entry.Type == beegfs.EntryDirectory {
-		fmt.Fprintf(entryToPrint, "+ Storage Pool: %d  (%s)\n", d.Pattern.StoragePoolID, d.Pattern.StoragePoolName)
-	}
-
-	if actualNumStorageTgts != 0 {
-		if d.Pattern.Type == beegfs.StripePatternBuddyMirror {
-			fmt.Fprintf(entryToPrint, "+ Storage mirror buddy groups:\n")
-			for _, tgt := range d.Pattern.TargetIDs {
-				fmt.Fprintf(entryToPrint, "  + %d\n", tgt)
-			}
+		fmt.Fprintf(entryToPrint, "Stripe pattern details:\n")
+		fmt.Fprintf(entryToPrint, "+ Type: %s\n", details.Pattern.Type)
+		if viper.GetBool(config.RawKey) {
+			fmt.Fprintf(entryToPrint, "+ Chunksize: %d\n", details.Pattern.Chunksize)
 		} else {
-			fmt.Fprintf(entryToPrint, "+ Storage targets:\n")
-			for _, tgt := range d.Pattern.TargetIDs {
-				// This differs slightly from the v7 CTL. The v7 method of getting target mappings
-				// first determined the node ID, then used this to determine the alias. It was
-				// possible to get the node ID but not the alias which printed <unknown(nodeNumID)>.
-				// The new target mapper works differently, looking up the node ID and alias at
-				// once, so if anything goes wrong we can't even print the node ID.
-				node, ok := d.Pattern.StorageTargets[beegfs.NumId(tgt)]
-				if ok && node != nil {
-					fmt.Fprintf(entryToPrint, "+ %d @ %s [ID: %d]\n", tgt, node.Alias, node.LegacyId.NumId)
-				} else {
-					fmt.Fprintf(entryToPrint, "+ %d @ <unknown>\n", tgt)
-				}
+			fmt.Fprintf(entryToPrint, "+ Chunksize: %s\n", unitconv.FormatPrefix(float64(details.Pattern.Chunksize), unitconv.Base1024, 0))
+		}
+		fmt.Fprintf(entryToPrint, "+ Number of storage targets: ")
+		actualNumStorageTgts := len(details.Pattern.TargetIDs)
+		if actualNumStorageTgts == 0 {
+			// Expected if this is a directory.
+			fmt.Fprintf(entryToPrint, "desired: %d\n", details.Pattern.DefaultNumTargets)
+		} else {
+			fmt.Fprintf(entryToPrint, "desired: %d; actual: %d\n", details.Pattern.DefaultNumTargets, actualNumStorageTgts)
+		}
 
+		if info.Entry.Type == beegfs.EntryDirectory {
+			fmt.Fprintf(entryToPrint, "+ Storage Pool: %d  (%s)\n", details.Pattern.StoragePoolID, details.Pattern.StoragePoolName)
+		}
+
+		if actualNumStorageTgts != 0 {
+			if details.Pattern.Type == beegfs.StripePatternBuddyMirror {
+				fmt.Fprintf(entryToPrint, "+ Storage mirror buddy groups:\n")
+				for _, tgt := range details.Pattern.TargetIDs {
+					fmt.Fprintf(entryToPrint, "  + %d\n", tgt)
+				}
+			} else {
+				fmt.Fprintf(entryToPrint, "+ Storage targets:\n")
+				for _, tgt := range details.Pattern.TargetIDs {
+					// This differs slightly from the v7 CTL. The v7 method of getting target mappings
+					// first determined the node ID, then used this to determine the alias. It was
+					// possible to get the node ID but not the alias which printed <unknown(nodeNumID)>.
+					// The new target mapper works differently, looking up the node ID and alias at
+					// once, so if anything goes wrong we can't even print the node ID.
+					node, ok := details.Pattern.StorageTargets[beegfs.NumId(tgt)]
+					if ok && node != nil {
+						fmt.Fprintf(entryToPrint, "+ %d @ %s [ID: %d]\n", tgt, node.Alias, node.LegacyId.NumId)
+					} else {
+						fmt.Fprintf(entryToPrint, "+ %d @ <unknown>\n", tgt)
+					}
+
+				}
 			}
 		}
-	}
 
-	if len(d.Remote.Targets) != 0 {
-		fmt.Fprintf(entryToPrint, "Remote Storage Target Details:\n")
-		fmt.Fprintf(entryToPrint, "+ CoolDown: %d\n", d.Remote.CoolDownPeriod)
-		fmt.Fprintf(entryToPrint, "+ Remote Storage Targets:\n")
-		for rstID, rst := range d.Remote.Targets {
-			if rst == nil {
-				fmt.Fprintf(entryToPrint, "  + <not available> [ID: %d]\n", rstID)
-			} else {
-				fmt.Fprintf(entryToPrint, "  + %s [ID: %d]\n", rst.Name, rstID)
+		if len(details.Remote.Targets) != 0 {
+			fmt.Fprintf(entryToPrint, "Remote Storage Target Details:\n")
+			fmt.Fprintf(entryToPrint, "+ CoolDown: %d\n", details.Remote.CoolDownPeriod)
+			fmt.Fprintf(entryToPrint, "+ Remote Storage Targets:\n")
+			for rstID, rst := range details.Remote.Targets {
+				if rst == nil {
+					fmt.Fprintf(entryToPrint, "  + <not available> [ID: %d]\n", rstID)
+				} else {
+					fmt.Fprintf(entryToPrint, "  + %s [ID: %d]\n", rst.Name, rstID)
+				}
 			}
 		}
 	}
@@ -242,7 +243,11 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		}
 
 		if info.Entry.Type == beegfs.EntryRegularFile {
-			fmt.Fprintf(entryToPrint, "File state: %s\n", d.FileState)
+			if details != nil {
+				fmt.Fprintf(entryToPrint, "File state: %s\n", details.FileState)
+			} else {
+				fmt.Fprintf(entryToPrint, "File state: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
+			}
 		}
 
 		if info.Entry.EntryID != "root" && len(info.Entry.Verbose.DentryPath) != 0 {
@@ -256,8 +261,12 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 			printMetaNodeInfo(info.Entry, true)
 		}
 		if info.Entry.Type == beegfs.EntryRegularFile {
-			fmt.Fprintf(entryToPrint, "Client Sessions\n")
-			fmt.Fprintf(entryToPrint, "+ Reading: %d\n+ Writing: %d\n", d.NumSessionsRead, d.NumSessionsWrite)
+			if details != nil {
+				fmt.Fprintf(entryToPrint, "Client Sessions\n")
+				fmt.Fprintf(entryToPrint, "+ Reading: %d\n+ Writing: %d\n", details.NumSessionsRead, details.NumSessionsWrite)
+			} else {
+				fmt.Fprintf(entryToPrint, "Client Sessions: <not available> (%s)\n", info.Entry.EntryInfoPopulated)
+			}
 		}
 	}
 	return entryToPrint.String()
