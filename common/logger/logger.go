@@ -81,11 +81,6 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 	if telemetryCfg != nil {
 		effectiveCfg = *telemetryCfg
 	}
-	tp, err := telemetry.New(effectiveCfg, telemetryOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to initialize telemetry: %w", err)
-	}
-	logMgr.telemetry = tp
 
 	// Use the opinionated Zap development configuration.
 	// This notably gives us stack traces at warn and error levels.
@@ -105,16 +100,20 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 			return nil, err
 		}
 		logMgr.Logger = l
-		// Developer mode uses zap's built-in development config which does not
-		// support adding a tee core. OTLP log export is intentionally skipped in
-		// this mode even when telemetry.logs is enabled.
+
+		undo := zap.ReplaceGlobals(logMgr.Logger)
+		if err := logMgr.initTelemetry(effectiveCfg, telemetryOpts...); err != nil {
+			undo()
+			return nil, err
+		}
+
 		if logMgr.telemetry.LogProvider() != nil {
 			logMgr.Logger.Warn("developer mode is active: OTLP log export is disabled (logs will not be sent to the configured endpoint)")
 		}
 		return &logMgr, nil
 	}
 
-	// Otherwise build a production config based on the user settings:
+	// Production config based on the user settings:
 	zapConfig := zap.NewProductionEncoderConfig()
 	zapConfig.TimeKey = "timestamp"
 	zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
@@ -172,6 +171,13 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 	}
 
 	baseCore := zapcore.NewCore(zapEncoder, logDestination, logMgr.level)
+	logMgr.Logger = zap.New(baseCore)
+
+	undo := zap.ReplaceGlobals(logMgr.Logger)
+	if err := logMgr.initTelemetry(effectiveCfg, telemetryOpts...); err != nil {
+		undo()
+		return nil, err
+	}
 
 	if lp := logMgr.telemetry.LogProvider(); lp != nil {
 		otelCore := otelzap.NewCore("github.com/thinkparq/beegfs-go/common/logger", otelzap.WithLoggerProvider(lp))
@@ -179,13 +185,24 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 		// sink so OTLP does not receive records below the configured threshold.
 		leveledOtelCore, err := zapcore.NewIncreaseLevelCore(otelCore, logMgr.level)
 		if err != nil {
+			undo()
 			return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
 		}
-		baseCore = zapcore.NewTee(baseCore, leveledOtelCore)
+		logMgr.Logger = zap.New(zapcore.NewTee(baseCore, leveledOtelCore))
+		zap.ReplaceGlobals(logMgr.Logger)
 	}
 
-	logMgr.Logger = zap.New(baseCore)
 	return &logMgr, nil
+}
+
+// initTelemetry creates the telemetry Provider and assigns it to the Logger.
+func (lm *Logger) initTelemetry(cfg telemetry.Config, opts ...telemetry.Option) error {
+	tp, err := telemetry.New(cfg, opts...)
+	if err != nil {
+		return fmt.Errorf("unable to initialize telemetry: %w", err)
+	}
+	lm.telemetry = tp
+	return nil
 }
 
 // With returns a child logger with the given fields permanently attached to
