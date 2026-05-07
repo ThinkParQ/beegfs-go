@@ -8,12 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"log/syslog"
 	"os"
 	"path"
 	"reflect"
-	"time"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
@@ -242,23 +240,6 @@ func (lm *Logger) Shutdown(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
-}
-
-// DeferredShutdown returns a function that shuts down the logger within the
-// given timeout. Intended for use with defer:
-//
-//	defer logger.DeferredShutdown(10 * time.Second)()
-//
-// Falls back to stdlib log on error because the zap logger may already be shut
-// down by the time the deferred function runs.
-func (lm *Logger) DeferredShutdown(timeout time.Duration) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		if err := lm.Shutdown(ctx); err != nil {
-			log.Printf("error during logger shutdown: %v", err)
-		}
-	}
 }
 
 // Configurer interface is used to get the logging configuration. It allows the

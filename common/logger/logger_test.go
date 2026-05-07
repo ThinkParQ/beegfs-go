@@ -6,8 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -124,37 +124,14 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// After shutdown, the Prometheus server should be stopped.
-	// Sync may error on stdout, so we only check for telemetry-related errors.
-	_ = log.Shutdown(context.Background())
+	// zap.Logger.Sync() returns EINVAL on stdout sinks; any other error is unexpected.
+	err = log.Shutdown(context.Background())
+	if err != nil {
+		require.ErrorIs(t, err, syscall.EINVAL, "unexpected shutdown error: %v", err)
+	}
 
 	_, err = http.Get(url)
 	assert.Error(t, err, "Prometheus endpoint should be unreachable after shutdown")
-}
-
-func TestDeferredShutdown(t *testing.T) {
-	// Verify that the closure returned by DeferredShutdown actually shuts down
-	// the telemetry provider when invoked.
-	port := findFreePort(t)
-	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-		},
-	}, telemetry.WithServiceName("deferred-shutdown-test"))
-	require.NoError(t, err)
-
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Invoke the returned closure directly (same as defer would do at return).
-	log.DeferredShutdown(5 * time.Second)()
-
-	_, err = http.Get(url)
-	assert.Error(t, err, "Prometheus endpoint should be unreachable after DeferredShutdown")
 }
 
 type testConfig struct {

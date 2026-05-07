@@ -119,7 +119,11 @@ Using environment variables:
 	if err != nil {
 		log.Fatalf("Unable to initialize logger: %s", err)
 	}
-	defer logger.Shutdown(context.Background())
+	defer func() {
+		if err := logger.Shutdown(context.Background()); err != nil {
+			log.Printf("error during logger shutdown: %v", err)
+		}
+	}()
 	logger.Info("<=== #### ===>")
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
 	cfgMgr.AddListener(logger)
