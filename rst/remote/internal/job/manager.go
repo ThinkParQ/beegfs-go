@@ -138,9 +138,11 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	// can happen with these compile-time constants.
 	jobRequests, _ := meter.Int64Counter("beeremote.job.requests",
 		metric.WithDescription("Total job requests received"),
+		metric.WithUnit("{job}"),
 	)
 	jobTerminal, _ := meter.Int64Counter("beeremote.job.terminal",
 		metric.WithDescription("Jobs that reached a terminal state"),
+		metric.WithUnit("{job}"),
 	)
 	jobDuration, _ := meter.Float64Histogram("beeremote.job.duration",
 		metric.WithDescription("Time from job creation to terminal state"),

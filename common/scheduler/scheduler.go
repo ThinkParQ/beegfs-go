@@ -178,10 +178,12 @@ func NewScheduler[T any](ctx context.Context, log *zap.Logger, queue chan T, opt
 	completedWorkGauge, _ := cfg.meter.Float64ObservableGauge(
 		metricCompletedWorkRate,
 		metric.WithDescription("Work completion rate (Hz)"),
+		metric.WithUnit("{work}/s"),
 	)
 	tokensAllowedGauge, _ := cfg.meter.Float64ObservableGauge(
 		metricTokensAllowedRate,
 		metric.WithDescription("Token release rate (Hz)"),
+		metric.WithUnit("{token}/s"),
 	)
 	// RegisterCallback only errors when given a nil callback, zero instruments, or instruments
 	// from a different meter — none of which can happen here.

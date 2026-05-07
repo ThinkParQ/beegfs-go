@@ -167,6 +167,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 
 	workRequests, err := meter.Int64Counter("beesync.work.requests",
 		metric.WithDescription("Work request lifecycle transitions"),
+		metric.WithUnit("{work}"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create work requests counter: %w", err)
