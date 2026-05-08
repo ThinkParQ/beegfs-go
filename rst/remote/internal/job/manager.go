@@ -1266,10 +1266,7 @@ func terminalStateString(state beeremote.Job_State) string {
 	case beeremote.Job_FAILED:
 		return "failed"
 	default:
-		// Unreachable: callers must guard with isTerminalState before calling.
-		// Panic here so contract violations surface immediately rather than
-		// silently miscounting metrics as "failed".
-		panic(fmt.Sprintf("terminalStateString called with non-terminal state: %v", state))
+		return "unknown"
 	}
 }
 

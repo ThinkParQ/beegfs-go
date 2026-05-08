@@ -417,6 +417,9 @@ func (m *Manager) recordInitialWork(state flex.Work_State, rstID uint32) {
 // Non-terminal → terminal: increments WorkTerminal only; WorkActive is monotonic and not decremented.
 // Non-terminal → non-terminal: increments WorkActive for the new state; old state entry is not decremented.
 func (m *Manager) recordWorkTransition(oldState, newState flex.Work_State, rstID uint32) {
+	if oldState == newState {
+		return
+	}
 	if isTerminalWorkState(oldState) {
 		return
 	}
