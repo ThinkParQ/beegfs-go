@@ -190,7 +190,6 @@ func TestManage(t *testing.T) {
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 	}.Build()
 	jobManager.JobUpdates <- updateJobRequest
-	time.Sleep(2 * time.Second)
 
 	getJobRequestsByID := beeremote.GetJobsRequest_builder{
 		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
@@ -201,9 +200,15 @@ func TestManage(t *testing.T) {
 		IncludeWorkResults:  true,
 	}.Build()
 
-	responses = make(chan *beeremote.GetJobsResponse, 1)
-	err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses)
-	getJobsResponse = <-responses
+	require.Eventually(t, func() bool {
+		responses = make(chan *beeremote.GetJobsResponse, 1)
+		if err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses); err != nil {
+			return false
+		}
+		getJobsResponse = <-responses
+		return len(getJobsResponse.GetResults()) > 0 &&
+			getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
+	}, 10*time.Second, 100*time.Millisecond, "job did not reach CANCELLED state")
 	require.NoError(t, err)
 	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
@@ -1094,6 +1099,21 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 			// State must remain unchanged after marking for deletion.
 			assert.Equal(t, startState, testJob.GetStatus().GetState())
 			assert.Equal(t, 0, observed.Len(), "no log for terminal → terminal transition")
+
+			// Also verify jobActive counter stays zero: terminal → terminal must never increment.
+			mc, reader, cleanup := newCountingManager(t)
+			defer cleanup()
+			testJob2 := &Job{
+				Job: beeremote.Job_builder{
+					Request: &beeremote.JobRequest{},
+					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
+				}.Build(),
+			}
+			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, forceUpdate)
+			counts := jobActiveValues(t, reader)
+			for k, v := range counts {
+				assert.Equal(t, int64(0), v, "terminal → terminal must not increment jobActive; unexpected increment for key %v", k)
+			}
 		})
 	}
 
@@ -1113,8 +1133,80 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 			assert.False(t, safeToDelete)
 			assert.Equal(t, startState, testJob.GetStatus().GetState())
 			assert.Equal(t, 0, observed.Len(), "no log when delete is rejected for a terminal job")
+
+			// Also verify jobActive counter stays zero: rejected delete must never increment.
+			mc, reader, cleanup := newCountingManager(t)
+			defer cleanup()
+			testJob2 := &Job{
+				Job: beeremote.Job_builder{
+					Request: &beeremote.JobRequest{},
+					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
+				}.Build(),
+			}
+			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, false)
+			counts := jobActiveValues(t, reader)
+			for k, v := range counts {
+				assert.Equal(t, int64(0), v, "rejected delete must not increment jobActive; unexpected increment for key %v", k)
+			}
 		})
 	}
+}
+
+// TestUpdateJobStateDeferFiresOnTerminalTransition is a direct unit test for the
+// defer in updateJobState: verifies that recordJobTerminal (and thus the
+// jobTerminal counter) is called exactly once when the job transitions from a
+// non-terminal state to a terminal state. This catches bugs where the defer guard
+// condition is accidentally inverted or the defer itself is removed.
+func TestUpdateJobStateDeferFiresOnTerminalTransition(t *testing.T) {
+	// connect + disconnect only: no UpdateWork expectations needed because
+	// UpdateJob with empty WorkResults iterates over nothing and succeeds without
+	// contacting any worker node.
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}, filesystem.NewMockFS(), Config{})
+	defer cleanup()
+
+	// Pre-insert a SCHEDULED (non-terminal) job with no work requests so that
+	// workerManager.UpdateJob succeeds without any mock worker calls.
+	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/scheduled")
+	require.NoError(t, err)
+	entry.Value = map[string]*Job{
+		"job-1": {
+			Job: beeremote.Job_builder{
+				Id:      "job-1",
+				Request: beeremote.JobRequest_builder{Path: "/test/scheduled", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_SCHEDULED}.Build(),
+			}.Build(),
+			WorkResults: map[string]worker.WorkResult{},
+		},
+	}
+	require.NoError(t, commit())
+
+	req := beeremote.UpdateJobsRequest_builder{
+		Path:     "/test/scheduled",
+		NewState: beeremote.UpdateJobsRequest_CANCELLED,
+	}.Build()
+	resp, err := m.UpdateJobs(req)
+	require.NoError(t, err)
+	require.True(t, resp.GetOk(), resp.GetMessage())
+	assert.Equal(t, beeremote.Job_CANCELLED, resp.GetResults()[0].GetJob().GetStatus().GetState())
+
+	// recordJobTerminal must have been called exactly once: SCHEDULED → CANCELLED
+	// is a non-terminal → terminal transition, which is the defer's trigger condition.
+	termCounts := jobTerminalValues(t, reader)
+	assert.Equal(t, int64(1), termCounts[counterKey{"cancelled", 1}], "recordJobTerminal must fire once for SCHEDULED → CANCELLED transition")
 }
 
 // TestJobStateString pins every beeremote.Job_State enum value to its expected
@@ -1147,7 +1239,10 @@ func TestJobStateString(t *testing.T) {
 
 // newCountingManager creates a Manager backed by a real Badger pathStore and a
 // real OTel ManualReader, suitable for verifying counter behavior. It does NOT
-// start the manager or wire up a workerManager — callers invoke methods directly.
+// start the manager or wire up a workerManager — callers must only invoke methods
+// that do not dereference workerManager. Safe paths: updateJobState with DELETED
+// (terminal initial state) and CANCELLED→CANCELLED no-op. Unsafe: any cancel/update
+// path that reaches workerManager.UpdateJob or workerManager.RemoteStorageTargets.
 func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()) {
 	t.Helper()
 	tmpPath, cleanupPath, err := tempPathForTesting(testDBBasePath)
@@ -1212,6 +1307,31 @@ func jobActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKe
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
 			require.True(t, ok, "beeremote.job.active should be a Sum[int64] (Counter)")
+			for _, dp := range data.DataPoints {
+				s, _ := dp.Attributes.Value(attrState)
+				r, _ := dp.Attributes.Value(attrRSTID)
+				result[counterKey{s.AsString(), int(r.AsInt64())}] = dp.Value
+			}
+		}
+	}
+	return result
+}
+
+// jobTerminalValues collects metric data and returns a map of (state, rstID) → cumulative value
+// for the beeremote.job.terminal counter (incremented by recordJobTerminal).
+func jobTerminalValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKey]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	result := make(map[counterKey]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "beeremote.job.terminal" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "beeremote.job.terminal should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -1315,8 +1435,12 @@ func TestJobCounterNoopTransitions(t *testing.T) {
 
 			counts := jobActiveValues(t, reader)
 			assert.Equal(t, int64(0), counts[counterKey{stateStr, 1}], "terminal job never tracked; counter must stay zero for no-op transition")
+
+			termCounts := jobTerminalValues(t, reader)
+			assert.Equal(t, int64(0), termCounts[counterKey{stateStr, 1}], "recordJobTerminal must not fire for no-op transition (initialState is already terminal)")
 		})
 	}
+
 }
 
 // TestJobCounterRSTIsolation verifies that counters for different RST IDs never
@@ -1969,32 +2093,49 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 }
 
 // TestJobCounterNeverNegativeOnRestart verifies that jobs loaded from the DB on
-// restart do not cause the counter to go negative. The counter is a monotonic
-// Int64Counter: it only increments when jobs enter non-terminal states in the
-// current process run. Terminal states are never incremented. DB-loaded jobs are
-// invisible to the counter until they submit new work in the current process run.
+// restart do not cause the counter to undercount or behave incorrectly. The counter
+// is a monotonic Int64Counter: DB-loaded jobs are invisible to it (counter starts at
+// zero). When those jobs are later cancelled via UpdateJobs, jobActive stays at zero
+// (was never incremented for DB-loaded jobs) and jobTerminal increments correctly.
 func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
-	m, reader, cleanup := newCountingManager(t)
+	// connect + disconnect only: cancel with empty WorkResults needs no worker calls.
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	m, reader, cleanup := newFullCountingManager(t, workerConfigs, []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+	}, filesystem.NewMockFS(), Config{})
 	defer cleanup()
 
-	// Pre-populate the store with SCHEDULED jobs as if they were restored from Badger on restart.
-	// These jobs have never been counted by this process's counter (counter starts at 0).
+	// Pre-populate the store with SCHEDULED jobs as if restored from Badger on restart.
+	// These were never counted by this process's counter, so counter starts at zero.
 	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
 	require.NoError(t, err)
 	entry.Value = map[string]*Job{
 		"job-1": {
 			Job: beeremote.Job_builder{
 				Id:      "job-1",
-				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
 				Status:  beeremote.Job_Status_builder{State: beeremote.Job_SCHEDULED}.Build(),
 			}.Build(),
+			WorkResults: map[string]worker.WorkResult{},
 		},
 		"job-2": {
 			Job: beeremote.Job_builder{
 				Id:      "job-2",
-				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1}.Build(),
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 1, Mock: flex.MockJob_builder{}.Build()}.Build(),
 				Status:  beeremote.Job_Status_builder{State: beeremote.Job_SCHEDULED}.Build(),
 			}.Build(),
+			WorkResults: map[string]worker.WorkResult{},
 		},
 	}
 	require.NoError(t, commit())
@@ -2003,12 +2144,24 @@ func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
 	counts := jobActiveValues(t, reader)
 	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "DB-restored jobs must not be pre-counted; counter must start at zero on restart")
 
-	// Verify that the counter type itself guarantees no negative values: Int64Counter
-	// panics on negative Add — the switch from UpDownCounter to Counter is the fix.
-	// We confirm a fresh submit increments the counter correctly, independent of DB state.
-	m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String("scheduled"), attrRSTID.Int(1)))
+	// Cancel both DB-restored jobs on this same manager (simulating post-restart UpdateJobs).
+	// jobActive["scheduled"] must stay at zero throughout: it was never incremented for these
+	// jobs, so there is nothing to decrement — no negative values possible.
+	req := beeremote.UpdateJobsRequest_builder{
+		Path:     "/test/file",
+		NewState: beeremote.UpdateJobsRequest_CANCELLED,
+	}.Build()
+	resp, err := m.UpdateJobs(req)
+	require.NoError(t, err)
+	require.True(t, resp.GetOk(), resp.GetMessage())
+
 	counts = jobActiveValues(t, reader)
-	assert.Equal(t, int64(1), counts[counterKey{"scheduled", 1}], "fresh submit increments counter correctly")
+	assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "jobActive[scheduled] must stay zero after cancelling DB-restored jobs — counter was never incremented for them")
+	assert.Equal(t, int64(0), counts[counterKey{"cancelled", 1}], "CANCELLED is terminal; never tracked in jobActive")
+
+	// recordJobTerminal must have fired twice: both SCHEDULED → CANCELLED transitions.
+	termCounts := jobTerminalValues(t, reader)
+	assert.Equal(t, int64(2), termCounts[counterKey{"cancelled", 1}], "recordJobTerminal must fire once per job for SCHEDULED → CANCELLED")
 }
 
 // workActiveValues collects the beeremote.work.active counter values,

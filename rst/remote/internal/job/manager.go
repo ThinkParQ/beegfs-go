@@ -941,17 +941,9 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	state := status.GetState()
 	initialState := state
 
-	// Increment the counter when a job enters a non-terminal state. Declared first (runs last in LIFO):
-	// runs after recordJobTerminal, which is declared second and fires first.
-	defer func() {
-		if currentState := status.GetState(); currentState != initialState && !isTerminalState(currentState) {
-			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(currentState)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
-		}
-	}()
-
-	// Records metrics and a log only when this call transitions the job FROM a
-	// non-terminal state TO a terminal state. Force-updates that move between
-	// two terminal states (e.g., COMPLETED → CANCELLED) are not re-recorded.
+	// Records metrics and a log when this call transitions the job from a non-terminal
+	// state to a terminal state. Force-updates that move between two terminal states
+	// (e.g., COMPLETED → CANCELLED) are not re-recorded.
 	defer func() {
 		if !isTerminalState(initialState) && isTerminalState(status.GetState()) {
 			m.recordJobTerminal(job, terminalStateString(status.GetState()))
