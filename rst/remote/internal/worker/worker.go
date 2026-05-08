@@ -203,6 +203,10 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 						// Otherwise continue.
 					}
 				}
+			} else {
+				// connectLoop returns false when context is cancelled or an unrecoverable
+				// error occurs. In both cases stop retrying.
+				done = true
 			}
 		}
 		// We'll first set the node state to offline so the node is not assigned

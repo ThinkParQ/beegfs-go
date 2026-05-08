@@ -31,9 +31,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const (
-	testDBBasePath = "/tmp"
-)
+var testDBBasePath = os.TempDir()
 
 // counterKey identifies a job counter dimension (state label + RST ID).
 type counterKey struct {
