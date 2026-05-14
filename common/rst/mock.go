@@ -90,15 +90,21 @@ func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
-	return false, 0, ErrUnsupportedOpForRST
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
+	return false, 0, nil, ErrUnsupportedOpForRST
 }
 
 func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	return false, ""
 }
 
-func (m *MockClient) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
+func (m *MockClient) ExecuteBulkRequest(
+	ctx context.Context,
+	stateMountPath string,
+	operation string,
+	requests []*beeremote.JobRequest,
+	walkChan chan<- *filesystem.StreamPathResult,
+) (reschedule bool, delay time.Duration, err error) {
 	return false, 0, ErrUnsupportedOpForRST
 }
 
@@ -106,7 +112,7 @@ func (m *MockClient) CompleteBulkRequest(ctx context.Context, stateMountPath str
 	return nil
 }
 
-func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error {
+func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	return nil
 }
 

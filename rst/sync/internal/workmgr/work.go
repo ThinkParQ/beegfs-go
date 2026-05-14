@@ -400,11 +400,12 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 
 	var reschedule bool
 	var rescheduleDelay time.Duration
+	var bulkErr error
 	var err error
 	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionChan)
-		reschedule, rescheduleDelay, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		reschedule, rescheduleDelay, bulkErr, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 	}()
 
 	total := 0
@@ -433,7 +434,10 @@ processJobs:
 		}
 	}
 
-	if err != nil {
+	if bulkErr != nil {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("job builder failed to complete bulk operation(s): " + bulkErr.Error())
+	} else if err != nil {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("job builder failed to complete: " + err.Error())
 	} else if reschedule {

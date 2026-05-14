@@ -375,6 +375,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	}
 
 	var writeLockSet bool
+	var undoPrepare func() error
 	defer func() {
 		if err == nil || errors.Is(err, ErrJobAlreadyOffloaded) {
 			return
@@ -387,9 +388,17 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}()
 
-	if writeLockSet, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
+	if writeLockSet, undoPrepare, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err == nil || IsErrJobTerminalSentinel(err) {
+			return
+		}
+		if undoErr := undoPrepare(); undoErr != nil {
+			err = errors.Join(err, undoErr)
+		}
+	}()
 	job.SetExternalId(sync.LockedInfo.ExternalId)
 
 	switch sync.Operation {
@@ -404,15 +413,21 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
-	return false, 0, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
+	return false, 0, nil, ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	return false, ""
 }
 
-func (r *S3Client) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
+func (r *S3Client) ExecuteBulkRequest(
+	ctx context.Context,
+	stateMountPath string,
+	operation string,
+	requests []*beeremote.JobRequest,
+	walkChan chan<- *filesystem.StreamPathResult,
+) (reschedule bool, delay time.Duration, err error) {
 	return false, 0, ErrUnsupportedOpForRST
 }
 
@@ -420,7 +435,7 @@ func (r *S3Client) CompleteBulkRequest(ctx context.Context, stateMountPath strin
 	return ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error {
+func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	return ErrUnsupportedOpForRST
 }
 
@@ -872,7 +887,19 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 	// Skip checking the file was modified if we were told to abort since the mtime may not have
 	// been set correctly anyway given the error check is skipped above.
-	if !abort {
+	if abort {
+		// Restore the original local state as best we can. If data was written then the file will be
+		// the same as before except for the timestamps.
+		if IsFileOffloaded(sync.LockedInfo) {
+			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.LockedInfo.StubUrlPath, sync.LockedInfo.StubUrlRstId, true); err != nil {
+				return fmt.Errorf("failed to restore original stub file: %w", err)
+			}
+		} else if sync.LockedInfo.Size < sync.LockedInfo.RemoteSize {
+			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.Size, true); err != nil {
+				return fmt.Errorf("failed to restore original file size: %w", err)
+			}
+		}
+	} else {
 		start := job.GetStartMtime().AsTime()
 		stop := job.GetStopMtime().AsTime()
 		if !start.Equal(stop) {
@@ -886,9 +913,17 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 			return fmt.Errorf("failed to update download's mtime: %w", err)
 		}
 
-		// Clear offloaded data state when contents for a stub file were downloaded successfully.
-		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
-			entry.SetFileDataState(ctx, request.Path, DataStateNone)
+		if !request.StubLocal {
+			// Clear offloaded data state when contents for a stub file were downloaded successfully.
+			if IsFileOffloaded(sync.LockedInfo) {
+				entry.SetFileDataState(ctx, request.Path, DataStateNone)
+			}
+
+			// Reduce the file size if it's larger than the remote object. This situation means the original
+			// file size was larger than needed so no additional space was preallocated.
+			if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
+				r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true)
+			}
 		}
 	}
 
@@ -896,7 +931,8 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 }
 
 // prepareJobRequest ensures that sync.LockedInfo is full populated.
-func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, err error) {
+func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, undo func() error, err error) {
+	undo = func() error { return nil }
 	lockedInfo := sync.LockedInfo
 	if IsFileLocked(lockedInfo) && HasRemotePathInfo(lockedInfo) {
 		return
@@ -917,7 +953,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	}
 
 	if !HasRemotePathInfo(lockedInfo) {
-		request := BuildJobRequest(ctx, r, r.mountPoint, cfg)
+		request := BuildJobRequest(ctx, r, cfg)
 		status := request.GetGenerationStatus()
 		if status != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, status.Message)
@@ -931,7 +967,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 			}
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {
+		if undo, err = PrepareFileStateForWorkRequests(ctx, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}

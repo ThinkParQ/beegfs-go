@@ -487,30 +487,37 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 
 	}
 
-	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
-	if !ok {
-		return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
-	}
-
 	var jobSubmission workermgr.JobSubmission
-	if jr.GenerationStatus != nil {
-		status := jr.GenerationStatus
-		switch status.GetState() {
-		case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
-			// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
-			// mark the job as complete so ignore the err.
-			mtime, _ := time.ParseDateTime(status.Message)
-			err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
-		case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
-			err = rst.ErrJobAlreadyOffloaded
-		case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
-			err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
-		case beeremote.JobRequest_GenerationStatus_ERROR:
-			err = errors.New(status.Message)
-		default:
-			err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
+	if jr.HasGenerationStatus() {
+		status := jr.GetGenerationStatus()
+		if _, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+			if status.GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
+				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+			} else {
+				return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+			}
+		} else {
+			switch status.GetState() {
+			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
+				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
+				// mark the job as complete so ignore the err.
+				mtime, _ := time.ParseDateTime(status.Message)
+				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
+			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
+				err = rst.ErrJobAlreadyOffloaded
+			case beeremote.JobRequest_GenerationStatus_ERROR:
+				err = errors.New(status.Message)
+			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
+				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+			default:
+				err = fmt.Errorf("failure occurred while generating job request and the state is unknown: %s", status.Message)
+			}
 		}
 	} else {
+		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+		if !ok {
+			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+		}
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
 	}
 

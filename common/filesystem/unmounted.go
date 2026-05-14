@@ -40,6 +40,10 @@ func (fs UnmountedFS) CreatePreallocatedFile(path string, size int64, overwrite 
 	return ErrUnmounted
 }
 
+func (fs UnmountedFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	return ErrUnmounted
+}
+
 func (fs UnmountedFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	return ErrUnmounted
 }

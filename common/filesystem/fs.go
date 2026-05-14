@@ -46,6 +46,16 @@ type Provider interface {
 	// entire file, but should use optimized methods like fallocate() or truncate(). This also means
 	// it is not safe to rely on CreatePreallocatedFile to securely wipe an existing file.
 	CreatePreallocatedFile(name string, size int64, overwrite bool) error
+	// Creates or resizes a file at the specified path, returning an error if the file already
+	// exists unless overwrite is true. If overwrite is true and the file already exists, the file
+	// will be resized to the specified size without first zeroing or truncating it to zero. If the
+	// file is extended, the new region may be sparse and may not reserve physical disk space. If
+	// the file is reduced, data beyond the specified size is discarded and cannot be restored by
+	// later extending the file. This is useful for setting the logical size of a file before
+	// subsequent operations, such as a multipart download, but callers must still handle write-time
+	// space errors. Note that expanding a file with overwrite==true will not cause and error to be
+	// returned.
+	CreateOrResizeFile(name string, size int64, overwrite bool) error
 	// CreateWriteClose creates the file specified by name and immediately writes the specified buf
 	// as the file contents then closes the file.
 	CreateWriteClose(name string, buf []byte, mode uint32, overwrite bool) error
@@ -199,6 +209,26 @@ func (fs BeeGFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 		return err
 	}
 	return file.Close()
+}
+
+func (fs BeeGFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	absPath := filepath.Join(fs.MountPoint, path)
+	flags := os.O_RDWR | os.O_CREATE
+	if !overwrite {
+		flags |= os.O_EXCL
+	}
+
+	file, err := os.OpenFile(absPath, flags, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := file.Truncate(size); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {

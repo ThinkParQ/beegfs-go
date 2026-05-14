@@ -47,6 +47,16 @@ func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	return nil
 }
 
+func (fs MockFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	file, err := fs.Fs.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	file.Truncate(size)
+	return nil
+}
+
 func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	file, err := fs.Fs.Create(path)
 	if err != nil {

@@ -31,6 +31,7 @@ var (
 	ErrOffloadFileNotReadable       = errors.New("unable to read stub file")
 	ErrRSTUnavailable               = errors.New("remote target is unavailable")
 	ErrGetLockedInfoFatal           = errors.New("fatal error collecting locked info")
+	ErrBulkOperationCancelRequest   = errors.New("bulk operation cancel request")
 )
 
 func IsErrJobTerminalSentinel(err error) bool {
@@ -50,3 +51,14 @@ func (m *MtimeErr) Unwrap() error    { return m.Err }
 func GetErrJobAlreadyCompleteWithMtime(mtime time.Time) *MtimeErr {
 	return &MtimeErr{Err: ErrJobAlreadyComplete, Time: mtime}
 }
+
+// Bulk operations may need to be cancelled and in ssome cases, the unsent job requests should be
+// cancelled. Pass &RequestCancelError{Reason: err, Rollback: true} to the
+// filesystem.StreamPathResult Err to ensure the request is submitted as a failed-precondition
+// rather than an error when rollback was successful
+type RequestCancelError struct {
+	Reason error
+}
+
+func (e *RequestCancelError) Error() string { return e.Reason.Error() }
+func (e *RequestCancelError) Unwrap() error { return ErrBulkOperationCancelRequest }

@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -65,23 +63,27 @@ func parseBulkOperation(operation string) xtreemstoreS3BulkOperation {
 	}
 }
 
+type xtreemstoreS3BulkRequestStatus byte
+
 const (
-	xtreemstoreS3BulkRequestInitialized byte = iota
+	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
+	xtreemstoreS3BulkRequestSent
 	xtreemstoreS3BulkRequestComplete
 )
 
-const xtreemstoreS3BulkRetrieveBatchFileVersion = 1
+func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte { return []byte{byte(s)} }
 
 var (
 	ErrActiveRetrieveSessionAlreadyExists = errors.New("active retrieve-session already exists")
 )
 
 type xtreemstoreS3BulkRetrieveManager struct {
-	s3ApiClient    s3ApiClient
-	bucket         string
-	operation      string
-	stateMountPath string
-	state          *xtreemstoreS3BulkRetrieveManagerState
+	s3ApiClient
+	bucket    string
+	operation string
+	statePath string
+	state     *xtreemstoreS3BulkRetrieveManagerState
+	walkChan  chan<- *filesystem.StreamPathResult
 }
 
 type xtreemstoreS3BulkRetrieveSessionInfo struct {
@@ -108,30 +110,35 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
 }
 
-type xtreemstoreS3BulkRetrieveBatchFile struct {
-	Version             int `json:"version"`
-	BatchInfo           xtreemstoreS3BulkRetrieveBatchInfo
-	ActiveRetrieveId    string   `json:"active-retrieve-id"`
-	ActiveJobStart      int64    `json:"active-job-start"`
-	ActiveJobEnd        int64    `json:"active-job-end"` // exclusive
-	ActiveJobReferences []uint64 `json:"active-job-references"`
-}
-
-type activeSessionStatuses struct {
+type xtreemstoreS3BulkStatuses struct {
 	jobStatuses []byte
-	jobCount    uint64
-	offset      uint64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
+	jobCount    int64
+	offset      int64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
 }
 
-func (s *activeSessionStatuses) IsComplete(jobIndex uint64) (bool, error) {
+func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3BulkRequestStatus, err error) {
 	if jobIndex < s.offset {
-		return false, fmt.Errorf("invalid index for active session")
+		err = fmt.Errorf("invalid index for active session")
+		return
 	}
+
 	statusesJobIndex := jobIndex - s.offset
-	if statusesJobIndex >= uint64(len(s.jobStatuses)) {
-		return false, fmt.Errorf("invalid index for active session")
+	if statusesJobIndex >= int64(len(s.jobStatuses)) {
+		err = fmt.Errorf("invalid index for active session")
+		return
 	}
-	return s.jobStatuses[statusesJobIndex] == xtreemstoreS3BulkRequestComplete, nil
+	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
+}
+
+func (s *xtreemstoreS3BulkStatuses) All() []xtreemstoreS3BulkRequestStatus {
+	statuses := make([]xtreemstoreS3BulkRequestStatus, s.jobCount)
+	for jobIndex := range s.jobCount {
+		// Ignore status error since the jobIndex is valid.
+		status, _ := s.Get(jobIndex)
+		statuses[jobIndex] = status
+	}
+
+	return statuses
 }
 
 // newXtreemstore initializes an xtreemstore provider by reusing the S3 client implementation.
@@ -158,40 +165,6 @@ func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mo
 	return wrapper, nil
 }
 
-func newXtreemstoreS3BulkRetrieveManager(s3ApiClient s3ApiClient, bucket string, stateMountPath string, operation string) *xtreemstoreS3BulkRetrieveManager {
-	stateMountPath = path.Join(stateMountPath, operation)
-	return &xtreemstoreS3BulkRetrieveManager{
-		s3ApiClient:    s3ApiClient,
-		bucket:         bucket,
-		operation:      operation,
-		stateMountPath: stateMountPath,
-		state:          &xtreemstoreS3BulkRetrieveManagerState{},
-	}
-}
-
-func xtreemstoreS3BulkMarkRequestComplete(mountPath string, bulkInfo *flex.BulkJobRequestInfo) (err error) {
-	stateMountPath := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
-	manager := &xtreemstoreS3BulkRetrieveManager{
-		operation:      bulkInfo.Operation,
-		stateMountPath: stateMountPath,
-	}
-
-	var f *os.File
-	if f, err = os.OpenFile(manager.getStatusPath(), os.O_WRONLY, os.FileMode(0600)); err != nil {
-		return
-	}
-
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	_, err = f.WriteAt([]byte{xtreemstoreS3BulkRequestComplete}, bulkInfo.JobIndex)
-	return
-
-}
-
 func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
 	// Update xtreemstore head-object api request headers to include storage details.
 	optFns = append(optFns, func(options *s3.Options) {
@@ -207,17 +180,49 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 		return false, 0, ErrReqAndRSTTypeMismatch
 	}
 
-	ready, delay, err = x.Provider.IsWorkRequestReady(ctx, request)
-	if ready {
-		if request.HasBulkInfo() {
-			err = xtreemstoreS3BulkMarkRequestComplete(x.mountPoint.GetMountPath(), request.GetBulkInfo())
-			if err != nil {
-				return false, 0, fmt.Errorf("failed to mark bulk request complete: %w", err)
-			}
-		}
+	// // Option 2: Fail if the bulk request had an error.
+	// if request.HasBulkInfo() {
+	// 	// Bulk operation requests must be ready before they are sent, so either an error occurred
+	// 	// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+	// 	// retrieved but removed from the tape buffer before the download.
+	// 	bulkInfo := request.GetBulkInfo()
+	// 	if bulkErr := x.xtreemstoreS3BulkError(bulkInfo); bulkErr != nil {
+	// 		err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
+	// 	}
+	// }
+
+	if ready, delay, err = x.Provider.IsWorkRequestReady(ctx, request); err != nil {
+		return
+	}
+
+	// Option 1: Fail if the bulk request was not ready
+	if !ready && request.HasBulkInfo() {
+		// Bulk operation requests must be ready before they are sent, so either an error occurred
+		// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+		// retrieved but removed from the tape buffer before the download.
+		bulkInfo := request.GetBulkInfo()
+		err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, x.xtreemstoreS3BulkError(bulkInfo))
 	}
 
 	return
+}
+
+func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	request := job.GetRequest()
+	if !request.HasSync() {
+		return ErrReqAndRSTTypeMismatch
+	}
+
+	var bulkErr error
+	if request.HasBulkInfo() {
+		bulkInfo := request.GetBulkInfo()
+		if err := x.xtreemstoreS3BulkMarkRequestComplete(bulkInfo); err != nil {
+			bulkErr = fmt.Errorf("failed to mark bulk request complete: %w", err)
+		}
+	}
+
+	err := x.Provider.CompleteWorkRequests(ctx, job, workResults, abort)
+	return errors.Join(err, bulkErr)
 }
 
 func (x *xtreemstoreS3Provider) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
@@ -239,159 +244,405 @@ func (x *xtreemstoreS3Provider) IncludeInBulkRequest(ctx context.Context, reques
 	return
 }
 
-func (x *xtreemstoreS3Provider) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
-	bucket := x.GetConfig().GetXtreemstore().S3.Bucket
-	path := path.Join(x.mountPoint.GetMountPath(), stateMountPath)
+func (x *xtreemstoreS3Provider) ExecuteBulkRequest(
+	ctx context.Context,
+	stateMountPath string,
+	operation string,
+	requests []*beeremote.JobRequest,
+	walkChan chan<- *filesystem.StreamPathResult,
+) (reschedule bool, delay time.Duration, err error) {
 
 	switch parseBulkOperation(operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
-		manager := newXtreemstoreS3BulkRetrieveManager(x.s3ApiClient, bucket, path, operation)
+		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, walkChan)
 		if err = manager.LoadManagerState(); err != nil {
-			return false, 0, fmt.Errorf("failed to load manager state: %w", err)
+			err = fmt.Errorf("failed to load manager state: %w", err)
+			return
 		}
-		if err := manager.AddRequests(requests); err != nil {
+
+		if err = os.MkdirAll(manager.statePath, 0o700); err != nil {
 			return false, 0, err
 		}
+
+		if err = manager.AddRequests(requests); err != nil {
+			err = fmt.Errorf("failed to add requests to bulk operation: %w", err)
+			return
+		}
+
 		return manager.Execute(ctx)
 	default:
-		return false, 0, ErrUnsupportedOpForRST
+		err = ErrUnsupportedOpForRST
 	}
+
+	return
 }
 
+// TODO: Should this have an abort? Probably
+//
+//	If the job failed then this should be repeatedly called with abort until the cleanup succeeds unless the force flag is used.
 func (x *xtreemstoreS3Provider) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
 	return x.deleteBulkStateFiles(stateMountPath, operation)
 }
 
-func (x *xtreemstoreS3Provider) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) error {
-	bucket := x.GetConfig().GetXtreemstore().S3.Bucket
-	path := path.Join(x.mountPoint.GetMountPath(), stateMountPath)
-
+func (x *xtreemstoreS3Provider) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	switch parseBulkOperation(operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
-		manager := newXtreemstoreS3BulkRetrieveManager(x.s3ApiClient, bucket, path, operation)
+		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, walkChan)
 		if err := manager.LoadManagerState(); err != nil {
-			return fmt.Errorf("failed to load manager state: %w", err)
+			return fmt.Errorf("failed to cancel bulk operation request: %w", err)
+		}
+		if err := manager.Cancel(ctx, reason, walkChan); err != nil {
+			return fmt.Errorf("failed to cancel bulk operation manager: %w", err)
 		}
 
-		var errs []error
-
-		// TODO: Verify whether deleting the batch files are desired. Is it enough just to destroy the session?
-		paths, err := manager.getSortedBatchReferencePaths()
-		if err != nil {
-			errs = append(errs, err)
-		} else {
-			errs = append(errs, manager.removeBatchReferenceFiles(paths))
-		}
-
-		errs = append(errs, manager.destroyRetrieveSession(ctx))
-		errs = append(errs, x.deleteBulkStateFiles(stateMountPath, operation))
-
-		return errors.Join(errs...)
 	default:
 		return ErrUnsupportedOpForRST
 	}
+
+	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (reschedule bool, delay time.Duration, err error) {
-	sessionInfo, err := x.getSessionInfo(ctx)
-	if err != nil {
-		return false, 0, fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
+func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPath string, operation string, walkChan chan<- *filesystem.StreamPathResult) *xtreemstoreS3BulkRetrieveManager {
+	statePath := path.Join(x.mountPoint.GetMountPath(), stateMountPath, operation)
+	return &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient: x,
+		bucket:      x.GetConfig().GetXtreemstore().S3.Bucket,
+		operation:   operation,
+		statePath:   statePath,
+		state:       &xtreemstoreS3BulkRetrieveManagerState{},
+		walkChan:    walkChan,
+	}
+}
+
+// xtreemstoreS3BulkMarkRequestComplete marks a request sent by a bulk operation as complete.
+func (x *xtreemstoreS3Provider) xtreemstoreS3BulkMarkRequestComplete(bulkInfo *flex.BulkJobRequestInfo) (err error) {
+	statePath := path.Join(x.mountPoint.GetMountPath(), bulkInfo.StateMountPath, bulkInfo.Operation)
+	manager := &xtreemstoreS3BulkRetrieveManager{
+		operation: bulkInfo.Operation,
+		statePath: statePath,
+	}
+	return manager.MarkComplete(bulkInfo.JobIndex)
+}
+
+func (x *xtreemstoreS3Provider) xtreemstoreS3BulkError(bulkInfo *flex.BulkJobRequestInfo) error {
+	statePath := path.Join(x.mountPoint.GetMountPath(), bulkInfo.StateMountPath, bulkInfo.Operation)
+	m := &xtreemstoreS3BulkRetrieveManager{
+		operation: bulkInfo.Operation,
+		statePath: statePath,
 	}
 
-	if sessionInfo.Active {
-		if sessionInfo.RetrieveId != x.state.ActiveRetrieveId {
-			// Another session is active so reschedule
-			return true, 5 * time.Second, nil
+	message, err := os.ReadFile(m.getErrorsPath())
+	if err != nil {
+		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
+	}
+	return fmt.Errorf("%s", message)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
+
+	if reason != nil {
+		if err := m.CancelRequests(ctx, reason, walkChan); err != nil {
+			return fmt.Errorf("failed to cancel all bulk operation job requests: %w", err)
 		}
 	} else {
-		if err = x.StartSession(ctx); err != nil {
-			if errors.Is(err, ErrActiveRetrieveSessionAlreadyExists) {
-				return true, 5 * time.Second, nil
-			}
-			return false, 0, fmt.Errorf("failed to start retrieve-session: %w", err)
-		}
-	}
-
-	batchReferencePaths, err := x.ensureBatchReferenceFiles(ctx)
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to create batch reference files for the active retrieve-session: %w", err)
-	}
-
-	statuses, err := x.getActiveSessionStatuses()
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to get bulk retrieve entry states: %w", err)
-	}
-
-	// Review the remaining batches removing any that are complete. Reschedule the work request if a
-	// batch is still incomplete.
-	for _, path := range batchReferencePaths {
-		complete, err := x.checkBulkBatch(path, statuses)
+		// TODO: Check whether all requests have been sent.
+		statuses, err := m.getAllStatuses()
 		if err != nil {
-			return false, 0, fmt.Errorf("failed to create bulk batch reference files: %w", err)
-		}
 
-		if complete {
-			if err = os.Remove(path); err != nil {
-				return false, 0, fmt.Errorf("failed to remove batch file! Path: %q, Error: %q", path, err)
+		}
+		for _, status := range statuses.All() {
+			_ = status // TODO:
+			switch status {
+			case xtreemstoreS3BulkRequestInitialized:
+			case xtreemstoreS3BulkRequestSent:
+			case xtreemstoreS3BulkRequestComplete:
+			default:
 			}
-		} else {
-			return true, 5 * time.Second, nil
 		}
 	}
 
-	if err = x.destroyRetrieveSession(ctx); err != nil {
-		return false, 0, fmt.Errorf("retrieve-session completed successfully, but the active session could not be destroyed and manual intervention is required: %w", err)
+	sessionInfo, err := m.getSessionInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
 	}
-	return false, 0, nil
+
+	if !sessionInfo.Active || sessionInfo.RetrieveId != m.state.ActiveRetrieveId {
+		if err := m.deleteState(); err != nil {
+			return fmt.Errorf("failed to remove retrieve-session state file: %w", err)
+		}
+		return nil
+	}
+
+	batchInfos, err := m.getSessionBatchInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get retrieve-session batch info: %w", err)
+	}
+
+	for _, batchInfo := range batchInfos {
+		if err := m.deleteSessionBatch(ctx, batchInfo); err != nil {
+			return fmt.Errorf("failed to delete retrieve-session batch: %w", err)
+		}
+	}
+
+	if err := m.destroyRetrieveSession(ctx); err != nil {
+		return fmt.Errorf("failed to deactivate retrieve-session: %w", err)
+	}
+
+	if err := m.deleteState(); err != nil {
+		return fmt.Errorf("failed to remove retrieve-session state file: %w", err)
+	}
+
+	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) AddRequests(requests []*beeremote.JobRequest) (err error) {
-	if err = os.MkdirAll(x.stateMountPath, os.FileMode(0700)); err != nil {
+// CancelRequests sends the key for each object that has not been retrieved.
+func (m *xtreemstoreS3BulkRetrieveManager) CancelRequests(ctx context.Context, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
+	records, err := m.getRecordsFromActiveStart()
+	if err != nil {
+		return fmt.Errorf("unable to determine records to cancel: %w", err)
+	}
+	statuses, err := m.getStatusesFromActiveStart()
+	if err != nil {
+		return fmt.Errorf("unable to determine records to cancel: %w", err)
+	}
+
+	cancelErr := &RequestCancelError{Reason: reason}
+	for jobIndex, record := range records {
+		if status, err := statuses.Get(int64(jobIndex)); err != nil {
+			return fmt.Errorf("unable to send failed job request: %w", err)
+		} else {
+			switch status {
+			case xtreemstoreS3BulkRequestInitialized:
+				walkChan <- &filesystem.StreamPathResult{Path: record, Err: cancelErr}
+				m.MarkSent(int64(jobIndex))
+			case xtreemstoreS3BulkRequestSent:
+			case xtreemstoreS3BulkRequestComplete:
+			default:
+				return fmt.Errorf("unknown record status. Record: %s, Status: %v", record, status)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) deleteState() error {
+	var errs []error
+	errs = append(errs, os.Remove(m.getStatusPath()))
+	errs = append(errs, os.Remove(m.getRecordPath()))
+	errs = append(errs, os.Remove(m.getErrorsPath()))
+	errs = append(errs, os.Remove(m.getManagerPath()))
+	return errors.Join(errs...)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (reschedule bool, delay time.Duration, err error) {
+	rescheduleOperation := func() (bool, time.Duration, error) {
+		rescheduleDelay := 5 * time.Second // TODO: This should be based on config...
+		return true, rescheduleDelay, nil
+	}
+
+	if ready, err := m.ensureSessionActive(ctx); err != nil {
+		return false, 0, err
+	} else if !ready {
+		return rescheduleOperation()
+	}
+
+	if allBatchesComplete, err := m.processSessionBatches(ctx); err != nil {
+		return false, 0, err
+	} else if !allBatchesComplete {
+		return rescheduleOperation()
+	}
+
+	if err = m.destroyRetrieveSession(ctx); err != nil {
+		err = fmt.Errorf("retrieve-session completed successfully, but the active session could not be destroyed and manual intervention is required: %w", err)
+	}
+
+	// TODO: Should all the state be destroyed here?
+	//  - Batches are complete and active session is destroyed
+	return
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Context) (ready bool, err error) {
+	sessionInfo, sessionInfoErr := m.getSessionInfo(ctx)
+	if sessionInfoErr != nil {
+		err = fmt.Errorf("unable to determine whether retrieve-session is active: %w", sessionInfoErr)
 		return
 	}
 
-	queueStatusPath := x.getStatusPath()
-	var info os.FileInfo
-	if info, err = os.Stat(queueStatusPath); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return
+	if sessionInfo.Active {
+		ready = sessionInfo.RetrieveId == m.state.ActiveRetrieveId
+	} else if startSessionErr := m.startSession(ctx); startSessionErr != nil {
+		if !errors.Is(startSessionErr, ErrActiveRetrieveSessionAlreadyExists) {
+			err = fmt.Errorf("failed to start retrieve-session: %w", startSessionErr)
 		}
-		x.state.IncludedJobs = 0
 	} else {
-		x.state.IncludedJobs = info.Size()
+		ready = true
+	}
+	return
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatches(ctx context.Context) (complete bool, err error) {
+	var activeRecordMap map[string]int64
+	var activeStatuses *xtreemstoreS3BulkStatuses
+	var batchInfos []xtreemstoreS3BulkRetrieveBatchInfo
+	if activeRecordMap, err = m.getActiveRecordsMap(); err != nil {
+		return false, fmt.Errorf("failed to get record mappings for the active retrieve-session: %w", err)
+	}
+	if activeStatuses, err = m.getActiveSessionStatuses(); err != nil {
+		return false, fmt.Errorf("failed to get request statuses for active retrieve-session: %w", err)
+	}
+	if batchInfos, err = m.getSessionBatchInfo(ctx); err != nil {
+		return false, fmt.Errorf("failed to load retrieve-session batch info: %w", err)
 	}
 
-	var status *os.File
-	if status, err = os.OpenFile(queueStatusPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
+	for _, batchInfo := range batchInfos {
+		if complete, err = m.processSessionBatch(ctx, activeRecordMap, activeStatuses, batchInfo); err != nil {
+			return false, err
+		} else if !complete {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatch(ctx context.Context, activeRecordMap map[string]int64, activeStatuses *xtreemstoreS3BulkStatuses, batchInfo xtreemstoreS3BulkRetrieveBatchInfo) (bool, error) {
+	keys, err := m.getSessionBatchKeys(ctx, batchInfo)
+	if err != nil {
+		return false, fmt.Errorf("failed to retrieve batch keys: %w", err)
+	}
+
+	batchComplete := true
+	for _, key := range keys {
+		if complete, err := m.processSessionBatchKey(ctx, activeRecordMap, activeStatuses, key); err != nil {
+			return false, err
+		} else if !complete {
+			batchComplete = false
+		}
+	}
+
+	if !batchComplete {
+		return false, nil
+	}
+
+	if err = m.deleteSessionBatch(ctx, batchInfo); err != nil {
+		return false, fmt.Errorf("failed to delete retrieve-session batch: %w", err)
+	}
+	return true, nil
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(ctx context.Context, activeRecordMap map[string]int64, activeStatuses *xtreemstoreS3BulkStatuses, key string) (bool, error) {
+	jobIndex, ok := activeRecordMap[key]
+	if !ok {
+		return false, fmt.Errorf("unable to determine status for key: %s", key)
+	}
+
+	jobStatus, err := activeStatuses.Get(jobIndex)
+	if err != nil {
+		return false, fmt.Errorf("unable to determine status: %w", err)
+	}
+
+	switch jobStatus {
+	case xtreemstoreS3BulkRequestInitialized:
+		if ready, err := m.isObjectReadyForDownload(ctx, key); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				m.walkChan <- &filesystem.StreamPathResult{
+					Path: key,
+					Err:  fmt.Errorf("object no longer exists"),
+				}
+				if err := m.MarkComplete(jobIndex); err != nil {
+					return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
+				}
+				return true, nil
+			}
+			return false, fmt.Errorf("failed to determine restore state: %w", err)
+		} else if ready {
+			m.walkChan <- &filesystem.StreamPathResult{Path: key}
+			if err := m.MarkSent(jobIndex); err != nil {
+				return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
+			}
+		}
+		return false, nil
+	case xtreemstoreS3BulkRequestSent:
+		return false, nil
+	case xtreemstoreS3BulkRequestComplete:
+		return true, nil
+	default:
+		m.walkChan <- &filesystem.StreamPathResult{
+			Path: key,
+			Err:  fmt.Errorf("unknown job request status"),
+		}
+		if err := m.MarkComplete(jobIndex); err != nil {
+			return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
+		}
+		return true, nil
+	}
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) AddRequests(requests []*beeremote.JobRequest) (err error) {
+	defer func() {
+		if saveErr := m.saveManagerState(); saveErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to update manager state: %w", saveErr))
+		}
+	}()
+
+	var fStatus *os.File
+	if fStatus, err = os.OpenFile(m.getStatusPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return err
 	}
-
 	defer func() {
-		if closeErr := status.Close(); closeErr != nil {
+		if closeErr := fStatus.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
 	}()
 
-	var record *os.File
-	if record, err = os.OpenFile(x.getRecordPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
+	var fRecord *os.File
+	if fRecord, err = os.OpenFile(m.getRecordPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return err
 	}
 	defer func() {
-		if closeErr := record.Close(); closeErr != nil {
+		if closeErr := fRecord.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
 	}()
 
 	for _, request := range requests {
-		if err = x.insertRequest(status, record, request); err != nil {
+		if err = m.insertRequest(fStatus, fRecord, request); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) LoadManagerState() error {
-	f, err := os.OpenFile(x.getManagerPath(), os.O_RDONLY, os.FileMode(0600))
+func (m *xtreemstoreS3BulkRetrieveManager) insertRequest(fStatus *os.File, fRecord *os.File, request *beeremote.JobRequest) (err error) {
+	if !request.HasSync() {
+		return ErrReqAndRSTTypeMismatch
+	}
+	if !request.HasBulkInfo() {
+		return fmt.Errorf("missing request bulkInfo")
+	}
+	if request.GetBulkInfo().JobIndex != m.state.IncludedJobs {
+		return fmt.Errorf("unexpected request bulkInfo.JobIndex")
+	}
+
+	if _, err = fStatus.Write(xtreemstoreS3BulkRequestInitialized.Bytes()); err != nil {
+		return
+	}
+
+	remotePath := request.GetSync().GetRemotePath()
+	if m.state.IncludedJobs == 0 {
+		_, err = fRecord.WriteString(remotePath)
+	} else {
+		_, err = fRecord.WriteString("\n" + remotePath)
+	}
+
+	m.state.IncludedJobs++
+	return
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) LoadManagerState() error {
+	f, err := os.OpenFile(m.getManagerPath(), os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -400,12 +651,12 @@ func (x *xtreemstoreS3BulkRetrieveManager) LoadManagerState() error {
 	}
 	defer f.Close()
 
-	return json.NewDecoder(f).Decode(x.state)
+	return json.NewDecoder(f).Decode(m.state)
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) saveManagerState() (err error) {
+func (m *xtreemstoreS3BulkRetrieveManager) saveManagerState() (err error) {
 	var f *os.File
-	if f, err = os.OpenFile(x.getManagerPath(), os.O_WRONLY|os.O_CREATE, os.FileMode(0600)); err != nil {
+	if f, err = os.OpenFile(m.getManagerPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(0600)); err != nil {
 		return
 	}
 
@@ -415,68 +666,66 @@ func (x *xtreemstoreS3BulkRetrieveManager) saveManagerState() (err error) {
 		}
 	}()
 
-	err = json.NewEncoder(f).Encode(x.state)
+	err = json.NewEncoder(f).Encode(m.state)
 	return
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getStatusPath() string {
-	return path.Join(x.stateMountPath, "status")
+func (m *xtreemstoreS3BulkRetrieveManager) MarkComplete(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestComplete, jobIndex)
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getRecordPath() string {
-	return path.Join(x.stateMountPath, "record")
+func (m *xtreemstoreS3BulkRetrieveManager) MarkSent(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestSent, jobIndex)
+}
+func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3BulkRequestStatus, jobIndex int64) error {
+	f, err := os.OpenFile(m.getStatusPath(), os.O_WRONLY, os.FileMode(0600))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	_, err = f.WriteAt(status.Bytes(), jobIndex)
+	return err
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getManagerPath() string {
-	return path.Join(x.stateMountPath, "manager.json")
+func (m *xtreemstoreS3BulkRetrieveManager) getStatusPath() string {
+	return path.Join(m.statePath, "status")
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getBatchPath(number int64) string {
-	return path.Join(x.stateMountPath, fmt.Sprintf("batch.%d", number))
+func (m *xtreemstoreS3BulkRetrieveManager) getRecordPath() string {
+	return path.Join(m.statePath, "record")
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) insertRequest(status *os.File, record *os.File, request *beeremote.JobRequest) (err error) {
-	if !request.HasSync() {
-		return ErrReqAndRSTTypeMismatch
-	}
-	if !request.HasBulkInfo() {
-		return fmt.Errorf("missing request bulkInfo")
-	}
-	if request.GetBulkInfo().JobIndex != x.state.IncludedJobs {
-		return fmt.Errorf("unexpected request bulkInfo.JobIndex")
-	}
-
-	if _, err = status.Write([]byte{xtreemstoreS3BulkRequestInitialized}); err != nil {
-		return
-	}
-
-	remotePath := request.GetSync().GetRemotePath()
-	if x.state.IncludedJobs == 0 {
-		_, err = record.WriteString(remotePath)
-	} else {
-		_, err = record.WriteString("\n" + remotePath)
-	}
-
-	x.state.IncludedJobs++
-	return
+func (m *xtreemstoreS3BulkRetrieveManager) getErrorsPath() string {
+	return path.Join(m.statePath, "errors")
 }
 
+func (m *xtreemstoreS3BulkRetrieveManager) getManagerPath() string {
+	return path.Join(m.statePath, "manager.json")
+}
+
+// deleteBulkStateFiles will destroy the bulk operation directory. An error will be returned if
+// there are any remaining state files which indicates the bulk operation has not been destroyed.
 func (x *xtreemstoreS3Provider) deleteBulkStateFiles(stateMountPath string, operation string) error {
 	statePath := path.Join(x.mountPoint.GetMountPath(), stateMountPath, operation)
-	if err := os.RemoveAll(statePath); err != nil {
+	if err := os.Remove(statePath); err != nil {
 		return fmt.Errorf("delete bulk state files: %w", err)
 	}
 
 	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (*xtreemstoreS3BulkRetrieveSessionInfo, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (*xtreemstoreS3BulkRetrieveSessionInfo, error) {
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(x.bucket),
+		Bucket: aws.String(m.bucket),
 		Key:    aws.String(XTS_SYSTEM_RETRIEVE_SESSION),
 	}
 
-	resp, err := x.s3ApiClient.GetObject(ctx, getObjectInput)
+	resp, err := m.s3ApiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
@@ -493,13 +742,13 @@ func (x *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (
 	return info, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getSessionBatchInfo(ctx context.Context) ([]xtreemstoreS3BulkRetrieveBatchInfo, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) getSessionBatchInfo(ctx context.Context) ([]xtreemstoreS3BulkRetrieveBatchInfo, error) {
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(x.bucket),
+		Bucket: aws.String(m.bucket),
 		Key:    aws.String(XTS_SYSTEM_RETRIEVE_BATCH_LIST),
 	}
 
-	resp, err := x.s3ApiClient.GetObject(ctx, getObjectInput)
+	resp, err := m.s3ApiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
 		return nil, err
 	}
@@ -513,13 +762,13 @@ func (x *xtreemstoreS3BulkRetrieveManager) getSessionBatchInfo(ctx context.Conte
 	return info, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getSessionBatchKeys(ctx context.Context, batchInfo xtreemstoreS3BulkRetrieveBatchInfo) ([]string, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) getSessionBatchKeys(ctx context.Context, batchInfo xtreemstoreS3BulkRetrieveBatchInfo) ([]string, error) {
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(x.bucket),
+		Bucket: aws.String(m.bucket),
 		Key:    aws.String(fmt.Sprintf(XTS_SYSTEM_RETRIEVE_BATCH_FMT, batchInfo.Number)),
 	}
 
-	resp, err := x.s3ApiClient.GetObject(ctx, getObjectInput)
+	resp, err := m.s3ApiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
 		return nil, err
 	}
@@ -533,102 +782,56 @@ func (x *xtreemstoreS3BulkRetrieveManager) getSessionBatchKeys(ctx context.Conte
 	return keys, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) createBatchReferenceFiles(ctx context.Context, batchInfos []xtreemstoreS3BulkRetrieveBatchInfo) (paths []string, err error) {
-	var keyMap map[string]int64
-	if keyMap, err = x.getActiveRecordsMap(); err != nil {
-		return
+func (m *xtreemstoreS3BulkRetrieveManager) deleteSessionBatch(ctx context.Context, batchInfo xtreemstoreS3BulkRetrieveBatchInfo) error {
+	_, err := m.s3ApiClient.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(m.bucket),
+		Key:    aws.String(fmt.Sprintf(XTS_SYSTEM_RETRIEVE_BATCH_FMT, batchInfo.Number)),
+	})
+	if err != nil {
+		return fmt.Errorf("delete retrieve batch %d: %w", batchInfo.Number, err)
 	}
 
-	for _, batchInfo := range batchInfos {
-		var keys []string
-		if keys, err = x.getSessionBatchKeys(ctx, batchInfo); err != nil {
-			return nil, err
-		}
-		if len(keys) != int(batchInfo.Objects) {
-			err = fmt.Errorf("key count does not match the expected number of objects")
-			return
-		}
-
-		references := make([]uint64, 0, len(keys))
-		for _, key := range keys {
-			if index, ok := keyMap[key]; ok {
-				references = append(references, uint64(index))
-			} else {
-				err = fmt.Errorf("key was not found in the key map")
-				return
-			}
-		}
-
-		path := x.getBatchPath(batchInfo.Number)
-		var f *os.File
-		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(0600)); err != nil {
-			return
-		}
-
-		batchFile := &xtreemstoreS3BulkRetrieveBatchFile{
-			Version:             xtreemstoreS3BulkRetrieveBatchFileVersion,
-			BatchInfo:           batchInfo,
-			ActiveRetrieveId:    x.state.ActiveRetrieveId,
-			ActiveJobStart:      x.state.ActiveJobStart,
-			ActiveJobEnd:        x.state.ActiveJobEnd,
-			ActiveJobReferences: references,
-		}
-
-		if err = json.NewEncoder(f).Encode(batchFile); err != nil {
-			if closeErr := f.Close(); closeErr != nil {
-				err = errors.Join(err, closeErr)
-			}
-			return
-		}
-		if err = f.Close(); err != nil {
-			return
-		}
-
-		paths = append(paths, path)
-	}
-
-	return
+	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) ensureBatchReferenceFiles(ctx context.Context) ([]string, error) {
-	batchInfos, err := x.getSessionBatchInfo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load retrieve-session batch info: %w", err)
+func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.Context, key string) (bool, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(m.bucket),
+		Key:    aws.String(key),
 	}
-
-	paths, err := x.getSortedBatchReferencePaths()
+	resp, err := m.s3ApiClient.HeadObject(ctx, input)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := x.validateBatchReferenceFiles(paths, batchInfos); err == nil {
-		return paths, nil
-	} else if len(paths) > 0 {
-		if removeErr := x.removeBatchReferenceFiles(paths); removeErr != nil {
-			return nil, fmt.Errorf("failed to reset invalid batch reference files: %w", errors.Join(err, removeErr))
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+			return false, os.ErrNotExist
 		}
+		return false, fmt.Errorf("head object for key %q: %w", key, err)
 	}
 
-	return x.createBatchReferenceFiles(ctx, batchInfos)
+	if resp.Restore == nil {
+		return true, nil
+	}
+
+	return strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) StartSession(ctx context.Context) error {
-	if x.state.IncludedJobs == 0 {
+func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (err error) {
+	if m.state.IncludedJobs == 0 {
 		return fmt.Errorf("retrieve-session requires at least one key")
 	}
 
-	previousState := *x.state
+	previousState := *m.state
 	cleanupCreatedSession := func(reason error) error {
-		*x.state = previousState
-		if cleanupErr := x.destroyRetrieveSession(ctx); cleanupErr != nil {
+		*m.state = previousState
+		if cleanupErr := m.destroyRetrieveSession(ctx); cleanupErr != nil {
 			return fmt.Errorf("retrieve-session was created but local ownership state could not be persisted, cleanup also failed, and manual intervention is required: %w", errors.Join(reason, cleanupErr))
 		}
 		return reason
 	}
 
-	x.state.ActiveJobStart = x.state.ActiveJobEnd
-	x.state.ActiveJobEnd = x.state.IncludedJobs
-	keys, err := x.getActiveRecords()
+	activeJobStart := m.state.ActiveJobEnd
+	activeJobEnd := m.state.IncludedJobs
+	keys, err := m.getRecords(activeJobStart, activeJobEnd)
 	if err != nil {
 		return err
 	}
@@ -638,8 +841,8 @@ func (x *xtreemstoreS3BulkRetrieveManager) StartSession(ctx context.Context) err
 		return fmt.Errorf("failed to marshal retrieve-session request: %w", err)
 	}
 
-	_, err = x.s3ApiClient.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(x.bucket),
+	_, err = m.s3ApiClient.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(m.bucket),
 		Key:         aws.String(XTS_SYSTEM_RETRIEVE_SESSION),
 		Body:        bytes.NewReader(retrieveSessionJson),
 		ContentType: aws.String("application/json"),
@@ -647,28 +850,32 @@ func (x *xtreemstoreS3BulkRetrieveManager) StartSession(ctx context.Context) err
 	if err != nil {
 		var responseErr *smithyhttp.ResponseError
 		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusConflict {
-			*x.state = previousState
+			*m.state = previousState
 			return ErrActiveRetrieveSessionAlreadyExists
 		}
 
 		return fmt.Errorf("failed to start retrieve-session: %w", err)
 	}
 
-	sessionInfo, err := x.getSessionInfo(ctx)
+	sessionInfo, err := m.getSessionInfo(ctx)
 	if err != nil {
 		return cleanupCreatedSession(fmt.Errorf("failed to recover retrieve-session ownership state after creation: %w", err))
 	}
-	x.state.ActiveRetrieveId = sessionInfo.RetrieveId
 
-	if err = x.saveManagerState(); err != nil {
+	m.state.ActiveJobStart = activeJobStart
+	m.state.ActiveJobEnd = activeJobEnd
+	m.state.ActiveRetrieveId = sessionInfo.RetrieveId
+
+	if err = m.saveManagerState(); err != nil {
 		return cleanupCreatedSession(fmt.Errorf("failed to store retrieve-session ownership state after creation: %w", err))
 	}
+
 	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) destroyRetrieveSession(ctx context.Context) error {
-	_, err := x.s3ApiClient.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(x.bucket),
+func (m *xtreemstoreS3BulkRetrieveManager) destroyRetrieveSession(ctx context.Context) error {
+	_, err := m.s3ApiClient.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(m.bucket),
 		Key:    aws.String(XTS_SYSTEM_RETRIEVE_SESSION),
 	})
 	if err != nil {
@@ -682,24 +889,61 @@ func (x *xtreemstoreS3BulkRetrieveManager) destroyRetrieveSession(ctx context.Co
 	return nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int64, error) {
-	f, err := os.OpenFile(x.getRecordPath(), os.O_RDONLY, os.FileMode(0600))
+func (m *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int64, error) {
+	return m.getRecordsMap(m.state.ActiveJobStart, m.state.ActiveJobEnd)
+}
+
+// func (m *xtreemstoreS3BulkRetrieveManager) getRecordsMapFromActiveStart() (map[string]int64, error) {
+// 	return m.getRecordsMap(m.state.ActiveJobStart, -1)
+// }
+
+func (m *xtreemstoreS3BulkRetrieveManager) getActiveRecords() ([]string, error) {
+	return m.getRecords(m.state.ActiveJobStart, m.state.ActiveJobEnd)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) getRecordsFromActiveStart() ([]string, error) {
+	return m.getRecords(m.state.ActiveJobStart, -1)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) getActiveSessionStatuses() (*xtreemstoreS3BulkStatuses, error) {
+	return m.getStatuses(m.state.ActiveJobStart, m.state.ActiveJobEnd)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) getStatusesFromActiveStart() (*xtreemstoreS3BulkStatuses, error) {
+	return m.getStatuses(m.state.ActiveJobStart, -1)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) getAllStatuses() (*xtreemstoreS3BulkStatuses, error) {
+	return m.getStatuses(0, -1)
+}
+
+// getRecordsMap returns a mapping of record paths to job indexes for the specified range. Set end
+// to -1 to get all mappings beginning from the start index.
+func (m *xtreemstoreS3BulkRetrieveManager) getRecordsMap(start int64, end int64) (map[string]int64, error) {
+	if end == -1 {
+		end = m.state.IncludedJobs
+	}
+	if start < 0 || end < start {
+		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", start, end)
+	}
+
+	keyMap := map[string]int64{}
+	if start == end {
+		return keyMap, nil
+	}
+
+	f, err := os.OpenFile(m.getRecordPath(), os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	if x.state.ActiveJobStart < 0 || x.state.ActiveJobEnd < x.state.ActiveJobStart {
-		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", x.state.ActiveJobStart, x.state.ActiveJobEnd)
-	}
-
-	keyMap := make(map[string]int64)
 	scanner := bufio.NewScanner(f)
 	for index := int64(0); scanner.Scan(); index++ {
-		if index < x.state.ActiveJobStart {
+		if index < start {
 			continue
 		}
-		if index >= x.state.ActiveJobEnd {
+		if index >= end {
 			break
 		}
 		keyMap[scanner.Text()] = index
@@ -712,24 +956,31 @@ func (x *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int
 	return keyMap, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) getActiveRecords() ([]string, error) {
-	f, err := os.OpenFile(x.getRecordPath(), os.O_RDONLY, os.FileMode(0600))
+// getRecords returns a range of record paths. Set end to -1 to get all records beginning with start.
+func (m *xtreemstoreS3BulkRetrieveManager) getRecords(start int64, end int64) ([]string, error) {
+	if end == -1 {
+		end = m.state.IncludedJobs
+	}
+	if start < 0 || end < start {
+		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", start, end)
+	}
+	if start == end {
+		return []string{}, nil
+	}
+
+	f, err := os.OpenFile(m.getRecordPath(), os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	if x.state.ActiveJobStart < 0 || x.state.ActiveJobEnd < x.state.ActiveJobStart {
-		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", x.state.ActiveJobStart, x.state.ActiveJobEnd)
-	}
-
-	keys := make([]string, 0, max(0, int(x.state.ActiveJobEnd-x.state.ActiveJobStart)))
+	keys := make([]string, 0, max(0, int(end-start)))
 	scanner := bufio.NewScanner(f)
 	for index := int64(0); scanner.Scan(); index++ {
-		if index < x.state.ActiveJobStart {
+		if index < start {
 			continue
 		}
-		if index >= x.state.ActiveJobEnd {
+		if index >= end {
 			break
 		}
 		keys = append(keys, scanner.Text())
@@ -742,174 +993,33 @@ func (x *xtreemstoreS3BulkRetrieveManager) getActiveRecords() ([]string, error) 
 	return keys, nil
 }
 
-func (x *xtreemstoreS3BulkRetrieveManager) loadBatchReferenceFile(path string) (*xtreemstoreS3BulkRetrieveBatchFile, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY, os.FileMode(0600))
-	if err != nil {
-		return nil, fmt.Errorf("failed to open batch reference file %q: %w", path, err)
+// getStatuses returns statuses. Set end to -1 to get all statues beginning with start.
+func (m *xtreemstoreS3BulkRetrieveManager) getStatuses(start int64, end int64) (*xtreemstoreS3BulkStatuses, error) {
+	if end == -1 {
+		end = m.state.IncludedJobs
 	}
-	defer f.Close()
-
-	batchFile := &xtreemstoreS3BulkRetrieveBatchFile{}
-	if err := json.NewDecoder(f).Decode(batchFile); err != nil {
-		return nil, fmt.Errorf("failed to decode batch reference file %q: %w", path, err)
-	}
-	if batchFile.Version != xtreemstoreS3BulkRetrieveBatchFileVersion {
-		return nil, fmt.Errorf("invalid batch reference file %q: unsupported version %d", path, batchFile.Version)
+	if start < 0 || end < start {
+		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", start, end)
 	}
 
-	return batchFile, nil
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) validateLoadedBatchReferenceFile(path string, batchFile *xtreemstoreS3BulkRetrieveBatchFile) error {
-	if batchFile.ActiveRetrieveId != x.state.ActiveRetrieveId {
-		return fmt.Errorf("invalid batch reference file %q: retrieve-session mismatch", path)
-	}
-	if batchFile.ActiveJobStart != x.state.ActiveJobStart || batchFile.ActiveJobEnd != x.state.ActiveJobEnd {
-		return fmt.Errorf("invalid batch reference file %q: active job range mismatch", path)
+	statuses := &xtreemstoreS3BulkStatuses{offset: start}
+	if start == end {
+		return statuses, nil
 	}
 
-	return nil
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) validateBatchReferenceFiles(paths []string, batchInfos []xtreemstoreS3BulkRetrieveBatchInfo) error {
-	if len(paths) != len(batchInfos) {
-		return fmt.Errorf("unexpected batch reference file count")
-	}
-
-	expectedByNumber := make(map[int64]xtreemstoreS3BulkRetrieveBatchInfo, len(batchInfos))
-	for _, batchInfo := range batchInfos {
-		expectedByNumber[batchInfo.Number] = batchInfo
-	}
-
-	seen := make(map[int64]struct{}, len(paths))
-	for _, path := range paths {
-		batchFile, err := x.loadBatchReferenceFile(path)
-		if err != nil {
-			return err
-		}
-		if err := x.validateLoadedBatchReferenceFile(path, batchFile); err != nil {
-			return err
-		}
-
-		expectedBatchInfo, ok := expectedByNumber[batchFile.BatchInfo.Number]
-		if !ok {
-			return fmt.Errorf("invalid batch reference file %q: unexpected batch number %d", path, batchFile.BatchInfo.Number)
-		}
-		if batchFile.BatchInfo != expectedBatchInfo {
-			return fmt.Errorf("invalid batch reference file %q: batch metadata mismatch", path)
-		}
-		if _, exists := seen[batchFile.BatchInfo.Number]; exists {
-			return fmt.Errorf("invalid batch reference file %q: duplicate batch number %d", path, batchFile.BatchInfo.Number)
-		}
-		seen[batchFile.BatchInfo.Number] = struct{}{}
-	}
-
-	return nil
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) removeBatchReferenceFiles(paths []string) error {
-	errs := make([]error, 0, len(paths))
-	for _, path := range paths {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("remove batch reference file %q: %w", path, err))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) getSortedBatchReferencePaths() ([]string, error) {
-	prefix := "batch."
-	entries, err := os.ReadDir(x.stateMountPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []string{}, nil
-		}
-		return nil, fmt.Errorf("failed to list batch reference files: %w", err)
-	}
-
-	type batchReference struct {
-		number int
-		path   string
-	}
-
-	batches := []batchReference{}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		filename := entry.Name()
-		if !strings.HasPrefix(filename, prefix) {
-			continue
-		}
-
-		suffix := strings.TrimPrefix(filename, prefix)
-		batchNumber, err := strconv.Atoi(suffix)
-		if err != nil {
-			continue
-		}
-
-		batches = append(batches, batchReference{
-			number: batchNumber,
-			path:   path.Join(x.stateMountPath, filename),
-		})
-	}
-
-	sort.Slice(batches, func(i, j int) bool {
-		return batches[i].number < batches[j].number
-	})
-
-	paths := make([]string, 0, len(batches))
-	for _, batch := range batches {
-		paths = append(paths, batch.path)
-	}
-	return paths, nil
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) getActiveSessionStatuses() (*activeSessionStatuses, error) {
-	if x.state.ActiveJobStart < 0 || x.state.ActiveJobEnd < x.state.ActiveJobStart {
-		return nil, fmt.Errorf("invalid active record range: start=%d end=%d", x.state.ActiveJobStart, x.state.ActiveJobEnd)
-	}
-
-	activeStatuses := &activeSessionStatuses{offset: uint64(x.state.ActiveJobStart)}
-	if x.state.ActiveJobEnd == x.state.ActiveJobStart {
-		return activeStatuses, nil
-	}
-
-	f, err := os.OpenFile(x.getStatusPath(), os.O_RDONLY, os.FileMode(0600))
+	f, err := os.OpenFile(m.getStatusPath(), os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	activeStatuses.jobCount = uint64(x.state.ActiveJobEnd - x.state.ActiveJobStart)
-	activeStatuses.jobStatuses = make([]byte, activeStatuses.jobCount)
-	if n, err := f.ReadAt(activeStatuses.jobStatuses, int64(activeStatuses.offset)); err != nil {
+	statuses.jobCount = end - start
+	statuses.jobStatuses = make([]byte, statuses.jobCount)
+	if n, err := f.ReadAt(statuses.jobStatuses, int64(statuses.offset)); err != nil {
 		return nil, fmt.Errorf("failed to read bulk entry state file: %w", err)
-	} else if n != len(activeStatuses.jobStatuses) {
+	} else if n != len(statuses.jobStatuses) {
 		return nil, fmt.Errorf("invalid bulk entry state")
 	}
 
-	return activeStatuses, nil
-}
-
-func (x *xtreemstoreS3BulkRetrieveManager) checkBulkBatch(path string, activeStatuses *activeSessionStatuses) (bool, error) {
-	batchFile, err := x.loadBatchReferenceFile(path)
-	if err != nil {
-		return false, err
-	}
-	if err := x.validateLoadedBatchReferenceFile(path, batchFile); err != nil {
-		return false, err
-	}
-
-	for _, index := range batchFile.ActiveJobReferences {
-		if isComplete, err := activeStatuses.IsComplete(index); err != nil {
-			return false, err
-		} else if !isComplete {
-			return false, nil
-		}
-	}
-
-	return true, nil
+	return statuses, nil
 }
