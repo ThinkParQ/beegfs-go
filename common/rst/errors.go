@@ -52,7 +52,7 @@ func GetErrJobAlreadyCompleteWithMtime(mtime time.Time) *MtimeErr {
 	return &MtimeErr{Err: ErrJobAlreadyComplete, Time: mtime}
 }
 
-// Bulk operations may need to be cancelled and in ssome cases, the unsent job requests should be
+// Bulk operations may need to be cancelled and in some cases, the unsent job requests should be
 // cancelled. Pass &RequestCancelError{Reason: err, Rollback: true} to the
 // filesystem.StreamPathResult Err to ensure the request is submitted as a failed-precondition
 // rather than an error when rollback was successful

@@ -26,6 +26,7 @@ type AppConfig struct {
 	Management           MgmtdConfig                 `mapstructure:"management"`
 	Server               server.Config               `mapstructure:"server"`
 	Log                  logger.Config               `mapstructure:"log"`
+	Builder              BuilderConfig               `mapstructure:"builder"`
 	Job                  job.Config                  `mapstructure:"job"`
 	WorkerMgr            workermgr.Config            `mapstructure:"worker-mgr"`
 	Workers              []worker.Config             `mapstructure:"worker"`
@@ -44,6 +45,11 @@ type MgmtdConfig struct {
 	UseProxy               bool   `mapstructure:"use-http-proxy"`
 	AuthFile               string `mapstructure:"auth-file"`
 	AuthDisable            bool   `mapstructure:"auth-disable"`
+}
+
+type BuilderConfig struct {
+	StateRoot   string `mapstructure:"state-root"`
+	MaxRequests int    `mapstructure:"max-requests"`
 }
 
 // NewEmptyInstance() returns an empty AppConfig for ConfigManager to use with
@@ -71,6 +77,10 @@ func (c *AppConfig) ValidateConfig() error {
 
 	if c.Job.MaxJobEntriesPerRST < c.Job.MinJobEntriesPerRST {
 		return fmt.Errorf("the job.max-job-entries-per-rst (%d) cannot be less than the job.min-job-entries-per-rst (%d)", c.Job.MaxJobEntriesPerRST, c.Job.MinJobEntriesPerRST)
+	}
+
+	if c.Builder.MaxRequests < 1 {
+		return fmt.Errorf("the builder.max-requests must be one or greater (provided value: %d)", c.Builder.MaxRequests)
 	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/29

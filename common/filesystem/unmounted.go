@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // UnmountedFS can be used whenever a mounted file system may not actually be required. This allows
@@ -52,6 +53,10 @@ func (fs UnmountedFS) Remove(path string) error {
 	return ErrUnmounted
 }
 
+func (fs UnmountedFS) RemoveAll(path string) error {
+	return ErrUnmounted
+}
+
 func (fs UnmountedFS) Open(path string) (io.ReadCloser, error) {
 	return nil, ErrUnmounted
 }
@@ -86,6 +91,10 @@ func (fs UnmountedFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) err
 }
 
 func (fs UnmountedFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
+	return ErrUnmounted
+}
+
+func (fs UnmountedFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
 	return ErrUnmounted
 }
 

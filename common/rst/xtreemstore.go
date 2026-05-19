@@ -180,29 +180,42 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 		return false, 0, ErrReqAndRSTTypeMismatch
 	}
 
-	// // Option 2: Fail if the bulk request had an error.
+	// // Option 1: Assume bulk operation sent when ready.
+	// //  - This option assumes the work is ready based on the existence of the job request and requires no additional api calls.
+	// //    The job will fail if an error has occurred.
 	// if request.HasBulkInfo() {
-	// 	// Bulk operation requests must be ready before they are sent, so either an error occurred
-	// 	// or the bulk request was aborted. For a bulk retrieve operation, the resource was
-	// 	// retrieved but removed from the tape buffer before the download.
-	// 	bulkInfo := request.GetBulkInfo()
-	// 	if bulkErr := x.xtreemstoreS3BulkError(bulkInfo); bulkErr != nil {
-	// 		err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
-	// 	}
+	// 	ready = true
+	// 	return
 	// }
+
+	// Option 2: Also assumes bulk operation was sent when ready. However, it checks for errors before proceeding.
+	//  - Requires a stat call but prevents the work from starting if there was a bulk operation error.
+	if request.HasBulkInfo() {
+		// Bulk operation requests must be ready before they are sent, so either an error occurred
+		// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+		// retrieved but removed from the tape buffer before the download.
+		bulkInfo := request.GetBulkInfo()
+		if bulkErr := x.xtreemstoreS3BulkError(bulkInfo); bulkErr != nil {
+			err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
+		} else {
+			ready = true
+		}
+		return
+	}
 
 	if ready, delay, err = x.Provider.IsWorkRequestReady(ctx, request); err != nil {
 		return
 	}
 
-	// Option 1: Fail if the bulk request was not ready
-	if !ready && request.HasBulkInfo() {
-		// Bulk operation requests must be ready before they are sent, so either an error occurred
-		// or the bulk request was aborted. For a bulk retrieve operation, the resource was
-		// retrieved but removed from the tape buffer before the download.
-		bulkInfo := request.GetBulkInfo()
-		err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, x.xtreemstoreS3BulkError(bulkInfo))
-	}
+	// // Option 3: Fail if the bulk request was not ready
+	// //  - Verifies the work is in fact ready but requires an api call.
+	// if !ready && request.HasBulkInfo() {
+	// 	// Bulk operation requests must be ready before they are sent, so either an error occurred
+	// 	// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+	// 	// retrieved but removed from the tape buffer before the download.
+	// 	bulkInfo := request.GetBulkInfo()
+	// 	err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, x.xtreemstoreS3BulkError(bulkInfo))
+	// }
 
 	return
 }
@@ -269,6 +282,11 @@ func (x *xtreemstoreS3Provider) ExecuteBulkRequest(
 			return
 		}
 
+		// // TESTING ONLY, TEMPORARY:
+		// // Replace manager.Execute(ctx) with manager.ExecuteTest(ctx) to exercise the bulk-request
+		// // plumbing without an xtreemstore retrieve-session.
+		// return manager.ExecuteTest(ctx)
+
 		return manager.Execute(ctx)
 	default:
 		err = ErrUnsupportedOpForRST
@@ -277,12 +295,13 @@ func (x *xtreemstoreS3Provider) ExecuteBulkRequest(
 	return
 }
 
-// TODO: Should this have an abort? Probably
-//
-//	If the job failed then this should be repeatedly called with abort until the cleanup succeeds unless the force flag is used.
-func (x *xtreemstoreS3Provider) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
-	return x.deleteBulkStateFiles(stateMountPath, operation)
-}
+// REMOVING CompleteBulkRequest -- ExecuteBulkRequest should handle completion.
+// // TODO: Should this have an abort? Probably
+// //
+// //	If the job failed then this should be repeatedly called with abort until the cleanup succeeds unless the force flag is used.
+// func (x *xtreemstoreS3Provider) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
+// 	return x.deleteBulkStateFiles(stateMountPath, operation)
+// }
 
 func (x *xtreemstoreS3Provider) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	switch parseBulkOperation(operation) {
@@ -324,6 +343,8 @@ func (x *xtreemstoreS3Provider) xtreemstoreS3BulkMarkRequestComplete(bulkInfo *f
 	return manager.MarkComplete(bulkInfo.JobIndex)
 }
 
+// xtreemstoreS3BulkError retrieves any bulk operation errors. If no errors were found then nil will
+// be returned.
 func (x *xtreemstoreS3Provider) xtreemstoreS3BulkError(bulkInfo *flex.BulkJobRequestInfo) error {
 	statePath := path.Join(x.mountPoint.GetMountPath(), bulkInfo.StateMountPath, bulkInfo.Operation)
 	m := &xtreemstoreS3BulkRetrieveManager{
@@ -333,6 +354,9 @@ func (x *xtreemstoreS3Provider) xtreemstoreS3BulkError(bulkInfo *flex.BulkJobReq
 
 	message, err := os.ReadFile(m.getErrorsPath())
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
 	}
 	return fmt.Errorf("%s", message)
@@ -460,6 +484,46 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (resched
 	// TODO: Should all the state be destroyed here?
 	//  - Batches are complete and active session is destroyed
 	return
+}
+
+// ExecuteTest is a temporary manual test helper that bypasses the xtreemstore retrieve-session and
+// emits all initialized bulk requests as ready immediately.
+func (m *xtreemstoreS3BulkRetrieveManager) ExecuteTest(ctx context.Context) (reschedule bool, delay time.Duration, err error) {
+	records, err := m.getRecords(0, -1)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to load bulk request records: %w", err)
+	}
+
+	statuses, err := m.getAllStatuses()
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to load bulk request statuses: %w", err)
+	}
+
+	for jobIndex, record := range records {
+		status, err := statuses.Get(int64(jobIndex))
+		if err != nil {
+			return false, 0, fmt.Errorf("failed to determine status for key %q: %w", record, err)
+		}
+
+		switch status {
+		case xtreemstoreS3BulkRequestInitialized:
+			select {
+			case <-ctx.Done():
+				return false, 0, ctx.Err()
+			case m.walkChan <- &filesystem.StreamPathResult{Path: record}:
+			}
+
+			if err := m.MarkSent(int64(jobIndex)); err != nil {
+				return false, 0, fmt.Errorf("failed to mark bulk job request as sent: %w", err)
+			}
+		case xtreemstoreS3BulkRequestSent:
+		case xtreemstoreS3BulkRequestComplete:
+		default:
+			return false, 0, fmt.Errorf("unknown record status. Record: %s, Status: %v", record, status)
+		}
+	}
+
+	return false, 0, nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Context) (ready bool, err error) {
@@ -706,17 +770,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) getErrorsPath() string {
 
 func (m *xtreemstoreS3BulkRetrieveManager) getManagerPath() string {
 	return path.Join(m.statePath, "manager.json")
-}
-
-// deleteBulkStateFiles will destroy the bulk operation directory. An error will be returned if
-// there are any remaining state files which indicates the bulk operation has not been destroyed.
-func (x *xtreemstoreS3Provider) deleteBulkStateFiles(stateMountPath string, operation string) error {
-	statePath := path.Join(x.mountPoint.GetMountPath(), stateMountPath, operation)
-	if err := os.Remove(statePath); err != nil {
-		return fmt.Errorf("delete bulk state files: %w", err)
-	}
-
-	return nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (*xtreemstoreS3BulkRetrieveSessionInfo, error) {

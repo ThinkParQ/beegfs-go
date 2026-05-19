@@ -307,7 +307,7 @@ func (w *worker) process(work workAssignment) {
 	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
-	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	err = commitJournalEntry(kvstore.WithUpdateOnly(true))
 	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
 		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
 	}

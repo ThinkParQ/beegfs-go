@@ -108,10 +108,6 @@ func (m *MockClient) ExecuteBulkRequest(
 	return false, 0, ErrUnsupportedOpForRST
 }
 
-func (m *MockClient) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
-	return nil
-}
-
 func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	return nil
 }

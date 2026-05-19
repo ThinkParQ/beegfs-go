@@ -139,53 +139,38 @@ type Provider interface {
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
 	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
-	// ExecuteBulkRequest manages the lifecycle of a provider-defined bulk operation for the specified
-	// stateMountPath and operation.
+	// ExecuteBulkRequest manages the lifecycle of a provider-defined bulk operation.
 	//
 	// requests contains the requests selected for this bulk operation in the current builder pass.
-	// These requests will be submitted immediately after ExecuteBulkRequest returns. On later builder
-	// passes after a reschedule, requests may be empty if the walk has already completed or there
-	// are no newly discovered requests to add to the bulk operation.
+	// On later builder passes after a reschedule, requests may be empty. It is the responsibility
+	// of the provider to ensure each selected request is ready to be processed and that its path is
+	// sent on walkChan. If a request fails, send its path and error on walkChan. Any ResumeToken
+	// set on a result sent to walkChan is ignored and should not be used. Return reschedule=true
+	// whenever provider-side bulk work remains to be completed.
 	//
-	// walkChan should be streamed paths for each job request that is ready to be submitted.
+	// stateMountPath is a path provided by the builder job for providers to use for state
+	// information. Providers are responsible for persisting any state information needed for
+	// ExecuteBulkRequest and CancelBulkRequest. stateMountPath, operation and the provider itself
+	// identify the bulk operation. The contents of stateMountPath will be deleted once the builder
+	// walk completes and no bulk operation manager for the builder job asks to be rescheduled.
 	//
-	// Providers are responsible for persisting and recovering any provider-side state needed to
-	// resume ExecuteBulkRequest or later complete/cancel the bulk operation after the builder job is
-	// rescheduled. stateMountPath, operation, and the provider itself identify the bulk operation.
+	// Use reschedule and delay to reschedule the builder job while bulk work continues. Be aware
+	// that rescheduling delay does not guarantee the next execution time since multiple bulk
+	// operations can be associated with a single builder job and the builder job itself can be
+	// rescheduled when the maximum paths have been processed. When there are multiple rescheduled
+	// tasks, the shortest delay time will be selected.
 	//
-	// stateMountPath is builder-maintained workflow metadata. It is a provider-specific in-mount
-	// path that identifies where provider-side bulk state should be stored and later recovered from
-	// during rescheduled builder passes.
-	//
-	// Use reschedule and delay to reschedule the builder job while bulk work continues. If there are
-	// multiple bulk operations associated with a single builder job then the shortest delay will be
-	// chosen.
-	//
-	// Errors should only be returned to abort the builder job. Report all non-fatal errors through
-	// the included job requests.
+	// Fatal errors should only be returned to abort the builder job; a fatal error is one where the
+	// failure likely indicates an external error or misconfiguration that would also affect
+	// subsequent bulk-operation calls for the parent builder job. Report all non-fatal errors by
+	// sending them on walkChan for the affected job requests.
 	ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest, walkChan chan<- *filesystem.StreamPathResult) (reschedule bool, delay time.Duration, err error)
-	// CompleteBulkRequest completes any final provider-side actions needed to finish the bulk
-	// operation identified by stateMountPath and operation.
-	CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error
-	// CancelBulkRequest cancels the remaining provider-side work for the bulk operation identified by
-	// stateMountPath and operation and signals the included job requests to abort if needed.
+	// CancelBulkRequest cancels the remaining provider-side work for the bulk operation identified
+	// by stateMountPath, operation and the provider itself. It should also send all remaining
+	// request paths to walkChan with the specified cancellation reason. Any ResumeToken set on a
+	// result sent to walkChan is ignored and should not be used.
 	CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error
 }
-
-/*
-
-TODO:
-* Cancel selected requests based on CancelBulkRequest() call for a specific bulk operation
-	* Should state information be utilized (ie an append-only error file)
-		* Provider-side should maintain this record
-		* For builder-side to maintain we would need to collect:
-			* jobId for each select request
-			* cancel each jobId ignoring any that already in a terminal state.
-
-* Make sure builder fails when a bulk request fails.
-	* Should this fail on the current pass or should it allow the builder job to complete?
-
-*/
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
 // used to cancel the initialization if for example initializing the specified RST type requires
@@ -326,116 +311,24 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 	return segments
 }
 
-/* BuildJobRequestsOLD - Description was changed!
-// BuildJobRequests returns a list of job requests, one for each remote target. Unless
-// skipPrepareJob=true then remote resource information will be added to the request's lockedInfo
-// and common checks and tasks will be preformed.
-//
-// A returned error indicates that one or more job request were not able to be built. However, if
-// a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequestsOLD(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	keepLock := false
-	lockedInfo, writeLockSet, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
-
-	defer func() {
-		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
-			}
-		}
-	}()
-
-	if err != nil {
-		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
-		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
-		// would always fail, whenever there is a file with no RSTs set on its entry info.
-		if errors.Is(err, ErrFileHasNoRSTs) {
-			return nil, nil
-		}
-		// If this function returns an error but it will also abort the entire builder job, which we
-		// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
-		// IDs available for this inMountPath (either specified by the user, or determined
-		// automatically), then report any errors as part of the generated requests for each file.
-		// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
-		// avoid it being silently dropped.
-		if errors.Is(err, ErrGetLockedInfoFatal) || len(rstIds) == 0 {
-			return nil, err
-		}
-	} else if len(rstIds) > 1 && (cfg.Download || cfg.StubLocal) {
-		err = errors.Join(err, ErrFileHasAmbiguousRSTs)
+// BuildJobRequestWithFailedPrecondition returns a job request with failed precondition
+// GenerationStatus with the specified message.
+func BuildJobRequestWithFailedPrecondition(client Provider, cfg *flex.JobRequestCfg, message string) *beeremote.JobRequest {
+	request := client.GetJobRequest(cfg)
+	status := &beeremote.JobRequest_GenerationStatus{
+		State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+		Message: message,
 	}
-
-	var errs []error
-	var requests []*beeremote.JobRequest
-	for _, rstId := range rstIds {
-		client, ok := rstMap[rstId]
-		if !ok {
-			errs = append(errs, errors.Join(err, fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, rstId)))
-			continue
-		}
-
-		requestCfg := proto.Clone(cfg).(*flex.JobRequestCfg)
-		requestCfg.SetPath(inMountPath)
-		requestCfg.SetRemotePath(client.SanitizeRemotePath(remotePath))
-		requestCfg.SetRemoteStorageTarget(rstId)
-		requestLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
-		requestCfg.SetLockedInfo(requestLockedInfo)
-
-		if err != nil {
-			request := client.GetJobRequest(requestCfg)
-			status := &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to build job request: %s", err.Error()),
-			}
-			request.SetGenerationStatus(status)
-			requests = append(requests, request)
-			continue
-		}
-
-		request := BuildJobRequest(ctx, client, mountPoint, requestCfg)
-		if request.GetGenerationStatus() == nil {
-			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, entryInfoMsg, ownerNode, requestCfg); err != nil {
-				if errors.Is(err, ErrJobAlreadyComplete) {
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
-						Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-					}
-				} else if errors.Is(err, ErrJobAlreadyOffloaded) {
-					keepLock = true
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED}
-				} else {
-					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-						Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
-					})
-				}
-			} else {
-				// This request will execute so ensure the lock is kept.
-				keepLock = true
-			}
-		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
-		requests = append(requests, request)
-	}
-
-	return requests, errors.Join(errs...)
+	request.SetGenerationStatus(status)
+	return request
 }
-*/
 
-// TODO: Description...
+// BuildJobRequest creates a provider-specific job request for cfg if the request is valid;
+// otherwise, the request will be returned with a failed precondition status for the issue.
 func BuildJobRequest(ctx context.Context, client Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
-	getRequestWithFailedPrecondition := func(message string) *beeremote.JobRequest {
-		request := client.GetJobRequest(cfg)
-		status := &beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: message,
-		}
-		request.SetGenerationStatus(status)
-		return request
-	}
-
 	lockedInfo := cfg.GetLockedInfo()
 	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
-		return getRequestWithFailedPrecondition("path lock has not been acquired")
+		return BuildJobRequestWithFailedPrecondition(client, cfg, "path lock has not been acquired")
 	}
 
 	cfg.SetRemotePath(client.SanitizeRemotePath(cfg.RemotePath))
@@ -444,37 +337,38 @@ func BuildJobRequest(ctx context.Context, client Provider, cfg *flex.JobRequestC
 		if cfg.RemotePath == "" {
 			cfg.SetRemotePath(client.SanitizeRemotePath(lockedInfo.StubUrlPath))
 		} else if !cfg.Overwrite && cfg.RemotePath != lockedInfo.StubUrlPath {
-			return getRequestWithFailedPrecondition("unexpected stub file path")
+			return BuildJobRequestWithFailedPrecondition(client, cfg, "unexpected stub file path")
 		}
+
 		if !cfg.Overwrite && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return getRequestWithFailedPrecondition("unexpected stub file rst id")
+			return BuildJobRequestWithFailedPrecondition(client, cfg, "unexpected stub file rst id")
 		}
 	}
 
 	if cfg.Download && cfg.RemotePath == "" {
 		if !FileExists(lockedInfo) {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
+			return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
 		}
 
 		// Attempt to retrieve remote path from a previously completed job request.
 		if lastJob, err := GetLastCompletedJobFromRst(ctx, cfg.Path, cfg.RemoteStorageTarget); err != nil {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
+			return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
 		} else if lastJob != nil {
 			switch lastJob.Request.WhichType() {
 			case beeremote.JobRequest_Sync_case:
 				cfg.SetRemotePath(client.SanitizeRemotePath(lastJob.Request.GetSync().RemotePath))
 			default:
-				return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
+				return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
 			}
 		}
 	}
 
 	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
+		return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
+		return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
 	}
 	lockedInfo.SetRemoteSize(remoteSize)
 	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
@@ -520,72 +414,6 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 // HasRemotePathInfo indicates whether lockedInfo has been updated with the remote path information.
 func HasRemotePathInfo(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.RemoteMtime != nil && !lockedInfo.RemoteMtime.AsTime().IsZero()
-}
-
-// BuildJobRequest adds remote resource information to lockedInfo, performs common checks and
-// operations, and then returns the job request. It is the responsibility of the caller to ensure
-// lockedInfo is already locked.
-//
-// Be aware that cfg's remote information will be updated.
-func BuildJobRequestOLD(ctx context.Context, client Provider, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
-	getRequestWithFailedPrecondition := func(message string) *beeremote.JobRequest {
-		request := client.GetJobRequest(cfg)
-		status := &beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: message,
-		}
-		request.SetGenerationStatus(status)
-		return request
-	}
-
-	lockedInfo := cfg.LockedInfo
-	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
-		return getRequestWithFailedPrecondition("path lock has not been acquired")
-	}
-
-	cfg.SetRemotePath(client.SanitizeRemotePath(cfg.RemotePath))
-	if IsFileOffloaded(lockedInfo) {
-		// Use rst url from the stub file when a remote-path wasn't provided.
-		if cfg.RemotePath == "" {
-			cfg.SetRemotePath(client.SanitizeRemotePath(lockedInfo.StubUrlPath))
-		} else if !cfg.Overwrite && cfg.RemotePath != lockedInfo.StubUrlPath {
-			return getRequestWithFailedPrecondition("unexpected stub file path")
-		}
-		if !cfg.Overwrite && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return getRequestWithFailedPrecondition("unexpected stub file rst id")
-		}
-	}
-
-	if cfg.Download && cfg.RemotePath == "" {
-		if !FileExists(lockedInfo) {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
-		}
-
-		// Attempt to retrieve remote path from a previously completed job request.
-		if lastJob, err := GetLastCompletedJobFromRst(ctx, cfg.Path, cfg.RemoteStorageTarget); err != nil {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
-		} else if lastJob != nil {
-			switch lastJob.Request.WhichType() {
-			case beeremote.JobRequest_Sync_case:
-				cfg.SetRemotePath(client.SanitizeRemotePath(lastJob.Request.GetSync().RemotePath))
-			default:
-				return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
-			}
-		}
-	}
-
-	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := client.GetRemotePathInfo(ctx, cfg)
-	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
-	}
-	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
-	}
-	lockedInfo.SetRemoteSize(remoteSize)
-	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-	lockedInfo.SetIsArchived(isArchived)
-
-	return client.GetJobRequest(cfg)
 }
 
 // updateRstConfig applies the RST configuration from the job request to the file entry by calling SetFileRstIds directly.
@@ -775,7 +603,7 @@ func PrepareFileStateForWorkRequests(
 		})
 
 		var info *flex.JobLockedInfo
-		if info, _, _, entryInfo, ownerNode, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path, false); err != nil {
+		if info, _, _, entryInfo, ownerNode, err = GetLockedInfo(ctx, mountPoint, cfg.Path, LockedInfoAcquireLock); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
@@ -796,210 +624,75 @@ func PrepareFileStateForWorkRequests(
 	return
 }
 
-/* PrepareFileStateForWorkRequests OLD
-// PrepareFileStateForWorkRequests handles preflight checks and common tasks based on collected
-// lockedInfo. Sentinel errors are returned when the file is already in the expected synced or
-// offloaded state. Sentinel errors can be checked using IsErrJobTerminalSentinel.
+type LockedInfoMode int
+
+const (
+	LockedInfoAcquireLock LockedInfoMode = iota
+	LockedInfoReadOnly
+)
+
+// GetLockedInfo collects file state for inMountPath and optionally acquires the file access lock.
+// It returns only information derived from the file itself.
 //
-// It is the responsibility of the caller to ensure lockedInfo is populated when the file exists. If
-// the file does not exist, it will be created and cfg.LockedInfo will be updated.
-func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mountPoint filesystem.Provider, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (err error) {
-	lockedInfo := cfg.LockedInfo
-
-	fileDataStateCleared := false
-	filePreallocated := false
-	fileCreated := false
-	defer func() {
-		if err != nil {
-			if IsFileOffloaded(lockedInfo) {
-				if fileDataStateCleared {
-					if restoreErr := entry.SetFileDataState(ctx, cfg.Path, DataStateOffloaded); restoreErr != nil {
-						err = fmt.Errorf("%w: unable to restore offloaded data state: %s", err, restoreErr.Error())
-					}
-				}
-				if filePreallocated {
-					// Roll back stub file if there's a failure after the contents have been changed
-					rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath)
-					if restoreErr := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, true); restoreErr != nil {
-						err = fmt.Errorf("%w: unable to restore stub file rst url: %s", err, restoreErr.Error())
-					}
-				}
-			} else if fileCreated {
-				// Remove preallocated file since it previously did not exist.
-				if restoreErr := mountPoint.Remove(cfg.Path); restoreErr != nil {
-					err = fmt.Errorf("%w: unable to remove preallocated file: %s", err, restoreErr.Error())
-				}
-			}
-		}
-	}()
-
-	updateRstCfg := func(sentinel error) error {
-		if cfg.GetUpdate() {
-			if err := updateRstConfig(ctx, cfg.RemoteStorageTarget, cfg.Path, entryInfo, ownerNode); err != nil {
-				if sentinel != nil {
-					return fmt.Errorf("%s but unable to update rst configuration: %w", sentinel.Error(), err)
-				}
-				return err
-			}
-		}
-		return sentinel
-	}
-
-	alreadySynced := IsFileAlreadySynced(lockedInfo)
-	if cfg.StubLocal {
-		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
-			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced); err != nil {
-				err = fmt.Errorf("failed to create stub file: %w", err)
-				return
-			}
-			err = entry.SetAccessFlags(ctx, cfg.Path, LockedAccessFlags)
-			if err != nil {
-				return
-			}
-			lockedInfo.SetReadWriteLocked(true)
-
-			return updateRstCfg(ErrJobAlreadyOffloaded)
-		}
-		if IsFileOffloaded(lockedInfo) {
-			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
-				err = ErrOffloadFileUrlMismatch
-				return
-			}
-			return updateRstCfg(ErrJobAlreadyOffloaded)
-		}
-
-		if cfg.Download && !cfg.Overwrite && FileExists(lockedInfo) {
-			err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
-			return
-		}
-	} else if FileExists(lockedInfo) {
-		if alreadySynced {
-			return updateRstCfg(GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime()))
-		}
-
-		if cfg.Download {
-			allowOverwrite := cfg.Overwrite
-			if IsFileOffloaded(lockedInfo) {
-				if !allowOverwrite && !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
-					err = ErrOffloadFileUrlMismatch
-					return
-				}
-
-				if err = entry.SetFileDataState(ctx, cfg.Path, DataStateNone); err != nil {
-					return
-				}
-				fileDataStateCleared = true
-				allowOverwrite = true
-			}
-
-			if !allowOverwrite {
-				err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
-				return
-			}
-
-			if !IsFileSizeMatched(lockedInfo) {
-				if err = mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, allowOverwrite); err != nil {
-					err = fmt.Errorf("unable to preallocate space for file: %w", err)
-					return
-				}
-				filePreallocated = true
-			}
-		} else if IsFileOffloaded(lockedInfo) {
-			err = fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
-			return
-		}
-	} else if cfg.Download {
-		if err = mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
-			err = fmt.Errorf("unable to preallocate space for file: %w", err)
-			return
-		}
-		fileCreated = true
-		filePreallocated = true
-
-		var info *flex.JobLockedInfo
-		if info, _, _, entryInfo, ownerNode, err = GetLockedInfo(ctx, mountPoint, cfg, cfg.Path, false); err != nil {
-			err = fmt.Errorf("failed to collect information for new file: %w", err)
-			return
-		}
-		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		lockedInfo.SetExists(info.Exists)
-		lockedInfo.SetSize(info.Size)
-		lockedInfo.SetMtime(info.Mtime)
-		lockedInfo.SetMode(info.Mode)
-	} else {
-		err = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
-		return
-	}
-
-	if err = updateRstCfg(nil); err != nil {
-		return err
-	}
-
-	// Generating the externalId must be the last possible error to avoid situations where, once
-	// the externalId is generated, it is lost because of a subsequent preconditional failure.
-	var externalId string
-	if externalId, err = client.GenerateExternalId(ctx, cfg); err != nil {
-		return fmt.Errorf("failed to generate external id: %s", err.Error())
-	} else {
-		lockedInfo.SetExternalId(externalId)
-	}
-
-	return nil
-}
-*/
-
-// GetLockedInfo collects the available file state for inMountPath and unless skipAccessLock is
-// true, acquires the access lock needed to do so. It uses cfg only as configuration for the path,
-// so cfg.Path is ignored. This avoids unnecessary cfg cloning because the returned lockedInfo may
-// be reused across multiple job requests.
+// It does not interpret caller intent such as cfg.RemoteStorageTarget or decide the effective
+// remote target for a request. Callers are responsible for applying target precedence and
+// validating any explicit target against stub or entry information.
 //
-// writeLockSet reports whether the write lock was set. When skipAccessLock is true, the access
-// lock state is left unchanged, which is useful when a point-in-time read-only view is needed.
-//
-// ErrOffloadFileNotReadable is returned when the file is offloaded and client cannot read it.
-// ErrGetLockedInfoFatal is returned when the failure likely indicates an external error or
-// misconfiguration that would also affect subsequent calls for other paths.
+// ErrOffloadFileNotReadable is returned when the file is offloaded and the client cannot read the
+// stub file. ErrGetLockedInfoFatal is returned when the failure likely indicates an external error
+// or misconfiguration that would also affect subsequent calls for other paths.
 func GetLockedInfo(
 	ctx context.Context,
 	mountPoint filesystem.Provider,
-	cfg *flex.JobRequestCfg,
 	inMountPath string,
-	skipAccessLock bool,
+	mode LockedInfoMode,
 ) (lockedInfo *flex.JobLockedInfo, lockAcquired bool, rstIds []uint32, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
-
 	lockedInfo = &flex.JobLockedInfo{}
-	if IsValidRstId(cfg.RemoteStorageTarget) {
-		rstIds = []uint32{cfg.RemoteStorageTarget}
-	}
-
 	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
 		Verbose:        false,
 		IncludeOrigMsg: true,
 	}, inMountPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, nil
+			err = nil
+			return
 		}
-		return lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, fmt.Errorf("%w: %w", ErrGetLockedInfoFatal, err)
+		err = fmt.Errorf("%w: %w", ErrGetLockedInfoFatal, err)
+		return
 	}
 	lockedInfo.Exists = true
 
-	if rstIds == nil {
-		rstIds = entryInfo.Entry.Remote.RSTIDs
+	origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
+	if origEntryInfoPtr != nil {
+		entryInfoMsg = *origEntryInfoPtr
+	} else {
+		entryInfoMsg = msg.EntryInfo{}
 	}
+	ownerNode = entryInfo.Entry.MetaOwnerNode
+	rstIds = entryInfo.Entry.Remote.RSTIDs
 
 	isFileLocked := entryInfo.Entry.FileState.IsReadWriteLocked()
-	if !skipAccessLock {
-		if !isFileLocked {
-			err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags)
-			if err != nil {
-				return
-			}
-			isFileLocked = true
-			lockAcquired = true
+	if !isFileLocked && mode == LockedInfoAcquireLock {
+		if err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags); err != nil {
+			return
 		}
+		isFileLocked = true
+		lockAcquired = true
 	}
 	lockedInfo.SetReadWriteLocked(isFileLocked)
+
+	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
+		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				err = ErrOffloadFileNotReadable
+				return
+			}
+			err = fmt.Errorf("unable to retrieve stub file info: %w", err)
+			return
+		}
+
+		rstIds = []uint32{lockedInfo.StubUrlRstId}
+	}
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
@@ -1009,31 +702,6 @@ func GetLockedInfo(
 	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	lockedInfo.Mode = uint32(stat.Mode())
 
-	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
-		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
-			if errors.Is(err, syscall.EWOULDBLOCK) {
-				return lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, ErrOffloadFileNotReadable
-			}
-			return lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, fmt.Errorf("unable to retrieve stub file info: %w", err)
-		}
-
-		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return lockedInfo, lockAcquired, nil, entryInfoMsg, ownerNode, fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag)
-		}
-		rstIds = []uint32{lockedInfo.StubUrlRstId}
-	}
-
-	origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
-	if origEntryInfoPtr != nil {
-		entryInfoMsg = *origEntryInfoPtr
-	} else {
-		entryInfoMsg = msg.EntryInfo{}
-	}
-	ownerNode = entryInfo.Entry.MetaOwnerNode
-
-	if rstIds == nil {
-		return lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, ErrFileHasNoRSTs
-	}
 	return
 }
 

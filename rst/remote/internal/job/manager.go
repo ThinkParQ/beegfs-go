@@ -484,7 +484,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				WorkResults:  getProtoWorkResults(conflictingJob.WorkResults),
 			}.Build(), err
 		}
-
 	}
 
 	var jobSubmission workermgr.JobSubmission
@@ -770,12 +769,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		err := m.releaseUnusedFileLockFunc(jobUpdate.GetPath(), pathEntry.Value)
 		if err != nil {
 			response.SetOk(false)
-			message := "unable to clear lock: " + err.Error()
-			if response.Message != "" {
-				response.SetMessage(fmt.Sprintf("%s; %s", response.Message, message))
-			} else {
-				response.SetMessage(message)
-			}
+			response.SetMessage(appendMessage(response.Message, "unable to clear lock: "+err.Error()))
 		}
 	}()
 
@@ -789,7 +783,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		// from some other job, don't overwrite it:
 		response.SetOk(success && response.GetOk())
 		if newMessage != "" {
-			response.SetMessage(response.GetMessage() + "; " + newMessage)
+			response.SetMessage(appendMessage(response.GetMessage(), newMessage))
 		}
 		// Only if the user requested a deletion and the job is safe to delete mark it for deletion:
 		if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && safeToDelete {
@@ -966,11 +960,11 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if !ok {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
-				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
+				status.SetMessage(appendMessage(status.GetMessage(), "unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
-			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
+			status.SetMessage(appendMessage(status.GetMessage(), "unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
 			return false, false, ""
 		}
 
@@ -978,16 +972,16 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if err != nil {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
-				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (ignoring because this is a forced update): " + err.Error()))
+				status.SetMessage(appendMessage(status.GetMessage(), "error requesting the RST abort this job (ignoring because this is a forced update): "+err.Error()))
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
-			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (try again or force the update to cancel the job anyway): " + err.Error()))
+			status.SetMessage(appendMessage(status.GetMessage(), "error requesting the RST abort this job (try again or force the update to cancel the job anyway): "+err.Error()))
 			return false, false, ""
 		}
 
 		status.SetState(beeremote.Job_CANCELLED)
-		status.SetMessage(status.GetMessage() + "; successfully requested the RST abort this job")
+		status.SetMessage(appendMessage(status.GetMessage(), "successfully requested the RST abort this job"))
 		m.log.Debug("successfully updated job", zap.Any("job", job))
 		return true, true, ""
 	}
@@ -1059,12 +1053,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		if !job.InActiveState() {
 			if err := m.releaseUnusedFileLockFunc(workResult.GetPath(), pathEntry.Value); err != nil {
 				status.SetState(beeremote.Job_FAILED)
-				message := "unable to clear lock: " + err.Error()
-				if status.Message != "" {
-					status.SetMessage(fmt.Sprintf("%s; %s", status.Message, message))
-				} else {
-					status.SetMessage(message)
-				}
+				status.SetMessage(appendMessage(status.Message, "unable to clear lock: "+err.Error()))
 			}
 		}
 	}()
@@ -1192,4 +1181,11 @@ func (m *Manager) Stop() {
 	m.ctxCancel()
 	m.wg.Wait()
 	m.log.Info("stopped manager")
+}
+
+func appendMessage(original string, addition string) string {
+	if original == "" {
+		return addition
+	}
+	return original + "; " + addition
 }

@@ -61,6 +61,8 @@ type Provider interface {
 	CreateWriteClose(name string, buf []byte, mode uint32, overwrite bool) error
 	// Removes the file specified by name.
 	Remove(name string) error
+	// Removes the specified path and any children it contains.
+	RemoveAll(name string) error
 	// Opens the file specified by name and returns it as an io.ReadCloser. The caller must close the
 	// file when it is no longer required.
 	Open(name string) (io.ReadCloser, error)
@@ -92,6 +94,8 @@ type Provider interface {
 	CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error
 	// CopyTimestamps sets the atime/mtime in fromStat on dstPath.
 	CopyTimestamps(fromStat fs.FileInfo, dstPath string) error
+	// Chtimes changes the access and modification times of the named file.
+	Chtimes(path string, atime time.Time, mtime time.Time) error
 	// Atomically renames srcPath to dstPath overwriting the dstPath with srcPath's contents.
 	OverwriteFile(srcPath, dstPath string) error
 	Readlink(path string) (string, error)
@@ -254,6 +258,10 @@ func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrit
 
 func (fs BeeGFS) Remove(path string) error {
 	return os.Remove(filepath.Join(fs.MountPoint, path))
+}
+
+func (fs BeeGFS) RemoveAll(path string) error {
+	return os.RemoveAll(filepath.Join(fs.MountPoint, path))
 }
 
 func (fs BeeGFS) Open(path string) (io.ReadCloser, error) {
@@ -457,6 +465,11 @@ func (fs BeeGFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	}
 
 	return nil
+}
+
+func (fs BeeGFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
+	absPath := filepath.Join(fs.MountPoint, path)
+	return os.Chtimes(absPath, atime, mtime)
 }
 
 func (fs BeeGFS) OverwriteFile(srcPath, dstPath string) error {

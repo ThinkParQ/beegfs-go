@@ -96,3 +96,5 @@ require (
 	honnef.co/go/tools v0.7.0 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
+
+replace github.com/thinkparq/protobuf => ../protobuf

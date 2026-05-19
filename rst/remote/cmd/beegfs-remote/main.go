@@ -16,6 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
@@ -70,6 +71,8 @@ func main() {
 	pflag.String("server.tls-cert-file", "/etc/beegfs/cert.pem", "Path to a certificate file that provides the identify of this Remote node's gRPC server.")
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Remote node's gRPC server.")
+	pflag.String("builder.state-root", ".beegfs-rst", "Relative path under mount-point where builder state is stored.")
+	pflag.Int("builder.max-requests", 1000, "Maximum number of requests a builder pass may emit before it is rescheduled.")
 	pflag.String("job.path-db", "/var/lib/beegfs/remote/path.badger", "Path where the database tracking jobs for each path will be created/maintained.")
 	pflag.Int("job.request-queue-depth", 1024, "Number of requests that can be made to JobMgr before new requests are blocked.")
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
@@ -176,6 +179,11 @@ Using environment variables:
 	if err != nil {
 		logger.Fatal("unable to access BeeGFS mount point", zap.Error(err))
 	}
+
+	rst.SetJobBuilderConfig(rst.JobBuilderConfig{
+		StateRoot:   initialCfg.Builder.StateRoot,
+		MaxRequests: initialCfg.Builder.MaxRequests,
+	})
 
 	// Create a channel to receive OS signals to coordinate graceful shutdown:
 	sigs := make(chan os.Signal, 1)

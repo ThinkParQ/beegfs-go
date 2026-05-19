@@ -431,10 +431,6 @@ func (r *S3Client) ExecuteBulkRequest(
 	return false, 0, ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) CompleteBulkRequest(ctx context.Context, stateMountPath string, operation string) error {
-	return ErrUnsupportedOpForRST
-}
-
 func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
 	return ErrUnsupportedOpForRST
 }
@@ -879,60 +875,93 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 
+	if abort {
+		if isWorkStarted(workResults) {
+			// The download was incomplete so replace with a stub file for the requested resource.
+			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true); err != nil {
+				return fmt.Errorf("failed to replace incomplete download with stub file: %w", err)
+			}
+			return nil
+		}
+
+		if IsFileOffloaded(sync.LockedInfo) {
+			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.LockedInfo.StubUrlPath, sync.LockedInfo.StubUrlRstId, true); err != nil {
+				return fmt.Errorf("failed to restore original stub file: %w", err)
+			}
+			return nil
+		}
+
+		if !sync.LockedInfo.Exists {
+			return r.mountPoint.Remove(request.Path)
+		}
+
+		// File exist and no changes were made so restore the mtime and if needed, restore the file size.
+		job.SetStopMtime(sync.LockedInfo.Mtime)
+		mtime := sync.LockedInfo.Mtime.AsTime()
+		if sync.LockedInfo.Size < sync.LockedInfo.RemoteSize {
+			// The existing file was enlarged but no changes were made to original contents so we
+			// can safely restore the contents by reducing the file to its original size.
+			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.Size, true); err != nil {
+				return fmt.Errorf("failed to restore original file size: %w", err)
+			}
+		}
+		if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+			return fmt.Errorf("failed to restore original mtime: %w", err)
+		}
+		return nil
+	}
+
 	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
 		return fmt.Errorf("unable to verify the remote object has not changed: %w", err)
 	}
 	job.SetStopMtime(timestamppb.New(mtime))
 
-	// Skip checking the file was modified if we were told to abort since the mtime may not have
-	// been set correctly anyway given the error check is skipped above.
-	if abort {
-		// Restore the original local state as best we can. If data was written then the file will be
-		// the same as before except for the timestamps.
+	start := job.GetStartMtime().AsTime()
+	stop := job.GetStopMtime().AsTime()
+	if !start.Equal(stop) {
+		return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
+			start.Format(time.RFC3339), stop.Format(time.RFC3339))
+	}
+
+	// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
+	if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+		return fmt.Errorf("failed to update download's mtime: %w", err)
+	}
+
+	if !request.StubLocal {
+		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if IsFileOffloaded(sync.LockedInfo) {
-			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.LockedInfo.StubUrlPath, sync.LockedInfo.StubUrlRstId, true); err != nil {
-				return fmt.Errorf("failed to restore original stub file: %w", err)
-			}
-		} else if sync.LockedInfo.Size < sync.LockedInfo.RemoteSize {
-			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.Size, true); err != nil {
-				return fmt.Errorf("failed to restore original file size: %w", err)
-			}
-		}
-	} else {
-		start := job.GetStartMtime().AsTime()
-		stop := job.GetStopMtime().AsTime()
-		if !start.Equal(stop) {
-			return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
-				start.Format(time.RFC3339), stop.Format(time.RFC3339))
+			entry.SetFileDataState(ctx, request.Path, DataStateNone)
 		}
 
-		// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
-		absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
-		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
-			return fmt.Errorf("failed to update download's mtime: %w", err)
-		}
-
-		if !request.StubLocal {
-			// Clear offloaded data state when contents for a stub file were downloaded successfully.
-			if IsFileOffloaded(sync.LockedInfo) {
-				entry.SetFileDataState(ctx, request.Path, DataStateNone)
-			}
-
-			// Reduce the file size if it's larger than the remote object. This situation means the original
-			// file size was larger than needed so no additional space was preallocated.
-			if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
-				r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true)
-			}
+		// Reduce the file size if it's larger than the remote object. This situation means the original
+		// file size was larger than needed so no additional space was preallocated.
+		if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
+			r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true)
 		}
 	}
 
 	return nil
 }
 
+// isWorkStarted returns true whenever a part indicates it was started or, in order to maintain
+// backwards compatibility, when the part's optional Started field is nil.
+func isWorkStarted(workResults []*flex.Work) bool {
+	for _, result := range workResults {
+		for _, part := range result.GetParts() {
+			if part == nil || part.Started == nil || *part.Started {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // prepareJobRequest ensures that sync.LockedInfo is full populated.
 func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, undo func() error, err error) {
 	undo = func() error { return nil }
+
 	lockedInfo := sync.LockedInfo
 	if IsFileLocked(lockedInfo) && HasRemotePathInfo(lockedInfo) {
 		return
@@ -943,13 +972,19 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	var getLockedInfoCalled bool
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
+		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg.Path, LockedInfoAcquireLock); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
+
 		getLockedInfoCalled = true
 		cfg.SetLockedInfo(lockedInfo)
 		sync.SetLockedInfo(lockedInfo)
+	}
+
+	if !cfg.GetOverwrite() && IsFileOffloaded(lockedInfo) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
+		err = fmt.Errorf("%w: supplied --%s does not match stub file", ErrJobFailedPrecondition, RemoteTargetFlag)
+		return
 	}
 
 	if !HasRemotePathInfo(lockedInfo) {
@@ -1198,6 +1233,7 @@ func (r *S3Client) upload(
 		ChecksumSHA256: aws.String(part.ChecksumSha256),
 	}
 
+	part.SetStarted(true)
 	resp, err := r.apiClient.UploadPart(ctx, uploadPartReq)
 	if err != nil {
 		return err
@@ -1232,7 +1268,9 @@ func (r *S3Client) download(ctx context.Context, path string, remotePath string,
 		return err
 	}
 	defer resp.Body.Close()
+
 	copiedBytes, err := io.Copy(filePart, resp.Body)
+	part.SetStarted(copiedBytes > 0)
 	if err != nil {
 		return err
 	}
