@@ -334,6 +334,7 @@ Using environment variables:
 			subscriber.WithEventFilter(&beewatch.EventFilter{
 				V2Types: []beewatch.V2Event_Type{
 					beewatch.V2Event_OPEN_BLOCKED,
+					beewatch.V2Event_LAST_WRITER_CLOSED,
 				},
 			}),
 		},
