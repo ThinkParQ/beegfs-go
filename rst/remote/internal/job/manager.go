@@ -14,7 +14,7 @@ import (
 	"syscall"
 	stdtime "time"
 
-	"github.com/aws/smithy-go/time"
+	smithytime "github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
@@ -105,6 +105,9 @@ type Manager struct {
 	// function to release the file's access locks when no longer needed.
 	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
 	metrics                   managerMetrics
+	// pendingSync holds files that received V2Event_LAST_WRITER_CLOSED and are waiting out their
+	// per-entry cooldown before an UPLOAD job is submitted.
+	pendingSync *pendingSyncTracker
 }
 
 type managerOptConfig struct {
@@ -187,6 +190,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		},
 	}
 
+	m.pendingSync = newPendingSyncTracker(log.Logger, m.SubmitJobRequest)
 	return m
 }
 
@@ -290,6 +294,13 @@ func (m *Manager) Start() error {
 			}
 		}
 	}()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.pendingSync.Run(m.ctx)
+	}()
+
 	return nil
 }
 
@@ -298,66 +309,120 @@ func (m *Manager) GetEventDispatchFunc(ctx context.Context, log *zap.Logger) dis
 	return func(event *beewatch.Event) bool {
 		// The dispatcher ensures we receive V2 events.
 		e := event.EventData.(*beewatch.Event_V2)
-		if e.V2.Type != beewatch.V2Event_OPEN_BLOCKED {
+		switch e.V2.Type {
+		case beewatch.V2Event_OPEN_BLOCKED:
+			return m.dispatchOpenBlocked(ctx, log, e.V2)
+		case beewatch.V2Event_LAST_WRITER_CLOSED:
+			return m.dispatchLastWriterClosed(ctx, log, e.V2)
+		default:
 			log.Debug("filtered out event type (ignoring)", zap.Any("type", e.V2.GetType()), zap.Any("seq", event.SeqId))
 			return false
 		}
-
-		path := e.V2.GetPath()
-
-		log.Debug("detected a blocked open event, checking if the stub file is eligible for automatic restore",
-			zap.String("path", path), zap.Any("type", e.V2.GetType()))
-
-		entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, e.V2.Path)
-		if err != nil {
-			log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(err))
-			return false
-		}
-
-		if !(entryInfo.Entry.FileState.GetDataState() == beegfs.DataStateAutoRestore ||
-			entryInfo.Entry.FileState.GetDataState() == beegfs.DataStateDelayedRestore) {
-			log.Debug("stub file's data state does not allow an automatic restore",
-				zap.String("path", path), zap.Any("dataState", entryInfo.Entry.FileState.GetDataState()))
-			return false
-		}
-
-		// If a restore is currently in progress this will fail for "stub file is malformed". If a
-		// restore was already requested but not yet started, then the job submission below is
-		// rejected. We could add a dedupe map here, but if we set to short a TTL duplicates will
-		// slip through anyway, and too long and we might suppress legitimate retries after a failed
-		// restore or scenarios where a file was offloaded/restored/offloaded (weird, but possible).
-		// We already have a three layer defense against races between the data state check,
-		// GetStubContents failure, and SubmitJobRequest rejecting duplicate requests, no need to
-		// add extra complexity.
-		id, url, err := m.GetStubContents(path)
-		if err != nil {
-			log.Debug("skipping automatic restore as the stub file's contents could not be retrieved", zap.String("path", path), zap.Error(err))
-			return false
-		}
-
-		result, err := m.SubmitJobRequest(&beeremote.JobRequest{
-			Path:                path,
-			Priority:            1,
-			RemoteStorageTarget: id,
-			Type: &beeremote.JobRequest_Sync{
-				Sync: &flex.SyncJob{
-					Operation:  flex.SyncJob_DOWNLOAD,
-					RemotePath: url,
-					// Overwrite=false is intentional to avoid a race where a file was restored or
-					// otherwise overwritten prior to this job getting a chance to execute. The system
-					// is already designed to safely permit downloading offloaded files.
-					Overwrite: false,
-				},
-			},
-		})
-		if err != nil {
-			log.Debug("unable to create sync job to restore the specified stub file's contents", zap.String("path", path), zap.Error(err))
-			return false
-		}
-
-		log.Debug("stub file restore triggered", zap.Any("result", result))
-		return true
 	}
+}
+
+func (m *Manager) dispatchOpenBlocked(ctx context.Context, log *zap.Logger, e *beewatch.V2Event) bool {
+	path := e.GetPath()
+
+	log.Debug("detected a blocked open event, checking if the stub file is eligible for automatic restore",
+		zap.String("path", path), zap.Any("type", e.GetType()))
+
+	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, path)
+	if err != nil {
+		log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(err))
+		return false
+	}
+
+	if entryInfo.Entry.Details == nil {
+		log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(entryInfo.Entry.EntryInfoPopulated))
+		return false
+	}
+
+	if !(entryInfo.Entry.Details.FileState.GetDataState() == beegfs.DataStateAutoRestore ||
+		entryInfo.Entry.Details.FileState.GetDataState() == beegfs.DataStateDelayedRestore) {
+		log.Debug("stub file's data state does not allow an automatic restore",
+			zap.String("path", path), zap.Any("dataState", entryInfo.Entry.Details.FileState.GetDataState()))
+		return false
+	}
+
+	// If a restore is currently in progress this will fail for "stub file is malformed". If a
+	// restore was already requested but not yet started, then the job submission below is
+	// rejected. We could add a dedupe map here, but if we set to short a TTL duplicates will
+	// slip through anyway, and too long and we might suppress legitimate retries after a failed
+	// restore or scenarios where a file was offloaded/restored/offloaded (weird, but possible).
+	// We already have a three layer defense against races between the data state check,
+	// GetStubContents failure, and SubmitJobRequest rejecting duplicate requests, no need to
+	// add extra complexity.
+	id, url, err := m.GetStubContents(path)
+	if err != nil {
+		log.Debug("skipping automatic restore as the stub file's contents could not be retrieved", zap.String("path", path), zap.Error(err))
+		return false
+	}
+
+	result, err := m.SubmitJobRequest(&beeremote.JobRequest{
+		Path:                path,
+		Priority:            1,
+		RemoteStorageTarget: id,
+		Type: &beeremote.JobRequest_Sync{
+			Sync: &flex.SyncJob{
+				Operation:  flex.SyncJob_DOWNLOAD,
+				RemotePath: url,
+				// Overwrite=false is intentional to avoid a race where a file was restored or
+				// otherwise overwritten prior to this job getting a chance to execute. The system
+				// is already designed to safely permit downloading offloaded files.
+				Overwrite: false,
+			},
+		},
+	})
+	if err != nil {
+		log.Debug("unable to create sync job to restore the specified stub file's contents", zap.String("path", path), zap.Error(err))
+		return false
+	}
+
+	log.Debug("stub file restore triggered", zap.Any("result", result))
+	return true
+}
+
+// dispatchLastWriterClosed queues a deferred sync for the file. It does not submit the job
+// directly — it just hands the path to the pending sync tracker, which holds it for
+// CoolDownPeriod and then attempts SubmitJobRequest. If the file is still in active use when the
+// cooldown elapses, the meta will reject the access-flag transition with OpsErr_INUSE and the
+// tracker will retry after another cooldown.
+func (m *Manager) dispatchLastWriterClosed(ctx context.Context, log *zap.Logger, e *beewatch.V2Event) bool {
+	path := e.GetPath()
+
+	log.Debug("detected a last writer closed event, checking if the file is eligible for automatic sync",
+		zap.String("path", path), zap.Any("type", e.GetType()))
+
+	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, path)
+	if err != nil {
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			return false
+		}
+		log.Warn("skipping automatic sync as the file's remote configuration could not be determined", zap.String("path", path), zap.Error(err))
+		return false
+	}
+
+	if entryInfo.Entry.Details == nil {
+		log.Warn("skipping automatic sync as the file's remote configuration could not be determined", zap.String("path", path), zap.Error(entryInfo.Entry.EntryInfoPopulated))
+		return false
+	}
+
+	if entryInfo.Entry.Details.Remote.CoolDownPeriod == 0 {
+		log.Debug("automatic sync not enabled for file (cooldown is zero)", zap.String("path", path))
+		return false
+	}
+
+	if len(entryInfo.Entry.Details.Remote.RSTIDs) == 0 {
+		log.Debug("automatic sync not possible (no RSTs configured)", zap.String("path", path))
+		return false
+	}
+
+	cooldown := stdtime.Duration(entryInfo.Entry.Details.Remote.CoolDownPeriod) * stdtime.Second
+	m.pendingSync.Mark(path, cooldown, entryInfo.Entry.Details.Remote.RSTIDs)
+	log.Debug("automatic sync queued",
+		zap.String("path", path), zap.Duration("cooldown", cooldown))
+	return true
 }
 
 func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest, responses chan<- *beeremote.GetJobsResponse) error {
@@ -622,7 +687,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
 				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
 				// mark the job as complete so ignore the err.
-				mtime, _ := time.ParseDateTime(status.Message)
+				mtime, _ := smithytime.ParseDateTime(status.Message)
 				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
 			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 				err = rst.ErrJobAlreadyOffloaded
