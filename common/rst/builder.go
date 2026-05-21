@@ -97,12 +97,8 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	}
 
 	builder := workRequest.GetBuilder()
-	bulkOperationsManager := c.newBulkOperationsManager(workRequest)
-	defer func() {
-		builder.SetBulkOperations(bulkOperationsManager.GetBulkOperations())
-	}()
 
-	reschedule, delay, bulkErr, err = c.executeBuilderRequest(ctx, workRequest, jobSubmissionChan, bulkOperationsManager)
+	reschedule, delay, bulkErr, err = c.executeBuilderRequest(ctx, workRequest, jobSubmissionChan)
 	if err != nil || bulkErr != nil || reschedule {
 		return
 	}
@@ -111,15 +107,23 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(
-	ctx context.Context,
-	workRequest *flex.WorkRequest,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	bulkOperationsManager *jobBuilderBulkOperationsManager,
-) (bool, time.Duration, error, error) {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
+	builder := workRequest.GetBuilder()
+	cfg := builder.GetCfg()
+
+	// Setup bulk operations manager which will oversee any bulk operation started.
+	bulkOperationsManager := c.newBulkOperationsManager(workRequest)
+	defer func() {
+		builder.SetBulkOperations(bulkOperationsManager.GetBulkOperations())
+	}()
+
+	// Create and start request build controller.
+	controller := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
+	wait := controller.Start()
+
 	abort := func(abortErr error) (bool, time.Duration, error, error) {
 		err := fmt.Errorf("job builder request was aborted: %w", abortErr)
-		bulkErr := bulkOperationsManager.Abort(ctx, jobSubmissionChan, c.mountPoint, err)
+		bulkErr := bulkOperationsManager.Abort(ctx, controller, err)
 		return false, 0, bulkErr, err
 	}
 
@@ -127,33 +131,198 @@ func (c *JobBuilderClient) executeBuilderRequest(
 	walkComplete := isWalkComplete(workRequest.GetExternalId(), workRequest.JobId)
 	if !walkComplete {
 		maxRequests := jobBuilderConfig.MaxRequests
-		walkSize := min(cap(jobSubmissionChan), maxRequests+1) // maxRequests +1 is for ResumeToken when there is more work
-		walkChan, walkErr := c.getWalkChan(ctx, workRequest, maxRequests, walkSize)
+		walkSize := min(cap(jobSubmissionCh), maxRequests+1) // maxRequests +1 is for ResumeToken when there is more work
+		walkCh, walkErr := c.getWalkCh(ctx, workRequest, walkSize)
 		if walkErr != nil {
 			return abort(walkErr)
 		}
+		waitForWalk := controller.AddWalks([]<-chan *filesystem.StreamPathResult{walkCh})
 
-		waitForWalkResult := processBuilder(ctx, workRequest, walkChan, jobSubmissionChan, c.mountPoint, c.rstMap, bulkOperationsManager.AddRequest)
+		// TODO: It would be better if the builder walk was allowed to continue until the end where the bulk
+		// operation could be executed in parallel and not be handled all together at the same time at the end.
+		// So that,
+		//  - Builder walk starts
+		//		- Summits requests that can be
+		//		- Routes request to bulk operations
+		//  - Bulk manager can wait for new bulk operations
+		//		- Each new bulk operation is executed and starts processing routed requests (ExecuteBulkRequest)
+		//	- Builder walk completes or is rescheduled with no delay (just momentarily pushed to the wait-queue)
+		//  - Bulk operation manager tells each bulk operation to finish (CompleteBulkRequest)
+		//  - Bulk operation manager completes (all bulk operations are finished) OR reschedules with delay (minimum bulk operation delay required)
+		//  - Wait for aggregate results (builder state results (jobs submitted, errors, conflicts))
+		//  - (...)
 
-		var err error
-		if walkReschedule, err = waitForWalkResult(); err != nil {
-			return abort(err)
-		} else if !walkReschedule {
-			walkComplete = true
-			walkCompleteSentinel := makeWalkCompleteSentinel(workRequest.JobId)
-			workRequest.SetExternalId(walkCompleteSentinel)
-		}
+		waitForWalk()
 	}
 
-	bulkReschedule, bulkDelay, bulkErr := bulkOperationsManager.Execute(ctx, jobSubmissionChan, c.mountPoint, walkComplete)
+	walkResultBuilder := bulkRequestHandles{}
+	for managerKey, manager := range bulkOperationsManager.managers {
+		client := c.rstMap[manager.rstId]
+		walkCh, getResult, err := client.ExecuteBulkRequest(ctx, manager.StateMountPath, manager.Operation, manager.JobRequests)
+		if err != nil {
+			manager.AppendError(err)
+			continue
+		}
+		walkResultBuilder.add(managerKey, walkCh, getResult)
+	}
+
+	waitForBulkWalks := controller.AddWalks(walkResultBuilder.getWalkChs())
+	waitForBulkWalks()
+	bulkReschedule, bulkDelay, executeErrs := walkResultBuilder.getMergedResults()
+	for key, err := range executeErrs {
+		bulkOperationsManager.managers[key].AppendError(err)
+	}
+
+	// Close the controller and wait for the results.
+	_ = controller.Close()
+	results, err := wait()
+	builder.Submitted += results.Submitted
+	builder.Errors += results.Errors
+	builder.Conflicts += results.Conflicts
+	if err != nil {
+		return abort(err)
+	} else if results.ResumeToken != "" {
+		walkReschedule = true
+		workRequest.SetExternalId(results.ResumeToken)
+	} else {
+		walkComplete = true
+		walkCompleteSentinel := makeWalkCompleteSentinel(workRequest.JobId)
+		workRequest.SetExternalId(walkCompleteSentinel)
+	}
 
 	reschedule := walkReschedule || bulkReschedule
 	var delay time.Duration
 	if !walkReschedule && bulkDelay != 0 {
 		delay = bulkDelay
 	}
+	return reschedule, delay, nil, nil
+}
 
-	return reschedule, delay, bulkErr, nil
+type bulkRequestHandles struct {
+	walkChs    map[string]<-chan *filesystem.StreamPathResult
+	getResults map[string]BulkRequestResultFn
+}
+
+func (b *bulkRequestHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkRequestResultFn) {
+	if b.walkChs == nil {
+		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+	}
+	if b.getResults == nil {
+		b.getResults = map[string]BulkRequestResultFn{}
+	}
+	b.walkChs[managerKey] = walkCh
+	b.getResults[managerKey] = getResult
+}
+
+func (b *bulkRequestHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+	for _, walkCh := range b.walkChs {
+		walkChs = append(walkChs, walkCh)
+	}
+	return walkChs
+}
+
+func (b *bulkRequestHandles) getMergedResults() (reschedule bool, delay time.Duration, errs map[string]error) {
+	errs = map[string]error{}
+	for managerKey, getResult := range b.getResults {
+		resultReschedule, resultDelay, resultErr := getResult()
+		if resultReschedule {
+			reschedule = true
+			if delay == 0 || delay > resultDelay {
+				delay = resultDelay
+			}
+		}
+		if resultErr != nil {
+			errs[managerKey] = resultErr
+		}
+	}
+	return
+}
+
+type bulkCancelHandles struct {
+	walkChs map[string]<-chan *filesystem.StreamPathResult
+	waits   map[string]BulkCancelResultFn
+}
+
+func (b *bulkCancelHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkCancelResultFn) {
+	if b.walkChs == nil {
+		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+	}
+	if b.waits == nil {
+		b.waits = map[string]BulkCancelResultFn{}
+	}
+	b.walkChs[managerKey] = walkCh
+	b.waits[managerKey] = wait
+}
+
+func (b *bulkCancelHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+	for _, walkCh := range b.walkChs {
+		walkChs = append(walkChs, walkCh)
+	}
+	return walkChs
+}
+
+func (b *bulkCancelHandles) getMergedResults() map[string]error {
+	errs := map[string]error{}
+	for managerKey, wait := range b.waits {
+		if err := wait(); err != nil {
+			errs[managerKey] = err
+		}
+	}
+	return errs
+}
+
+type requestPathResolver func(walkPath string) (inMountPath string, remotePath string, err error)
+type tryRouteToBulkOperationFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool)
+
+func (c *JobBuilderClient) newRequestBuilderWorker(
+	builderCfg *flex.JobRequestCfg,
+	walkCh <-chan *filesystem.StreamPathResult,
+	jobSubmissionCh chan<- *beeremote.JobRequest,
+	tryRouteToBulkOperation tryRouteToBulkOperationFn,
+) *requestBuilderWorker {
+	return &requestBuilderWorker{
+		mountPoint:              c.mountPoint,
+		RstMap:                  c.rstMap,
+		jobSubmissionCh:         jobSubmissionCh,
+		builderCfg:              builderCfg,
+		walkCh:                  walkCh,
+		getPaths:                c.getPathsFn(builderCfg),
+		tryRouteToBulkOperation: tryRouteToBulkOperation,
+		result:                  &requestBuilderWorkerResult{},
+	}
+}
+
+func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) requestPathResolver {
+
+	if cfg.Download {
+		if walkLocalPathInsteadOfRemote(cfg) {
+			// Walking cfg.Path to support stub file download and files with a defined rst.
+			return func(walkPath string) (string, string, error) {
+				return walkPath, "", nil
+			}
+		}
+
+		return func(walkPath string) (string, string, error) {
+			// GetDownloadInMountPath should never return an error happen since remotePath and
+			// remotePathDir are derived from cfg.RemotePath, so any error here indicates a bug
+			// in the walking logic.
+			remotePathDir, remotePathIsGlob := GetDownloadRemotePathDirectory(cfg.RemotePath)
+			stat, err := c.mountPoint.Lstat(cfg.Path)
+			isPathDir := err == nil && stat.IsDir()
+
+			remotePath := walkPath
+			inMountPath, err := GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
+			if err == nil {
+				// Ensure the local directory structure supports the object downloads
+				err = c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755)
+			}
+			return inMountPath, remotePath, err
+		}
+	}
+
+	return func(walkPath string) (string, string, error) {
+		return walkPath, walkPath, nil
+	}
 }
 
 func (c *JobBuilderClient) getBuilderResults(builder *flex.BuilderJob) (err error) {
@@ -195,12 +364,12 @@ func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *be
 	return false, ""
 }
 
-func (c *JobBuilderClient) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest, walkChan chan<- *filesystem.StreamPathResult) (reschedule bool, delay time.Duration, err error) {
-	return false, 0, ErrUnsupportedOpForRST
+func (c *JobBuilderClient) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
-	return ErrUnsupportedOpForRST
+func (c *JobBuilderClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
 func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, workRequest *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
@@ -241,11 +410,8 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func isStatusError(status *beeremote.JobRequest_GenerationStatus) bool {
-	return status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION)
-}
-
-func (c *JobBuilderClient) getWalkChan(ctx context.Context, workRequest *flex.WorkRequest, maxPaths int, chanSize int) (walkCh <-chan *filesystem.StreamPathResult, err error) {
+func (c *JobBuilderClient) getWalkCh(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (walkCh <-chan *filesystem.StreamPathResult, err error) {
+	maxPaths := jobBuilderConfig.MaxRequests
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 	resumeToken := workRequest.GetExternalId()
@@ -299,6 +465,428 @@ func (c *JobBuilderClient) getWalkChan(ctx context.Context, workRequest *flex.Wo
 	return
 }
 
+type requestBuildControllerResult func() (*requestBuilderWorkerResult, error)
+type submissionQueueDepthFn func() int
+type requestBuildController struct {
+	group                   *errgroup.Group
+	ctx                     context.Context
+	parentCtx               context.Context
+	workers                 []*requestBuilderWorker
+	getSubmissionQueueDepth submissionQueueDepthFn
+	workersStarted          int
+	walkCh                  chan *filesystem.StreamPathResult
+	closeOnce               sync.Once
+}
+
+func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, cfg *flex.JobRequestCfg, jobSubmissionCh chan<- *beeremote.JobRequest, tryRouteToBulkOperation tryRouteToBulkOperationFn) *requestBuildController {
+	g, gCtx := errgroup.WithContext(ctx)
+	controller := &requestBuildController{
+		group:                   g,
+		ctx:                     gCtx,
+		parentCtx:               ctx,
+		getSubmissionQueueDepth: func() int { return len(jobSubmissionCh) },
+		walkCh:                  make(chan *filesystem.StreamPathResult, max(1, cap(jobSubmissionCh))),
+	}
+	worker := c.newRequestBuilderWorker(cfg, controller.walkCh, jobSubmissionCh, tryRouteToBulkOperation)
+	controller.workers = []*requestBuilderWorker{worker}
+
+	return controller
+}
+
+func (c *requestBuildController) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.walkCh)
+	})
+	return nil
+}
+
+func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {
+	if len(walkChs) == 0 {
+		return func() {}
+	}
+
+	var wg sync.WaitGroup
+	for _, ch := range walkChs {
+		wg.Add(1)
+		go func(ch <-chan *filesystem.StreamPathResult) {
+			defer wg.Done()
+			for {
+				select {
+				case <-c.ctx.Done():
+					return
+				case walkPath, ok := <-ch:
+					if !ok {
+						return
+					}
+
+					select {
+					case <-c.ctx.Done():
+						return
+					case c.walkCh <- walkPath:
+					}
+				}
+			}
+		}(ch)
+	}
+
+	return func() {
+		wg.Wait()
+	}
+}
+
+func (c *requestBuildController) addWorker(doneCh chan<- struct{}) {
+	if len(c.workers) == 0 {
+		return
+	}
+
+	var worker *requestBuilderWorker
+	if c.workersStarted == 0 {
+		worker = c.workers[0]
+	} else {
+		worker = c.workers[0].Clone()
+		c.workers = append(c.workers, worker)
+	}
+
+	c.group.Go(func() error {
+		return worker.Run(c.ctx, doneCh)
+	})
+	c.workersStarted++
+}
+
+// One worker starts immediately. Additional workers are added only when the job submission channel
+// appears underutilized, meaning the current workers are not generating enough work to keep it
+// filled. The controller uses a low `len(jobSubmissionChan)` relative to the number of active
+// workers as a signal that downstream pressure is low, and increases parallelism in response.
+//
+// Processing finishes when input work is exhausted, the context is canceled, or any worker or the
+// controller returns an error
+func (c *requestBuildController) Start() requestBuildControllerResult {
+	maxWorkers := runtime.GOMAXPROCS(0)
+	doneCh := make(chan struct{}, maxWorkers)
+	c.group.Go(func() error {
+		lowThresholdTicks := 0
+
+		c.addWorker(doneCh)
+		for {
+			select {
+			case <-c.ctx.Done():
+				if c.parentCtx.Err() != nil {
+					return c.parentCtx.Err()
+				}
+				return nil
+			case <-doneCh:
+				return nil
+			case <-time.After(100 * time.Millisecond):
+				queueDepth := c.getSubmissionQueueDepth()
+				workers := len(c.workers)
+				if workers < maxWorkers && queueDepth <= 2*workers {
+					if queueDepth <= workers {
+						lowThresholdTicks += 3
+					} else {
+						lowThresholdTicks++
+					}
+
+					if lowThresholdTicks >= 3 {
+						c.addWorker(doneCh)
+						lowThresholdTicks = 0
+					}
+				} else {
+					lowThresholdTicks = 0
+				}
+
+			}
+		}
+	})
+
+	return func() (*requestBuilderWorkerResult, error) {
+		err := c.group.Wait()
+
+		aggregate := &requestBuilderWorkerResult{}
+		for _, worker := range c.workers {
+			aggregate = aggregate.Merge(worker.GetResult())
+		}
+		return aggregate, err
+	}
+}
+
+type requestBuilderWorkerResult struct {
+	Submitted   int32
+	Errors      int32
+	Conflicts   int32
+	ResumeToken string
+}
+
+func (r *requestBuilderWorkerResult) Merge(result *requestBuilderWorkerResult) *requestBuilderWorkerResult {
+	merged := &requestBuilderWorkerResult{
+		Submitted: r.Submitted + result.Submitted,
+		Errors:    r.Submitted + result.Submitted,
+		Conflicts: r.Conflicts + result.Conflicts,
+	}
+
+	if r.ResumeToken == "" && result.ResumeToken != "" {
+		merged.ResumeToken = result.ResumeToken
+	}
+
+	return merged
+}
+
+type requestBuilderWorker struct {
+	mountPoint              filesystem.Provider
+	RstMap                  map[uint32]Provider
+	jobSubmissionCh         chan<- *beeremote.JobRequest
+	builderCfg              *flex.JobRequestCfg
+	tryRouteToBulkOperation tryRouteToBulkOperationFn
+	walkCh                  <-chan *filesystem.StreamPathResult
+	getPaths                requestPathResolver
+	result                  *requestBuilderWorkerResult
+}
+
+func (w *requestBuilderWorker) Run(ctx context.Context, doneCh chan<- struct{}) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case walkResp, ok := <-w.walkCh:
+			if !ok {
+				select {
+				case doneCh <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+
+			var failedPrecondition error
+			if walkResp.Err != nil {
+				if cancelErr, ok := errors.AsType[*RequestCancelError](walkResp.Err); ok {
+					appendError(failedPrecondition, cancelErr.Reason)
+				} else {
+					return walkResp.Err
+
+				}
+			}
+
+			if walkResp.ResumeToken != "" {
+				w.result.ResumeToken = walkResp.ResumeToken
+				return nil
+			}
+
+			inMountPath, remotePath, err := w.getPaths(walkResp.Path)
+			if err != nil {
+				return err
+			}
+
+			if w.builderCfg.GetUpdate() {
+				if stat, statErr := w.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
+					// Directory update-mode entries do not produce a JobRequest. Apply the persistent
+					// RST configuration on a best-effort basis and continue walking regardless of failure.
+					updateDirRstConfig(ctx, w.builderCfg.RemoteStorageTarget, inMountPath)
+					return nil
+				}
+			}
+
+			resolved, err := w.resolvePathStateForRequest(ctx, inMountPath)
+			if err != nil {
+				return err
+			}
+			if resolved.Skip {
+				continue
+			}
+			if resolved.FailedPrecondition != nil {
+				appendError(failedPrecondition, resolved.FailedPrecondition)
+			}
+
+			keepLock := false
+			for _, requestCfg := range w.buildJobRequestCfgs(inMountPath, remotePath, resolved.PathState.RstIds, resolved.PathState.LockedInfo, w.builderCfg) {
+				request := w.buildJobRequest(ctx, requestCfg, failedPrecondition)
+
+				if !request.HasGenerationStatus() {
+					if !request.HasBulkInfo() {
+						// The file access lock must be acquired for the path. If the lock was already held, it
+						// indicates a job conflict. Offloaded files are the exception because their lock is held
+						// until their contents are retrieved.
+						if !resolved.PathState.LockAcquired && !IsFileOffloaded(resolved.PathState.LockedInfo) {
+							w.result.Conflicts++
+							continue
+						}
+
+						if skip := w.tryRouteToBulkOperation(ctx, request); skip {
+							keepLock = true
+							continue
+						}
+					}
+
+					w.prepareJobRequestForSubmission(ctx, request, requestCfg, resolved.PathState.EntryInfo, resolved.PathState.OwnerNode, &keepLock)
+				}
+
+				select {
+				case <-ctx.Done():
+					return nil
+				case w.jobSubmissionCh <- request:
+					if isStatusError(request.GetGenerationStatus()) {
+						w.result.Errors++
+					}
+					w.result.Submitted++
+				}
+			}
+
+			if !keepLock {
+				if err := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); err != nil {
+					return errors.Join(err, fmt.Errorf("unable to clear lock: %w", err))
+				}
+			}
+
+		}
+	}
+}
+
+func (w *requestBuilderWorker) buildJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
+	rstId := cfg.GetRemoteStorageTarget()
+	client, ok := w.RstMap[rstId]
+	if !ok {
+		return &beeremote.JobRequest{
+			Path:                cfg.Path,
+			RemoteStorageTarget: cfg.GetRemoteStorageTarget(),
+			GenerationStatus: &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: fmt.Sprintf("failed to build job request: %s: rstId %d", ErrConfigRSTTypeIsUnknown.Error(), rstId),
+			},
+		}
+	}
+
+	if failedPrecondition != nil {
+		return BuildJobRequestWithFailedPrecondition(client, cfg, failedPrecondition.Error())
+	}
+	return BuildJobRequest(ctx, client, cfg)
+}
+
+func (w *requestBuilderWorker) Clone() *requestBuilderWorker {
+	clone := *w
+	clone.result = &requestBuilderWorkerResult{}
+	return &clone
+}
+
+func (w *requestBuilderWorker) GetResult() *requestBuilderWorkerResult {
+	return w.result
+}
+
+type resolvedPathState struct {
+	PathState          PathState
+	FailedPrecondition error
+	Skip               bool
+}
+
+func (w *requestBuilderWorker) resolvePathStateForRequest(ctx context.Context, inMountPath string) (*resolvedPathState, error) {
+	resolved := &resolvedPathState{}
+	addFailedPrecondition := func(err error) {
+		resolved.FailedPrecondition = appendError(resolved.FailedPrecondition, err)
+	}
+
+	pathState, pathStateErr := GetPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
+	resolved.PathState = pathState
+
+	if IsValidRstId(w.builderCfg.RemoteStorageTarget) {
+		if IsFileOffloaded(pathState.LockedInfo) && w.builderCfg.RemoteStorageTarget != pathState.LockedInfo.StubUrlRstId && !w.builderCfg.GetOverwrite() {
+			addFailedPrecondition(fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag))
+		}
+		pathState.RstIds = []uint32{w.builderCfg.RemoteStorageTarget}
+	} else if len(pathState.RstIds) == 0 {
+		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
+		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
+		// would always fail, whenever there is a file with no RSTs set on its entry info.
+		resolved.Skip = true
+		return resolved, nil
+	}
+
+	if pathStateErr != nil {
+		if errors.Is(pathStateErr, ErrGetPathStateFatal) {
+			// If this function returns an error but it will also abort the entire builder job, which we
+			// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
+			// IDs available for this inMountPath (either specified by the user, or determined
+			// automatically), then report any errors as part of the generated requests for each file.
+			// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
+			// avoid it being silently dropped.
+			return nil, pathStateErr
+		}
+		// All other errors are sent as failed preconditions
+		addFailedPrecondition(pathStateErr)
+	} else if len(pathState.RstIds) > 1 && (w.builderCfg.Download || w.builderCfg.StubLocal) {
+		addFailedPrecondition(ErrFileHasAmbiguousRSTs)
+	}
+
+	return resolved, nil
+}
+
+// buildJobRequestCfgs returns a list of jobRequestCfgs for each rstId. Each cfg is a clone of the
+// original cfg updated with the provided information.
+func (w *requestBuilderWorker) buildJobRequestCfgs(inMountPath string, remotePath string, rstIds []uint32, lockedInfo *flex.JobLockedInfo, cfg *flex.JobRequestCfg) []*flex.JobRequestCfg {
+	var requests []*flex.JobRequestCfg
+	for _, rstId := range rstIds {
+		request := proto.Clone(cfg).(*flex.JobRequestCfg)
+		request.SetPath(inMountPath)
+		request.SetRemotePath(remotePath)
+		request.SetRemoteStorageTarget(rstId)
+		request.SetLockedInfo(proto.Clone(lockedInfo).(*flex.JobLockedInfo))
+		requests = append(requests, request)
+	}
+	return requests
+}
+
+// prepareJobRequestForSubmission prepares a valid job request for submission. request must have resolved to a valid client.
+func (w *requestBuilderWorker) prepareJobRequestForSubmission(
+	ctx context.Context,
+	request *beeremote.JobRequest,
+	cfg *flex.JobRequestCfg,
+	entryInfo msg.EntryInfo,
+	ownerNode beegfs.Node,
+	keepLock *bool,
+) {
+	lockedInfo := cfg.GetLockedInfo()
+	undoPrepare, prepareErr := PrepareFileStateForWorkRequests(ctx, w.mountPoint, entryInfo, ownerNode, cfg)
+	if prepareErr != nil {
+		if errors.Is(prepareErr, ErrJobAlreadyComplete) {
+			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
+			}
+		} else if errors.Is(prepareErr, ErrJobAlreadyOffloaded) {
+			*keepLock = true
+			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+				State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
+			}
+		} else {
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: fmt.Sprintf("failed to prepare file state: %s", prepareErr.Error()),
+			})
+		}
+		return
+	}
+
+	// Generating the externalId must be the last possible error to avoid situations where, once the
+	// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
+	client, _ := w.RstMap[request.GetRemoteStorageTarget()]
+	externalId, err := client.GenerateExternalId(ctx, cfg)
+	if err != nil {
+		if undoErr := undoPrepare(); undoErr != nil {
+			*keepLock = true
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_ERROR,
+				Message: fmt.Sprintf("failed to generate external id: %s; rollback also failed: %s", err.Error(), undoErr.Error()),
+			})
+			return
+		}
+
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: fmt.Sprintf("failed to generate external id: %s", err.Error()),
+		})
+		return
+	}
+
+	lockedInfo.SetExternalId(externalId)
+	*keepLock = true
+}
+
 type jobBuilderBulkOperationsManager struct {
 	managers     map[string]*bulkOperationManager
 	managersMu   sync.Mutex
@@ -322,22 +910,10 @@ func (c *JobBuilderClient) newBulkOperationsManager(workRequest *flex.WorkReques
 
 	for _, bulkOperation := range builder.GetBulkOperations() {
 		key := fmt.Sprintf("%d-%s", bulkOperation.RstId, bulkOperation.Operation)
-		manager.managers[key] = newBulkManager(builderJobId, bulkOperation)
+		manager.managers[key] = newBulkOperationManager(builderJobId, bulkOperation)
 	}
 	return manager
 }
-
-// func (c *JobBuilderClient) abortBulkOperations(ctx context.Context, builderJobId string, builder *flex.BuilderJob) {
-// 	for _, bulkOperation := range builder.GetBulkOperations() {
-// 		manager := newBulkManager(builderJobId, bulkOperation)
-// 		rstId := bulkOperation.RstId
-// 		client := c.rstMap[rstId]
-
-// 		client.CancelBulkRequest(ctx, manager.StateMountPath, bulkOperation.Operation, nil, nil)
-
-// 		_ = manager // TODO: abort manager
-// 	}
-// }
 
 func (m *jobBuilderBulkOperationsManager) GetBulkOperations() []*flex.BuilderJob_BulkOperation {
 	var bulkOperations []*flex.BuilderJob_BulkOperation
@@ -362,121 +938,32 @@ func (m *jobBuilderBulkOperationsManager) AddRequest(ctx context.Context, reques
 	return
 }
 
-func (m *jobBuilderBulkOperationsManager) Execute(
-	ctx context.Context,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	mountPoint filesystem.Provider,
-	walkComplete bool,
-) (reschedule bool, delay time.Duration, err error) {
-	if len(m.managers) == 0 {
-		return
-	}
-
-	builderStateMu := &sync.Mutex{}
-	walkSize := max(1, cap(jobSubmissionChan)/len(m.managers))
-	rescheduleMu := sync.Mutex{}
-	g, ctx := errgroup.WithContext(ctx)
-	for _, manager := range m.managers {
-		// The original builder work request may not have specified a target so in order to avoid
-		// generating requests for all targets associated with the local file, the rstId will be set
-		// based on the manager's rstId.
-		walkChan := make(chan *filesystem.StreamPathResult, walkSize)
-		waitForManager := processBulkManagerRequests(ctx, m.workRequest, walkChan, jobSubmissionChan, mountPoint, m.rstMap, manager.rstId, builderStateMu, manager)
-		g.Go(func() error {
-			client := m.rstMap[manager.rstId]
-			managerReschedule, managerDelay, executeErr := client.ExecuteBulkRequest(ctx, manager.StateMountPath, manager.Operation, manager.JobRequests, walkChan)
-			if executeErr != nil {
-				manager.AppendError(executeErr)
-				if cancelErr := client.CancelBulkRequest(ctx, manager.StateMountPath, manager.Operation, executeErr, walkChan); cancelErr != nil {
-					manager.AppendError(cancelErr)
-				}
-			}
-			close(walkChan)
-
-			_, walkErr := waitForManager()
-			if walkErr != nil {
-				manager.AppendError(walkErr)
-			}
-
-			if managerReschedule {
-				rescheduleMu.Lock()
-				reschedule = true
-				if delay == 0 || managerDelay < delay {
-					delay = managerDelay
-				}
-				rescheduleMu.Unlock()
-			}
-
-			return nil
-		})
-	}
-
-	err = g.Wait()
-	if reschedule || !walkComplete {
-		// Bulk work is still in progress, either because a manager requested rescheduling or because
-		// builder walk is still being processed. Defer reporting manager errors
-		// until all bulk managers and their walk processing have reached a terminal state.
-		return reschedule, delay, nil
-	}
-
-	// Return any bulk operation manager errors since no manager rescheduled work and the builder
-	// walk is complete.
-	for _, manager := range m.managers {
-		if managerErr := manager.GetErrors(); managerErr != nil {
-			err = appendError(err, managerErr)
-		}
-		if cleanupErr := mountPoint.RemoveAll(manager.StateMountPath); cleanupErr != nil {
-			err = appendError(err, cleanupErr)
-		}
-	}
-
-	return
-}
-
-func appendError(accumulatedErr error, nextErr error) error {
-	if accumulatedErr == nil {
-		return nextErr
-	}
-	return fmt.Errorf("%w; %w", accumulatedErr, nextErr)
-}
-
 // Abort cancels all bulk operation. All errors will be added to the bulk operation manager.
-func (m *jobBuilderBulkOperationsManager) Abort(ctx context.Context, jobSubmissionChan chan<- *beeremote.JobRequest, mountPoint filesystem.Provider, reason error) (err error) {
+func (m *jobBuilderBulkOperationsManager) Abort(ctx context.Context, controller *requestBuildController, reason error) error {
 	if len(m.managers) == 0 {
-		return
+		return nil
 	}
 
-	builderStateMu := &sync.Mutex{}
-	walkSize := max(1, cap(jobSubmissionChan)/len(m.managers))
-	wg := sync.WaitGroup{}
-	for _, manager := range m.managers {
-		walkChan := make(chan *filesystem.StreamPathResult, walkSize)
-		waitForManagerWalk := processBulkManagerRequests(ctx, m.workRequest, walkChan, jobSubmissionChan, mountPoint, m.rstMap, manager.rstId, builderStateMu, manager)
-		wg.Go(func() {
-
-			client := m.rstMap[manager.rstId]
-			if cancelErr := client.CancelBulkRequest(ctx, manager.StateMountPath, manager.Operation, reason, walkChan); cancelErr != nil {
-				manager.AppendError(cancelErr)
-			}
-			close(walkChan)
-
-			if _, walkErr := waitForManagerWalk(); walkErr != nil {
-				manager.AppendError(walkErr)
-			}
-		})
-	}
-	wg.Wait()
-
-	for _, manager := range m.managers {
-		if managerErr := manager.GetErrors(); managerErr != nil {
-			if err == nil {
-				err = managerErr
-			} else {
-				err = fmt.Errorf("%w; %w", err, managerErr)
-			}
+	walkResultBuilder := bulkCancelHandles{}
+	for managerKey, manager := range m.managers {
+		client := m.rstMap[manager.rstId]
+		walkCh, wait, err := client.CancelBulkRequest(ctx, manager.StateMountPath, manager.Operation, reason)
+		if err != nil {
+			manager.AppendError(err)
+			continue
 		}
+		walkResultBuilder.add(managerKey, walkCh, wait)
 	}
-	return
+
+	waitForWalks := controller.AddWalks(walkResultBuilder.getWalkChs())
+	waitForWalks()
+
+	results := walkResultBuilder.getMergedResults()
+	for key, err := range results {
+		m.managers[key].AppendError(err)
+	}
+
+	return nil
 }
 
 // getManager returns the bulk operation manager and creates it if it does not exists.
@@ -488,528 +975,10 @@ func (m *jobBuilderBulkOperationsManager) getManager(rstId uint32, operation str
 	manager, ok := m.managers[key]
 	if !ok {
 		bulkOperation := &flex.BuilderJob_BulkOperation{RstId: rstId, Operation: operation}
-		manager = newBulkManager(m.builderJobId, bulkOperation)
+		manager = newBulkOperationManager(m.builderJobId, bulkOperation)
 		m.managers[key] = manager
 	}
 	return manager
-}
-
-type jobBuilderWalkGetPath func(walkPath string) (inMountPath string, remotePath string, err error)
-type jobBuilderWalkAddBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool)
-
-type jobBuilderWalkResultFn func() (reschedule bool, err error)
-type jobBuilderWalkMode int
-
-const (
-	jobBuilderWalkModeAddBulkRequests jobBuilderWalkMode = iota
-	jobBuilderWalkModeProcessBulkRequests
-)
-
-type jobBuilderWalkManager struct {
-	builder     *flex.BuilderJob
-	processor   *jobBuilderWalkManagerProcessor
-	stateMu     *sync.Mutex
-	resumeToken string
-	bulkManager *bulkOperationManager
-}
-
-// processBuilder processes paths from the builder walk and returns a wait function that reports
-// the walk results. Each path generates one or more requests that are either submitted to
-// jobSubmissionChan or added to a bulk operation.
-func processBuilder(
-	ctx context.Context,
-	workRequest *flex.WorkRequest,
-	walkChan <-chan *filesystem.StreamPathResult,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	mountPoint filesystem.Provider,
-	rstMap map[uint32]Provider,
-	addBulkRequestFn jobBuilderWalkAddBulkRequestFn,
-) jobBuilderWalkResultFn {
-	return processWalk(ctx, workRequest, walkChan, jobSubmissionChan, mountPoint, rstMap, addBulkRequestFn, nil, nil, nil)
-}
-
-// processBulkManagerRequests processes paths from a bulk operation manager walk and returns a wait
-// function that reports the walk results. Each path generates one request for the specified remote
-// storage target and submits it to jobSubmissionChan.
-func processBulkManagerRequests(
-	ctx context.Context,
-	workRequest *flex.WorkRequest,
-	walkChan <-chan *filesystem.StreamPathResult,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	mountPoint filesystem.Provider,
-	rstMap map[uint32]Provider,
-	rstID uint32,
-	builderStateMu *sync.Mutex,
-	manager *bulkOperationManager,
-) jobBuilderWalkResultFn {
-	return processWalk(ctx, workRequest, walkChan, jobSubmissionChan, mountPoint, rstMap, nil, &rstID, builderStateMu, manager)
-}
-
-// processWalk consumes paths from walkChan, builds requests and sending them to
-// jobSubmissionChan. runBeforeSubmitRequest function provides a hook to handle the built requests
-// just prior to submission; however, it will not be called if the request has GenerationStatus.
-// rstId overrides the original workRequest.RemoteStorageTarget and forces a single client request.
-//
-// If multiple instances of processWalk are called concurrently, it is important that they
-// share a commonStateMu since this mutex governs builder state updates.
-func processWalk(
-	ctx context.Context,
-	workRequest *flex.WorkRequest,
-	walkChan <-chan *filesystem.StreamPathResult,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	mountPoint filesystem.Provider,
-	rstMap map[uint32]Provider,
-	addBulkRequestFn jobBuilderWalkAddBulkRequestFn,
-	rstIdOverride *uint32,
-	commonStateMu *sync.Mutex,
-	bulkManager *bulkOperationManager,
-) jobBuilderWalkResultFn {
-	if commonStateMu == nil {
-		commonStateMu = &sync.Mutex{}
-	}
-
-	m := &jobBuilderWalkManager{
-		builder:     workRequest.GetBuilder(),
-		stateMu:     commonStateMu,
-		bulkManager: bulkManager,
-	}
-
-	workRequest.GetBuilder()
-	g, gCtx := errgroup.WithContext(ctx)
-	maxWorkers := runtime.GOMAXPROCS(0)
-	walkDoneCh := make(chan struct{}, maxWorkers)
-
-	// Start worker(s) that process walk paths and enqueue job requests. Begin with one and add more
-	// (up to GOMAXPROCS) when the job submission channel stays near empty, indicating the consumer is
-	// draining faster than we can fill it. This keeps throughput balanced without over saturating
-	// the system.
-	g.Go(func() error {
-		workers := 1
-		lowThresholdTicks := 0
-
-		m.startProcessor(g, gCtx, mountPoint, rstMap, jobSubmissionChan, walkChan, walkDoneCh, addBulkRequestFn, rstIdOverride)
-		for {
-			select {
-			case <-gCtx.Done():
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return nil
-			case <-walkDoneCh:
-				return nil
-			case <-time.After(100 * time.Millisecond):
-				size := len(jobSubmissionChan)
-				if workers < maxWorkers && size <= 2*workers {
-					if size <= workers {
-						lowThresholdTicks += 3
-					} else {
-						lowThresholdTicks++
-					}
-
-					if lowThresholdTicks >= 3 {
-						m.addProcessor(g, gCtx)
-						workers++
-						lowThresholdTicks = 0
-					}
-				} else {
-					lowThresholdTicks = 0
-				}
-			}
-		}
-	})
-
-	return func() (reschedule bool, err error) {
-		err = g.Wait()
-
-		// TODO: Remove
-		fmt.Printf("ProcessJobBuilderWalk: Submitted: %d, Errors: %d, Conflicts: %d\n", m.builder.Submitted, m.builder.Errors, m.builder.Conflicts)
-
-		if m.resumeToken != "" {
-			reschedule = true
-			workRequest.SetExternalId(m.resumeToken)
-		}
-		return
-	}
-}
-
-func (m *jobBuilderWalkManager) getPathsFn(mountPoint filesystem.Provider) jobBuilderWalkGetPath {
-	cfg := m.builder.GetCfg()
-
-	if cfg.Download {
-		if walkLocalPathInsteadOfRemote(cfg) {
-			// Walking cfg.Path to support stub file download and files with a defined rst.
-			return func(walkPath string) (string, string, error) {
-				return walkPath, "", nil
-			}
-		}
-
-		return func(walkPath string) (string, string, error) {
-			// GetDownloadInMountPath should never return an error happen since remotePath and
-			// remotePathDir are derived from cfg.RemotePath, so any error here indicates a bug
-			// in the walking logic.
-			remotePathDir, remotePathIsGlob := GetDownloadRemotePathDirectory(cfg.RemotePath)
-			stat, err := mountPoint.Lstat(cfg.Path)
-			isPathDir := err == nil && stat.IsDir()
-
-			remotePath := walkPath
-			inMountPath, err := GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
-			if err == nil {
-				// Ensure the local directory structure supports the object downloads
-				err = mountPoint.CreateDir(filepath.Dir(inMountPath), 0755)
-			}
-			return inMountPath, remotePath, err
-		}
-	}
-
-	return func(walkPath string) (string, string, error) {
-		return walkPath, walkPath, nil
-	}
-}
-
-// startProcessor will build a new processor and run it. Only run once and afterwards if another
-// processor is needed, call addProcessor.
-func (m *jobBuilderWalkManager) startProcessor(
-	g *errgroup.Group,
-	ctx context.Context,
-	mountPoint filesystem.Provider,
-	rstMap map[uint32]Provider,
-	jobSubmissionChan chan<- *beeremote.JobRequest,
-	walkChan <-chan *filesystem.StreamPathResult,
-	walkDoneCh chan struct{},
-	addBulkRequestFn jobBuilderWalkAddBulkRequestFn,
-	rstIdOverride *uint32,
-) {
-	mode := jobBuilderWalkModeProcessBulkRequests
-	if addBulkRequestFn != nil {
-		mode = jobBuilderWalkModeAddBulkRequests
-	}
-
-	cfg := proto.Clone(m.builder.GetCfg()).(*flex.JobRequestCfg)
-	if rstIdOverride != nil {
-		cfg.SetRemoteStorageTarget(*rstIdOverride)
-	}
-
-	m.processor = &jobBuilderWalkManagerProcessor{
-		mode:              mode,
-		cfg:               cfg,
-		mountPoint:        mountPoint,
-		rstMap:            rstMap,
-		jobSubmissionChan: jobSubmissionChan,
-		walkChan:          walkChan,
-		walkDoneCh:        walkDoneCh,
-		addBulkRequest:    addBulkRequestFn,
-		bulkManager:       m.bulkManager,
-		getPaths:          m.getPathsFn(mountPoint),
-	}
-
-	// TODO: Remove
-	fmt.Println("startProcessor")
-
-	m.runProcessor(g, ctx, m.processor)
-}
-
-// addProcessor will clone the original processor created in startProcessor and run it.
-// startProcessor must be called first.
-func (m *jobBuilderWalkManager) addProcessor(g *errgroup.Group, ctx context.Context) {
-
-	// TODO: Remove
-	fmt.Println("addProcessor")
-
-	processor := m.processor.Clone()
-	m.runProcessor(g, ctx, processor)
-}
-
-func (m *jobBuilderWalkManager) runProcessor(g *errgroup.Group, ctx context.Context, processor *jobBuilderWalkManagerProcessor) {
-	g.Go(func() error {
-		resumeToken, err := processor.Process(ctx)
-
-		m.stateMu.Lock()
-		m.builder.Submitted += processor.jobsSubmitted
-		m.builder.Errors += processor.jobsWithErrors
-		m.builder.Conflicts += processor.jobsWithConflicts
-		if resumeToken != "" {
-			m.resumeToken = resumeToken
-		}
-		m.stateMu.Unlock()
-
-		return err
-	})
-}
-
-type jobBuilderWalkManagerProcessor struct {
-	mode              jobBuilderWalkMode
-	cfg               *flex.JobRequestCfg
-	mountPoint        filesystem.Provider
-	rstMap            map[uint32]Provider
-	jobSubmissionChan chan<- *beeremote.JobRequest
-	walkChan          <-chan *filesystem.StreamPathResult
-	walkDoneCh        chan struct{}
-	addBulkRequest    jobBuilderWalkAddBulkRequestFn
-	bulkManager       *bulkOperationManager
-	getPaths          jobBuilderWalkGetPath
-	jobsSubmitted     int32
-	jobsWithErrors    int32
-	jobsWithConflicts int32
-}
-
-func (p *jobBuilderWalkManagerProcessor) Clone() *jobBuilderWalkManagerProcessor {
-	if p == nil {
-		return nil
-	}
-
-	clone := *p
-	clone.jobsSubmitted = 0
-	clone.jobsWithErrors = 0
-	clone.jobsWithConflicts = 0
-	return &clone
-}
-
-func (p *jobBuilderWalkManagerProcessor) Process(ctx context.Context) (resumeToken string, err error) {
-	var inMountPath string
-	var remotePath string
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case walkResp, ok := <-p.walkChan:
-			if !ok {
-				select {
-				case p.walkDoneCh <- struct{}{}:
-				default:
-				}
-				return
-			}
-
-			var cancelReason error
-			if walkResp.Err != nil {
-				if cancelErr, ok := errors.AsType[*RequestCancelError](walkResp.Err); ok {
-					cancelReason = cancelErr.Reason
-				} else {
-					err = walkResp.Err
-					return
-
-				}
-			}
-
-			if walkResp.ResumeToken != "" {
-				resumeToken = walkResp.ResumeToken
-				return
-			}
-
-			if inMountPath, remotePath, err = p.getPaths(walkResp.Path); err != nil {
-				return
-			}
-
-			if err = p.processWalkPath(ctx, inMountPath, remotePath, cancelReason); err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (p *jobBuilderWalkManagerProcessor) processWalkPath(ctx context.Context, inMountPath string, remotePath string, failedPreconditionErr error) error {
-	if p.cfg.GetUpdate() {
-		if stat, statErr := p.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
-			// Directory update-mode entries do not produce a JobRequest. Apply the persistent
-			// RST configuration on a best-effort basis and continue walking regardless of failure.
-			updateDirRstConfig(ctx, p.cfg.RemoteStorageTarget, inMountPath)
-			return nil
-		}
-	}
-
-	lockedInfo, lockAcquired, rstIds, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, p.mountPoint, inMountPath, LockedInfoAcquireLock)
-	if IsValidRstId(p.cfg.RemoteStorageTarget) {
-		if IsFileOffloaded(lockedInfo) && p.cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId && !p.cfg.GetOverwrite() {
-			failedPreconditionErr = appendError(failedPreconditionErr, fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag))
-		}
-		rstIds = []uint32{p.cfg.RemoteStorageTarget}
-	} else if len(rstIds) == 0 {
-		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
-		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
-		// would always fail, whenever there is a file with no RSTs set on its entry info.
-		return nil
-	}
-
-	if err != nil {
-		if errors.Is(err, ErrGetLockedInfoFatal) {
-			// If this function returns an error but it will also abort the entire builder job, which we
-			// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
-			// IDs available for this inMountPath (either specified by the user, or determined
-			// automatically), then report any errors as part of the generated requests for each file.
-			// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
-			// avoid it being silently dropped.
-			return err
-		}
-		// All other errors are sent as failed preconditions
-		failedPreconditionErr = appendError(failedPreconditionErr, err)
-	} else {
-		if len(rstIds) > 1 && (p.cfg.Download || p.cfg.StubLocal) {
-			failedPreconditionErr = appendError(failedPreconditionErr, ErrFileHasAmbiguousRSTs)
-		}
-
-		if p.mode == jobBuilderWalkModeAddBulkRequests {
-			// Prior to adding a request to a bulk operation, the file access lock must be acquired.
-			// If the lock was already held, indicating that conflicting job took the lock.
-			// Offloaded files are the exception because their lock is held until their contents are
-			// retrieved. Failed precondition requests are also exempt because they are submitted
-			// only to persist the error state.
-			if !lockAcquired && !(IsFileOffloaded(lockedInfo) || failedPreconditionErr != nil) {
-				p.jobsWithConflicts++
-				return nil
-			}
-		}
-	}
-
-	// It is the responsibility of this job to release the lock unless there's at least one request that still needs it.
-	keepLock := false
-	defer func() {
-		if !keepLock {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearWriteLockErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
-			}
-		}
-	}()
-
-	for _, jobRequestCfg := range BuildJobRequestCfgs(rstIds, inMountPath, remotePath, lockedInfo, p.cfg) {
-		request, skip := p.processJobRequestCfg(ctx, jobRequestCfg, entryInfoMsg, ownerNode, failedPreconditionErr, &keepLock)
-		if skip {
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case p.jobSubmissionChan <- request:
-			if isStatusError(request.GetGenerationStatus()) {
-				p.jobsWithErrors++
-			}
-			p.jobsSubmitted++
-		}
-	}
-
-	return nil
-}
-
-func (p *jobBuilderWalkManagerProcessor) processJobRequestCfg(
-	ctx context.Context,
-	jobRequestCfg *flex.JobRequestCfg,
-	entryInfoMsg msg.EntryInfo,
-	ownerNode beegfs.Node,
-	failedPreconditionErr error,
-	keepLock *bool,
-) (request *beeremote.JobRequest, skipSubmit bool) {
-	lockedInfo := jobRequestCfg.GetLockedInfo()
-
-	rstId := jobRequestCfg.GetRemoteStorageTarget()
-	client, ok := p.rstMap[rstId]
-	if !ok {
-		request = &beeremote.JobRequest{
-			Path:                jobRequestCfg.Path,
-			RemoteStorageTarget: jobRequestCfg.GetRemoteStorageTarget(),
-			GenerationStatus: &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to build job request: %s: rstId %d", ErrConfigRSTTypeIsUnknown.Error(), rstId),
-			},
-		}
-		return
-	}
-
-	if failedPreconditionErr != nil {
-		request = BuildJobRequestWithFailedPrecondition(client, jobRequestCfg, failedPreconditionErr.Error())
-		return
-	}
-
-	request = BuildJobRequest(ctx, client, jobRequestCfg)
-	if request.HasGenerationStatus() {
-		return
-	}
-
-	// if p.mode == jobBuilderWalkModeAddBulkRequests {
-	// 	if skipSubmit = p.addBulkRequest(ctx, request); skipSubmit {
-	// 		*keepLock = true
-
-	// 		// TODO: Remove
-	// 		fmt.Println("	-> added to bulk operation")
-
-	// 		return
-	// 	}
-	// }
-
-	undoPrepare, prepareErr := PrepareFileStateForWorkRequests(ctx, p.mountPoint, entryInfoMsg, ownerNode, jobRequestCfg)
-	if prepareErr != nil {
-		if errors.Is(prepareErr, ErrJobAlreadyComplete) {
-			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
-				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-			}
-		} else if errors.Is(prepareErr, ErrJobAlreadyOffloaded) {
-			*keepLock = true
-			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-				State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
-			}
-		} else {
-			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to prepare file state: %s", prepareErr.Error()),
-			})
-		}
-		return
-	}
-
-	// Generating the externalId must be the last possible error to avoid situations where, once the
-	// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
-	externalId, err := client.GenerateExternalId(ctx, jobRequestCfg)
-	if err != nil {
-		if undoErr := undoPrepare(); undoErr != nil {
-			*keepLock = true
-			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_ERROR,
-				Message: fmt.Sprintf("failed to generate external id: %s; rollback also failed: %s", err.Error(), undoErr.Error()),
-			})
-			return
-		}
-
-		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: fmt.Sprintf("failed to generate external id: %s", err.Error()),
-		})
-		return
-	}
-
-	lockedInfo.SetExternalId(externalId)
-	*keepLock = true
-
-	return
-}
-
-// BuildJobRequestCfgs returns a list of jobRequestCfgs for each rstId. Each cfg is a clone of the
-// original cfg updated with the provided information.
-func BuildJobRequestCfgs(rstIds []uint32, inMountPath string, remotePath string, lockedInfo *flex.JobLockedInfo, cfg *flex.JobRequestCfg) []*flex.JobRequestCfg {
-	var requests []*flex.JobRequestCfg
-	for _, rstId := range rstIds {
-		request := proto.Clone(cfg).(*flex.JobRequestCfg)
-		request.SetPath(inMountPath)
-		request.SetRemotePath(remotePath)
-		request.SetRemoteStorageTarget(rstId)
-		request.SetLockedInfo(proto.Clone(lockedInfo).(*flex.JobLockedInfo))
-		requests = append(requests, request)
-	}
-	return requests
-}
-
-func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
-	return cfg.RemotePath == ""
-}
-
-const builderWalkCompletePrefix = "builder:walk-complete:"
-
-func makeWalkCompleteSentinel(jobID string) string {
-	return builderWalkCompletePrefix + jobID
-}
-
-func isWalkComplete(externalID, jobID string) bool {
-	return externalID == makeWalkCompleteSentinel(jobID)
 }
 
 const (
@@ -1030,7 +999,7 @@ type bulkOperationManager struct {
 	Completed      bool
 }
 
-func newBulkManager(jobId string, bulkOperation *flex.BuilderJob_BulkOperation) *bulkOperationManager {
+func newBulkOperationManager(jobId string, bulkOperation *flex.BuilderJob_BulkOperation) *bulkOperationManager {
 	stateMountPath := path.Join(jobBuilderConfig.StateRoot, bulkManagerPath, jobId, fmt.Sprint(bulkOperation.RstId))
 	manager := &bulkOperationManager{
 		StateMountPath: stateMountPath,
@@ -1087,10 +1056,35 @@ func (m *bulkOperationManager) AppendError(err error) {
 	}
 }
 
+const builderWalkCompletePrefix = "builder:walk-complete:"
+
+func makeWalkCompleteSentinel(jobID string) string {
+	return builderWalkCompletePrefix + jobID
+}
+
+func isWalkComplete(externalID, jobID string) bool {
+	return externalID == makeWalkCompleteSentinel(jobID)
+}
+
 func (m *bulkOperationManager) GetErrors() error {
 	if m.errors == "" {
 		return nil
 	}
 
 	return fmt.Errorf("bulk operation %s: (%s)", m.Operation, m.errors)
+}
+
+func isStatusError(status *beeremote.JobRequest_GenerationStatus) bool {
+	return status != nil && (status.State == beeremote.JobRequest_GenerationStatus_ERROR || status.State == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION)
+}
+
+func appendError(accumulatedErr error, nextErr error) error {
+	if accumulatedErr == nil {
+		return nextErr
+	}
+	return fmt.Errorf("%w; %w", accumulatedErr, nextErr)
+}
+
+func walkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
+	return cfg.RemotePath == ""
 }

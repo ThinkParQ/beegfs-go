@@ -103,13 +103,12 @@ func (m *MockClient) ExecuteBulkRequest(
 	stateMountPath string,
 	operation string,
 	requests []*beeremote.JobRequest,
-	walkChan chan<- *filesystem.StreamPathResult,
-) (reschedule bool, delay time.Duration, err error) {
-	return false, 0, ErrUnsupportedOpForRST
+) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
-func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
-	return nil
+func (m *MockClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
+	return nil, func() error { return nil }, nil
 }
 
 func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {

@@ -144,9 +144,10 @@ type Provider interface {
 	// requests contains the requests selected for this bulk operation in the current builder pass.
 	// On later builder passes after a reschedule, requests may be empty. It is the responsibility
 	// of the provider to ensure each selected request is ready to be processed and that its path is
-	// sent on walkChan. If a request fails, send its path and error on walkChan. Any ResumeToken
-	// set on a result sent to walkChan is ignored and should not be used. Return reschedule=true
-	// whenever provider-side bulk work remains to be completed.
+	// sent on the returned walkChan. If a request fails, send its path and error on walkChan. Any
+	// ResumeToken set on a result sent to walkChan is ignored and should not be used. The returned
+	// getResults function waits for the provider-side bulk work to reach a terminal state and
+	// returns reschedule=true whenever provider-side bulk work remains to be completed.
 	//
 	// stateMountPath is a path provided by the builder job for providers to use for state
 	// information. Providers are responsible for persisting any state information needed for
@@ -164,13 +165,16 @@ type Provider interface {
 	// failure likely indicates an external error or misconfiguration that would also affect
 	// subsequent bulk-operation calls for the parent builder job. Report all non-fatal errors by
 	// sending them on walkChan for the affected job requests.
-	ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest, walkChan chan<- *filesystem.StreamPathResult) (reschedule bool, delay time.Duration, err error)
+	ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error)
 	// CancelBulkRequest cancels the remaining provider-side work for the bulk operation identified
 	// by stateMountPath, operation and the provider itself. It should also send all remaining
-	// request paths to walkChan with the specified cancellation reason. Any ResumeToken set on a
-	// result sent to walkChan is ignored and should not be used.
-	CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error
+	// request paths to the returned walkChan with the specified cancellation reason. Any ResumeToken
+	// set on a result sent to walkChan is ignored and should not be used.
+	CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error)
 }
+
+type BulkRequestResultFn func() (reschedule bool, delay time.Duration, err error)
+type BulkCancelResultFn func() error
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
 // used to cancel the initialization if for example initializing the specified RST type requires
@@ -602,11 +606,14 @@ func PrepareFileStateForWorkRequests(
 			return nil
 		})
 
-		var info *flex.JobLockedInfo
-		if info, _, _, entryInfo, ownerNode, err = GetLockedInfo(ctx, mountPoint, cfg.Path, LockedInfoAcquireLock); err != nil {
+		var infoResult PathState
+		if infoResult, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
 			err = fmt.Errorf("failed to collect information for new file: %w", err)
 			return
 		}
+		info := infoResult.LockedInfo
+		entryInfo = infoResult.EntryInfo
+		ownerNode = infoResult.OwnerNode
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
 		lockedInfo.SetExists(info.Exists)
 		lockedInfo.SetSize(info.Size)
@@ -624,85 +631,83 @@ func PrepareFileStateForWorkRequests(
 	return
 }
 
-type LockedInfoMode int
+type PathStateMode int
 
 const (
-	LockedInfoAcquireLock LockedInfoMode = iota
-	LockedInfoReadOnly
+	PathStateWithLock PathStateMode = iota
+	PathStateNoLock
 )
 
-// GetLockedInfo collects file state for inMountPath and optionally acquires the file access lock.
-// It returns only information derived from the file itself.
-//
-// It does not interpret caller intent such as cfg.RemoteStorageTarget or decide the effective
-// remote target for a request. Callers are responsible for applying target precedence and
-// validating any explicit target against stub or entry information.
+type PathState struct {
+	LockedInfo   *flex.JobLockedInfo
+	LockAcquired bool
+	RstIds       []uint32
+	EntryInfo    msg.EntryInfo
+	OwnerNode    beegfs.Node
+}
+
+// GetLockedInfo collects existing path state for inMountPath and optionally acquires the file
+// access lock. It returns information derived from the current file, stub, and entry metadata for
+// the path.
 //
 // ErrOffloadFileNotReadable is returned when the file is offloaded and the client cannot read the
-// stub file. ErrGetLockedInfoFatal is returned when the failure likely indicates an external error
-// or misconfiguration that would also affect subsequent calls for other paths.
-func GetLockedInfo(
-	ctx context.Context,
-	mountPoint filesystem.Provider,
-	inMountPath string,
-	mode LockedInfoMode,
-) (lockedInfo *flex.JobLockedInfo, lockAcquired bool, rstIds []uint32, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
-	lockedInfo = &flex.JobLockedInfo{}
-	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
-		Verbose:        false,
-		IncludeOrigMsg: true,
-	}, inMountPath)
+// stub file. ErrGetLockedInfoFatal wraps entry lookup failures that likely indicate an external
+// error or misconfiguration that may also affect other paths.
+func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+	result := PathState{}
+	result.LockedInfo = &flex.JobLockedInfo{}
+
+	entryCfg := entry.GetEntriesCfg{Verbose: false, IncludeOrigMsg: true}
+	entryInfo, err := entry.GetEntry(ctx, nil, entryCfg, inMountPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			err = nil
-			return
+			return result, nil
 		}
-		err = fmt.Errorf("%w: %w", ErrGetLockedInfoFatal, err)
-		return
+		return result, fmt.Errorf("%w: %w", ErrGetPathStateFatal, err)
 	}
-	lockedInfo.Exists = true
+	result.LockedInfo.Exists = true
 
 	origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
 	if origEntryInfoPtr != nil {
-		entryInfoMsg = *origEntryInfoPtr
+		result.EntryInfo = *origEntryInfoPtr
 	} else {
-		entryInfoMsg = msg.EntryInfo{}
+		result.EntryInfo = msg.EntryInfo{}
 	}
-	ownerNode = entryInfo.Entry.MetaOwnerNode
-	rstIds = entryInfo.Entry.Remote.RSTIDs
+	result.OwnerNode = entryInfo.Entry.MetaOwnerNode
+	result.RstIds = entryInfo.Entry.Remote.RSTIDs
 
 	isFileLocked := entryInfo.Entry.FileState.IsReadWriteLocked()
-	if !isFileLocked && mode == LockedInfoAcquireLock {
+	if !isFileLocked && mode == PathStateWithLock {
 		if err = entry.SetAccessFlags(ctx, inMountPath, LockedAccessFlags); err != nil {
-			return
+			return result, err
 		}
 		isFileLocked = true
-		lockAcquired = true
+		result.LockAcquired = true
 	}
-	lockedInfo.SetReadWriteLocked(isFileLocked)
+	result.LockedInfo.SetReadWriteLocked(isFileLocked)
 
 	if entryInfo.Entry.FileState.GetDataState() == DataStateOffloaded {
-		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
+		stubUrlRstId, stubUrlPath, err := GetOffloadedUrlPartsFromFile(mountPoint, inMountPath)
+		if err != nil {
 			if errors.Is(err, syscall.EWOULDBLOCK) {
-				err = ErrOffloadFileNotReadable
-				return
+				return result, ErrOffloadFileNotReadable
 			}
-			err = fmt.Errorf("unable to retrieve stub file info: %w", err)
-			return
+			return result, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}
-
-		rstIds = []uint32{lockedInfo.StubUrlRstId}
+		result.LockedInfo.StubUrlRstId = stubUrlRstId
+		result.LockedInfo.StubUrlPath = stubUrlPath
+		result.RstIds = []uint32{result.LockedInfo.StubUrlRstId}
 	}
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
-		return
+		return result, err
 	}
-	lockedInfo.Size = stat.Size()
-	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
-	lockedInfo.Mode = uint32(stat.Mode())
+	result.LockedInfo.Size = stat.Size()
+	result.LockedInfo.Mtime = timestamppb.New(stat.ModTime())
+	result.LockedInfo.Mode = uint32(stat.Mode())
 
-	return
+	return result, nil
 }
 
 // CreateOffloadedDataFile generates a stub file with an rst url pointing to the remote resource.
@@ -800,7 +805,7 @@ func GetDownloadInMountPath(path string, remotePath string, remotePathDir string
 	}
 
 	if flatten {
-		relPath = strings.Replace(relPath, "/", "_", -1)
+		relPath = strings.ReplaceAll(relPath, "/", "_")
 	}
 
 	if relPath == "." {

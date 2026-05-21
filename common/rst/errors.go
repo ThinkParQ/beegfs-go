@@ -30,7 +30,7 @@ var (
 	ErrOffloadFileUrlMismatch       = errors.New("offload file url does not match")
 	ErrOffloadFileNotReadable       = errors.New("unable to read stub file")
 	ErrRSTUnavailable               = errors.New("remote target is unavailable")
-	ErrGetLockedInfoFatal           = errors.New("fatal error collecting locked info")
+	ErrGetPathStateFatal            = errors.New("fatal error collecting state path info")
 	ErrBulkOperationCancelRequest   = errors.New("bulk operation cancel request")
 )
 

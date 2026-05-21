@@ -412,10 +412,13 @@ func getPathStatusFromTarget(
 ) (*GetStatusResult, error) {
 	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
 	// from GetLockedInfo.
-	lockedInfo, _, rstIds, _, _, err := rst.GetLockedInfo(ctx, mountPoint, fsPath, rst.LockedInfoReadOnly)
+	lockedInfoResult, err := rst.GetPathState(ctx, mountPoint, fsPath, rst.PathStateNoLock)
+	lockedInfo := lockedInfoResult.LockedInfo
+	rstIds := lockedInfoResult.RstIds
 	if len(cfg.RemoteTargets) != 0 {
 		rstIds = cfg.RemoteTargets
 	}
+
 	// GetLockedInfo returns any known information along with the defaults. So, if lockedInfo.Mode
 	// is non-zero then it is valid to check the file type and is safe to do so before checking the
 	// GetLockedInfo error.

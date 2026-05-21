@@ -262,37 +262,40 @@ func (x *xtreemstoreS3Provider) ExecuteBulkRequest(
 	stateMountPath string,
 	operation string,
 	requests []*beeremote.JobRequest,
-	walkChan chan<- *filesystem.StreamPathResult,
-) (reschedule bool, delay time.Duration, err error) {
+) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
 
 	switch parseBulkOperation(operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
-		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, walkChan)
+		walkCh := make(chan *filesystem.StreamPathResult, 128)
+		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, walkCh)
 		if err = manager.LoadManagerState(); err != nil {
-			err = fmt.Errorf("failed to load manager state: %w", err)
-			return
+			return nil, nil, fmt.Errorf("failed to load manager state: %w", err)
 		}
 
 		if err = os.MkdirAll(manager.statePath, 0o700); err != nil {
-			return false, 0, err
+			return nil, nil, err
 		}
 
 		if err = manager.AddRequests(requests); err != nil {
-			err = fmt.Errorf("failed to add requests to bulk operation: %w", err)
-			return
+			return nil, nil, fmt.Errorf("failed to add requests to bulk operation: %w", err)
 		}
 
 		// // TESTING ONLY, TEMPORARY:
 		// // Replace manager.Execute(ctx) with manager.ExecuteTest(ctx) to exercise the bulk-request
 		// // plumbing without an xtreemstore retrieve-session.
-		// return manager.ExecuteTest(ctx)
+		// getResults = func() (bool, time.Duration, error) {
+		// 	defer close(managerWalkCh)
+		// 	return manager.ExecuteTest(ctx)
+		// }
 
-		return manager.Execute(ctx)
+		getResults = func() (bool, time.Duration, error) {
+			defer close(walkCh)
+			return manager.Execute(ctx)
+		}
+		return walkCh, getResults, nil
 	default:
-		err = ErrUnsupportedOpForRST
+		return nil, nil, ErrUnsupportedOpForRST
 	}
-
-	return
 }
 
 // REMOVING CompleteBulkRequest -- ExecuteBulkRequest should handle completion.
@@ -303,22 +306,27 @@ func (x *xtreemstoreS3Provider) ExecuteBulkRequest(
 // 	return x.deleteBulkStateFiles(stateMountPath, operation)
 // }
 
-func (x *xtreemstoreS3Provider) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
+func (x *xtreemstoreS3Provider) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
+	managerWalkCh := make(chan *filesystem.StreamPathResult)
+
 	switch parseBulkOperation(operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
-		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, walkChan)
+		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation, managerWalkCh)
 		if err := manager.LoadManagerState(); err != nil {
-			return fmt.Errorf("failed to cancel bulk operation request: %w", err)
+			return nil, nil, fmt.Errorf("failed to cancel bulk operation request: %w", err)
 		}
-		if err := manager.Cancel(ctx, reason, walkChan); err != nil {
-			return fmt.Errorf("failed to cancel bulk operation manager: %w", err)
+		wait = func() error {
+			defer close(managerWalkCh)
+			if err := manager.Cancel(ctx, reason, managerWalkCh); err != nil {
+				return fmt.Errorf("failed to cancel bulk operation manager: %w", err)
+			}
+			return nil
 		}
+		return managerWalkCh, wait, nil
 
 	default:
-		return ErrUnsupportedOpForRST
+		return nil, nil, ErrUnsupportedOpForRST
 	}
-
-	return nil
 }
 
 func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPath string, operation string, walkChan chan<- *filesystem.StreamPathResult) *xtreemstoreS3BulkRetrieveManager {

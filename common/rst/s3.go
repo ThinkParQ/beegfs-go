@@ -426,13 +426,12 @@ func (r *S3Client) ExecuteBulkRequest(
 	stateMountPath string,
 	operation string,
 	requests []*beeremote.JobRequest,
-	walkChan chan<- *filesystem.StreamPathResult,
-) (reschedule bool, delay time.Duration, err error) {
-	return false, 0, ErrUnsupportedOpForRST
+) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
-func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error, walkChan chan<- *filesystem.StreamPathResult) error {
-	return ErrUnsupportedOpForRST
+func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
+	return nil, nil, ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -972,10 +971,15 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	var getLockedInfoCalled bool
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg.Path, LockedInfoAcquireLock); err != nil {
+		var lockedInfoResult PathState
+		if lockedInfoResult, err = GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock); err != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
+		lockedInfo = lockedInfoResult.LockedInfo
+		writeLockSet = lockedInfoResult.LockAcquired
+		entryInfoMsg = lockedInfoResult.EntryInfo
+		ownerNode = lockedInfoResult.OwnerNode
 
 		getLockedInfoCalled = true
 		cfg.SetLockedInfo(lockedInfo)
