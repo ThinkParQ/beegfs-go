@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"reflect"
 	"time"
 
@@ -25,10 +23,9 @@ const (
 
 // Config represents the telemetry configuration.
 type Config struct {
-	OTLP       OTLPConfig       `mapstructure:"otlp"`
-	Prometheus PrometheusConfig `mapstructure:"prometheus"`
-	Histograms HistogramConfig  `mapstructure:"histograms"`
-	Logs       LogsConfig       `mapstructure:"logs"`
+	OTLP       OTLPConfig      `mapstructure:"otlp"`
+	Histograms HistogramConfig `mapstructure:"histograms"`
+	Logs       LogsConfig      `mapstructure:"logs"`
 }
 
 type OTLPConfig struct {
@@ -45,23 +42,13 @@ type OTLPConfig struct {
 	Headers                map[string]string `mapstructure:"headers"`
 }
 
-type PrometheusConfig struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	ListenAddress string `mapstructure:"listen-address"`
-	Path          string `mapstructure:"path"`
-	TLSCertFile   string `mapstructure:"tls-cert-file"`
-	TLSKeyFile    string `mapstructure:"tls-key-file"`
-	TLSDisable    bool   `mapstructure:"tls-disable"`
-}
-
 // HistogramConfig allows overriding the default OTel histogram bucket boundaries.
 type HistogramConfig struct {
 	DurationBoundaries []float64 `mapstructure:"duration-boundaries"`
 	BytesBoundaries    []float64 `mapstructure:"bytes-boundaries"`
 }
 
-// Logs are always push-based (OTLP only) — there is no pull-based log
-// collection equivalent to Prometheus in the OTel ecosystem.
+// Logs are always push-based (OTLP only).
 // Enabling logs does not require enabling OTLP metrics; they may use
 // different endpoints.
 type LogsConfig struct {
@@ -86,24 +73,6 @@ func (c *Config) ValidateConfig() error {
 		}
 		if c.OTLP.Interval < time.Second {
 			return fmt.Errorf("telemetry.otlp.interval must be at least 1s (got '%s')", c.OTLP.Interval)
-		}
-	}
-	if c.Prometheus.Enabled {
-		if c.Prometheus.ListenAddress == "" {
-			return fmt.Errorf("telemetry.prometheus.listen-address must be set when Prometheus is enabled")
-		}
-		if _, err := net.ResolveTCPAddr("tcp", c.Prometheus.ListenAddress); err != nil {
-			return fmt.Errorf("telemetry.prometheus.listen-address is not a valid host:port address: %w", err)
-		}
-		if c.Prometheus.Path == "" {
-			return fmt.Errorf("telemetry.prometheus.path must be set when Prometheus is enabled")
-		}
-		if !c.Prometheus.TLSDisable {
-			certSet := c.Prometheus.TLSCertFile != ""
-			keySet := c.Prometheus.TLSKeyFile != ""
-			if certSet != keySet {
-				return fmt.Errorf("telemetry.prometheus: tls-cert-file and tls-key-file must both be set or both be empty")
-			}
 		}
 	}
 	if c.Logs.Enabled {
@@ -149,9 +118,7 @@ type Provider struct {
 	meterProvider metric.MeterProvider
 	sdkProvider   *sdkmetric.MeterProvider // nil when disabled (using noop)
 	logProvider   *sdklog.LoggerProvider   // nil when log export is disabled
-	config        Config
-	promServer    *http.Server // nil when Prometheus is disabled
-	promReader    *prometheusReader
+	config Config
 }
 
 // Verify all interfaces that depend on Provider are satisfied:
@@ -200,7 +167,7 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 		return nil, err
 	}
 
-	metricsEnabled := cfg.OTLP.Enabled || cfg.Prometheus.Enabled
+	metricsEnabled := cfg.OTLP.Enabled
 	if !metricsEnabled && !cfg.Logs.Enabled {
 		p.meterProvider = noop.NewMeterProvider()
 		return p, nil
@@ -213,8 +180,8 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 	//
 	// Resources are drained in registration order (oldest first). This differs
 	// from the reverse order used by Shutdown(), but it is safe here because
-	// cleanup() only fires during partial construction where the Prometheus
-	// server and SDK provider have never handled real traffic.
+	// cleanup() only fires during partial construction where the SDK provider
+	// has never handled real traffic.
 	var cleanupFns []func(context.Context) error
 	cleanup := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -250,14 +217,13 @@ func New(cfg Config, opts ...Option) (*Provider, error) {
 	return p, nil
 }
 
-// initMetrics creates and registers the OTel MeterProvider and any configured metric exporters
-// (OTLP, Prometheus). On success it appends shutdown callbacks to cleanupFns.
+// initMetrics creates and registers the OTel MeterProvider and any configured metric exporters.
+// On success it appends shutdown callbacks to cleanupFns.
 func (p *Provider) initMetrics(cfg Config, res *resource.Resource, cleanupFns *[]func(context.Context) error) error {
-	readers, promRdr, err := buildReaders(cfg)
+	readers, err := buildReaders(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to build telemetry exporters: %w", err)
 	}
-	p.promReader = promRdr
 
 	meterOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 	for _, reader := range readers {
@@ -293,14 +259,6 @@ func (p *Provider) initMetrics(cfg Config, res *resource.Resource, cleanupFns *[
 	p.sdkProvider = sdkProvider
 	p.meterProvider = sdkProvider
 	*cleanupFns = append(*cleanupFns, sdkProvider.Shutdown)
-
-	if cfg.Prometheus.Enabled {
-		if err := p.startPrometheusServer(cfg.Prometheus); err != nil {
-			return fmt.Errorf("failed to start Prometheus server: %w", err)
-		}
-		srv := p.promServer
-		*cleanupFns = append(*cleanupFns, srv.Shutdown)
-	}
 
 	return nil
 }
@@ -338,11 +296,6 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	var errs []error
-	if p.promServer != nil {
-		if err := p.promServer.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("prometheus server shutdown: %w", err))
-		}
-	}
 	if p.sdkProvider != nil {
 		if err := p.sdkProvider.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("meter provider shutdown: %w", err))

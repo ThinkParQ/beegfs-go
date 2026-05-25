@@ -5,15 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
-	"net"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -26,16 +22,6 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
-
-// findFreePort finds an available TCP port by binding to :0.
-func findFreePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
-}
 
 // TestNewNoopWhenNoExporters verifies that a provider with no exporters configured
 // returns a no-op meter and shuts down cleanly.
@@ -107,42 +93,6 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "interval must be at least 1s",
-		},
-		{
-			name: "Prometheus empty listen-address returns error",
-			cfg: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "",
-					Path:          "/metrics",
-				},
-			},
-			wantErr: true,
-			errMsg:  "listen-address must be set",
-		},
-		{
-			name: "Prometheus malformed listen-address (no port) returns error",
-			cfg: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "0.0.0.0",
-					Path:          "/metrics",
-				},
-			},
-			wantErr: true,
-			errMsg:  "not a valid host:port address",
-		},
-		{
-			name: "empty Prometheus path",
-			cfg: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "127.0.0.1:9090",
-					Path:          "",
-				},
-			},
-			wantErr: true,
-			errMsg:  "path must be set",
 		},
 		{
 			name: "valid OTLP-only config",
@@ -237,34 +187,6 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid Prometheus-only config",
-			cfg: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "127.0.0.1:9090",
-					Path:          "/metrics",
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "valid both enabled",
-			cfg: telemetry.Config{
-				OTLP: telemetry.OTLPConfig{
-					Enabled:  true,
-					Protocol: "http",
-					Endpoint: "localhost:4318",
-					Interval: 60 * time.Second,
-				},
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "127.0.0.1:9090",
-					Path:          "/metrics",
-				},
-			},
-			wantErr: false,
-		},
-		{
 			name: "logs only (metrics disabled)",
 			cfg: telemetry.Config{
 				Logs: telemetry.LogsConfig{
@@ -278,15 +200,16 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "logs and metrics both enabled",
 			cfg: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: "127.0.0.1:9090",
-					Path:          "/metrics",
+				OTLP: telemetry.OTLPConfig{
+					Enabled:  true,
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
+					Interval: 30 * time.Second,
 				},
 				Logs: telemetry.LogsConfig{
 					Enabled:  true,
-					Protocol: "http",
-					Endpoint: "localhost:4318",
+					Protocol: "grpc",
+					Endpoint: "localhost:4317",
 				},
 			},
 			wantErr: false,
@@ -335,16 +258,17 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// TestWithOptions verifies that WithInstanceID and WithVersion set resource
-// attributes that appear in exported metrics (via the Prometheus target_info metric).
+// TestWithOptions verifies that WithInstanceID, WithVersion, and WithServiceName options
+// are accepted without error when constructing a provider.
 func TestWithOptions(t *testing.T) {
-	port := findFreePort(t)
 	p, err := telemetry.New(
 		telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-				Path:          "/metrics",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:    true,
+				Protocol:   "grpc",
+				Endpoint:   "localhost:4317",
+				Interval:   30 * time.Second,
+				TLSDisable: true,
 			},
 		},
 		telemetry.WithServiceName("options-test"),
@@ -354,38 +278,22 @@ func TestWithOptions(t *testing.T) {
 	require.NoError(t, err)
 	defer p.Shutdown(context.Background())
 
-	// Record a metric so the response is non-empty.
 	counter, err := p.Meter("test").Int64Counter("options_test_counter")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 1)
-
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	bodyStr := string(body)
-
-	// The OTel Prometheus exporter exposes resource attributes as target_info labels.
-	// Label names use underscores (OTel attribute key normalization); values are verbatim.
-	assert.Contains(t, bodyStr, "options_test_counter", "recorded counter should appear in output")
-	assert.Contains(t, bodyStr, `service_instance_id="my-host:9000"`, "service.instance.id should appear in target_info")
-	assert.Contains(t, bodyStr, `service_version="v2.0.0"`, "service.version should appear in target_info")
 }
 
-// TestWithServiceName verifies that WithServiceName sets the service.name resource
-// attribute that appears in exported metrics (via the Prometheus target_info metric).
+// TestWithServiceName verifies that WithServiceName is accepted without error when
+// constructing a provider.
 func TestWithServiceName(t *testing.T) {
-	port := findFreePort(t)
 	p, err := telemetry.New(
 		telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-				Path:          "/metrics",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:    true,
+				Protocol:   "grpc",
+				Endpoint:   "localhost:4317",
+				Interval:   30 * time.Second,
+				TLSDisable: true,
 			},
 		},
 		telemetry.WithServiceName("my-service"),
@@ -396,105 +304,6 @@ func TestWithServiceName(t *testing.T) {
 	counter, err := p.Meter("test").Int64Counter("service_name_test_counter")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 1)
-
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), `service_name="my-service"`, "service name should appear in target_info labels")
-}
-
-// TestPrometheusEndpoint starts a provider with Prometheus enabled on a random
-// port, then GETs the metrics path and verifies a 200 response.
-func TestPrometheusEndpoint(t *testing.T) {
-	port := findFreePort(t)
-	cfg := telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-		},
-	}
-	p, err := telemetry.New(cfg, telemetry.WithServiceName("test-service"))
-	require.NoError(t, err)
-	defer p.Shutdown(context.Background())
-
-	// Record a metric so the response is non-empty.
-	meter := p.Meter("test")
-	counter, err := meter.Int64Counter("test_prom_counter")
-	require.NoError(t, err)
-	counter.Add(context.Background(), 42)
-
-	// The port is pre-bound by New(), so the server is ready immediately.
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	bodyStr := string(body)
-	assert.Contains(t, bodyStr, "test_prom_counter", "recorded counter should appear in Prometheus response")
-	// Verify that Go runtime and process collectors registered on the custom
-	// registry are included in the output.
-	assert.Contains(t, bodyStr, "go_goroutines", "Go runtime metrics should appear in Prometheus response")
-	assert.Contains(t, bodyStr, "process_resident_memory_bytes", "process metrics should appear in Prometheus response")
-}
-
-// TestPrometheusPortAlreadyInUse verifies that New() returns an error immediately
-// when the Prometheus port is already bound by another listener.
-func TestPrometheusPortAlreadyInUse(t *testing.T) {
-	// Hold the port open for the duration of the test.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	cfg := telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-		},
-	}
-	_, err = telemetry.New(cfg, telemetry.WithServiceName("test-service"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prometheus server failed to bind on")
-}
-
-// TestPrometheusInvalidPort verifies that New() returns an error when the
-// listen-address contains an out-of-range port, caught by ValidateConfig.
-func TestPrometheusInvalidPort(t *testing.T) {
-	cfg := telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: "127.0.0.1:99999",
-			Path:          "/metrics",
-		},
-	}
-	_, err := telemetry.New(cfg, telemetry.WithServiceName("test-service"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not a valid host:port address")
-}
-
-// TestShutdownEnabled verifies that Shutdown on an enabled Prometheus provider
-// returns nil and tears down resources cleanly.
-func TestShutdownEnabled(t *testing.T) {
-	port := findFreePort(t)
-	p, err := telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-		},
-	}, telemetry.WithServiceName("shutdown-test"))
-	require.NoError(t, err)
-	assert.NoError(t, p.Shutdown(context.Background()))
 }
 
 // observeGlobalLogger replaces the global zap logger with an observed one for
@@ -560,12 +369,14 @@ func TestUpdateConfiguration(t *testing.T) {
 		require.NoError(t, err)
 		defer p.Shutdown(context.Background())
 		// UpdateConfiguration stores the new config but does NOT restart the
-		// provider, so no server is actually started here.
+		// provider, so no exporter is actually started here.
 		newCfg := telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", findFreePort(t)),
-				Path:          "/metrics",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:    true,
+				Protocol:   "grpc",
+				Endpoint:   "localhost:4317",
+				Interval:   30 * time.Second,
+				TLSDisable: true,
 			},
 		}
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: newCfg})
@@ -575,7 +386,7 @@ func TestUpdateConfiguration(t *testing.T) {
 		// and logProvider remain nil) must also succeed without a restart warning,
 		// regardless of whether the config changed.
 		differentCfg := newCfg
-		differentCfg.Prometheus.Path = "/other-metrics"
+		differentCfg.OTLP.Endpoint = "localhost:4318"
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: differentCfg})
 		assert.NoError(t, err)
 		for _, entry := range logs.All() {
@@ -586,12 +397,13 @@ func TestUpdateConfiguration(t *testing.T) {
 
 	t.Run("changed config on enabled provider warns but succeeds", func(t *testing.T) {
 		logs := observeGlobalLogger(t, zapcore.WarnLevel)
-		port := findFreePort(t)
 		cfg := telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-				Path:          "/metrics",
+			OTLP: telemetry.OTLPConfig{
+				Enabled:    true,
+				Protocol:   "grpc",
+				Endpoint:   "localhost:4317",
+				Interval:   30 * time.Second,
+				TLSDisable: true,
 			},
 		}
 		p, err := telemetry.New(cfg, telemetry.WithServiceName("update-test"))
@@ -599,7 +411,7 @@ func TestUpdateConfiguration(t *testing.T) {
 		defer p.Shutdown(context.Background())
 
 		changedCfg := cfg
-		changedCfg.Prometheus.Path = "/other-metrics"
+		changedCfg.OTLP.Endpoint = "localhost:4318"
 		err = p.UpdateConfiguration(&testTelemetryConfig{cfg: changedCfg})
 		assert.NoError(t, err)
 
@@ -611,20 +423,22 @@ func TestUpdateConfiguration(t *testing.T) {
 }
 
 // TestHistogramBucketBoundaries verifies that custom DurationBoundaries and
-// BytesBoundaries are applied to their respective histograms via the Prometheus exporter.
+// BytesBoundaries configuration is accepted without error.
 func TestHistogramBucketBoundaries(t *testing.T) {
+	otlpCfg := telemetry.OTLPConfig{
+		Enabled:    true,
+		Protocol:   "grpc",
+		Endpoint:   "localhost:4317",
+		Interval:   30 * time.Second,
+		TLSDisable: true,
+	}
+
 	t.Run("DurationBoundaries", func(t *testing.T) {
 		t.Parallel()
-		port := findFreePort(t)
-		customBounds := []float64{0.01, 0.05, 0.1, 0.5, 1.0}
 		p, err := telemetry.New(telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-				Path:          "/metrics",
-			},
+			OTLP: otlpCfg,
 			Histograms: telemetry.HistogramConfig{
-				DurationBoundaries: customBounds,
+				DurationBoundaries: []float64{0.01, 0.05, 0.1, 0.5, 1.0},
 			},
 		}, telemetry.WithServiceName("histogram-test"))
 		require.NoError(t, err)
@@ -634,37 +448,14 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		require.NoError(t, err)
 		hist.Record(context.Background(), 0.03)
 		hist.Record(context.Background(), 0.75)
-
-		url := fmt.Sprintf("http://localhost:%d/metrics", port)
-		resp, err := http.Get(url)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		bodyStr := string(body)
-
-		// Verify the custom bucket boundaries appear in the Prometheus output.
-		for _, bound := range customBounds {
-			le := fmt.Sprintf("le=\"%g\"", bound)
-			assert.True(t, strings.Contains(bodyStr, le),
-				"expected bucket boundary %s in Prometheus output", le)
-		}
 	})
 
 	t.Run("BytesBoundaries", func(t *testing.T) {
 		t.Parallel()
-		port := findFreePort(t)
-		customBounds := []float64{1024, 65536, 1048576}
 		p, err := telemetry.New(telemetry.Config{
-			Prometheus: telemetry.PrometheusConfig{
-				Enabled:       true,
-				ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-				Path:          "/metrics",
-			},
+			OTLP: otlpCfg,
 			Histograms: telemetry.HistogramConfig{
-				BytesBoundaries: customBounds,
+				BytesBoundaries: []float64{1024, 65536, 1048576},
 			},
 		}, telemetry.WithServiceName("histogram-bytes-test"))
 		require.NoError(t, err)
@@ -674,23 +465,6 @@ func TestHistogramBucketBoundaries(t *testing.T) {
 		require.NoError(t, err)
 		hist.Record(context.Background(), 2048)
 		hist.Record(context.Background(), 131072)
-
-		url := fmt.Sprintf("http://localhost:%d/metrics", port)
-		resp, err := http.Get(url)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		bodyStr := string(body)
-
-		// Verify the custom byte bucket boundaries appear in the Prometheus output.
-		for _, bound := range customBounds {
-			le := fmt.Sprintf("le=\"%g\"", bound)
-			assert.True(t, strings.Contains(bodyStr, le),
-				"expected byte bucket boundary %s in Prometheus output", le)
-		}
 	})
 }
 
@@ -746,16 +520,17 @@ func TestOTLPReaderNewFields(t *testing.T) {
 // TestLogsDisabledWhenMetricsEnabled verifies that when metrics are enabled but logs are not
 // configured, LogProvider returns nil — metrics running does not activate logs.
 func TestLogsDisabledWhenMetricsEnabled(t *testing.T) {
-	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
+		OTLP: telemetry.OTLPConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			Interval:   30 * time.Second,
+			TLSDisable: true,
 		},
 	}, telemetry.WithServiceName("logs-disabled-test"))
 	require.NoError(t, err)
-	require.NoError(t, p.Shutdown(context.Background()))
+	defer p.Shutdown(context.Background())
 	assert.Nil(t, p.LogProvider())
 }
 
@@ -904,12 +679,13 @@ func TestLogsIndependentOfMetrics(t *testing.T) {
 // TestLogsAndMetricsEnabled verifies that both log and metrics providers are initialized
 // when both signals are enabled simultaneously.
 func TestLogsAndMetricsEnabled(t *testing.T) {
-	port := findFreePort(t)
 	p, err := telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
+		OTLP: telemetry.OTLPConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			Interval:   30 * time.Second,
+			TLSDisable: true,
 		},
 		Logs: telemetry.LogsConfig{
 			Enabled:    true,
@@ -920,23 +696,13 @@ func TestLogsAndMetricsEnabled(t *testing.T) {
 	}, telemetry.WithServiceName("both-signals"))
 	require.NoError(t, err)
 
+	defer p.Shutdown(context.Background())
+
 	assert.NotNil(t, p.LogProvider(), "log provider must be non-nil")
 
 	counter, err := p.Meter("test").Int64Counter("both_signals_counter")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 1)
-
-	// Verify the metrics side is actually wired — the counter must appear in Prometheus output.
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "both_signals_counter")
-
-	assert.NoError(t, p.Shutdown(context.Background()))
 }
 
 // TestShutdownWithLogsEnabled verifies that Shutdown flushes the log provider cleanly.
@@ -1071,146 +837,6 @@ func TestTLSCertFileErrors(t *testing.T) {
 	})
 }
 
-// TestPrometheusEndpointTLS starts a provider with TLS configured, verifies that a plain
-// HTTP client is rejected, then verifies an HTTPS client with the self-signed cert succeeds.
-func TestPrometheusEndpointTLS(t *testing.T) {
-	certPEM, keyPEM := generateServerCert(t)
-
-	certFile, err := os.CreateTemp(t.TempDir(), "cert-*.pem")
-	require.NoError(t, err)
-	_, err = certFile.Write(certPEM)
-	require.NoError(t, err)
-	certFile.Close()
-
-	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
-	require.NoError(t, err)
-	_, err = keyFile.Write(keyPEM)
-	require.NoError(t, err)
-	keyFile.Close()
-
-	port := findFreePort(t)
-	p, err := telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-			TLSCertFile:   certFile.Name(),
-			TLSKeyFile:    keyFile.Name(),
-		},
-	}, telemetry.WithServiceName("tls-test"))
-	require.NoError(t, err)
-	defer p.Shutdown(context.Background())
-
-	// Record a metric so we can assert body content on the TLS path.
-	counter, err := p.Meter("test").Int64Counter("tls_test_counter")
-	require.NoError(t, err)
-	counter.Add(context.Background(), 7)
-
-	// Plain HTTP must not succeed — the server speaks TLS. When a plain HTTP/1.1
-	// request hits a TLS listener, Go's TLS stack fails the handshake. Depending
-	// on the platform and Go version, the client sees either a connection error
-	// or an HTTP error status (e.g. 400). Both outcomes prove TLS is enforced.
-	plainURL := fmt.Sprintf("http://localhost:%d/metrics", port)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, plainURL, nil)
-	require.NoError(t, err)
-	plainResp, plainErr := http.DefaultClient.Do(req)
-	if plainErr == nil {
-		defer plainResp.Body.Close()
-		assert.NotEqual(t, http.StatusOK, plainResp.StatusCode, "plain HTTP client should not get 200 from a TLS server")
-	}
-
-	// HTTPS client with the self-signed cert in its trust pool must succeed
-	// and return the recorded metric.
-	certPool := x509.NewCertPool()
-	ok := certPool.AppendCertsFromPEM(certPEM)
-	require.True(t, ok)
-	tlsClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: certPool},
-		},
-	}
-	url := fmt.Sprintf("https://localhost:%d/metrics", port)
-	resp, err := tlsClient.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "tls_test_counter", "recorded counter should appear in TLS-secured Prometheus response")
-}
-
-// TestPrometheusPartialTLSConfig verifies that ValidateConfig rejects configs where
-// only one of tls-cert-file and tls-key-file is set.
-func TestPrometheusPartialTLSConfig(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		certSet bool
-		keySet  bool
-	}{
-		{"cert only", true, false},
-		{"key only", false, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{
-					Enabled:       true,
-					ListenAddress: fmt.Sprintf("127.0.0.1:%d", findFreePort(t)),
-					Path:          "/metrics",
-				},
-			}
-			if tt.certSet {
-				cfg.Prometheus.TLSCertFile = "/some/cert.pem"
-			}
-			if tt.keySet {
-				cfg.Prometheus.TLSKeyFile = "/some/key.pem"
-			}
-			err := cfg.ValidateConfig()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "tls-cert-file and tls-key-file must both be set or both be empty")
-		})
-	}
-}
-
-// TestPrometheusTLSMismatchedKeyPair verifies that a mismatched cert/key pair causes New
-// to return an error without binding the port — the listener must be released so the port
-// can be reused immediately.
-func TestPrometheusTLSMismatchedKeyPair(t *testing.T) {
-	// Generate two independent cert/key pairs; use cert from one, key from the other.
-	certPEM, _ := generateServerCert(t)
-	_, unrelatedKeyPEM := generateServerCert(t)
-
-	certFile, err := os.CreateTemp(t.TempDir(), "cert-*.pem")
-	require.NoError(t, err)
-	_, err = certFile.Write(certPEM)
-	require.NoError(t, err)
-	certFile.Close()
-
-	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
-	require.NoError(t, err)
-	_, err = keyFile.Write(unrelatedKeyPEM)
-	require.NoError(t, err)
-	keyFile.Close()
-
-	port := findFreePort(t)
-	_, err = telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-			TLSCertFile:   certFile.Name(),
-			TLSKeyFile:    keyFile.Name(),
-		},
-	}, telemetry.WithServiceName("mismatched-tls-test"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to load TLS cert/key")
-
-	// The listener must have been released on error — the port should be immediately
-	// rebindable, proving no socket was leaked.
-	ln, listenErr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	require.NoError(t, listenErr, "port should be available after construction failure")
-	ln.Close()
-}
-
 // TestOTLPDefaultTLSConstruction verifies that OTLP exporter construction succeeds when
 // neither a cert file nor disable-verification is configured. In this case the OTel SDK
 // uses its default TLS transport (system cert pool). Connection is deferred so no server
@@ -1274,25 +900,6 @@ func TestLogsGRPCURLPathWarning(t *testing.T) {
 		"expected url-path warning for logs gRPC protocol")
 }
 
-// TestPrometheusServerTLSDisableLog verifies that starting a Prometheus server
-// with TLSDisable=true logs an info-level message indicating TLS was explicitly disabled.
-func TestPrometheusServerTLSDisableLog(t *testing.T) {
-	logs := observeGlobalLogger(t, zapcore.InfoLevel)
-	port := findFreePort(t)
-	p, err := telemetry.New(telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
-			TLSDisable:    true,
-		},
-	}, telemetry.WithServiceName("tls-disable-log-test"))
-	require.NoError(t, err)
-	defer p.Shutdown(context.Background())
-	assertLogContains(t, logs, "prometheus metrics server TLS explicitly disabled",
-		"expected TLS-disabled info log when Prometheus TLS is explicitly disabled")
-}
-
 // generateSelfSignedCert creates a minimal self-signed CA cert in PEM format for testing.
 func generateSelfSignedCert(t *testing.T) []byte {
 	t.Helper()
@@ -1309,25 +916,3 @@ func generateSelfSignedCert(t *testing.T) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-// generateServerCert creates a self-signed cert and private key pair in PEM format for testing.
-func generateServerCert(t *testing.T) (certPEM, keyPEM []byte) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	require.NoError(t, err)
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	require.NoError(t, err)
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return
-}
