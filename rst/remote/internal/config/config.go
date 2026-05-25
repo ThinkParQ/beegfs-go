@@ -72,7 +72,7 @@ func (c *AppConfig) UpdateAllowed(newConfig configmgr.Configurable) error {
 }
 
 func (c *AppConfig) ValidateConfig() error {
-	if c.ServiceName == "" && (c.Telemetry.OTLP.Enabled || c.Telemetry.Prometheus.Enabled || c.Telemetry.Logs.Enabled) {
+	if c.ServiceName == "" && (c.Telemetry.OTLP.Enabled || c.Telemetry.Logs.Enabled) {
 		return fmt.Errorf("service-name must be set when telemetry is enabled")
 	}
 	if err := c.Telemetry.ValidateConfig(); err != nil {

@@ -9,17 +9,6 @@ import (
 )
 
 func TestValidateServiceName(t *testing.T) {
-	t.Run("empty service-name with Prometheus enabled returns error", func(t *testing.T) {
-		cfg := AppConfig{
-			Telemetry: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{Enabled: true},
-			},
-		}
-		err := cfg.ValidateConfig()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "service-name must be set when telemetry is enabled")
-	})
-
 	t.Run("empty service-name with OTLP enabled returns error", func(t *testing.T) {
 		cfg := AppConfig{
 			Telemetry: telemetry.Config{
@@ -46,7 +35,7 @@ func TestValidateServiceName(t *testing.T) {
 		cfg := AppConfig{
 			ServiceName: "test-svc",
 			Telemetry: telemetry.Config{
-				Prometheus: telemetry.PrometheusConfig{Enabled: true},
+				OTLP: telemetry.OTLPConfig{Enabled: true},
 			},
 		}
 		err := cfg.ValidateConfig()

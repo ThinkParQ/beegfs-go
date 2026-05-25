@@ -138,14 +138,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # tls-disable-verification = false
 # tls-disable = false
 #
-# [telemetry.prometheus]
-# enabled = false
-# listen-address = "0.0.0.0:9091"
-# path = "/metrics"
-# tls-cert-file = ""
-# tls-key-file = ""
-# tls-disable = false
-#
 # [telemetry.logs]
 # enabled = false
 # protocol = "grpc"
@@ -275,9 +267,9 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #
 
 # Telemetry configuration must be specified under [telemetry]. Metrics can be exported via OTLP
-# (push to a collector such as OpenTelemetry Collector, Grafana Alloy, or Grafana Mimir) and/or
-# scraped by Prometheus. Log export via OTLP is configured independently under [telemetry.logs]
-# and does not require metrics to be enabled.
+# (push to a collector such as OpenTelemetry Collector, Grafana Alloy, or Grafana Mimir). Log
+# export via OTLP is configured independently under [telemetry.logs] and does not require metrics
+# to be enabled.
 
 # service-name: Identifies this service in exported metrics and logs. Appears as the
 # service.name resource attribute in all telemetry data.
@@ -313,19 +305,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # headers: Additional HTTP/gRPC headers to send with every export request. Commonly used
 # to pass authentication tokens (e.g. Authorization: Bearer <token>). Can only be set
 # via config file; not available as a command line flag.
-
-# [telemetry.prometheus] — pull-based metrics export via Prometheus:
-
-# enabled: Set to true to expose a Prometheus /metrics endpoint.
-
-# listen-address: Address:port the Prometheus HTTP server listens on (e.g. "0.0.0.0:9091").
-
-# path: URL path for the metrics endpoint (e.g. "/metrics").
-
-# tls-cert-file / tls-key-file: Certificate and key for TLS on the Prometheus endpoint.
-# Both must be set together, or both left empty for plain HTTP.
-
-# tls-disable: Disable TLS for the Prometheus endpoint.
 
 # [telemetry.logs] — OTLP log export (independent of metrics):
 

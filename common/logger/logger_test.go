@@ -2,12 +2,11 @@ package logger
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,16 +15,6 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
-
-// findFreePort finds an available TCP port by binding to :0.
-func findFreePort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
-}
 
 // TestNew performs some sanity checks around log initialization. For now it
 // just checks if the log level was set correctly and that a valid logger was
@@ -55,36 +44,23 @@ func TestNew(t *testing.T) {
 }
 
 func TestNewWithTelemetryEnabled(t *testing.T) {
-	// An enabled Prometheus config should create a real provider whose metrics
-	// endpoint is reachable.
-	port := findFreePort(t)
 	telCfg := &telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
+		OTLP: telemetry.OTLPConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			Interval:   30 * time.Second,
+			TLSDisable: true,
 		},
 	}
 	log, err := New(Config{Type: "stdout", Level: 3}, telCfg, telemetry.WithServiceName("logger-test"))
 	require.NoError(t, err)
 	defer log.Shutdown(context.Background())
 
-	// Create an instrument and record a value so the endpoint has data.
 	meter := log.Meter("test")
 	counter, err := meter.Int64Counter("logger_test_counter")
 	require.NoError(t, err)
 	counter.Add(context.Background(), 42)
-
-	// Verify the Prometheus endpoint is reachable and contains the counter.
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "logger_test_counter")
 }
 
 func TestWith(t *testing.T) {
@@ -106,32 +82,22 @@ func TestWith(t *testing.T) {
 
 func TestShutdownWithTelemetry(t *testing.T) {
 	// Verify Shutdown tears down an active telemetry provider cleanly.
-	port := findFreePort(t)
 	log, err := New(Config{Type: "stdout", Level: 3}, &telemetry.Config{
-		Prometheus: telemetry.PrometheusConfig{
-			Enabled:       true,
-			ListenAddress: fmt.Sprintf("127.0.0.1:%d", port),
-			Path:          "/metrics",
+		OTLP: telemetry.OTLPConfig{
+			Enabled:    true,
+			Protocol:   "grpc",
+			Endpoint:   "localhost:4317",
+			Interval:   30 * time.Second,
+			TLSDisable: true,
 		},
 	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
 
-	// Endpoint should be reachable before shutdown.
-	url := fmt.Sprintf("http://localhost:%d/metrics", port)
-	resp, err := http.Get(url)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// After shutdown, the Prometheus server should be stopped.
-	// zap.Logger.Sync() returns EINVAL on stdout sinks; any other error is unexpected.
+	// zap.Logger.Sync() returns EINVAL on stdout sinks; allow that specific error.
 	err = log.Shutdown(context.Background())
-	if err != nil {
-		require.ErrorIs(t, err, syscall.EINVAL, "unexpected shutdown error: %v", err)
+	if err != nil && !errors.Is(err, syscall.EINVAL) {
+		t.Errorf("unexpected shutdown error: %v", err)
 	}
-
-	_, err = http.Get(url)
-	assert.Error(t, err, "Prometheus endpoint should be unreachable after shutdown")
 }
 
 type testConfig struct {
