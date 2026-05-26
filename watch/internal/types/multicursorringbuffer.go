@@ -177,6 +177,7 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 
 	// Otherwise we always clear at least the oldest event in the buffer:
 	currentStart := b.start
+	droppedUnackdSeqID := b.buffer[currentStart].SeqId
 	b.buffer[currentStart] = nil
 	b.start = (currentStart + 1) % len(b.buffer)
 
@@ -196,8 +197,7 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 			}
 		}
 		// This GC dropped an unacknowledged event.
-		seqID := b.buffer[b.start].SeqId
-		return &seqID
+		return &droppedUnackdSeqID
 	}
 
 	// Otherwise lets try and free up as much space as we can:

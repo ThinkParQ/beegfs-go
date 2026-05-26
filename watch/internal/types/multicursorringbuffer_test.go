@@ -12,9 +12,10 @@ import (
 // The type of the expected output varies depending on the particular functionality under test.
 // It can be used with the Testify assert functions which accept an interface.
 type MCRBTestCase struct {
-	name     string
-	input    *MultiCursorRingBuffer
-	expected any
+	name           string
+	input          *MultiCursorRingBuffer
+	expected       any
+	expectedReturn any
 }
 
 func TestAllEventsAcknowledged(t *testing.T) {
@@ -139,7 +140,8 @@ func TestCollectGarbage(t *testing.T) {
 					2: {sendCursor: 3, ackCursor: 1},
 				},
 			},
-			expected: []*pb.Event{{SeqId: 0}, {SeqId: 1}, {SeqId: 2}, {SeqId: 3}, nil, nil},
+			expected:       []*pb.Event{{SeqId: 0}, {SeqId: 1}, {SeqId: 2}, {SeqId: 3}, nil, nil},
+			expectedReturn: nil,
 		},
 		{
 			name: "Test when we run out of space but only the oldest event can be cleared (GC should always end with two nil events).",
@@ -152,7 +154,8 @@ func TestCollectGarbage(t *testing.T) {
 					2: {sendCursor: 3, ackCursor: 1},
 				},
 			},
-			expected: []*pb.Event{nil, {SeqId: 1}, {SeqId: 2}, {SeqId: 3}, {SeqId: 4}, nil},
+			expected:       []*pb.Event{nil, {SeqId: 1}, {SeqId: 2}, {SeqId: 3}, {SeqId: 4}, nil},
+			expectedReturn: uint64(0),
 		},
 		{
 			name: "Test when multiple events can be cleared.",
@@ -165,7 +168,8 @@ func TestCollectGarbage(t *testing.T) {
 					2: {sendCursor: 3, ackCursor: 3},
 				},
 			},
-			expected: []*pb.Event{nil, nil, nil, {SeqId: 3}, nil},
+			expected:       []*pb.Event{nil, nil, nil, {SeqId: 3}, nil},
+			expectedReturn: nil,
 		},
 		{
 			name: "Test when multiple events can be cleared and the buffer wraps around.",
@@ -178,13 +182,19 @@ func TestCollectGarbage(t *testing.T) {
 					2: {sendCursor: 1, ackCursor: 7},
 				},
 			},
-			expected: []*pb.Event{{SeqId: 5}, {SeqId: 6}, nil, nil, nil, nil, nil, {SeqId: 4}},
+			expected:       []*pb.Event{{SeqId: 5}, {SeqId: 6}, nil, nil, nil, nil, nil, {SeqId: 4}},
+			expectedReturn: nil,
 		},
 	}
 
 	for _, test := range tests {
-		test.input.collectGarbage()
+		dropped := test.input.collectGarbage()
 		assert.Equal(t, test.expected, test.input.buffer, test.name)
+		if test.expectedReturn == nil {
+			assert.Nil(t, dropped)
+		} else {
+			assert.Equal(t, test.expectedReturn, *dropped)
+		}
 	}
 }
 
