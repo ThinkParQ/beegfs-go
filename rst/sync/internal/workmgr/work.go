@@ -434,9 +434,21 @@ processJobs:
 		}
 	}
 
+	builder := request.WorkRequest.GetBuilder()
+	bulkOperations := builder.GetBulkOperations()
+	if bulkOperations != nil {
+		result.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{
+			BulkOperations: bulkOperations,
+		}
+	}
+
 	if bulkErr != nil {
 		status.SetState(flex.Work_FAILED)
-		status.SetMessage("job builder failed to complete bulk operation(s): " + bulkErr.Error())
+		message := "job builder failed to complete bulk operation(s): " + bulkErr.Error()
+		if err != nil {
+			message += "; job builder failed to complete: " + err.Error()
+		}
+		status.SetMessage(message)
 	} else if err != nil {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("job builder failed to complete: " + err.Error())

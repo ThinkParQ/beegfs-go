@@ -2,106 +2,197 @@ package rst
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"sync"
+	"time"
 
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
 type jobBuilderBulkOperationsManager struct {
-	managers     map[string]*bulkOperationManager
-	managersMu   sync.Mutex
-	rstMap       map[uint32]Provider
-	workRequest  *flex.WorkRequest
-	builder      *flex.BuilderJob
-	builderJobId string
+	managers              map[string]*bulkOperationManager
+	managersMu            sync.Mutex
+	rstMap                map[uint32]Provider
+	builderBulkOperations *[]*flex.BulkOperation
+	builderJobId          string
 }
 
-func (c *JobBuilderClient) newBulkOperationsManager(workRequest *flex.WorkRequest) *jobBuilderBulkOperationsManager {
-	builder := workRequest.GetBuilder()
-	builderJobId := workRequest.GetJobId()
-	manager := &jobBuilderBulkOperationsManager{
-		managers:     make(map[string]*bulkOperationManager),
-		managersMu:   sync.Mutex{},
-		rstMap:       c.rstMap,
-		workRequest:  workRequest,
-		builder:      builder,
-		builderJobId: builderJobId,
-	}
-
-	for _, bulkOperation := range builder.GetBulkOperations() {
-		key := fmt.Sprintf("%d-%s", bulkOperation.RstId, bulkOperation.Operation)
-		manager.managers[key] = newBulkOperationManager(builderJobId, bulkOperation)
-	}
-	return manager
+func (m *jobBuilderBulkOperationsManager) getManagersSnapshot() map[string]*bulkOperationManager {
+	m.managersMu.Lock()
+	defer m.managersMu.Unlock()
+	snapshot := make(map[string]*bulkOperationManager, len(m.managers))
+	maps.Copy(snapshot, m.managers)
+	return snapshot
 }
 
-func (m *jobBuilderBulkOperationsManager) GetBulkOperations() []*flex.BuilderJob_BulkOperation {
-	var bulkOperations []*flex.BuilderJob_BulkOperation
-	for _, manager := range m.managers {
-		bulkOperations = append(bulkOperations, manager.GetBulkOperation())
-	}
-	return bulkOperations
+// getManager returns the bulkOperationManager for the key. If the key does not exist then nil will
+// be returned.
+func (m *jobBuilderBulkOperationsManager) getManager(key string) *bulkOperationManager {
+	m.managersMu.Lock()
+	defer m.managersMu.Unlock()
+	return m.managers[key]
 }
 
-func (m *jobBuilderBulkOperationsManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool) {
+func (m *jobBuilderBulkOperationsManager) addManagerUnlocked(ctx context.Context, client Provider, rstId uint32, operation string) (key string, manager *bulkOperationManager, err error) {
+	key = m.bulkOperationKey(rstId, operation)
+	bulkOperation := &flex.BulkOperation{RstId: rstId, Operation: operation}
+	manager, err = newBulkOperationManager(ctx, client, m.builderJobId, bulkOperation)
+	if err != nil {
+		return
+	}
+
+	*m.builderBulkOperations = append(*m.builderBulkOperations, bulkOperation)
+	m.managers[key] = manager
+	return
+}
+
+func (m *jobBuilderBulkOperationsManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error) {
 	if request.GetGenerationStatus() != nil {
 		return
 	}
 
-	client := m.rstMap[request.GetRemoteStorageTarget()]
+	rstId := request.GetRemoteStorageTarget()
+	client := m.rstMap[rstId]
 	include, operation := client.IncludeInBulkRequest(ctx, request)
 	if include {
-		manager := m.getManager(request.RemoteStorageTarget, operation)
-		manager.AddRequest(request)
+		m.managersMu.Lock()
+		defer m.managersMu.Unlock()
+
+		manager := m.managers[m.bulkOperationKey(rstId, operation)]
+		if manager == nil {
+			if _, manager, err = m.addManagerUnlocked(ctx, client, rstId, operation); err != nil {
+				return
+			}
+		}
+
+		if err = manager.AddRequest(ctx, request); err != nil {
+			return
+		}
 		skipSubmit = true
 	}
 	return
 }
 
-// Abort cancels all bulk operation. All errors will be added to the bulk operation manager.
-func (m *jobBuilderBulkOperationsManager) Abort(ctx context.Context, controller *requestBuildController, reason error) error {
-	if len(m.managers) == 0 {
-		return nil
-	}
-
-	walkResultBuilder := bulkCancelHandles{}
-	for managerKey, manager := range m.managers {
-		client := m.rstMap[manager.rstId]
-		walkCh, wait, err := client.CancelBulkRequest(ctx, manager.StateMountPath, manager.Operation, reason)
-		if err != nil {
-			manager.AppendError(err)
-			continue
-		}
-		walkResultBuilder.add(managerKey, walkCh, wait)
-	}
-
-	waitForWalks := controller.AddWalks(walkResultBuilder.getWalkChs())
-	waitForWalks()
-
-	results := walkResultBuilder.getMergedResults()
-	for key, err := range results {
-		m.managers[key].AppendError(err)
-	}
-
-	return nil
+func (m *jobBuilderBulkOperationsManager) bulkOperationKey(rstId uint32, operation string) string {
+	return fmt.Sprintf("%d-%s", rstId, operation)
 }
 
-// getManager returns the bulk operation manager and creates it if it does not exists.
-func (m *jobBuilderBulkOperationsManager) getManager(rstId uint32, operation string) *bulkOperationManager {
-	key := fmt.Sprintf("%d-%s", rstId, operation)
-	m.managersMu.Lock()
-	defer m.managersMu.Unlock()
-
-	manager, ok := m.managers[key]
-	if !ok {
-		bulkOperation := &flex.BuilderJob_BulkOperation{RstId: rstId, Operation: operation}
-		manager = newBulkOperationManager(m.builderJobId, bulkOperation)
-		m.managers[key] = manager
+func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controller *requestBuildController) (reschedule bool, delay time.Duration, err error) {
+	managers := m.getManagersSnapshot()
+	if len(managers) == 0 {
+		return
 	}
-	return manager
+
+	handles := bulkRequestHandles{}
+	for managerKey, manager := range managers {
+		walkCh, getResult, executeErr := manager.Execute(ctx)
+		if executeErr != nil {
+			manager.AppendError(executeErr)
+
+			// QUESTION: Should we fail builder because of these bulk operation errors
+			err = errors.Join(err, manager.GetErrors())
+
+			continue
+		}
+		handles.add(managerKey, walkCh, getResult)
+	}
+
+	waitForWalks := controller.AddWalks(handles.getWalkChs())
+	waitForWalks()
+
+	executeErrs := map[string]error{}
+	reschedule, delay, executeErrs = handles.getMergedResults()
+	for key, executeErr := range executeErrs {
+		manager := m.getManager(key)
+		if manager == nil {
+			err = errors.Join(err, fmt.Errorf("bulk operation %s failed: %w", key, executeErr))
+			continue
+		}
+
+		manager.AppendError(executeErr)
+
+		// QUESTION: Should we fail builder because of these bulk operation errors
+		err = errors.Join(err, manager.GetErrors())
+
+	}
+	return
+}
+
+func (m *jobBuilderBulkOperationsManager) Resume(ctx context.Context, controller *requestBuildController) (wait BulkWaitFn, err error) {
+	wait = func() error { return nil }
+	managers := m.getManagersSnapshot()
+	if len(managers) == 0 {
+		return
+	}
+
+	handles := bulkWaitHandles{}
+	for managerKey, manager := range managers {
+		walkCh, getResult, resumeErr := manager.Resume(ctx)
+		if resumeErr != nil {
+			manager.AppendError(resumeErr)
+			err = errors.Join(err, manager.GetErrors())
+			continue
+		}
+		handles.add(managerKey, walkCh, getResult)
+	}
+
+	waitForWalks := controller.AddWalks(handles.getWalkChs())
+
+	wait = func() (err error) {
+		waitForWalks()
+		results := handles.getMergedResults()
+		for key, resumeErr := range results {
+			if manager := m.getManager(key); manager != nil {
+				manager.AppendError(resumeErr)
+				err = errors.Join(err, manager.GetErrors())
+			} else {
+				err = errors.Join(resumeErr, fmt.Errorf("bulk operation %s failed to resume: %w", key, resumeErr))
+			}
+		}
+		return err
+	}
+
+	return
+}
+
+// Abort cancels all bulk operations. It returns an error only when cancellation itself leaves one
+// or more bulk operations in an invalid or indeterminate state.
+func (m *jobBuilderBulkOperationsManager) Abort(ctx context.Context, controller *requestBuildController, reason error) (err error) {
+	managers := m.getManagersSnapshot()
+	if len(managers) == 0 {
+		return
+	}
+
+	handles := bulkWaitHandles{}
+	for managerKey, manager := range managers {
+		walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
+		if cancelErr != nil {
+			manager.AppendError(cancelErr)
+			err = errors.Join(err, manager.GetErrors())
+			continue
+		}
+		handles.add(managerKey, walkCh, wait)
+	}
+
+	waitForWalks := controller.AddWalks(handles.getWalkChs())
+	waitForWalks()
+
+	results := handles.getMergedResults()
+	for key, waitErr := range results {
+		if manager := m.getManager(key); manager != nil {
+			manager.AppendError(waitErr)
+			err = errors.Join(err, manager.GetErrors())
+		} else {
+			err = errors.Join(err, fmt.Errorf("bulk operation %s failed to cancel: %w", key, waitErr))
+		}
+	}
+
+	return
 }
 
 const (
@@ -112,57 +203,62 @@ const (
 )
 
 type bulkOperationManager struct {
+	clientBulkOperation
 	StateMountPath string
 	rstId          uint32
 	Operation      string
 	JobRequests    []*beeremote.JobRequest
-	nextJobIndex   int64
+	nextJobIndex   *int64
 	mu             sync.Mutex
-	errors         string
+	errors         *string
 	Completed      bool
 }
 
-func newBulkOperationManager(jobId string, bulkOperation *flex.BuilderJob_BulkOperation) *bulkOperationManager {
+func newBulkOperationManager(ctx context.Context, client Provider, jobId string, bulkOperation *flex.BulkOperation) (*bulkOperationManager, error) {
 	stateMountPath := path.Join(jobBuilderConfig.StateRoot, bulkManagerPath, jobId, fmt.Sprint(bulkOperation.RstId))
+	clientBulkOperation, err := client.OpenBulkOperation(ctx, stateMountPath, bulkOperation.Operation)
+	if err != nil {
+		return nil, err
+	}
+	if bulkOperation.Errors == nil {
+		bulkOperation.Errors = new(string)
+	}
 	manager := &bulkOperationManager{
-		StateMountPath: stateMountPath,
-		rstId:          bulkOperation.RstId,
-		Operation:      bulkOperation.Operation,
-		nextJobIndex:   bulkOperation.NextJobIndex,
-		JobRequests:    []*beeremote.JobRequest{},
+		clientBulkOperation: clientBulkOperation,
+		StateMountPath:      stateMountPath,
+		rstId:               bulkOperation.RstId,
+		Operation:           bulkOperation.Operation,
+		nextJobIndex:        &bulkOperation.NextJobIndex,
+		JobRequests:         []*beeremote.JobRequest{},
+		errors:              bulkOperation.Errors,
 	}
-	if bulkOperation.Errors != nil {
-		manager.errors = *bulkOperation.Errors
-	}
-	return manager
+	return manager, nil
 }
 
-func (m *bulkOperationManager) GetBulkOperation() *flex.BuilderJob_BulkOperation {
-	operation := &flex.BuilderJob_BulkOperation{
-		RstId:        m.rstId,
-		Operation:    m.Operation,
-		NextJobIndex: m.nextJobIndex,
-	}
-
-	if m.errors != "" {
-		operation.Errors = new(m.errors)
-	}
-
-	return operation
-}
-
-func (m *bulkOperationManager) AddRequest(request *beeremote.JobRequest) {
+func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	request.SetBulkInfo(&flex.BulkJobRequestInfo{
 		StateMountPath: m.StateMountPath,
 		Operation:      m.Operation,
-		JobIndex:       m.nextJobIndex,
+		JobIndex:       *m.nextJobIndex,
 	})
-	m.nextJobIndex++
+	*m.nextJobIndex++
 
-	m.JobRequests = append(m.JobRequests, request)
+	return m.clientBulkOperation.AddRequest(ctx, request)
+}
+
+func (m *bulkOperationManager) Execute(ctx context.Context) (walkChan <-chan *filesystem.StreamPathResult, getResults BulkRequestWaitForResultFn, err error) {
+	return m.clientBulkOperation.Execute(ctx)
+}
+
+func (m *bulkOperationManager) Resume(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
+	return m.clientBulkOperation.Resume(ctx)
+}
+
+func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkChan <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
+	return m.clientBulkOperation.Cancel(ctx, reason)
 }
 
 func (m *bulkOperationManager) AppendError(err error) {
@@ -172,17 +268,17 @@ func (m *bulkOperationManager) AppendError(err error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.errors == "" {
-		m.errors = err.Error()
+	if *m.errors == "" {
+		*m.errors = err.Error()
 	} else {
-		m.errors = fmt.Sprintf("%s. %s", m.errors, err.Error())
+		*m.errors = fmt.Sprintf("%s. %s", *m.errors, err.Error())
 	}
 }
 
 func (m *bulkOperationManager) GetErrors() error {
-	if m.errors == "" {
+	if *m.errors == "" {
 		return nil
 	}
 
-	return fmt.Errorf("bulk operation %s: (%s)", m.Operation, m.errors)
+	return fmt.Errorf("bulk operation %s: (%s)", m.Operation, *m.errors)
 }

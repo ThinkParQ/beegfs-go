@@ -421,17 +421,8 @@ func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.
 	return false, ""
 }
 
-func (r *S3Client) ExecuteBulkRequest(
-	ctx context.Context,
-	stateMountPath string,
-	operation string,
-	requests []*beeremote.JobRequest,
-) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
-}
-
-func (r *S3Client) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
+func (r *S3Client) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	return nil, ErrFileTypeUnsupported
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {

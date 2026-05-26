@@ -849,6 +849,157 @@ func TestUpdateJobResults(t *testing.T) {
 
 }
 
+func TestUpdateJobsCancelsFailedBuilderJobUsingStoredJobBuilderInfo(t *testing.T) {
+	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err, "error setting up for test")
+	defer cleanupPathDBPath(t)
+
+	logger := zaptest.NewLogger(t)
+	workerMgrConfig := workermgr.Config{}
+	workerConfigs := []worker.Config{
+		{
+			ID:                  "0",
+			Name:                "test-node-0",
+			Type:                worker.Mock,
+			MaxReconnectBackOff: 5,
+			MockConfig: worker.MockConfig{
+				Expectations: []worker.MockExpectation{
+					{
+						MethodName: "connect",
+						ReturnArgs: []any{false, nil},
+					},
+					{
+						MethodName: "SubmitWork",
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
+							flex.Work_Status_builder{
+								State:   flex.Work_SCHEDULED,
+								Message: "test expects a scheduled request",
+							}.Build(),
+							nil,
+						},
+					},
+					{
+						MethodName: "disconnect",
+						ReturnArgs: []any{nil},
+					},
+				},
+			},
+		},
+	}
+
+	mountPoint := filesystem.NewMockFS()
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
+	workerManager, err := workermgr.NewManager(context.Background(), logger, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	mockRST, ok := workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	require.True(t, ok)
+
+	jobMgrConfig := Config{
+		PathDBPath: tmpPathDBPath,
+	}
+
+	jobManager := NewManager(logger, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	require.NoError(t, jobManager.Start())
+
+	builderRequest := beeremote.JobRequest_builder{
+		Path:                "/test/builder",
+		Name:                "builder job",
+		Priority:            3,
+		RemoteStorageTarget: 1,
+		Builder: flex.BuilderJob_builder{
+			Cfg: flex.JobRequestCfg_builder{
+				Path:                "/test/builder",
+				RemoteStorageTarget: 1,
+				Download:            true,
+				RemotePath:          "remote/test/builder",
+			}.Build(),
+		}.Build(),
+	}.Build()
+
+	mockRST.On("GenerateWorkRequests", mock.MatchedBy(func(job *beeremote.Job) bool {
+		return job.GetRequest().HasBuilder() &&
+			job.GetRequest().GetPath() == builderRequest.GetPath() &&
+			job.GetRequest().GetRemoteStorageTarget() == builderRequest.GetRemoteStorageTarget()
+	}), 0).Return([]*flex.WorkRequest{
+		flex.WorkRequest_builder{
+			JobId:               "ignored-by-worker-manager",
+			RequestId:           "0",
+			Path:                builderRequest.GetPath(),
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{}.Build(),
+		}.Build(),
+	}, nil, nil).Once()
+
+	jobResponse, err := jobManager.SubmitJobRequest(builderRequest)
+	require.NoError(t, err)
+	require.NotNil(t, jobResponse)
+
+	jobID := jobResponse.GetJob().GetId()
+	bulkStateMountPath := ".beegfs-rst/job/" + jobID + "/1"
+	expectedJobBuilderInfo := flex.Work_JobBuilderInfo_builder{
+		BulkOperations: []*flex.BulkOperation{
+			flex.BulkOperation_builder{
+				StateMountPath: bulkStateMountPath,
+				RstId:          1,
+				Operation:      "retrieve",
+			}.Build(),
+		},
+	}.Build()
+	mockRST.On("CompleteWorkRequests", mock.MatchedBy(func(job *beeremote.Job) bool {
+		return job.GetId() == jobID && job.GetRequest().HasBuilder()
+	}), mock.MatchedBy(func(workResults []*flex.Work) bool {
+		return len(workResults) == 1 &&
+			workResults[0].GetRequestId() == "0" &&
+			workResults[0].HasJobBuilderInfo() &&
+			proto.Equal(workResults[0].GetJobBuilderInfo(), expectedJobBuilderInfo)
+	}), true).Return(nil).Once()
+
+	workResult := flex.Work_builder{
+		Path:      builderRequest.GetPath(),
+		JobId:     jobID,
+		RequestId: "0",
+		Status: flex.Work_Status_builder{
+			State:   flex.Work_FAILED,
+			Message: "job builder failed to complete bulk operation(s): bulk restore session failed",
+		}.Build(),
+		Parts: []*flex.Work_Part{},
+		JobBuilderInfo: expectedJobBuilderInfo,
+	}.Build()
+
+	err = jobManager.UpdateWork(workResult)
+	require.NoError(t, err)
+
+	getJobsRequest := beeremote.GetJobsRequest_builder{
+		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+			JobId: jobID,
+			Path:  builderRequest.GetPath(),
+		}.Build(),
+		IncludeWorkRequests: false,
+		IncludeWorkResults:  true,
+	}.Build()
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobsRequest, responses)
+	require.NoError(t, err)
+	getJobsResponse := <-responses
+	require.Equal(t, beeremote.Job_FAILED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
+	require.True(t, getJobsResponse.GetResults()[0].GetWorkResults()[0].GetWork().HasJobBuilderInfo())
+
+	updateJobRequest := beeremote.UpdateJobsRequest_builder{
+		JobId:    new(jobID),
+		Path:     builderRequest.GetPath(),
+		NewState: beeremote.UpdateJobsRequest_CANCELLED,
+	}.Build()
+	updateJobResponse, err := jobManager.UpdateJobs(updateJobRequest)
+	require.NoError(t, err)
+	require.True(t, updateJobResponse.GetOk())
+	require.Equal(t, beeremote.Job_CANCELLED, updateJobResponse.GetResults()[0].GetJob().GetStatus().GetState())
+
+	mockRST.AssertExpectations(t)
+}
+
 func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
 	require.NoError(t, err, "error setting up for test")

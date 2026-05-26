@@ -2,13 +2,17 @@ package rst
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"golang.org/x/sync/errgroup"
 )
 
 // JobBuilderClient is a special RST client that builders new job requests based on the information
@@ -101,12 +105,8 @@ func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *be
 	return false, ""
 }
 
-func (c *JobBuilderClient) ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
-}
-
-func (c *JobBuilderClient) CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error) {
-	return nil, nil, ErrUnsupportedOpForRST
+func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	return nil, ErrFileTypeUnsupported
 }
 
 func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, workRequest *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
@@ -119,7 +119,48 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 }
 
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if abort {
+		bulkOperations := getBulkOperations(workResults)
+		if len(bulkOperations) > 0 {
+			bulkOperationsManager, err := c.newBulkOperationsManager(ctx, job.GetId(), &bulkOperations)
+			if err != nil {
+				return err
+			}
+
+			waits := []BulkWaitFn{}
+			for _, manager := range bulkOperationsManager.getManagersSnapshot() {
+				walkCh, wait, err := manager.Cancel(ctx, nil)
+				if err != nil {
+					return err
+				}
+				waits = append(waits, wait)
+				go func() {
+					// Discard any walk paths
+					for range walkCh {
+					}
+				}()
+			}
+
+			for _, wait := range waits {
+				err = errors.Join(err, wait())
+			}
+			return err
+		}
+	}
+
 	return nil
+}
+
+func getBulkOperations(workResults []*flex.Work) []*flex.BulkOperation {
+	jobBuilderOperations := []*flex.BulkOperation{}
+	for _, workResult := range workResults {
+		if workResult.HasJobBuilderInfo() {
+			for _, bulkOperation := range workResult.JobBuilderInfo.BulkOperations {
+				jobBuilderOperations = append(jobBuilderOperations, bulkOperation)
+			}
+		}
+	}
+	return jobBuilderOperations
 }
 
 // GetConfig is not implemented and should never be called.
@@ -151,71 +192,50 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
-	// Setup bulk operations manager which will oversee any bulk operation started.
-	bulkOperationsManager := c.newBulkOperationsManager(workRequest)
-	defer func() {
-		builder.SetBulkOperations(bulkOperationsManager.GetBulkOperations())
-	}()
+	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
+	if bulkErr != nil {
+		return false, 0, bulkErr, nil
+	}
 
-	// Create and start request build controller.
-	controller := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
-	wait := controller.Start()
+	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
+	waitForRequests := requestBuildController.Start()
 
-	abort := func(abortErr error) (bool, time.Duration, error, error) {
-		err := fmt.Errorf("job builder request was aborted: %w", abortErr)
-		bulkErr := bulkOperationsManager.Abort(ctx, controller, err)
+	abort := func(err error) (bool, time.Duration, error, error) {
+		err = fmt.Errorf("job builder request was aborted: %w", err)
+		bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err)
 		return false, 0, bulkErr, err
 	}
 
+	waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController)
+	if err != nil {
+		return abort(err)
+	}
+
 	walkReschedule := false
-	walkComplete := isWalkComplete(workRequest.GetExternalId(), workRequest.JobId)
-	if !walkComplete {
+	if !isWalkComplete(workRequest.GetExternalId(), workRequest.JobId) {
 		maxRequests := jobBuilderConfig.MaxRequests
 		walkSize := min(cap(jobSubmissionCh), maxRequests+1) // maxRequests +1 is for ResumeToken when there is more work
-		walkCh, walkErr := c.getWalkCh(ctx, workRequest, walkSize)
-		if walkErr != nil {
-			return abort(walkErr)
+		walkCh, err := c.getWalkCh(ctx, workRequest, walkSize)
+		if err != nil {
+			return abort(err)
 		}
-		waitForWalk := controller.AddWalks([]<-chan *filesystem.StreamPathResult{walkCh})
-
-		// TODO: It would be better if the builder walk was allowed to continue until the end where the bulk
-		// operation could be executed in parallel and not be handled all together at the same time at the end.
-		// So that,
-		//  - Builder walk starts
-		//		- Summits requests that can be
-		//		- Routes request to bulk operations
-		//  - Bulk manager can wait for new bulk operations
-		//		- Each new bulk operation is executed and starts processing routed requests (ExecuteBulkRequest)
-		//	- Builder walk completes or is rescheduled with no delay (just momentarily pushed to the wait-queue)
-		//  - Bulk operation manager tells each bulk operation to finish (CompleteBulkRequest)
-		//  - Bulk operation manager completes (all bulk operations are finished) OR reschedules with delay (minimum bulk operation delay required)
-		//  - Wait for aggregate results (builder state results (jobs submitted, errors, conflicts))
-		//  - (...)
-
+		waitForWalk := requestBuildController.AddWalks([]<-chan *filesystem.StreamPathResult{walkCh})
 		waitForWalk()
 	}
 
-	walkResultBuilder := bulkRequestHandles{}
-	for managerKey, manager := range bulkOperationsManager.managers {
-		client := c.rstMap[manager.rstId]
-		walkCh, getResult, err := client.ExecuteBulkRequest(ctx, manager.StateMountPath, manager.Operation, manager.JobRequests)
-		if err != nil {
-			manager.AppendError(err)
-			continue
-		}
-		walkResultBuilder.add(managerKey, walkCh, getResult)
+	if err = waitForBulkResume(); err != nil {
+		return abort(err)
 	}
 
-	waitForBulkWalks := controller.AddWalks(walkResultBuilder.getWalkChs())
-	waitForBulkWalks()
-	bulkReschedule, bulkDelay, executeErrs := walkResultBuilder.getMergedResults()
-	for key, err := range executeErrs {
-		bulkOperationsManager.managers[key].AppendError(err)
+	bulkReschedule, bulkDelay, err := bulkOperationsManager.Execute(ctx, requestBuildController)
+	if err != nil {
+		return abort(err)
 	}
 
-	// Close the controller and wait for the results.
-	_ = controller.Close()
-	results, err := wait()
+	// Close the request build controller and wait for the results. Be sure to update the builder
+	// counters before processing err.
+	requestBuildController.Close()
+	results, err := waitForRequests()
 	builder.Submitted += results.Submitted
 	builder.Errors += results.Errors
 	builder.Conflicts += results.Conflicts
@@ -225,7 +245,6 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		walkReschedule = true
 		workRequest.SetExternalId(results.ResumeToken)
 	} else {
-		walkComplete = true
 		walkCompleteSentinel := makeWalkCompleteSentinel(workRequest.JobId)
 		workRequest.SetExternalId(walkCompleteSentinel)
 	}
@@ -326,6 +345,101 @@ func (c *JobBuilderClient) getWalkCh(ctx context.Context, workRequest *flex.Work
 	}
 
 	return
+}
+
+func (c *JobBuilderClient) newBulkOperationsManager(ctx context.Context, builderJobId string, builderBulkOperations *[]*flex.BulkOperation) (*jobBuilderBulkOperationsManager, error) {
+	manager := &jobBuilderBulkOperationsManager{
+		managers:              make(map[string]*bulkOperationManager),
+		managersMu:            sync.Mutex{},
+		rstMap:                c.rstMap,
+		builderBulkOperations: builderBulkOperations,
+		builderJobId:          builderJobId,
+	}
+
+	var err error
+	for _, bulkOperation := range *builderBulkOperations {
+		key := fmt.Sprintf("%d-%s", bulkOperation.RstId, bulkOperation.Operation)
+		client := manager.rstMap[bulkOperation.RstId]
+		var createErr error
+		if manager.managers[key], createErr = newBulkOperationManager(ctx, client, builderJobId, bulkOperation); createErr != nil {
+			err = errors.Join(err, createErr)
+		}
+	}
+	return manager, err
+}
+
+func (c *JobBuilderClient) newRequestBuildController(
+	ctx context.Context,
+	cfg *flex.JobRequestCfg,
+	jobSubmissionCh chan<- *beeremote.JobRequest,
+	tryRouteToBulkOperation tryRouteToBulkOperationFn,
+) *requestBuildController {
+	g, gCtx := errgroup.WithContext(ctx)
+	controller := &requestBuildController{
+		group:                   g,
+		ctx:                     gCtx,
+		parentCtx:               ctx,
+		getSubmissionQueueDepth: func() int { return len(jobSubmissionCh) },
+		walkCh:                  make(chan *filesystem.StreamPathResult, max(1, cap(jobSubmissionCh))),
+	}
+	worker := c.newRequestBuilderWorker(cfg, controller.walkCh, jobSubmissionCh, tryRouteToBulkOperation)
+	controller.workers = []*requestBuilderWorker{worker}
+
+	return controller
+}
+
+func (c *JobBuilderClient) newRequestBuilderWorker(
+	builderCfg *flex.JobRequestCfg,
+	walkCh <-chan *filesystem.StreamPathResult,
+	jobSubmissionCh chan<- *beeremote.JobRequest,
+	tryRouteToBulkOperation tryRouteToBulkOperationFn,
+) *requestBuilderWorker {
+	return &requestBuilderWorker{
+		mountPoint:              c.mountPoint,
+		RstMap:                  c.rstMap,
+		jobSubmissionCh:         jobSubmissionCh,
+		builderCfg:              builderCfg,
+		walkCh:                  walkCh,
+		getPaths:                c.getPathsFn(builderCfg),
+		getPathState:            GetPathState,
+		updateDirRstConfig:      updateDirRstConfig,
+		prepareFileState:        PrepareFileStateForWorkRequests,
+		clearAccessFlags:        entry.ClearAccessFlags,
+		tryRouteToBulkOperation: tryRouteToBulkOperation,
+		result:                  &requestBuilderWorkerResult{},
+	}
+}
+
+func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) requestPathResolver {
+	if cfg.Download {
+		if walkLocalPathInsteadOfRemote(cfg) {
+			// Walking cfg.Path to support stub file download and files with a defined rst.
+			return func(walkPath string) (string, string, error) {
+				return walkPath, "", nil
+			}
+		}
+
+		return func(walkPath string) (string, string, error) {
+			// GetDownloadInMountPath should never return an error happen since remotePath and
+			// remotePathDir are derived from cfg.RemotePath, so any error here indicates a bug
+			// in the walking logic.
+			remotePathDir, remotePathIsGlob := GetDownloadRemotePathDirectory(cfg.RemotePath)
+			stat, err := c.mountPoint.Lstat(cfg.Path)
+			isPathDir := err == nil && stat.IsDir()
+
+			remotePath := walkPath
+			inMountPath, err := GetDownloadInMountPath(cfg.Path, remotePath, remotePathDir, remotePathIsGlob, isPathDir, cfg.Flatten)
+			if err == nil {
+				// Ensure the local directory structure supports the object downloads
+				err = c.mountPoint.CreateDir(filepath.Dir(inMountPath), 0755)
+			}
+			return inMountPath, remotePath, err
+		}
+	}
+
+	return func(walkPath string) (string, string, error) {
+		return walkPath, walkPath, nil
+	}
 }
 
 const builderWalkCompletePrefix = "builder:walk-complete:"

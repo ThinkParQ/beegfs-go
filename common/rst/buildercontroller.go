@@ -7,22 +7,20 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
-	"github.com/thinkparq/protobuf/go/beeremote"
-	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
 )
 
 type bulkRequestHandles struct {
 	walkChs    map[string]<-chan *filesystem.StreamPathResult
-	getResults map[string]BulkRequestResultFn
+	getResults map[string]BulkRequestWaitForResultFn
 }
 
-func (b *bulkRequestHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkRequestResultFn) {
+func (b *bulkRequestHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkRequestWaitForResultFn) {
 	if b.walkChs == nil {
 		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
 	}
 	if b.getResults == nil {
-		b.getResults = map[string]BulkRequestResultFn{}
+		b.getResults = map[string]BulkRequestWaitForResultFn{}
 	}
 	b.walkChs[managerKey] = walkCh
 	b.getResults[managerKey] = getResult
@@ -52,30 +50,30 @@ func (b *bulkRequestHandles) getMergedResults() (reschedule bool, delay time.Dur
 	return
 }
 
-type bulkCancelHandles struct {
+type bulkWaitHandles struct {
 	walkChs map[string]<-chan *filesystem.StreamPathResult
-	waits   map[string]BulkCancelResultFn
+	waits   map[string]BulkWaitFn
 }
 
-func (b *bulkCancelHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkCancelResultFn) {
+func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn) {
 	if b.walkChs == nil {
 		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
 	}
 	if b.waits == nil {
-		b.waits = map[string]BulkCancelResultFn{}
+		b.waits = map[string]BulkWaitFn{}
 	}
 	b.walkChs[managerKey] = walkCh
 	b.waits[managerKey] = wait
 }
 
-func (b *bulkCancelHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+func (b *bulkWaitHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
 	for _, walkCh := range b.walkChs {
 		walkChs = append(walkChs, walkCh)
 	}
 	return walkChs
 }
 
-func (b *bulkCancelHandles) getMergedResults() map[string]error {
+func (b *bulkWaitHandles) getMergedResults() map[string]error {
 	errs := map[string]error{}
 	for managerKey, wait := range b.waits {
 		if err := wait(); err != nil {
@@ -99,26 +97,10 @@ type requestBuildController struct {
 	closeOnce               sync.Once
 }
 
-func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, cfg *flex.JobRequestCfg, jobSubmissionCh chan<- *beeremote.JobRequest, tryRouteToBulkOperation tryRouteToBulkOperationFn) *requestBuildController {
-	g, gCtx := errgroup.WithContext(ctx)
-	controller := &requestBuildController{
-		group:                   g,
-		ctx:                     gCtx,
-		parentCtx:               ctx,
-		getSubmissionQueueDepth: func() int { return len(jobSubmissionCh) },
-		walkCh:                  make(chan *filesystem.StreamPathResult, max(1, cap(jobSubmissionCh))),
-	}
-	worker := c.newRequestBuilderWorker(cfg, controller.walkCh, jobSubmissionCh, tryRouteToBulkOperation)
-	controller.workers = []*requestBuilderWorker{worker}
-
-	return controller
-}
-
-func (c *requestBuildController) Close() error {
+func (c *requestBuildController) Close() {
 	c.closeOnce.Do(func() {
 		close(c.walkCh)
 	})
-	return nil
 }
 
 func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {

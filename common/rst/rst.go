@@ -70,9 +70,6 @@ var SupportedRSTTypes = map[string]func() (any, any){
 	// Mock could be included here if it ever made sense to allow configuration using a file.
 }
 
-type SubmitBulkRequestFn func(ctx context.Context)
-type EmitBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
-type AppendBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest)
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
 	GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest
@@ -88,9 +85,11 @@ type Provider interface {
 	// rescheduled==true to reschedule the remaining work for later which allows other work time to
 	// complete.
 	//
-	// Any bulk requests errors should be aggregated and return through bulkErr. Any non-nil bulkErr
-	// will result in a failed builder job that requires cancellation. All other errors should be
-	// aggregated and returned through err which will not require cancellation.
+	// Any bulk operation errors should be aggregated and returned through bulkErr. A non-nil
+	// bulkErr means the builder has started a bulk operation that failed and should be cancelled.
+	// All other builder errors should be aggregated and returned through err. A non-nil err stops
+	// the builder work but does not imply any provider-side abort or cleanup is required.
+	//
 	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, bulkErr error, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
@@ -134,47 +133,59 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
-
 	// IncludeInBulkRequest indicates whether the request should be included in a provider-defined
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
 	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
-	// ExecuteBulkRequest manages the lifecycle of a provider-defined bulk operation.
+	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
+	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
+	// operation for the current builder execution.
 	//
-	// requests contains the requests selected for this bulk operation in the current builder pass.
-	// On later builder passes after a reschedule, requests may be empty. It is the responsibility
-	// of the provider to ensure each selected request is ready to be processed and that its path is
-	// sent on the returned walkChan. If a request fails, send its path and error on walkChan. Any
-	// ResumeToken set on a result sent to walkChan is ignored and should not be used. The returned
-	// getResults function waits for the provider-side bulk work to reach a terminal state and
-	// returns reschedule=true whenever provider-side bulk work remains to be completed.
+	// The builder calls this once per tracked bulk operation, including when resuming a builder job
+	// that already persisted metadata from an earlier execution. Implementations should therefore
+	// recover any provider-side state needed to continue appending requests, executing, or
+	// cancelling the operation.
 	//
-	// stateMountPath is a path provided by the builder job for providers to use for state
-	// information. Providers are responsible for persisting any state information needed for
-	// ExecuteBulkRequest and CancelBulkRequest. stateMountPath, operation and the provider itself
-	// identify the bulk operation. The contents of stateMountPath will be deleted once the builder
-	// walk completes and no bulk operation manager for the builder job asks to be rescheduled.
-	//
-	// Use reschedule and delay to reschedule the builder job while bulk work continues. Be aware
-	// that rescheduling delay does not guarantee the next execution time since multiple bulk
-	// operations can be associated with a single builder job and the builder job itself can be
-	// rescheduled when the maximum paths have been processed. When there are multiple rescheduled
-	// tasks, the shortest delay time will be selected.
-	//
-	// Fatal errors should only be returned to abort the builder job; a fatal error is one where the
-	// failure likely indicates an external error or misconfiguration that would also affect
-	// subsequent bulk-operation calls for the parent builder job. Report all non-fatal errors by
-	// sending them on walkChan for the affected job requests.
-	ExecuteBulkRequest(ctx context.Context, stateMountPath string, operation string, requests []*beeremote.JobRequest) (walkChan chan *filesystem.StreamPathResult, getResults BulkRequestResultFn, err error)
-	// CancelBulkRequest cancels the remaining provider-side work for the bulk operation identified
-	// by stateMountPath, operation and the provider itself. It should also send all remaining
-	// request paths to the returned walkChan with the specified cancellation reason. Any ResumeToken
-	// set on a result sent to walkChan is ignored and should not be used.
-	CancelBulkRequest(ctx context.Context, stateMountPath string, operation string, reason error) (walkChan chan *filesystem.StreamPathResult, wait BulkCancelResultFn, err error)
+	// stateMountPath is reserved for provider state that must survive builder reschedules or
+	// retries. Return an error only when the bulk operation cannot be opened in a usable state.
+	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 
-type BulkRequestResultFn func() (reschedule bool, delay time.Duration, err error)
-type BulkCancelResultFn func() error
+type BulkRequestWaitForResultFn func() (reschedule bool, delay time.Duration, err error)
+type BulkWaitFn func() error
+type clientBulkOperation interface {
+	// AddRequest adds a single request to the bulk operation state.
+	//
+	// Calls are serialized by the caller, so implementations may rely on the order of AddRequest
+	// calls matching request.BulkInfo.JobIndex. Return an error only for failures that should stop
+	// the parent builder job.
+	AddRequest(ctx context.Context, request *beeremote.JobRequest) error
+	// Execute starts a bulk operation for the currently accumulated requests. Any paths that are
+	// ready may be sent to walkCh immediately so their requests can be submitted. The returned
+	// getResults function must not return until walkCh has been closed, and it returns the
+	// reschedule details and any errors that occurred. err should only be returned when the builder
+	// job itself should fail. All other errors should be reported on walkCh with the relevant path
+	// so the request can reflect the failure.
+	Execute(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, getResults BulkRequestWaitForResultFn, err error)
+	// Resume continues a bulk operation that was started by a previous builder call. It runs
+	// concurrently with the builder walk so previously started bulk work can complete before
+	// Execute is called again after the walk. Any error will be reported from the returned wait
+	// function, which must not return until walkCh has been closed.
+	//
+	// Resume may run concurrently with AddRequest, but it must only process requests that were
+	// already part of the previously started bulk operation when Resume began. Requests appended
+	// during Resume are reserved for a later Execute.
+	Resume(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error)
+	// Cancel stops the bulk operation and sends any unsent paths along with reason error to walkCh.
+	// Any bulk operation specific errors should be reported from the returned wait function, which
+	// must not return until walkCh has been closed.
+	//
+	// When failed builder job are cancelled, walkCh paths will be discarded which is consistent
+	// with normal builder job behavior. So it is the responsibiltiy of the provider to cancel the
+	// bulk operation and handle any cleanup. If any manual cleanup is require, the user must be
+	// notified.
+	Cancel(ctx context.Context, reason error) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error)
+}
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
 // used to cancel the initialization if for example initializing the specified RST type requires
