@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -876,12 +875,14 @@ func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, 
 	return nil
 }
 
-// SetFileRstPattern applies the specified RST fields to a file using a single SetFilePatternRequest,
-// preserving all other RST fields (IDs, cooldown, policies, etc.).
-// Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave
-// the current cooldown unchanged. When entryInfoMsg, ownerNode, and existingRst are already known
-// (e.g. from a prior GetLockedInfo call), pass them to avoid a redundant GetEntry round-trip;
-// otherwise pass zero values and the entry will be fetched internally.
+// SetFileRstPattern applies the specified RST fields to a file using a single
+// SetFilePatternRequest, preserving all other RST fields (IDs, cooldown, policies, etc.). Pass nil
+// for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave the current
+// cooldown unchanged. When entryInfoMsg, ownerNode, and existingRst are already known (e.g. from a
+// prior GetLockedInfo call), pass them to avoid a redundant GetEntry round-trip; otherwise pass
+// zero values and the entry will be fetched internally.
+//
+// IMPORTANT: Does not check permissions - the caller must verify the effective user ID is root.
 func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
 	if rstIds == nil && cooldownSecs == nil {
 		return nil
@@ -924,8 +925,10 @@ func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldo
 
 // SetDirRstPattern fetches the directory entry once and applies the specified RST fields using a
 // single SetDirPatternRequest, preserving the existing stripe pattern and all other RST fields.
-// Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave
-// the current cooldown unchanged.
+// Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave the
+// current cooldown unchanged.
+//
+// IMPORTANT: Does not check permissions - the caller must verify the effective user ID is root.
 func SetDirRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16) error {
 	if rstIds == nil && cooldownSecs == nil {
 		return nil
@@ -943,16 +946,11 @@ func SetDirRstPattern(ctx context.Context, path string, rstIds []uint32, cooldow
 	if entryInfo.Entry.Details == nil {
 		return fmt.Errorf("full entry details unavailable for %s: %s", path, entryInfo.Entry.EntryInfoPopulated)
 	}
-	euid := syscall.Geteuid()
-	if euid < 0 || euid > math.MaxUint32 {
-		return fmt.Errorf("effective user ID %d is out of bounds (not a uint32)", euid)
-	}
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
 		Pattern:   entryInfo.Entry.Details.Pattern.StripePattern,
 		RST:       entryInfo.Entry.Details.Remote.RemoteStorageTarget,
 	}
-	request.SetUID(uint32(euid))
 	if rstIds != nil {
 		request.RST.RSTIDs = rstIds
 	}
