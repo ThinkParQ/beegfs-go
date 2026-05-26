@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -115,6 +116,12 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	if euid := syscall.Geteuid(); euid < 0 || euid > math.MaxUint32 {
+		log.Fatalf("effective user ID %d is out of bounds (not a uint32)", euid)
+	} else if euid != 0 {
+		log.Fatalf("%s must be run with root privileges", binaryName)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
