@@ -2,6 +2,7 @@ package rst
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"time"
@@ -197,9 +198,13 @@ func (p *requestBuildWorkerPool) addWorker(doneCh chan<- struct{}) {
 func (p *requestBuildWorkerPool) Wait() (*requestBuilderWorkerResult, error) {
 	err := p.group.Wait()
 
-	aggregate := &requestBuilderWorkerResult{}
+	var mergedErr error
+	merged := &requestBuilderWorkerResult{}
 	for _, worker := range p.workers {
-		aggregate = aggregate.Merge(worker.GetResult())
+		if merged, mergedErr = merged.Merge(worker.GetResult()); mergedErr != nil {
+			err = errors.Join(err, mergedErr)
+		}
+
 	}
-	return aggregate, err
+	return merged, err
 }

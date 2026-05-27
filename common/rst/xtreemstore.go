@@ -829,6 +829,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
 	if m.statusHandle, err = os.OpenFile(m.getStatusPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return
 	}
+	// statusHandle is already assigned, so a failure here will be cleaned up by the caller via closeState().
 	if m.recordHandle, err = os.OpenFile(m.getRecordPath(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.FileMode(0600)); err != nil {
 		return
 	}

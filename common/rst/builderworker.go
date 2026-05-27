@@ -28,18 +28,23 @@ type requestBuilderWorkerResult struct {
 	ResumeToken string
 }
 
-func (r *requestBuilderWorkerResult) Merge(result *requestBuilderWorkerResult) *requestBuilderWorkerResult {
+func (r *requestBuilderWorkerResult) Merge(result *requestBuilderWorkerResult) (*requestBuilderWorkerResult, error) {
 	merged := &requestBuilderWorkerResult{
-		Submitted: r.Submitted + result.Submitted,
-		Errors:    r.Errors + result.Errors,
-		Conflicts: r.Conflicts + result.Conflicts,
+		Submitted:   r.Submitted + result.Submitted,
+		Errors:      r.Errors + result.Errors,
+		Conflicts:   r.Conflicts + result.Conflicts,
+		ResumeToken: r.ResumeToken,
 	}
 
-	if r.ResumeToken == "" && result.ResumeToken != "" {
-		merged.ResumeToken = result.ResumeToken
+	if result.ResumeToken != "" {
+		if r.ResumeToken == "" {
+			merged.ResumeToken = result.ResumeToken
+		} else {
+			return merged, fmt.Errorf("conflicting walk resume tokens: [%s, %s]", r.ResumeToken, result.ResumeToken)
+		}
 	}
 
-	return merged
+	return merged, nil
 }
 
 type requestBuilderWorker struct {
