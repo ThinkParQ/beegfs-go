@@ -394,55 +394,51 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 
 func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry workEntry) (cleanupEntries bool) {
 	request := entry.WorkRequest
-	result := entry.WorkResult
-	status := result.GetStatus()
-	mappedPriorityId := priorityIdMap[request.GetPriority()]
+	workRequest := request.WorkRequest
+	builder := workRequest.GetBuilder()
+	workResult := entry.WorkResult
+	status := workResult.GetStatus()
 
-	var reschedule bool
-	var rescheduleDelay time.Duration
-	var err error
-	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
+	executeResultCh := make(chan *rst.ExecuteJobBuilderRequestResult)
+	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 	go func() {
-		defer close(jobSubmissionChan)
-		reschedule, rescheduleDelay, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		defer close(jobSubmissionCh)
+		executeResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
 	}()
 
-	total := 0
+	var executeResult *rst.ExecuteJobBuilderRequestResult
 	totalErrors := 0
-processJobs:
 	for {
+		if executeResultCh == nil && jobSubmissionCh == nil {
+			break
+		}
+
 		select {
-		case <-work.ctx.Done():
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("work context was cancelled before job requests could be created")
-			if w.sendWorkResult(work, result.Work) {
-				cleanupEntries = true
-			}
-			for range jobSubmissionChan {
-			}
-			return
-		case jobRequest, ok := <-jobSubmissionChan:
+		case executeResult = <-executeResultCh:
+			executeResultCh = nil
+		case jobRequest, ok := <-jobSubmissionCh:
 			if !ok {
-				break processJobs
+				jobSubmissionCh = nil
+				continue
 			}
 
 			if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
 				totalErrors += 1
 			}
-			total++
 		}
 	}
+	if executeResult == nil {
+		executeResult = &rst.ExecuteJobBuilderRequestResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned a nil result"))}
+	}
 
-	builder := request.WorkRequest.GetBuilder()
 	bulkOperations := builder.GetBulkOperations()
 	if bulkOperations == nil {
 		bulkOperations = []*flex.BulkOperation{}
 	}
-	result.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{
-		BulkOperations: bulkOperations,
-	}
+	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
 
-	if err != nil {
+	if executeResult.Err != nil {
+		err := executeResult.Err
 		// Builder-level termination is driven by classified err. Individual request errors should already
 		// have been reported on the submitted requests via GenerationStatus and accounted for in the builder
 		// counters rather than forcing builder termination here.
@@ -456,16 +452,17 @@ processJobs:
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("job builder returned unclassified error: " + err.Error())
 		}
-	} else if reschedule {
+	} else if executeResult.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		message := "waiting for builder job to continue"
 		if totalErrors > 0 {
 			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
 		}
 		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now().Add(rescheduleDelay)
-		w.sendWorkResult(work, result.Work)
+		entry.ExecuteAfter = time.Now().Add(executeResult.Delay)
+		w.sendWorkResult(work, workResult.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+		mappedPriorityId := priorityIdMap[request.GetPriority()]
 		beeSyncRescheduled.Add(mappedPriorityId, 1)
 		return
 	} else if totalErrors > 0 {
@@ -476,7 +473,7 @@ processJobs:
 		status.SetMessage("all jobs were submitted")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(work, workResult.Work) {
 		cleanupEntries = true
 	}
 	return

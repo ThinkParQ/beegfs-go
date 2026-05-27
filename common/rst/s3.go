@@ -413,8 +413,8 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
-	return false, 0, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
+	return &ExecuteJobBuilderRequestResult{Err: ErrUnsupportedOpForRST}
 }
 
 func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
@@ -544,22 +544,22 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		}
 	}
 
-	walkChan := make(chan *filesystem.StreamPathResult, chanSize)
+	walkCh := make(chan *filesystem.StreamPathResult, chanSize)
 	send := func(result *filesystem.StreamPathResult) bool {
 		select {
 		case <-ctx.Done():
 			select {
-			case walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
+			case walkCh <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
 			default:
 			}
 			return false
-		case walkChan <- result:
+		case walkCh <- result:
 			return true
 		}
 	}
 
 	go func() {
-		defer close(walkChan)
+		defer close(walkCh)
 
 		prefixWalk := func() (keysFound bool) {
 			// Size the request's MaxKeys to minimize requests. Sizing with respect to maxKeys
@@ -700,7 +700,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		prefixWalk()
 	}()
 
-	return walkChan, nil
+	return walkCh, nil
 }
 
 // s3ResumeToken holds pagination state so a walk can be resumed. When the list-object api supports

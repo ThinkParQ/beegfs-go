@@ -249,7 +249,7 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 	return m.clientBulkOperation.AddRequest(ctx, request)
 }
 
-func (m *bulkOperationManager) Execute(ctx context.Context) (walkChan <-chan *filesystem.StreamPathResult, getResults BulkRequestWaitForResultFn, err error) {
+func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, getResults BulkRequestWaitForResultFn, err error) {
 	return m.clientBulkOperation.Execute(ctx)
 }
 
@@ -257,7 +257,7 @@ func (m *bulkOperationManager) Resume(ctx context.Context) (walkCh <-chan *files
 	return m.clientBulkOperation.Resume(ctx)
 }
 
-func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkChan <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
+func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
 	return m.clientBulkOperation.Cancel(ctx, reason)
 }
 

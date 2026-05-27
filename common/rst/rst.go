@@ -131,7 +131,7 @@ type Provider interface {
 	//
 	// Unclassified errors are treated as failed by callers.
 	//
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, err error)
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -190,6 +190,12 @@ type Provider interface {
 	// stateMountPath is reserved for provider state that must survive builder reschedules or
 	// retries. Return an error only when the bulk operation cannot be opened in a usable state.
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
+}
+
+type ExecuteJobBuilderRequestResult struct {
+	Reschedule bool
+	Delay      time.Duration
+	Err        error
 }
 
 type BulkRequestWaitForResultFn func() (reschedule bool, delay time.Duration, err error)

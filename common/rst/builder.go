@@ -84,20 +84,18 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
 	if !workRequest.HasBuilder() {
-		err = ErrReqAndRSTTypeMismatch
-		return
+		return &ExecuteJobBuilderRequestResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 
-	reschedule, delay, err = c.executeBuilderRequest(ctx, workRequest, jobSubmissionChan)
-	if err != nil || reschedule {
-		return
+	result := c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh)
+	if result.Err != nil || result.Reschedule {
+		return result
 	}
 
-	builder := workRequest.GetBuilder()
-	err = MarkBuilderCancelled(c.getBuilderResults(builder))
-	return
+	result.Err = c.getBuilderResults(workRequest.GetBuilder())
+	return result
 }
 
 func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
@@ -187,25 +185,24 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
 	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	if bulkErr != nil {
-		return false, 0, MarkBuilderFailed(bulkErr)
+		return &ExecuteJobBuilderRequestResult{Err: MarkBuilderFailed(bulkErr)}
 	}
 
 	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
 	requestBuildController.Start()
 
-	abort := func(err error) (bool, time.Duration, error) {
-		err = MarkBuilderCancelled(fmt.Errorf("job builder request was aborted: %w", err))
-		bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err)
-		if bulkErr != nil {
-			return false, 0, MarkBuilderFailed(errors.Join(err, bulkErr))
+	abort := func(err error) *ExecuteJobBuilderRequestResult {
+		err = fmt.Errorf("job builder request was aborted: %w", err)
+		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
+			return &ExecuteJobBuilderRequestResult{Err: MarkBuilderFailed(errors.Join(err, bulkErr))}
 		}
-		return false, 0, err
+		return &ExecuteJobBuilderRequestResult{Err: MarkBuilderCancelled(err)}
 	}
 
 	waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController)
@@ -251,12 +248,13 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		workRequest.SetExternalId(walkCompleteSentinel)
 	}
 
-	reschedule := walkReschedule || bulkReschedule
-	var delay time.Duration
+	result := &ExecuteJobBuilderRequestResult{}
+	result.Reschedule = walkReschedule || bulkReschedule
 	if !walkReschedule && bulkDelay != 0 {
-		delay = bulkDelay
+		result.Delay = bulkDelay
 	}
-	return reschedule, delay, nil
+
+	return result
 }
 
 func (c *JobBuilderClient) getBuilderResults(builder *flex.BuilderJob) (err error) {
@@ -290,6 +288,7 @@ func (c *JobBuilderClient) getBuilderResults(builder *flex.BuilderJob) (err erro
 		if !IsValidRstId(cfg.GetRemoteStorageTarget()) {
 			err = appendError(err, fmt.Errorf("--%s was not provided so relying on configured rstIds and stub urls", RemoteTargetFlag))
 		}
+		err = MarkBuilderCancelled(err)
 	}
 	return
 }
