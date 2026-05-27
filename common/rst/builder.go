@@ -21,7 +21,6 @@ type JobBuilderClient struct {
 	ctx        context.Context
 	rstMap     map[uint32]Provider
 	mountPoint filesystem.Provider
-	stateMu    *sync.Mutex
 }
 
 var _ Provider = &JobBuilderClient{}
@@ -85,19 +84,19 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, bulkErr error, err error) {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, err error) {
 	if !workRequest.HasBuilder() {
 		err = ErrReqAndRSTTypeMismatch
 		return
 	}
 
-	reschedule, delay, bulkErr, err = c.executeBuilderRequest(ctx, workRequest, jobSubmissionChan)
-	if err != nil || bulkErr != nil || reschedule {
+	reschedule, delay, err = c.executeBuilderRequest(ctx, workRequest, jobSubmissionChan)
+	if err != nil || reschedule {
 		return
 	}
 
 	builder := workRequest.GetBuilder()
-	err = c.getBuilderResults(builder)
+	err = MarkBuilderCancelled(c.getBuilderResults(builder))
 	return
 }
 
@@ -188,22 +187,25 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
 	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	if bulkErr != nil {
-		return false, 0, bulkErr, nil
+		return false, 0, MarkBuilderFailed(bulkErr)
 	}
 
 	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
-	waitForRequests := requestBuildController.Start()
+	requestBuildController.Start()
 
-	abort := func(err error) (bool, time.Duration, error, error) {
-		err = fmt.Errorf("job builder request was aborted: %w", err)
+	abort := func(err error) (bool, time.Duration, error) {
+		err = MarkBuilderCancelled(fmt.Errorf("job builder request was aborted: %w", err))
 		bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err)
-		return false, 0, bulkErr, err
+		if bulkErr != nil {
+			return false, 0, MarkBuilderFailed(errors.Join(err, bulkErr))
+		}
+		return false, 0, err
 	}
 
 	waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController)
@@ -235,7 +237,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	// Close the request build controller and wait for the results. Be sure to update the builder
 	// counters before processing err.
 	requestBuildController.Close()
-	results, err := waitForRequests()
+	results, err := requestBuildController.Wait()
 	builder.Submitted += results.Submitted
 	builder.Errors += results.Errors
 	builder.Conflicts += results.Conflicts
@@ -254,7 +256,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	if !walkReschedule && bulkDelay != 0 {
 		delay = bulkDelay
 	}
-	return reschedule, delay, nil, nil
+	return reschedule, delay, nil
 }
 
 func (c *JobBuilderClient) getBuilderResults(builder *flex.BuilderJob) (err error) {
@@ -375,17 +377,20 @@ func (c *JobBuilderClient) newRequestBuildController(
 	tryRouteToBulkOperation tryRouteToBulkOperationFn,
 ) *requestBuildController {
 	g, gCtx := errgroup.WithContext(ctx)
-	controller := &requestBuildController{
+	walkMultiplexer := newRequestBuildWalkMultiplexer(gCtx, cap(jobSubmissionCh))
+	worker := c.newRequestBuilderWorker(cfg, walkMultiplexer.Output(), jobSubmissionCh, tryRouteToBulkOperation)
+	workerPool := &requestBuildWorkerPool{
 		group:                   g,
 		ctx:                     gCtx,
 		parentCtx:               ctx,
+		workerBase:              worker,
 		getSubmissionQueueDepth: func() int { return len(jobSubmissionCh) },
-		walkCh:                  make(chan *filesystem.StreamPathResult, max(1, cap(jobSubmissionCh))),
 	}
-	worker := c.newRequestBuilderWorker(cfg, controller.walkCh, jobSubmissionCh, tryRouteToBulkOperation)
-	controller.workers = []*requestBuilderWorker{worker}
 
-	return controller
+	return &requestBuildController{
+		walkMultiplexer: walkMultiplexer,
+		workerPool:      workerPool,
+	}
 }
 
 func (c *JobBuilderClient) newRequestBuilderWorker(

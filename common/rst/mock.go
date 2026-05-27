@@ -128,14 +128,14 @@ func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 	return err
 }
 
-func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
 	if m.hasExpectedCall("ExecuteJobBuilderRequest") {
 		args := m.Called(ctx, workRequest, jobSubmissionChan)
 		delay, _ := args.Get(1).(time.Duration)
-		return args.Bool(0), delay, args.Error(2), args.Error(3)
+		return args.Bool(0), delay, args.Error(2)
 	}
 
-	return false, 0, nil, ErrUnsupportedOpForRST
+	return false, 0, ErrUnsupportedOpForRST
 }
 
 func (m *MockClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {

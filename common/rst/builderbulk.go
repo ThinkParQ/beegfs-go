@@ -282,3 +282,76 @@ func (m *bulkOperationManager) GetErrors() error {
 
 	return fmt.Errorf("bulk operation %s: (%s)", m.Operation, *m.errors)
 }
+
+type bulkRequestHandles struct {
+	walkChs    map[string]<-chan *filesystem.StreamPathResult
+	getResults map[string]BulkRequestWaitForResultFn
+}
+
+func (b *bulkRequestHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkRequestWaitForResultFn) {
+	if b.walkChs == nil {
+		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+	}
+	if b.getResults == nil {
+		b.getResults = map[string]BulkRequestWaitForResultFn{}
+	}
+	b.walkChs[managerKey] = walkCh
+	b.getResults[managerKey] = getResult
+}
+
+func (b *bulkRequestHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+	for _, walkCh := range b.walkChs {
+		walkChs = append(walkChs, walkCh)
+	}
+	return walkChs
+}
+
+func (b *bulkRequestHandles) getMergedResults() (reschedule bool, delay time.Duration, errs map[string]error) {
+	errs = map[string]error{}
+	for managerKey, getResult := range b.getResults {
+		resultReschedule, resultDelay, resultErr := getResult()
+		if resultReschedule {
+			reschedule = true
+			if delay == 0 || delay > resultDelay {
+				delay = resultDelay
+			}
+		}
+		if resultErr != nil {
+			errs[managerKey] = resultErr
+		}
+	}
+	return
+}
+
+type bulkWaitHandles struct {
+	walkChs map[string]<-chan *filesystem.StreamPathResult
+	waits   map[string]BulkWaitFn
+}
+
+func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn) {
+	if b.walkChs == nil {
+		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+	}
+	if b.waits == nil {
+		b.waits = map[string]BulkWaitFn{}
+	}
+	b.walkChs[managerKey] = walkCh
+	b.waits[managerKey] = wait
+}
+
+func (b *bulkWaitHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+	for _, walkCh := range b.walkChs {
+		walkChs = append(walkChs, walkCh)
+	}
+	return walkChs
+}
+
+func (b *bulkWaitHandles) getMergedResults() map[string]error {
+	errs := map[string]error{}
+	for managerKey, wait := range b.waits {
+		if err := wait(); err != nil {
+			errs[managerKey] = err
+		}
+	}
+	return errs
+}

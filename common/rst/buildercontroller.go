@@ -10,112 +10,71 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type bulkRequestHandles struct {
-	walkChs    map[string]<-chan *filesystem.StreamPathResult
-	getResults map[string]BulkRequestWaitForResultFn
-}
-
-func (b *bulkRequestHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkRequestWaitForResultFn) {
-	if b.walkChs == nil {
-		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
-	}
-	if b.getResults == nil {
-		b.getResults = map[string]BulkRequestWaitForResultFn{}
-	}
-	b.walkChs[managerKey] = walkCh
-	b.getResults[managerKey] = getResult
-}
-
-func (b *bulkRequestHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
-	for _, walkCh := range b.walkChs {
-		walkChs = append(walkChs, walkCh)
-	}
-	return walkChs
-}
-
-func (b *bulkRequestHandles) getMergedResults() (reschedule bool, delay time.Duration, errs map[string]error) {
-	errs = map[string]error{}
-	for managerKey, getResult := range b.getResults {
-		resultReschedule, resultDelay, resultErr := getResult()
-		if resultReschedule {
-			reschedule = true
-			if delay == 0 || delay > resultDelay {
-				delay = resultDelay
-			}
-		}
-		if resultErr != nil {
-			errs[managerKey] = resultErr
-		}
-	}
-	return
-}
-
-type bulkWaitHandles struct {
-	walkChs map[string]<-chan *filesystem.StreamPathResult
-	waits   map[string]BulkWaitFn
-}
-
-func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn) {
-	if b.walkChs == nil {
-		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
-	}
-	if b.waits == nil {
-		b.waits = map[string]BulkWaitFn{}
-	}
-	b.walkChs[managerKey] = walkCh
-	b.waits[managerKey] = wait
-}
-
-func (b *bulkWaitHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
-	for _, walkCh := range b.walkChs {
-		walkChs = append(walkChs, walkCh)
-	}
-	return walkChs
-}
-
-func (b *bulkWaitHandles) getMergedResults() map[string]error {
-	errs := map[string]error{}
-	for managerKey, wait := range b.waits {
-		if err := wait(); err != nil {
-			errs[managerKey] = err
-		}
-	}
-	return errs
-}
-
-type requestBuildControllerResult func() (*requestBuilderWorkerResult, error)
-type submissionQueueDepthFn func() int
-
 type requestBuildController struct {
-	group                   *errgroup.Group
-	ctx                     context.Context
-	parentCtx               context.Context
-	workers                 []*requestBuilderWorker
-	getSubmissionQueueDepth submissionQueueDepthFn
-	workersStarted          int
-	walkCh                  chan *filesystem.StreamPathResult
-	closeOnce               sync.Once
+	walkMultiplexer *requestBuildWalkMultiplexer
+	workerPool      *requestBuildWorkerPool
+}
+
+func (c *requestBuildController) Start() {
+	c.workerPool.Start()
+}
+
+func (c *requestBuildController) Wait() (*requestBuilderWorkerResult, error) {
+	return c.workerPool.Wait()
 }
 
 func (c *requestBuildController) Close() {
-	c.closeOnce.Do(func() {
-		close(c.walkCh)
-	})
+	c.walkMultiplexer.Close()
 }
 
 func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {
+	return c.walkMultiplexer.AddWalks(walkChs)
+}
+
+type requestBuildWalkMultiplexer struct {
+	ctx           context.Context
+	mergeCh       chan *filesystem.StreamPathResult
+	mergeChClosed bool
+	mu            sync.Mutex
+	done          *sync.Cond
+	activeInputs  int
+	closed        bool
+}
+
+func newRequestBuildWalkMultiplexer(ctx context.Context, bufferSize int) *requestBuildWalkMultiplexer {
+	mergeCh := make(chan *filesystem.StreamPathResult, max(1, bufferSize))
+	multiplexer := &requestBuildWalkMultiplexer{ctx: ctx, mergeCh: mergeCh}
+	multiplexer.done = sync.NewCond(&multiplexer.mu)
+	return multiplexer
+}
+
+func (m *requestBuildWalkMultiplexer) Output() <-chan *filesystem.StreamPathResult {
+	return m.mergeCh
+}
+
+func (m *requestBuildWalkMultiplexer) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {
 	if len(walkChs) == 0 {
 		return func() {}
 	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return func() {}
+	}
+	m.activeInputs += len(walkChs)
+	m.mu.Unlock()
 
 	var wg sync.WaitGroup
 	for _, ch := range walkChs {
 		wg.Add(1)
 		go func(ch <-chan *filesystem.StreamPathResult) {
 			defer wg.Done()
+			defer m.addWalksDone()
+
 			for {
 				select {
-				case <-c.ctx.Done():
+				case <-m.ctx.Done():
 					return
 				case walkPath, ok := <-ch:
 					if !ok {
@@ -123,9 +82,9 @@ func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPat
 					}
 
 					select {
-					case <-c.ctx.Done():
+					case <-m.ctx.Done():
 						return
-					case c.walkCh <- walkPath:
+					case m.mergeCh <- walkPath:
 					}
 				}
 			}
@@ -137,51 +96,68 @@ func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPat
 	}
 }
 
-func (c *requestBuildController) addWorker(doneCh chan<- struct{}) {
-	if len(c.workers) == 0 {
-		return
-	}
+func (m *requestBuildWalkMultiplexer) addWalksDone() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	var worker *requestBuilderWorker
-	if c.workersStarted == 0 {
-		worker = c.workers[0]
-	} else {
-		worker = c.workers[0].Clone()
-		c.workers = append(c.workers, worker)
+	m.activeInputs--
+	if m.closed && m.activeInputs == 0 && !m.mergeChClosed {
+		close(m.mergeCh)
+		m.mergeChClosed = true
+		m.done.Broadcast()
 	}
-
-	c.group.Go(func() error {
-		return worker.Run(c.ctx, doneCh)
-	})
-	c.workersStarted++
 }
 
-// One worker starts immediately. Additional workers are added only when the job submission channel
-// appears underutilized, meaning the current workers are not generating enough work to keep it
-// filled. The controller uses a low `len(jobSubmissionChan)` relative to the number of active
-// workers as a signal that downstream pressure is low, and increases parallelism in response.
-//
-// Processing finishes when input work is exhausted, the context is canceled, or any worker or the
-// controller returns an error
-func (c *requestBuildController) Start() requestBuildControllerResult {
+func (m *requestBuildWalkMultiplexer) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.closed = true
+
+	if m.activeInputs == 0 && !m.mergeChClosed {
+		close(m.mergeCh)
+		m.mergeChClosed = true
+		m.done.Broadcast()
+	}
+
+	for !m.mergeChClosed {
+		m.done.Wait()
+	}
+}
+
+type submissionQueueDepthFn func() int
+
+type requestBuildWorkerPool struct {
+	group                   *errgroup.Group
+	ctx                     context.Context
+	parentCtx               context.Context
+	workerBase              *requestBuilderWorker
+	workers                 []*requestBuilderWorker
+	getSubmissionQueueDepth submissionQueueDepthFn
+	workersStarted          int
+}
+
+func (p *requestBuildWorkerPool) Start() {
 	maxWorkers := runtime.GOMAXPROCS(0)
 	doneCh := make(chan struct{}, maxWorkers)
-	c.group.Go(func() error {
+	p.group.Go(func() error {
 		lowThresholdTicks := 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
 
-		c.addWorker(doneCh)
+		p.addWorker(doneCh)
 		for {
 			select {
-			case <-c.ctx.Done():
-				if c.parentCtx.Err() != nil {
-					return c.parentCtx.Err()
+			case <-p.ctx.Done():
+				if p.parentCtx.Err() != nil {
+					return p.parentCtx.Err()
 				}
 				return nil
 			case <-doneCh:
 				return nil
-			case <-time.After(100 * time.Millisecond):
-				queueDepth := c.getSubmissionQueueDepth()
-				workers := len(c.workers)
+			case <-ticker.C:
+				queueDepth := p.getSubmissionQueueDepth()
+				workers := p.workersStarted
 				if workers < maxWorkers && queueDepth <= 2*workers {
 					if queueDepth <= workers {
 						lowThresholdTicks += 3
@@ -190,7 +166,7 @@ func (c *requestBuildController) Start() requestBuildControllerResult {
 					}
 
 					if lowThresholdTicks >= 3 {
-						c.addWorker(doneCh)
+						p.addWorker(doneCh)
 						lowThresholdTicks = 0
 					}
 				} else {
@@ -199,14 +175,31 @@ func (c *requestBuildController) Start() requestBuildControllerResult {
 			}
 		}
 	})
+}
 
-	return func() (*requestBuilderWorkerResult, error) {
-		err := c.group.Wait()
-
-		aggregate := &requestBuilderWorkerResult{}
-		for _, worker := range c.workers {
-			aggregate = aggregate.Merge(worker.GetResult())
-		}
-		return aggregate, err
+func (p *requestBuildWorkerPool) addWorker(doneCh chan<- struct{}) {
+	if p.workerBase == nil {
+		return
 	}
+
+	worker := p.workerBase
+	if p.workersStarted > 0 {
+		worker = p.workerBase.Clone()
+	}
+
+	p.workers = append(p.workers, worker)
+	p.group.Go(func() error {
+		return worker.Run(p.ctx, doneCh)
+	})
+	p.workersStarted++
+}
+
+func (p *requestBuildWorkerPool) Wait() (*requestBuilderWorkerResult, error) {
+	err := p.group.Wait()
+
+	aggregate := &requestBuilderWorkerResult{}
+	for _, worker := range p.workers {
+		aggregate = aggregate.Merge(worker.GetResult())
+	}
+	return aggregate, err
 }

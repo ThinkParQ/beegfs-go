@@ -413,8 +413,8 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error, error) {
-	return false, 0, nil, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, time.Duration, error) {
+	return false, 0, ErrUnsupportedOpForRST
 }
 
 func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {

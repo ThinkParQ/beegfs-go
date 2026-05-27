@@ -48,8 +48,7 @@ func (t *testBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *f
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t *testing.T) {
 	controller := &requestBuildController{
-		ctx:    context.Background(),
-		walkCh: make(chan *filesystem.StreamPathResult, 1),
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
 	}
 
 	cancelErrs := new(string)
@@ -70,8 +69,7 @@ func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t 
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t *testing.T) {
 	controller := &requestBuildController{
-		ctx:    context.Background(),
-		walkCh: make(chan *filesystem.StreamPathResult, 1),
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
 	}
 
 	resumeErrs := new(string)
@@ -93,8 +91,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *testing.T) {
 	controller := &requestBuildController{
-		ctx:    context.Background(),
-		walkCh: make(chan *filesystem.StreamPathResult, 1),
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)
@@ -128,8 +125,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *t
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsErrorsWhenCancelFails(t *testing.T) {
 	controller := &requestBuildController{
-		ctx:    context.Background(),
-		walkCh: make(chan *filesystem.StreamPathResult, 1),
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)

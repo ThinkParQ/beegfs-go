@@ -400,12 +400,11 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 
 	var reschedule bool
 	var rescheduleDelay time.Duration
-	var bulkErr error
 	var err error
 	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionChan)
-		reschedule, rescheduleDelay, bulkErr, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		reschedule, rescheduleDelay, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
 	}()
 
 	total := 0
@@ -436,22 +435,27 @@ processJobs:
 
 	builder := request.WorkRequest.GetBuilder()
 	bulkOperations := builder.GetBulkOperations()
-	if bulkOperations != nil {
-		result.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{
-			BulkOperations: bulkOperations,
-		}
+	if bulkOperations == nil {
+		bulkOperations = []*flex.BulkOperation{}
+	}
+	result.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{
+		BulkOperations: bulkOperations,
 	}
 
-	if bulkErr != nil {
-		status.SetState(flex.Work_FAILED)
-		message := "job builder failed to complete bulk operation(s): " + bulkErr.Error()
-		if err != nil {
-			message += "; job builder failed to complete: " + err.Error()
+	if err != nil {
+		// Builder-level termination is driven by classified err. Individual request errors should already
+		// have been reported on the submitted requests via GenerationStatus and accounted for in the builder
+		// counters rather than forcing builder termination here.
+		if errors.Is(err, rst.ErrBuilderCancelled) {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("job builder failed to complete: " + err.Error())
+		} else if errors.Is(err, rst.ErrBuilderFailed) {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder failed to complete: " + err.Error())
+		} else {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder returned unclassified error: " + err.Error())
 		}
-		status.SetMessage(message)
-	} else if err != nil {
-		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage("job builder failed to complete: " + err.Error())
 	} else if reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		message := "waiting for builder job to continue"

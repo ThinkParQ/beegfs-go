@@ -41,6 +41,31 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+var (
+	// ErrBuilderFailed marks a builder-level termination that must leave the work request in the
+	// FAILED state. Use it when the builder can no longer continue and the builder/provider state
+	// may require cleanup or manual attention.
+	ErrBuilderFailed = errors.New("builder failed")
+	// ErrBuilderCancelled marks a builder-level termination that must leave the work request in
+	// the CANCELLED state. Use it when the builder can no longer continue, but it has not entered
+	// a failed/invalid state that requires failed-job cleanup semantics.
+	ErrBuilderCancelled = errors.New("builder cancelled")
+)
+
+func MarkBuilderFailed(err error) error {
+	if err == nil || errors.Is(err, ErrBuilderFailed) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrBuilderFailed, err)
+}
+
+func MarkBuilderCancelled(err error) error {
+	if err == nil || errors.Is(err, ErrBuilderCancelled) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrBuilderCancelled, err)
+}
+
 const (
 	// LockedAccessFlags defines the access flags applied when locking or unlocking job request and stub files.
 	// Always use this constant when managing RST locks.
@@ -85,12 +110,28 @@ type Provider interface {
 	// rescheduled==true to reschedule the remaining work for later which allows other work time to
 	// complete.
 	//
-	// Any bulk operation errors should be aggregated and returned through bulkErr. A non-nil
-	// bulkErr means the builder has started a bulk operation that failed and should be cancelled.
-	// All other builder errors should be aggregated and returned through err. A non-nil err stops
-	// the builder work but does not imply any provider-side abort or cleanup is required.
+	// Builder reporting is split across three layers:
 	//
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, bulkErr error, err error)
+	//   - Individual job request outcomes should be reported on the generated JobRequest via
+	//     GenerationStatus whenever the builder can continue generating more requests.
+	//   - Builder progress and reschedule state should be persisted on the builder itself, notably
+	//     Submitted, Errors, Conflicts, and any resume cursor stored in workRequest.ExternalId.
+	//   - Builder termination must be reported through err when the builder can no longer safely or
+	//     usefully continue generating additional requests.
+	//
+	// Returning a non-nil err means the builder execution is over. err must be classified with one
+	// of the builder sentinels:
+	//
+	//   - ErrBuilderCancelled means the builder must stop early because continued submissions are
+	//     likely to fail or are otherwise unsafe, but the builder/provider state is not known to be
+	//     failed or invalid in a way that requires failed-job cleanup semantics.
+	//   - ErrBuilderFailed means the builder must stop and the builder/provider state must be
+	//     treated as failed. Use it when cleanup may be required or state is invalid,
+	//     inconsistent, incomplete, or otherwise requires manual attention.
+	//
+	// Unclassified errors are treated as failed by callers.
+	//
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, delay time.Duration, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
