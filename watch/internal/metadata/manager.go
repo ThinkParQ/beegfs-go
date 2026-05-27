@@ -301,7 +301,7 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	handshakeResp := &HandshakeResponse{}
 	if !handler.recv(handshakeResp) {
 		return
-	} else if handshakeResp.Major != m.eventVersion.major && handshakeResp.Minor != m.eventVersion.minor {
+	} else if handshakeResp.Major != m.eventVersion.major {
 		m.log.Error("unsupported metadata event protocol detected",
 			zap.String("metaProtocolVersion", fmt.Sprintf("%d.%d", handshakeResp.Major, handshakeResp.Minor)),
 			zap.String("watchProtocolVersion", fmt.Sprintf("%d.%d", m.eventVersion.major, m.eventVersion.minor)))
