@@ -131,7 +131,7 @@ type Provider interface {
 	//
 	// Unclassified errors are treated as failed by callers.
 	//
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -192,13 +192,13 @@ type Provider interface {
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 
-type ExecuteJobBuilderRequestResult struct {
+type SchedulingResult struct {
 	Reschedule bool
 	Delay      time.Duration
 	Err        error
 }
 
-type BulkRequestWaitForResultFn func() (reschedule bool, delay time.Duration, err error)
+type BulkRequestWaitForResultFn func() *SchedulingResult
 type BulkWaitFn func() error
 type clientBulkOperation interface {
 	// AddRequest adds a single request to the bulk operation state.

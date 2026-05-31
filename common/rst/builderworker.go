@@ -14,7 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type requestPathResolver func(walkPath string) (inMountPath string, remotePath string, err error)
+type requestPathResolverFn func(walkPath string) (inMountPath string, remotePath string, err error)
 type tryRouteToBulkOperationFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
 type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error)
 type updateDirRstConfigFn func(ctx context.Context, rstID uint32, path string) error
@@ -54,7 +54,7 @@ type requestBuilderWorker struct {
 	builderCfg              *flex.JobRequestCfg
 	tryRouteToBulkOperation tryRouteToBulkOperationFn
 	walkCh                  <-chan *filesystem.StreamPathResult
-	getPaths                requestPathResolver
+	getPaths                requestPathResolverFn
 	getPathState            getPathStateFn
 	updateDirRstConfig      updateDirRstConfigFn
 	prepareFileState        prepareFileStateForWorkRequestsFn
@@ -211,10 +211,24 @@ func (w *requestBuilderWorker) processJobRequestCfg(ctx context.Context, cfg *fl
 	if request.HasGenerationStatus() {
 		canReleaseLock = true
 	} else {
-		var skip bool
-		if skip, err = w.routeRequest(ctx, request, pathState.LockedInfo, pathState.LockAcquired); err != nil || skip {
-			return
+		if !request.HasBulkInfo() {
+			// The file access lock must be acquired for the path. If the lock was already held, it
+			// indicates a job conflict. Offloaded files are the exception because their lock is held
+			// until their contents are retrieved.
+			if !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo) {
+				w.result.Conflicts++
+				return
+			}
+
+			if skip, routeErr := w.tryRouteToBulkOperation(ctx, request); routeErr != nil {
+				// Request failed to be routed and since the file access lock was newly acquired, it
+				// may be released.
+				return true, routeErr
+			} else if skip {
+				return
+			}
 		}
+
 		canReleaseLock = w.prepareJobRequestForSubmission(ctx, request, cfg, pathState.EntryInfo, pathState.OwnerNode)
 	}
 

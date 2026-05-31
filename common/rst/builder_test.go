@@ -3,7 +3,6 @@ package rst
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -26,7 +25,7 @@ func (t *trackingBulkOperation) AddRequest(ctx context.Context, request *beeremo
 func (t *trackingBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkRequestWaitForResultFn, error) {
 	walkCh := make(chan *filesystem.StreamPathResult)
 	close(walkCh)
-	return walkCh, func() (bool, time.Duration, error) { return false, 0, nil }, nil
+	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
 func (t *trackingBulkOperation) Resume(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {

@@ -79,10 +79,10 @@ func TestMockClientBulkOperationReplaysArchivedRequestsOnce(t *testing.T) {
 	}
 	assert.Equal(t, []string{"remote/file"}, replayPaths)
 
-	reschedule, delay, err := getResults()
-	require.NoError(t, err)
-	assert.False(t, reschedule)
-	assert.Equal(t, time.Duration(0), delay)
+	result := getResults()
+	require.NoError(t, result.Err)
+	assert.False(t, result.Reschedule)
+	assert.Equal(t, time.Duration(0), result.Delay)
 
 	replayedRequest := client.GetJobRequest(cfg)
 	include, operation = client.IncludeInBulkRequest(context.Background(), replayedRequest)

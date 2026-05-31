@@ -13,9 +13,11 @@ import (
 )
 
 type testBulkOperation struct {
-	resumeErr error
-	cancelErr error
-	waitErr   error
+	executeErr    error
+	executeResult *SchedulingResult
+	resumeErr     error
+	cancelErr     error
+	waitErr       error
 }
 
 func (t *testBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
@@ -23,7 +25,18 @@ func (t *testBulkOperation) AddRequest(ctx context.Context, request *beeremote.J
 }
 
 func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkRequestWaitForResultFn, error) {
-	return nil, nil, nil
+	if t.executeErr != nil {
+		return nil, nil, t.executeErr
+	}
+
+	walkCh := make(chan *filesystem.StreamPathResult)
+	close(walkCh)
+	return walkCh, func() *SchedulingResult {
+		if t.executeResult != nil {
+			return t.executeResult
+		}
+		return &SchedulingResult{}
+	}, nil
 }
 
 func (t *testBulkOperation) Resume(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
@@ -87,6 +100,71 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t
 	assert.NoError(t, err)
 	require.NoError(t, wait())
 	assert.Empty(t, *resumeErrs)
+}
+
+func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t *testing.T) {
+	controller := &requestBuildController{
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 2),
+	}
+
+	manager := &jobBuilderBulkOperationsManager{
+		managers: map[string]*bulkOperationManager{
+			"1-retrieve": {
+				clientBulkOperation: &testBulkOperation{
+					executeResult: &SchedulingResult{Reschedule: true, Delay: 5},
+				},
+				Operation: "retrieve",
+				errors:    new(string),
+			},
+			"1-archive": {
+				clientBulkOperation: &testBulkOperation{
+					executeResult: &SchedulingResult{Reschedule: true, Delay: 3},
+				},
+				Operation: "archive",
+				errors:    new(string),
+			},
+		},
+	}
+
+	result := manager.Execute(context.Background(), controller)
+	require.NotNil(t, result)
+	require.NoError(t, result.Err)
+	assert.True(t, result.Reschedule)
+	assert.Equal(t, 3, int(result.Delay))
+}
+
+func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t *testing.T) {
+	controller := &requestBuildController{
+		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 2),
+	}
+
+	openErrs := new(string)
+	waitErrs := new(string)
+	manager := &jobBuilderBulkOperationsManager{
+		managers: map[string]*bulkOperationManager{
+			"1-retrieve": {
+				clientBulkOperation: &testBulkOperation{executeErr: fmt.Errorf("failed to open execute state")},
+				Operation:           "retrieve",
+				errors:              openErrs,
+			},
+			"1-archive": {
+				clientBulkOperation: &testBulkOperation{
+					executeResult: &SchedulingResult{Err: fmt.Errorf("failed waiting for execute completion")},
+				},
+				Operation: "archive",
+				errors:    waitErrs,
+			},
+		},
+	}
+
+	result := manager.Execute(context.Background(), controller)
+	require.NotNil(t, result)
+	if assert.Error(t, result.Err) {
+		assert.True(t, strings.Contains(result.Err.Error(), "bulk operation retrieve: (failed to open execute state)"))
+		assert.True(t, strings.Contains(result.Err.Error(), "bulk operation archive: (failed waiting for execute completion)"))
+	}
+	assert.Equal(t, "failed to open execute state", *openErrs)
+	assert.Equal(t, "failed waiting for execute completion", *waitErrs)
 }
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *testing.T) {

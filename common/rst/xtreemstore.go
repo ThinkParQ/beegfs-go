@@ -347,15 +347,17 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 	// // TESTING ONLY, TEMPORARY:
 	// // Replace manager.Execute(ctx) with manager.ExecuteTest(ctx) to exercise the bulk-request
 	// // plumbing without an xtreemstore retrieve-session.
-	// getResults = func() (bool, time.Duration, error) {
+	// getResults = func() *SchedulingResult {
 	// 	defer close(m.WalkCh)
-	// 	return m.ExecuteTest(ctx)
+	// 	reschedule, delay, err := m.ExecuteTest(ctx)
+	// 	return &SchedulingResult{Reschedule: reschedule, Delay: delay, Err: err}
 	// }
 
-	getResults = func() (bool, time.Duration, error) {
+	getResults = func() *SchedulingResult {
 		defer m.closeState()
 		defer close(m.walkCh)
-		return m.execute(ctx)
+		reschedule, delay, err := m.execute(ctx)
+		return &SchedulingResult{Reschedule: reschedule, Delay: delay, Err: err}
 	}
 	return m.walkCh, getResults, nil
 }

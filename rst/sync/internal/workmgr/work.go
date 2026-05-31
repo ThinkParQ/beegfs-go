@@ -399,23 +399,23 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	workResult := entry.WorkResult
 	status := workResult.GetStatus()
 
-	executeResultCh := make(chan *rst.ExecuteJobBuilderRequestResult)
+	schedulingResultCh := make(chan *rst.SchedulingResult)
 	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionCh)
-		executeResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
+		schedulingResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
 	}()
 
-	var executeResult *rst.ExecuteJobBuilderRequestResult
+	var schedulingResult *rst.SchedulingResult
 	totalErrors := 0
 	for {
-		if executeResultCh == nil && jobSubmissionCh == nil {
+		if schedulingResultCh == nil && jobSubmissionCh == nil {
 			break
 		}
 
 		select {
-		case executeResult = <-executeResultCh:
-			executeResultCh = nil
+		case schedulingResult = <-schedulingResultCh:
+			schedulingResultCh = nil
 		case jobRequest, ok := <-jobSubmissionCh:
 			if !ok {
 				jobSubmissionCh = nil
@@ -427,8 +427,8 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 			}
 		}
 	}
-	if executeResult == nil {
-		executeResult = &rst.ExecuteJobBuilderRequestResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned a nil result"))}
+	if schedulingResult == nil {
+		schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
 	}
 
 	bulkOperations := builder.GetBulkOperations()
@@ -437,8 +437,8 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	}
 	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
 
-	if executeResult.Err != nil {
-		err := executeResult.Err
+	if schedulingResult.Err != nil {
+		err := schedulingResult.Err
 		// Builder-level termination is driven by classified err. Individual request errors should already
 		// have been reported on the submitted requests via GenerationStatus and accounted for in the builder
 		// counters rather than forcing builder termination here.
@@ -452,14 +452,14 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("job builder returned unclassified error: " + err.Error())
 		}
-	} else if executeResult.Reschedule {
+	} else if schedulingResult.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		message := "waiting for builder job to continue"
 		if totalErrors > 0 {
 			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
 		}
 		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now().Add(executeResult.Delay)
+		entry.ExecuteAfter = time.Now().Add(schedulingResult.Delay)
 		w.sendWorkResult(work, workResult.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		mappedPriorityId := priorityIdMap[request.GetPriority()]

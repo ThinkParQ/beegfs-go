@@ -7,7 +7,6 @@ import (
 	"maps"
 	"path"
 	"sync"
-	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -82,7 +81,10 @@ func (m *jobBuilderBulkOperationsManager) bulkOperationKey(rstId uint32, operati
 	return fmt.Sprintf("%d-%s", rstId, operation)
 }
 
-func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controller *requestBuildController) (reschedule bool, delay time.Duration, err error) {
+// TODO: This creates duplicate error messages in the Abort code paths since.
+
+func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controller *requestBuildController) (result *SchedulingResult) {
+	result = &SchedulingResult{}
 	managers := m.getManagersSnapshot()
 	if len(managers) == 0 {
 		return
@@ -93,10 +95,7 @@ func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controlle
 		walkCh, getResult, executeErr := manager.Execute(ctx)
 		if executeErr != nil {
 			manager.AppendError(executeErr)
-
-			// QUESTION: Should we fail builder because of these bulk operation errors
-			err = errors.Join(err, manager.GetErrors())
-
+			result.Err = errors.Join(result.Err, manager.GetErrors())
 			continue
 		}
 		handles.add(managerKey, walkCh, getResult)
@@ -106,18 +105,19 @@ func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controlle
 	waitForWalks()
 
 	executeErrs := map[string]error{}
-	reschedule, delay, executeErrs = handles.getMergedResults()
+	mergedResult, executeErrs := handles.getMergedResults()
+	result.Reschedule = mergedResult.Reschedule
+	result.Delay = mergedResult.Delay
+	result.Err = errors.Join(result.Err, mergedResult.Err)
 	for key, executeErr := range executeErrs {
 		manager := m.getManager(key)
 		if manager == nil {
-			err = errors.Join(err, fmt.Errorf("bulk operation %s failed: %w", key, executeErr))
+			result.Err = errors.Join(result.Err, fmt.Errorf("bulk operation %s failed: %w", key, executeErr))
 			continue
 		}
 
 		manager.AppendError(executeErr)
-
-		// QUESTION: Should we fail builder because of these bulk operation errors
-		err = errors.Join(err, manager.GetErrors())
+		result.Err = errors.Join(result.Err, manager.GetErrors())
 
 	}
 	return
@@ -306,18 +306,19 @@ func (b *bulkRequestHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPa
 	return walkChs
 }
 
-func (b *bulkRequestHandles) getMergedResults() (reschedule bool, delay time.Duration, errs map[string]error) {
+func (b *bulkRequestHandles) getMergedResults() (result *SchedulingResult, errs map[string]error) {
+	result = &SchedulingResult{}
 	errs = map[string]error{}
 	for managerKey, getResult := range b.getResults {
-		resultReschedule, resultDelay, resultErr := getResult()
-		if resultReschedule {
-			reschedule = true
-			if delay == 0 || delay > resultDelay {
-				delay = resultDelay
+		managerResult := getResult()
+		if managerResult.Reschedule {
+			result.Reschedule = true
+			if result.Delay == 0 || result.Delay > managerResult.Delay {
+				result.Delay = managerResult.Delay
 			}
 		}
-		if resultErr != nil {
-			errs[managerKey] = resultErr
+		if managerResult.Err != nil {
+			errs[managerKey] = managerResult.Err
 		}
 	}
 	return

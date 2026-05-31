@@ -65,7 +65,8 @@ func TestRequestBuilderWorker_ResultMerge(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			merged := test.left.Merge(test.right)
+			merged, err := test.left.Merge(test.right)
+			require.NoError(t, err)
 			require.NotNil(t, merged)
 			assert.Equal(t, test.expected, merged)
 		})

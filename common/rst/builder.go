@@ -84,9 +84,9 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
 	if !workRequest.HasBuilder() {
-		return &ExecuteJobBuilderRequestResult{Err: ErrReqAndRSTTypeMismatch}
+		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 
 	result := c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh)
@@ -185,24 +185,24 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
 	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	if bulkErr != nil {
-		return &ExecuteJobBuilderRequestResult{Err: MarkBuilderFailed(bulkErr)}
+		return &SchedulingResult{Err: MarkBuilderFailed(bulkErr)}
 	}
 
 	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
 	requestBuildController.Start()
 
-	abort := func(err error) *ExecuteJobBuilderRequestResult {
+	abort := func(err error) *SchedulingResult {
 		err = fmt.Errorf("job builder request was aborted: %w", err)
 		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
-			return &ExecuteJobBuilderRequestResult{Err: MarkBuilderFailed(errors.Join(err, bulkErr))}
+			return &SchedulingResult{Err: MarkBuilderFailed(errors.Join(err, bulkErr))}
 		}
-		return &ExecuteJobBuilderRequestResult{Err: MarkBuilderCancelled(err)}
+		return &SchedulingResult{Err: MarkBuilderCancelled(err)}
 	}
 
 	waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController)
@@ -226,9 +226,9 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		return abort(err)
 	}
 
-	bulkReschedule, bulkDelay, err := bulkOperationsManager.Execute(ctx, requestBuildController)
-	if err != nil {
-		return abort(err)
+	bulkResult := bulkOperationsManager.Execute(ctx, requestBuildController)
+	if bulkResult.Err != nil {
+		return abort(bulkResult.Err)
 	}
 
 	// Close the request build controller and wait for the results. Be sure to update the builder
@@ -248,10 +248,10 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		workRequest.SetExternalId(walkCompleteSentinel)
 	}
 
-	result := &ExecuteJobBuilderRequestResult{}
-	result.Reschedule = walkReschedule || bulkReschedule
-	if !walkReschedule && bulkDelay != 0 {
-		result.Delay = bulkDelay
+	result := &SchedulingResult{}
+	result.Reschedule = walkReschedule || bulkResult.Reschedule
+	if !walkReschedule && bulkResult.Delay != 0 {
+		result.Delay = bulkResult.Delay
 	}
 
 	return result
@@ -414,7 +414,7 @@ func (c *JobBuilderClient) newRequestBuilderWorker(
 	}
 }
 
-func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) requestPathResolver {
+func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) requestPathResolverFn {
 	if cfg.Download {
 		if walkLocalPathInsteadOfRemote(cfg) {
 			// Walking cfg.Path to support stub file download and files with a defined rst.

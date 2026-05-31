@@ -128,14 +128,14 @@ func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 	return err
 }
 
-func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *ExecuteJobBuilderRequestResult {
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
 	if !m.hasExpectedCall("ExecuteJobBuilderRequest") {
-		return &ExecuteJobBuilderRequestResult{Err: ErrUnsupportedOpForRST}
+		return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 	}
 
 	args := m.Called(ctx, workRequest, jobSubmissionCh)
 	delay, _ := args.Get(1).(time.Duration)
-	return &ExecuteJobBuilderRequestResult{
+	return &SchedulingResult{
 		Reschedule: args.Bool(0),
 		Delay:      delay,
 		Err:        args.Error(2),
@@ -291,7 +291,7 @@ func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.Str
 		walkCh <- &filesystem.StreamPathResult{Path: path}
 	}
 	close(walkCh)
-	return walkCh, func() (bool, time.Duration, error) { return false, 0, nil }, nil
+	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
 func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
