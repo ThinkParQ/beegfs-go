@@ -2,138 +2,122 @@ package rst
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
 )
 
-func TestRequestBuildWalkMultiplexer_CloseWaitsForInputsToDrain(t *testing.T) {
-	mux := newRequestBuildWalkMultiplexer(context.Background(), 1)
-	input := make(chan *filesystem.StreamPathResult, 1)
-	waitForInput := mux.AddWalks([]<-chan *filesystem.StreamPathResult{input})
+func TestRequestBuildController_ProcessesWalkAndAggregatesCounts(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 4)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	closeDone := make(chan struct{})
-	go func() {
-		mux.Close()
-		close(closeDone)
-	}()
+	controller.Start()
 
-	input <- &filesystem.StreamPathResult{Path: "/test-path"}
-	close(input)
+	walkCh := make(chan *filesystem.StreamPathResult, 1)
+	waitForWalk := controller.AddWalks([]<-chan *filesystem.StreamPathResult{walkCh})
+	walkCh <- &filesystem.StreamPathResult{Path: "/test-path"}
+	close(walkCh)
+	waitForWalk()
 
-	waitForInput()
-
-	select {
-	case result, ok := <-mux.Output():
-		require.True(t, ok)
-		require.NotNil(t, result)
-		assert.Equal(t, "/test-path", result.Path)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for multiplexed walk result")
-	}
+	controller.Close()
+	result, err := controller.Wait()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, int32(1), result.Submitted)
+	assert.Equal(t, int32(0), result.Errors)
+	assert.Equal(t, int32(0), result.Conflicts)
+	assert.Empty(t, result.ResumeToken)
 
 	select {
-	case <-closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for multiplexer close")
+	case request := <-jobSubmissionCh:
+		require.NotNil(t, request)
+		assert.Equal(t, "/test-path", request.Path)
+		assert.Equal(t, uint32(1), request.GetRemoteStorageTarget())
+	default:
+		t.Fatal("expected submitted job request")
 	}
-
-	_, ok := <-mux.Output()
-	assert.False(t, ok)
 }
 
-func TestRequestBuildWalkMultiplexer_ForwardsFromMultipleInputs(t *testing.T) {
-	mux := newRequestBuildWalkMultiplexer(context.Background(), 2)
-	inputA := make(chan *filesystem.StreamPathResult, 1)
-	inputB := make(chan *filesystem.StreamPathResult, 1)
-	waitForInputs := mux.AddWalks([]<-chan *filesystem.StreamPathResult{inputA, inputB})
-
-	inputA <- &filesystem.StreamPathResult{Path: "/path-a"}
-	inputB <- &filesystem.StreamPathResult{Path: "/path-b"}
-	close(inputA)
-	close(inputB)
-
-	waitForInputs()
-	mux.Close()
-
-	received := map[string]bool{}
-	for result := range mux.Output() {
-		require.NotNil(t, result)
-		received[result.Path] = true
-	}
-
-	assert.Equal(t, map[string]bool{
-		"/path-a": true,
-		"/path-b": true,
-	}, received)
-}
-
-func TestRequestBuildWorkerPool_StartAndWaitAggregatesResult(t *testing.T) {
+func TestRequestBuildController_WaitReturnsMergedCounts(t *testing.T) {
 	ctx := context.Background()
 	g, gCtx := errgroup.WithContext(ctx)
-	walkCh := make(chan *filesystem.StreamPathResult)
-	close(walkCh)
-
-	pool := &requestBuildWorkerPool{
-		group:     g,
-		ctx:       gCtx,
-		parentCtx: ctx,
-		workerBase: &requestBuilderWorker{
-			walkCh: walkCh,
-			result: &requestBuilderWorkerResult{
-				Submitted: 3,
-				Errors:    1,
-				Conflicts: 2,
-			},
-		},
-		getSubmissionQueueDepth: func() int { return 8 },
+	controller := &requestBuildController{
+		wg:                 &sync.WaitGroup{},
+		group:              g,
+		ctx:                gCtx,
+		parentCtx:          ctx,
+		jobRequestCountsCh: make(chan *jobRequestCounts, 2),
 	}
 
-	pool.Start()
-	result, err := pool.Wait()
+	controller.wg.Go(controller.mergeJobRequestCounts)
+	controller.jobRequestCountsCh <- &jobRequestCounts{Submitted: 2, Errors: 1}
+	controller.jobRequestCountsCh <- &jobRequestCounts{Submitted: 3, Conflicts: 4}
+
+	result, err := controller.Wait()
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, &requestBuilderWorkerResult{
-		Submitted: 3,
-		Errors:    1,
-		Conflicts: 2,
-	}, result)
-	assert.Equal(t, 1, pool.workersStarted)
-	require.Len(t, pool.workers, 1)
+	assert.Equal(t, int32(5), result.Submitted)
+	assert.Equal(t, int32(1), result.Errors)
+	assert.Equal(t, int32(4), result.Conflicts)
 }
 
-func TestRequestBuildWorkerPool_ScalesWhenSubmissionQueueStaysLow(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	g, gCtx := errgroup.WithContext(ctx)
-	walkCh := make(chan *filesystem.StreamPathResult)
+func TestRequestBuildController_ProcessWalkResultStopsOnResumeToken(t *testing.T) {
+	controller := &requestBuildController{}
 
-	pool := &requestBuildWorkerPool{
-		group:     g,
-		ctx:       gCtx,
-		parentCtx: ctx,
-		workerBase: &requestBuilderWorker{
-			walkCh: walkCh,
-			result: &requestBuilderWorkerResult{},
-		},
-		getSubmissionQueueDepth: func() int { return 0 },
+	stop, err := controller.processWalkResult(&filesystem.StreamPathResult{ResumeToken: "resume-token"})
+	require.NoError(t, err)
+	assert.True(t, stop)
+	assert.Equal(t, "resume-token", controller.resumeToken)
+}
+
+func TestRequestBuildController_ProcessWalkResultRejectsConflictingResumeTokens(t *testing.T) {
+	controller := &requestBuildController{resumeToken: "existing-token"}
+
+	stop, err := controller.processWalkResult(&filesystem.StreamPathResult{ResumeToken: "new-token"})
+	require.Error(t, err)
+	assert.False(t, stop)
+	assert.Contains(t, err.Error(), "conflicting walk resume tokens")
+}
+
+func TestRequestBuildController_ProcessWalkResultReturnsWalkErrors(t *testing.T) {
+	walkErr := fmt.Errorf("walk failed")
+	controller := &requestBuildController{}
+
+	stop, err := controller.processWalkResult(&filesystem.StreamPathResult{Err: walkErr})
+	require.ErrorIs(t, err, walkErr)
+	assert.False(t, stop)
+}
+
+func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan<- *beeremote.JobRequest) *requestBuildController {
+	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS())
+	cfg := &flex.JobRequestCfg{RemoteStorageTarget: 1}
+	controller := client.newRequestBuildController(ctx, cfg, jobSubmissionCh, func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+		return false, nil
+	})
+
+	controller.requestBuilder.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+		return PathState{
+			LockedInfo:   &flex.JobLockedInfo{},
+			LockAcquired: true,
+			RstIds:       []uint32{1},
+		}, nil
+	}
+	controller.requestBuilder.prepareFileState = func(ctx context.Context, mountPoint filesystem.Provider, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
+		return func() error { return nil }, nil
+	}
+	controller.requestBuilder.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+		return nil
 	}
 
-	pool.Start()
-
-	require.Eventually(t, func() bool {
-		return pool.workersStarted >= 2
-	}, time.Second, 20*time.Millisecond)
-
-	close(walkCh)
-
-	result, err := pool.Wait()
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.GreaterOrEqual(t, pool.workersStarted, 2)
-	assert.Len(t, pool.workers, pool.workersStarted)
+	return controller
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -369,48 +370,71 @@ func (c *JobBuilderClient) newBulkOperationsManager(ctx context.Context, builder
 	return manager, err
 }
 
+const (
+	// requestBuildControllerWorkerMultiplier scales GOMAXPROCS to set the maximum number of
+	// concurrent path-processing goroutines. Each path always blocks on at least one BeeGFS
+	// metadata operation (lock acquisition via getPathState), making per-path goroutines the right
+	// model: goroutines are parked during the blocking I/O, freeing OS threads for other work.
+	// The multiplier must be large enough that enough goroutines are in flight to keep hardware
+	// threads busy, but small enough to avoid excessive concurrent pressure on the metadata server.
+	requestBuildControllerWorkerMultiplier = 4.0
+	// requestBuildControllerQueueDepthPerWorker controls the job submission backpressure threshold:
+	// threshold = min(cap(jobSubmissionCh), maxWorkers × queueDepthPerWorker). Once the submission
+	// queue reaches the threshold, processWalk stops spawning new path goroutines until it drains.
+	// Higher values allow more in-flight submissions before throttling, which smooths throughput but
+	// buffers more work in memory. Lower values throttle more tightly and respond faster to a slow
+	// downstream consumer.
+	requestBuildControllerQueueDepthPerWorker = 1.5
+)
+
 func (c *JobBuilderClient) newRequestBuildController(
 	ctx context.Context,
-	cfg *flex.JobRequestCfg,
+	builderCfg *flex.JobRequestCfg,
 	jobSubmissionCh chan<- *beeremote.JobRequest,
 	tryRouteToBulkOperation tryRouteToBulkOperationFn,
 ) *requestBuildController {
+	cpuLimit := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
+	queueLimit := max(1, cap(jobSubmissionCh))
+	maxWorkers := min(cpuLimit, queueLimit)
+	submissionBackpressureThreshold := max(1, min(cap(jobSubmissionCh), int(requestBuildControllerQueueDepthPerWorker*float32(maxWorkers))))
+
+	jobRequestCountsCh := make(chan *jobRequestCounts, maxWorkers)
+	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, tryRouteToBulkOperation, jobRequestCountsCh)
+
 	g, gCtx := errgroup.WithContext(ctx)
-	walkMultiplexer := newRequestBuildWalkMultiplexer(gCtx, cap(jobSubmissionCh))
-	worker := c.newRequestBuilderWorker(cfg, walkMultiplexer.Output(), jobSubmissionCh, tryRouteToBulkOperation)
-	workerPool := &requestBuildWorkerPool{
-		group:                   g,
-		ctx:                     gCtx,
-		parentCtx:               ctx,
-		workerBase:              worker,
-		getSubmissionQueueDepth: func() int { return len(jobSubmissionCh) },
-	}
+	g.SetLimit(maxWorkers + 1) // Reserve maxWorkers for path processors; processWalk uses one slot.
+	walkMultiplexer := filesystem.NewWalkMultiplexer(gCtx, cap(jobSubmissionCh))
 
 	return &requestBuildController{
-		walkMultiplexer: walkMultiplexer,
-		workerPool:      workerPool,
+		wg:                              &sync.WaitGroup{},
+		group:                           g,
+		ctx:                             gCtx,
+		parentCtx:                       ctx,
+		requestBuilder:                  requestBuilder,
+		submissionBackpressureThreshold: submissionBackpressureThreshold,
+		walkMultiplexer:                 walkMultiplexer,
+		getPaths:                        c.getPathsFn(builderCfg),
+		jobRequestCountsCh:              jobRequestCountsCh,
 	}
 }
 
-func (c *JobBuilderClient) newRequestBuilderWorker(
+func (c *JobBuilderClient) newJobRequestBuilder(
 	builderCfg *flex.JobRequestCfg,
-	walkCh <-chan *filesystem.StreamPathResult,
 	jobSubmissionCh chan<- *beeremote.JobRequest,
 	tryRouteToBulkOperation tryRouteToBulkOperationFn,
-) *requestBuilderWorker {
-	return &requestBuilderWorker{
+	jobRequestCountsCh chan<- *jobRequestCounts,
+) *jobRequestBuilder {
+	return &jobRequestBuilder{
 		mountPoint:              c.mountPoint,
 		RstMap:                  c.rstMap,
 		jobSubmissionCh:         jobSubmissionCh,
+		jobRequestCountsCh:      jobRequestCountsCh,
 		builderCfg:              builderCfg,
-		walkCh:                  walkCh,
-		getPaths:                c.getPathsFn(builderCfg),
 		getPathState:            GetPathState,
 		updateDirRstConfig:      updateDirRstConfig,
 		prepareFileState:        PrepareFileStateForWorkRequests,
 		clearAccessFlags:        entry.ClearAccessFlags,
 		tryRouteToBulkOperation: tryRouteToBulkOperation,
-		result:                  &requestBuilderWorkerResult{},
 	}
 }
 

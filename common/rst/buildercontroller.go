@@ -3,7 +3,7 @@ package rst
 import (
 	"context"
 	"errors"
-	"runtime"
+	"fmt"
 	"sync"
 	"time"
 
@@ -11,17 +11,51 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type requestBuildResult struct {
+	ResumeToken string
+	jobRequestCounts
+}
+
+// requestBuildController uses bounded fan-out stage instead of a worker pool where each each path
+// accepted from the walk stream is processed in its own goroutine, while the errgroup limit caps
+// the number of paths processed concurrently. These goroutines are also throttled by calls to
+// waitForSubmissionCapacity.
+//
+// A fixed worker pool and bounded per-path goroutines both park during blocking I/O and have
+// equivalent throughput at the same concurrency. The advantage here is simpler backpressure:
+// processWalk stops launching new path processors when the downstream job submission queue reaches
+// its threshold, so queue pressure propagates back through the pipeline.
+//
+// Benchmarks showed goroutine spawn overhead (~1-2us) is negligible compared with BeeGFS metadata
+// operations. The throughput matched a fixed pool across the measured I/O delay ranges.
 type requestBuildController struct {
-	walkMultiplexer *requestBuildWalkMultiplexer
-	workerPool      *requestBuildWorkerPool
+	wg                              *sync.WaitGroup
+	group                           *errgroup.Group
+	ctx                             context.Context
+	parentCtx                       context.Context
+	submissionBackpressureThreshold int
+	requestBuilder                  *jobRequestBuilder
+	walkMultiplexer                 *filesystem.WalkMultiplexer
+	getPaths                        requestPathResolverFn
+	jobRequestCountsCh              chan *jobRequestCounts
+	mergedJobRequestCounts          jobRequestCounts
+	resumeToken                     string
 }
 
 func (c *requestBuildController) Start() {
-	c.workerPool.Start()
+	c.group.Go(c.processWalk)
+	c.wg.Go(c.mergeJobRequestCounts)
 }
 
-func (c *requestBuildController) Wait() (*requestBuilderWorkerResult, error) {
-	return c.workerPool.Wait()
+func (c *requestBuildController) Wait() (*requestBuildResult, error) {
+	err := c.group.Wait()
+	close(c.jobRequestCountsCh)
+	c.wg.Wait()
+
+	return &requestBuildResult{
+		ResumeToken:      c.resumeToken,
+		jobRequestCounts: c.mergedJobRequestCounts,
+	}, err
 }
 
 func (c *requestBuildController) Close() {
@@ -32,179 +66,97 @@ func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPat
 	return c.walkMultiplexer.AddWalks(walkChs)
 }
 
-type requestBuildWalkMultiplexer struct {
-	ctx           context.Context
-	mergeCh       chan *filesystem.StreamPathResult
-	mergeChClosed bool
-	mu            sync.Mutex
-	done          *sync.Cond
-	activeInputs  int
-	closed        bool
-}
-
-func newRequestBuildWalkMultiplexer(ctx context.Context, bufferSize int) *requestBuildWalkMultiplexer {
-	mergeCh := make(chan *filesystem.StreamPathResult, max(1, bufferSize))
-	multiplexer := &requestBuildWalkMultiplexer{ctx: ctx, mergeCh: mergeCh}
-	multiplexer.done = sync.NewCond(&multiplexer.mu)
-	return multiplexer
-}
-
-func (m *requestBuildWalkMultiplexer) Output() <-chan *filesystem.StreamPathResult {
-	return m.mergeCh
-}
-
-func (m *requestBuildWalkMultiplexer) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {
-	if len(walkChs) == 0 {
-		return func() {}
-	}
-
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return func() {}
-	}
-	m.activeInputs += len(walkChs)
-	m.mu.Unlock()
-
-	var wg sync.WaitGroup
-	for _, ch := range walkChs {
-		wg.Add(1)
-		go func(ch <-chan *filesystem.StreamPathResult) {
-			defer wg.Done()
-			defer m.addWalksDone()
-
-			for {
-				select {
-				case <-m.ctx.Done():
-					return
-				case walkPath, ok := <-ch:
-					if !ok {
-						return
-					}
-
-					select {
-					case <-m.ctx.Done():
-						return
-					case m.mergeCh <- walkPath:
-					}
-				}
+func (c *requestBuildController) processWalk() error {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return c.parentError()
+		case result, ok := <-c.walkMultiplexer.Output():
+			if !ok {
+				return nil
 			}
-		}(ch)
-	}
 
-	return func() {
-		wg.Wait()
-	}
-}
-
-func (m *requestBuildWalkMultiplexer) addWalksDone() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.activeInputs--
-	if m.closed && m.activeInputs == 0 && !m.mergeChClosed {
-		close(m.mergeCh)
-		m.mergeChClosed = true
-		m.done.Broadcast()
-	}
-}
-
-func (m *requestBuildWalkMultiplexer) Close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.closed = true
-
-	if m.activeInputs == 0 && !m.mergeChClosed {
-		close(m.mergeCh)
-		m.mergeChClosed = true
-		m.done.Broadcast()
-	}
-
-	for !m.mergeChClosed {
-		m.done.Wait()
-	}
-}
-
-type submissionQueueDepthFn func() int
-
-type requestBuildWorkerPool struct {
-	group                   *errgroup.Group
-	ctx                     context.Context
-	parentCtx               context.Context
-	workerBase              *requestBuilderWorker
-	workers                 []*requestBuilderWorker
-	getSubmissionQueueDepth submissionQueueDepthFn
-	workersStarted          int
-}
-
-func (p *requestBuildWorkerPool) Start() {
-	maxWorkers := runtime.GOMAXPROCS(0)
-	doneCh := make(chan struct{}, maxWorkers)
-	p.group.Go(func() error {
-		lowThresholdTicks := 0
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-
-		p.addWorker(doneCh)
-		for {
-			select {
-			case <-p.ctx.Done():
-				if p.parentCtx.Err() != nil {
-					return p.parentCtx.Err()
-				}
+			stop, err := c.processWalkResult(result)
+			if err != nil {
+				return err
+			}
+			if stop {
 				return nil
-			case <-doneCh:
-				return nil
-			case <-ticker.C:
-				queueDepth := p.getSubmissionQueueDepth()
-				workers := p.workersStarted
-				if workers < maxWorkers && queueDepth <= 2*workers {
-					if queueDepth <= workers {
-						lowThresholdTicks += 3
-					} else {
-						lowThresholdTicks++
-					}
+			}
 
-					if lowThresholdTicks >= 3 {
-						p.addWorker(doneCh)
-						lowThresholdTicks = 0
-					}
-				} else {
-					lowThresholdTicks = 0
-				}
+			if err := c.waitForSubmissionCapacity(); err != nil {
+				return err
 			}
 		}
-	})
+	}
 }
 
-func (p *requestBuildWorkerPool) addWorker(doneCh chan<- struct{}) {
-	if p.workerBase == nil {
-		return
-	}
-
-	worker := p.workerBase
-	if p.workersStarted > 0 {
-		worker = p.workerBase.Clone()
-	}
-
-	p.workers = append(p.workers, worker)
-	p.group.Go(func() error {
-		return worker.Run(p.ctx, doneCh)
-	})
-	p.workersStarted++
-}
-
-func (p *requestBuildWorkerPool) Wait() (*requestBuilderWorkerResult, error) {
-	err := p.group.Wait()
-
-	var mergedErr error
-	merged := &requestBuilderWorkerResult{}
-	for _, worker := range p.workers {
-		if merged, mergedErr = merged.Merge(worker.GetResult()); mergedErr != nil {
-			err = errors.Join(err, mergedErr)
+func (c *requestBuildController) processWalkResult(result *filesystem.StreamPathResult) (stop bool, err error) {
+	var failedPrecondition error
+	if result.Err != nil {
+		if cancelErr, ok := errors.AsType[*RequestCancelError](result.Err); ok {
+			failedPrecondition = cancelErr.Reason
+		} else {
+			return false, result.Err
 		}
-
 	}
-	return merged, err
+
+	if result.ResumeToken != "" {
+		if c.resumeToken != "" {
+			return false, fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
+		}
+		c.resumeToken = result.ResumeToken
+		return true, nil
+	}
+
+	inMountPath, remotePath, err := c.getPaths(result.Path)
+	if err != nil {
+		return false, err
+	}
+
+	c.group.Go(func() error {
+		return c.requestBuilder.Process(c.ctx, inMountPath, remotePath, failedPrecondition)
+	})
+
+	return false, nil
+}
+
+func (c *requestBuildController) mergeJobRequestCounts() {
+	for counts := range c.jobRequestCountsCh {
+		if counts == nil {
+			continue
+		}
+		c.mergedJobRequestCounts.Submitted += counts.Submitted
+		c.mergedJobRequestCounts.Errors += counts.Errors
+		c.mergedJobRequestCounts.Conflicts += counts.Conflicts
+	}
+}
+
+// waitForSubmissionCapacity prevents the builder from overwhelming downstream job submission. If
+// the submission queue is below the backpressure threshold, processing continues immediately. Once
+// the queue reaches the threshold, it waits for queued submissions to drain before launching more
+// work.
+func (c *requestBuildController) waitForSubmissionCapacity() error {
+	if len(c.requestBuilder.jobSubmissionCh) < c.submissionBackpressureThreshold {
+		return nil
+	}
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for len(c.requestBuilder.jobSubmissionCh) >= c.submissionBackpressureThreshold {
+		select {
+		case <-c.ctx.Done():
+			return c.parentError()
+		case <-ticker.C:
+		}
+	}
+	return nil
+}
+
+func (c *requestBuildController) parentError() error {
+	if c.parentCtx.Err() != nil {
+		return c.parentCtx.Err()
+	}
+	return nil
 }

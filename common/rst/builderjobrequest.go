@@ -21,132 +21,71 @@ type updateDirRstConfigFn func(ctx context.Context, rstID uint32, path string) e
 type prepareFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error)
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 
-type requestBuilderWorkerResult struct {
-	Submitted   int32
-	Errors      int32
-	Conflicts   int32
-	ResumeToken string
-}
-
-func (r *requestBuilderWorkerResult) Merge(result *requestBuilderWorkerResult) (*requestBuilderWorkerResult, error) {
-	merged := &requestBuilderWorkerResult{
-		Submitted:   r.Submitted + result.Submitted,
-		Errors:      r.Errors + result.Errors,
-		Conflicts:   r.Conflicts + result.Conflicts,
-		ResumeToken: r.ResumeToken,
-	}
-
-	if result.ResumeToken != "" {
-		if r.ResumeToken == "" {
-			merged.ResumeToken = result.ResumeToken
-		} else {
-			return merged, fmt.Errorf("conflicting walk resume tokens: [%s, %s]", r.ResumeToken, result.ResumeToken)
-		}
-	}
-
-	return merged, nil
-}
-
-type requestBuilderWorker struct {
+type jobRequestBuilder struct {
 	mountPoint              filesystem.Provider
 	RstMap                  map[uint32]Provider
 	jobSubmissionCh         chan<- *beeremote.JobRequest
+	jobRequestCountsCh      chan<- *jobRequestCounts
 	builderCfg              *flex.JobRequestCfg
 	tryRouteToBulkOperation tryRouteToBulkOperationFn
-	walkCh                  <-chan *filesystem.StreamPathResult
-	getPaths                requestPathResolverFn
 	getPathState            getPathStateFn
 	updateDirRstConfig      updateDirRstConfigFn
 	prepareFileState        prepareFileStateForWorkRequestsFn
 	clearAccessFlags        clearAccessFlagsFn
-	result                  *requestBuilderWorkerResult
 }
 
-func (w *requestBuilderWorker) Run(ctx context.Context, doneCh chan<- struct{}) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case response, ok := <-w.walkCh:
-			if !ok {
-				select {
-				case doneCh <- struct{}{}:
-				default:
-				}
-				return nil
-			}
-			var failedPrecondition error
-			if response.Err != nil {
-				if cancelErr, ok := errors.AsType[*RequestCancelError](response.Err); ok {
-					failedPrecondition = cancelErr.Reason
-				} else {
-					return response.Err
-				}
-			}
-
-			if response.ResumeToken != "" {
-				w.result.ResumeToken = response.ResumeToken
-				return nil
-			}
-
-			if err := w.processWalkResponse(ctx, response, failedPrecondition); err != nil {
-				return err
-			}
-		}
-	}
+type jobRequestCounts struct {
+	Submitted int32
+	Errors    int32
+	Conflicts int32
 }
 
-func (w *requestBuilderWorker) processWalkResponse(ctx context.Context, walkResp *filesystem.StreamPathResult, failedPrecondition error) error {
-	inMountPath, remotePath, err := w.getPaths(walkResp.Path)
-	if err != nil {
-		return err
-	}
+func (w *jobRequestBuilder) Process(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (err error) {
+
+	var keepLock bool
+	var pathState PathState
 
 	if w.builderCfg.GetUpdate() {
 		if stat, statErr := w.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
-			// Directory update-mode entries do not produce a JobRequest. Apply the persistent
-			// RST configuration on a best-effort basis and continue walking regardless of failure.
+			// Directory update-mode entries do not produce a JobRequest. Apply the persistent RST
+			// configuration on a best-effort basis and continue walking regardless of failure.
 			w.updateDirRstConfig(ctx, w.builderCfg.RemoteStorageTarget, inMountPath)
-			return nil
+			return
 		}
 	}
 
-	pathState, skip, pathIssue, err := w.resolvePathStateForRequest(ctx, inMountPath)
-	if err != nil {
-		return err
-	} else if skip {
-		return nil
+	var skip bool
+	var pathIssue error
+	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(ctx, inMountPath); err != nil || skip {
+		return
 	}
-
 	failedPrecondition = appendError(failedPrecondition, pathIssue)
-	return w.processPath(ctx, inMountPath, remotePath, pathState, failedPrecondition)
-}
 
-func (w *requestBuilderWorker) processPath(ctx context.Context, inMountPath string, remotePath string, pathState PathState, failedPrecondition error) (err error) {
-	keepLock := false
+	result := &jobRequestCounts{}
 	defer func() {
+		w.jobRequestCountsCh <- result
 		if !keepLock {
-			if err = w.clearAccessFlags(ctx, inMountPath, LockedAccessFlags); err != nil {
-				err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", err))
+			if clearErr := w.clearAccessFlags(ctx, inMountPath, LockedAccessFlags); clearErr != nil {
+				err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
 
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstIds, pathState.LockedInfo, w.builderCfg) {
-		canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, failedPrecondition)
+		canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, failedPrecondition, result)
 		if !canReleaseLock {
 			keepLock = true
 		}
-
 		if processErr != nil {
 			err = processErr
 			return
 		}
 	}
+
 	return
 }
 
-func (w *requestBuilderWorker) resolvePathStateForRequest(ctx context.Context, inMountPath string) (state PathState, skip bool, pathIssue error, err error) {
+func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMountPath string) (state PathState, skip bool, pathIssue error, err error) {
 	addPathIssue := func(err error) {
 		pathIssue = appendError(pathIssue, err)
 	}
@@ -189,7 +128,7 @@ func (w *requestBuilderWorker) resolvePathStateForRequest(ctx context.Context, i
 
 // buildJobRequestCfgs returns a list of jobRequestCfgs for each rstId. Each cfg is a clone of the
 // original cfg updated with the provided information.
-func (w *requestBuilderWorker) buildJobRequestCfgs(inMountPath string, remotePath string, rstIds []uint32, lockedInfo *flex.JobLockedInfo, cfg *flex.JobRequestCfg) []*flex.JobRequestCfg {
+func (w *jobRequestBuilder) buildJobRequestCfgs(inMountPath string, remotePath string, rstIds []uint32, lockedInfo *flex.JobLockedInfo, cfg *flex.JobRequestCfg) []*flex.JobRequestCfg {
 	var requests []*flex.JobRequestCfg
 	for _, rstId := range rstIds {
 		request := proto.Clone(cfg).(*flex.JobRequestCfg)
@@ -205,7 +144,8 @@ func (w *requestBuilderWorker) buildJobRequestCfgs(inMountPath string, remotePat
 // processJobRequestCfg builds, prepares, and submits the job request for cfg. canReleaseLock is
 // returned true only when this path produced no in-flight work that still depends on the lock; once
 // the request is routed, prepared, or submitted for real work, the lock must remain held.
-func (w *requestBuilderWorker) processJobRequestCfg(ctx context.Context, cfg *flex.JobRequestCfg, pathState PathState, failedPrecondition error) (canReleaseLock bool, err error) {
+func (w *jobRequestBuilder) processJobRequestCfg(ctx context.Context, cfg *flex.JobRequestCfg, pathState PathState, failedPrecondition error, result *jobRequestCounts) (canReleaseLock bool, err error) {
+
 	request := w.buildJobRequest(ctx, cfg, failedPrecondition)
 
 	if request.HasGenerationStatus() {
@@ -216,29 +156,30 @@ func (w *requestBuilderWorker) processJobRequestCfg(ctx context.Context, cfg *fl
 			// indicates a job conflict. Offloaded files are the exception because their lock is held
 			// until their contents are retrieved.
 			if !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo) {
-				w.result.Conflicts++
+				result.Conflicts++
 				return
 			}
 
 			if skip, routeErr := w.tryRouteToBulkOperation(ctx, request); routeErr != nil {
 				// Request failed to be routed and since the file access lock was newly acquired, it
 				// may be released.
-				return true, routeErr
+				canReleaseLock = true
+				err = routeErr
+				return
 			} else if skip {
 				return
 			}
 		}
-
 		canReleaseLock = w.prepareJobRequestForSubmission(ctx, request, cfg, pathState.EntryInfo, pathState.OwnerNode)
 	}
 
-	err = w.submitJobRequest(ctx, request)
+	w.submitJobRequest(ctx, request, result)
 	return
 }
 
 // prepareJobRequestForSubmission prepares a valid job request for submission and returns whether
 // the caller may release the path lock afterward. request must have resolved to a valid client.
-func (w *requestBuilderWorker) prepareJobRequestForSubmission(ctx context.Context, request *beeremote.JobRequest, cfg *flex.JobRequestCfg, entryInfo msg.EntryInfo, ownerNode beegfs.Node) (canReleaseLock bool) {
+func (w *jobRequestBuilder) prepareJobRequestForSubmission(ctx context.Context, request *beeremote.JobRequest, cfg *flex.JobRequestCfg, entryInfo msg.EntryInfo, ownerNode beegfs.Node) (canReleaseLock bool) {
 	canReleaseLock = true
 	lockedInfo := cfg.GetLockedInfo()
 
@@ -289,7 +230,7 @@ func (w *requestBuilderWorker) prepareJobRequestForSubmission(ctx context.Contex
 	return
 }
 
-func (w *requestBuilderWorker) buildJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
+func (w *jobRequestBuilder) buildJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
 	rstId := cfg.GetRemoteStorageTarget()
 	client, ok := w.RstMap[rstId]
 	if !ok {
@@ -309,41 +250,14 @@ func (w *requestBuilderWorker) buildJobRequest(ctx context.Context, cfg *flex.Jo
 	return BuildJobRequest(ctx, client, cfg)
 }
 
-func (w *requestBuilderWorker) routeRequest(ctx context.Context, request *beeremote.JobRequest, lockedInfo *flex.JobLockedInfo, lockAcquired bool) (skip bool, err error) {
-	if request.HasBulkInfo() {
-		return false, nil
-	}
-
-	// The file access lock must be acquired for the path. If the lock was already held, it
-	// indicates a job conflict. Offloaded files are the exception because their lock is held
-	// until their contents are retrieved.
-	if !lockAcquired && !IsFileOffloaded(lockedInfo) {
-		w.result.Conflicts++
-		return true, nil
-	}
-
-	return w.tryRouteToBulkOperation(ctx, request)
-}
-
-func (w *requestBuilderWorker) submitJobRequest(ctx context.Context, request *beeremote.JobRequest) error {
+func (w *jobRequestBuilder) submitJobRequest(ctx context.Context, request *beeremote.JobRequest, result *jobRequestCounts) {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return
 	case w.jobSubmissionCh <- request:
+		result.Submitted++
 		if isStatusError(request.GetGenerationStatus()) {
-			w.result.Errors++
+			result.Errors++
 		}
-		w.result.Submitted++
 	}
-	return nil
-}
-
-func (w *requestBuilderWorker) Clone() *requestBuilderWorker {
-	clone := *w
-	clone.result = &requestBuilderWorkerResult{}
-	return &clone
-}
-
-func (w *requestBuilderWorker) GetResult() *requestBuilderWorkerResult {
-	return w.result
 }

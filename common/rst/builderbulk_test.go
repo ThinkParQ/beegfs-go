@@ -61,7 +61,7 @@ func (t *testBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *f
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
 	}
 
 	cancelErrs := new(string)
@@ -82,7 +82,7 @@ func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t 
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
 	}
 
 	resumeErrs := new(string)
@@ -104,7 +104,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t
 
 func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 2),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 2),
 	}
 
 	manager := &jobBuilderBulkOperationsManager{
@@ -135,7 +135,7 @@ func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t 
 
 func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 2),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 2),
 	}
 
 	openErrs := new(string)
@@ -169,7 +169,7 @@ func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t 
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)
@@ -203,7 +203,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *t
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsErrorsWhenCancelFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: newRequestBuildWalkMultiplexer(context.Background(), 1),
+		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)
