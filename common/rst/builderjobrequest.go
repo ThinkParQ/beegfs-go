@@ -93,31 +93,29 @@ func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMo
 	var pathStateErr error
 	state, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
 
+	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
+		// Returning err from this function aborts the entire builder job, so only fatal path
+		// state errors are returned here. Non-fatal path state errors are attached to the
+		// generated request when an rstId is available, allowing the builder job to continue.
+		err = pathStateErr
+		return
+	}
+
+	// If the caller specified a valid remote storage target, use it as the request's rstId.
+	// Otherwise, rely on any rstIds discovered from the file state. If none are available,
+	// skip the path so no request is created and the builder job does not fail. This is valid
+	// because callers can trigger jobs from configured file rstIds without specifying a target.
 	if IsValidRstId(w.builderCfg.RemoteStorageTarget) {
 		if IsFileOffloaded(state.LockedInfo) && w.builderCfg.RemoteStorageTarget != state.LockedInfo.StubUrlRstId && !w.builderCfg.GetOverwrite() {
 			addPathIssue(fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag))
 		}
 		state.RstIds = []uint32{w.builderCfg.RemoteStorageTarget}
 	} else if len(state.RstIds) == 0 {
-		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
-		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
-		// would always fail, whenever there is a file with no RSTs set on its entry info.
 		skip = true
 		return
 	}
 
 	if pathStateErr != nil {
-		if errors.Is(pathStateErr, ErrGetPathStateFatal) {
-			// If this function returns an error but it will also abort the entire builder job, which we
-			// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
-			// IDs available for this inMountPath (either specified by the user, or determined
-			// automatically), then report any errors as part of the generated requests for each file.
-			// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
-			// avoid it being silently dropped.
-			err = pathStateErr
-			return
-		}
-		// All other errors are sent as failed preconditions
 		addPathIssue(pathStateErr)
 	} else if len(state.RstIds) > 1 && (w.builderCfg.Download || w.builderCfg.StubLocal) {
 		addPathIssue(ErrFileHasAmbiguousRSTs)
