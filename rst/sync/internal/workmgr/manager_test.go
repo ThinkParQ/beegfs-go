@@ -73,7 +73,7 @@ func matchRespIDsAndStatus(expectedJobID string, expectedRequestID string, expec
 
 type testConfig struct {
 	Config
-	logLevel   zapcore.LevelEnabler
+	logLevel   int8
 	rstConfigs []*flex.RemoteStorageTarget
 }
 
@@ -91,10 +91,10 @@ func WithNumWorkers(n int) getTestMgrOpt {
 	}
 }
 
-// By default we tests log at the debug level (though output only prints on test failure). Benchmark
-// tests in particular are sensitive to logging at higher verbosity and as much as a 2x performance
-// boost has been observed switching benchmark tests from DEBUG to INFO.
-func WithLogLevel(l zapcore.LevelEnabler) getTestMgrOpt {
+// By default tests log at the debug level. Benchmark tests in particular are sensitive to logging
+// at higher verbosity and as much as a 2x performance boost has been observed switching benchmark
+// tests from DEBUG to INFO. Levels follow the logger.Config convention: 3=info, 5=debug.
+func WithLogLevel(l int8) getTestMgrOpt {
 	return func(cfg *testConfig) {
 		cfg.logLevel = l
 	}
@@ -129,14 +129,15 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 			ActiveWorkQueueSize: 10,
 			NumWorkers:          1,
 		},
-		logLevel: zapcore.DebugLevel,
+		logLevel: 5, // debug
 	}
 
 	for _, opt := range opts {
 		opt(&config)
 	}
 
-	logger := zaptest.NewLogger(tb, zaptest.Level(config.logLevel))
+	log, err := logger.New(logger.Config{Type: "stdout", Level: config.logLevel}, nil)
+	require.NoError(tb, err)
 
 	if config.rstConfigs == nil {
 		config.rstConfigs = []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
@@ -149,7 +150,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 
 	mountPoint := filesystem.NewMockFS()
 
-	mgr, err := NewAndStart(logger, config.Config, beeRemoteClient, mountPoint)
+	mgr, err := NewAndStart(log, config.Config, beeRemoteClient, mountPoint)
 	if err != nil {
 		return nil, deferredFuncs, err
 	}
@@ -399,7 +400,7 @@ func TestUpdateRequests(t *testing.T) {
 func BenchmarkSubmitWorkRequests(b *testing.B) {
 	// Intentionally set the activeWQSize to 1 so we can test update behavior when requests are both
 	// active and inactive.
-	mgr, deferredFuncs, err := getTestManager(b, WithActiveWQSize(40000), WithNumWorkers(2), WithLogLevel(zapcore.InfoLevel))
+	mgr, deferredFuncs, err := getTestManager(b, WithActiveWQSize(40000), WithNumWorkers(2), WithLogLevel(3))
 	defer func() {
 		// Deferred function calls should happen LIFO.
 		for i := len(deferredFuncs) - 1; i >= 0; i-- {
