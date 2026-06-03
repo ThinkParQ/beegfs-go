@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	"go.uber.org/zap"
 )
@@ -30,7 +31,7 @@ type Manager struct {
 	// buffer by registering their own subscriber cursors.
 	EventBuffer *types.MultiCursorRingBuffer
 	ctx         context.Context
-	log         *zap.Logger
+	log         *logger.Logger
 	// This is the path where a socket will be created where the metadata server can send events.
 	socketPath string
 	socket     net.Listener
@@ -92,7 +93,7 @@ type Config struct {
 // used to initialize other components before we actually start receiving
 // events from the metadata service. This helps avoid dropped events in case
 // some other component was misconfigured.
-func New(ctx context.Context, log *zap.Logger, metaConfigs []Config) (*Manager, func(), error) {
+func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manager, func(), error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 
@@ -285,7 +286,7 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		mu:   connMutex,
 		ser:  NewSerializer(),
 		des:  NewDeserializer(),
-		log:  m.log.With(zap.Any("subComponent", "eventConnHandler")),
+		log:  m.log.With(zap.Any("subComponent", "eventConnHandler")).Logger,
 	}
 
 	defer cancelConn()

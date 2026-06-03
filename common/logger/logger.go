@@ -5,6 +5,8 @@
 package logger
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/syslog"
 	"os"
@@ -12,6 +14,10 @@ import (
 	"reflect"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
+	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"go.opentelemetry.io/contrib/bridges/otelzap"
+	"go.opentelemetry.io/otel/metric"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -19,10 +25,12 @@ import (
 
 // Logger is a wrapper around zap.Logger. It allows different aspects of the
 // Logger to be reconfigured after the application has started. Notably the log
-// level.
+// level. It optionally embeds a telemetry Provider so components can obtain
+// meters via log.Meter("name").
 type Logger struct {
 	*zap.Logger
-	level zap.AtomicLevel
+	level     zap.AtomicLevel
+	telemetry *telemetry.Provider
 }
 
 // Verify all interfaces that depend on Logger are satisfied:
@@ -60,10 +68,17 @@ var SupportedLogTypes = []supportedLogTypes{
 	Syslog,
 }
 
-// New returns new logger based on the provided configuration.
-func New(newConfig Config) (*Logger, error) {
+// New returns new logger based on the provided configuration. When
+// telemetryCfg is non-nil, the Logger initializes and owns a telemetry
+// Provider; otherwise it uses a noop Provider (zero overhead).
+func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...telemetry.Option) (*Logger, error) {
 
 	logMgr := Logger{}
+
+	effectiveCfg := telemetry.Config{}
+	if telemetryCfg != nil {
+		effectiveCfg = *telemetryCfg
+	}
 
 	// Use the opinionated Zap development configuration.
 	// This notably gives us stack traces at warn and error levels.
@@ -83,10 +98,20 @@ func New(newConfig Config) (*Logger, error) {
 			return nil, err
 		}
 		logMgr.Logger = l
+
+		undo := zap.ReplaceGlobals(logMgr.Logger)
+		if err := logMgr.initTelemetry(effectiveCfg, telemetryOpts...); err != nil {
+			undo()
+			return nil, err
+		}
+
+		if logMgr.telemetry.LogProvider() != nil {
+			logMgr.Logger.Warn("developer mode is active: OTLP log export is disabled (logs will not be sent to the configured endpoint)")
+		}
 		return &logMgr, nil
 	}
 
-	// Otherwise build a production config based on the user settings:
+	// Production config based on the user settings:
 	zapConfig := zap.NewProductionEncoderConfig()
 	zapConfig.TimeKey = "timestamp"
 	zapConfig.EncodeTime = zapcore.ISO8601TimeEncoder
@@ -143,9 +168,77 @@ func New(newConfig Config) (*Logger, error) {
 		return nil, fmt.Errorf("unsupported log type: %s", newConfig.Type)
 	}
 
-	logMgr.Logger = zap.New(zapcore.NewCore(zapEncoder, logDestination, logMgr.level))
-	return &logMgr, nil
+	baseCore := zapcore.NewCore(zapEncoder, logDestination, logMgr.level)
+	logMgr.Logger = zap.New(baseCore)
 
+	if err := logMgr.initTelemetry(effectiveCfg, telemetryOpts...); err != nil {
+		return nil, err
+	}
+
+	if lp := logMgr.telemetry.LogProvider(); lp != nil {
+		otelCore := otelzap.NewCore("github.com/thinkparq/beegfs-go/common/logger", otelzap.WithLoggerProvider(lp))
+		// Gate the otelzap core on the same atomic level as the console
+		// sink so OTLP does not receive records below the configured threshold.
+		leveledOtelCore, err := zapcore.NewIncreaseLevelCore(otelCore, logMgr.level)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
+		}
+		logMgr.Logger = zap.New(zapcore.NewTee(baseCore, leveledOtelCore))
+		zap.ReplaceGlobals(logMgr.Logger)
+		logMgr.telemetry.SetLogger(logMgr.Logger)
+	}
+
+	return &logMgr, nil
+}
+
+// initTelemetry creates the telemetry Provider and assigns it to the Logger.
+func (lm *Logger) initTelemetry(cfg telemetry.Config, opts ...telemetry.Option) error {
+	log := lm.Logger.With(zap.String("component", path.Base(reflect.TypeFor[telemetry.Provider]().PkgPath())))
+	tp, err := telemetry.New(cfg, log, opts...)
+	if err != nil {
+		return fmt.Errorf("unable to initialize telemetry: %w", err)
+	}
+	lm.telemetry = tp
+	return nil
+}
+
+// With returns a child logger with the given fields permanently attached to
+// every log entry it produces. The child shares the same telemetry provider
+// and log level as the parent.
+func (lm *Logger) With(fields ...zap.Field) *Logger {
+	return &Logger{
+		Logger:    lm.Logger.With(fields...),
+		level:     lm.level,
+		telemetry: lm.telemetry,
+	}
+}
+
+// Meter returns a named OTel Meter for creating instruments.
+// When telemetry is disabled, returns a no-op Meter (zero overhead).
+func (lm *Logger) Meter(name string) metric.Meter {
+	return lm.telemetry.Meter(name)
+}
+
+// LogProvider returns the OTel LoggerProvider, or nil when log export is disabled.
+// The concrete *sdklog.LoggerProvider type is returned (rather than an interface)
+// because otelzap.NewCore requires it directly.
+func (lm *Logger) LogProvider() *sdklog.LoggerProvider {
+	return lm.telemetry.LogProvider()
+}
+
+// Shutdown flushes pending telemetry metrics and syncs the logger. It should be
+// called during graceful service shutdown (typically via defer).
+func (lm *Logger) Shutdown(ctx context.Context) error {
+	var errs []error
+	if lm.telemetry != nil {
+		if err := lm.telemetry.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := lm.Sync(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // Configurer interface is used to get the logging configuration. It allows the
@@ -158,11 +251,10 @@ type Configurer interface {
 	GetLoggingConfig() Config
 }
 
-// UpdateConfiguration satisfies the [gobee.configmgr.ConfigListener] interface
-// and is used to dynamically update supported aspects of the logger. Currently
-// it only supports dynamically updating the log level. So it can be used with
-// any application configuration it accepts an interface{} but it is expected
-// that interface satisfy the [Configurer] interface.
+// UpdateConfiguration satisfies the [configmgr.Listener] interface and is used
+// to dynamically update supported aspects of the logger and its embedded
+// telemetry Provider. It updates the log level and delegates telemetry config
+// changes to the Provider when the config implements telemetry.Configurer.
 func (lm *Logger) UpdateConfiguration(newConfig any) error {
 
 	// Use type assertion to verify the newConfig interface variable is of the
@@ -194,6 +286,12 @@ func (lm *Logger) UpdateConfiguration(newConfig any) error {
 		log.Log(lm.level.Level(), "set log level", zap.Any("logLevel", lm.level.Level()))
 	} else {
 		log.Debug("no change to log level")
+	}
+
+	if _, ok := newConfig.(telemetry.Configurer); ok {
+		if err := lm.telemetry.UpdateConfiguration(newConfig); err != nil {
+			return fmt.Errorf("unable to update telemetry configuration: %w", err)
+		}
 	}
 
 	return nil
