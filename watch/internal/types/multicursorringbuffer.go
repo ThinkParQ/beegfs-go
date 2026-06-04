@@ -252,100 +252,94 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 	// Take a read lock so the list of cursors can't be changed out from under us.
 	b.cursorsMutex.RLock()
 	defer b.cursorsMutex.RUnlock()
-
-	// Determine the index of the oldest ackCursor in case we can free up lots of space:
-	// Note we don't have to lock individual cursors unless we actually have to advance them.
-	// At worst this means the actual oldestAckCursor may have moved forward in the meantime so we aren't able to free up quite as much space.
 	oldestAckCursor := b.getOldestAckCursor()
 
-	// If we still have space after the next push and the oldest ackCursor is still at the start of the buffer or there aren't any subscribers yet, don't clear any space.
-	if b.start != (b.end+1)%len(b.buffer) && (b.start == oldestAckCursor || oldestAckCursor == -1) {
+	// Return if we still have space after the next push and either the oldest ackCursor is still at
+	// the buffer's start or there's no subscribers yet.
+	if !b.mustFreeSpace() && (b.start == oldestAckCursor || oldestAckCursor == noAckCursor) {
 		return nil
 	}
 
 	// Otherwise we always clear at least the oldest event in the buffer:
-	currentStart := b.start
-	droppedUnackdSeqID := b.buffer[currentStart].Meta.SeqId
-	b.buffer[currentStart] = nil
-	b.start = (currentStart + 1) % len(b.buffer)
+	droppedStart, droppedSeqID := b.dropStart()
 
-	// If the oldest acknowledged event is at the current start of the buffer or there are no subscribers yet, only clear the oldest event.
-	if oldestAckCursor == currentStart || oldestAckCursor == -1 {
-		// Advance any ack or send cursors that were pointing at the oldestAckPosition to the new start:
+	if oldestAckCursor == noAckCursor {
+		return nil
+	}
+
+	// Forcibly advance any subscriber(s) that have not acknowledged droppedStart. If any cursor
+	// advances, return the dropped sequence to caller.
+	if oldestAckCursor == droppedStart {
+		droppedUnackEvent := false
 		for _, c := range b.cursors {
-			// First lock the cursors to ensure we don't move them backwards:
-			c.cursorMutex.Lock()
-			defer c.cursorMutex.Unlock()
-
-			if c.ackCursor == oldestAckCursor {
-				c.ackCursor = b.start
-			}
-			if c.sendCursor == oldestAckCursor {
-				c.sendCursor = b.start
+			if b.advanceCursorFromDroppedIndex(c, droppedStart) {
+				droppedUnackEvent = true
 			}
 		}
-		// This GC dropped an unacknowledged event.
-		return &droppedUnackdSeqID
-	}
-
-	// Otherwise lets try and free up as much space as we can:
-	newStart := b.start
-	for {
-		// start==end means the buffer is empty. Otherwise keep clearing to the oldest ack position:
-		if newStart == b.end || newStart == oldestAckCursor {
-			break
+		if droppedUnackEvent {
+			// This GC dropped an unacknowledged event.
+			return &droppedSeqID
 		}
-		b.buffer[newStart] = nil
-		newStart = (newStart + 1) % len(b.buffer)
+		return nil
 	}
 
-	// Move start to point at the oldest unacknowledged event.
-	b.start = newStart
+	// Otherwise free up as much space as we can.
+	for b.start != b.end && b.start != oldestAckCursor {
+		b.dropStart()
+	}
 	return nil
 }
 
-// getOldestAckCursor returns the index of the ackCursor that is the furthest away from the end of the buffer.
-// It SHOULD ONLY be called from collectGarbage() as it expects the MultiCursorRingBuffer and cursor mutexes to already be locked.
+// getOldestAckCursor returns a point-in-time snapshot of the ackCursor furthest behind end. Taking
+// each cursor's read lock here would not make the result authoritative unless the rest of GC also
+// ran under those cursor locks. After this returns, any cursor may advance, so the only guarantee
+// is that the returned ackCursor may be behind the current cursor state as it may only advance. The
+// caller must hold b.cursorsMutex.
 func (b *MultiCursorRingBuffer) getOldestAckCursor() int {
+	oldestAckCursor := noAckCursor
 
-	// The index the oldest ackCursor is pointing to.
-	// There may be multiple ackCursors pointing to the same index.
-	oldestAckCursor := -1
 	// The offset is the distance from the end to a particular ackCursor.
 	// Thus the closest offset is zero, indicating an ackCursor is all caught up.
 	var oldestOffset int
-
 	for _, c := range b.cursors {
-
-		if oldestAckCursor == -1 {
-			oldestAckCursor = c.ackCursor
-			oldestOffset = b.end - c.ackCursor
-		} else {
-			offset := b.end - c.ackCursor
-
-			// The oldest offset is always the highest negative number:
-			if offset < 0 {
-				if oldestOffset < 0 {
-					// If both offsets are negative, the oldest offset will be greater:
-					if offset > oldestOffset {
-						oldestAckCursor = c.ackCursor
-						oldestOffset = offset
-					}
-				} else {
-					// Otherwise if the new offset is negative it will always be older:
-					oldestAckCursor = c.ackCursor
-					oldestOffset = offset
-				}
-			} else if oldestOffset >= 0 { // Otherwise the offset is positive. If the oldest offset was already negative it is older.
-				// If both the offset and the oldest offset are positive, the oldest offset is whichever one is greater:
-				if offset > oldestOffset {
-					oldestAckCursor = c.ackCursor
-					oldestOffset = offset
-				}
-			}
+		ackCursor := c.ackCursor
+		offset := b.getDistance(ackCursor, b.end)
+		if oldestAckCursor == noAckCursor || oldestOffset < offset {
+			oldestAckCursor = ackCursor
+			oldestOffset = offset
 		}
 	}
 	return oldestAckCursor
+}
+
+func (b *MultiCursorRingBuffer) mustFreeSpace() bool {
+	return b.start == b.nextIndex(b.end)
+}
+
+// advanceCursorFromDroppedIndex moves a cursor still pointing at index to the current start.
+// advanced is true if either the ackCursor or sendCursor is changed.
+func (b *MultiCursorRingBuffer) advanceCursorFromDroppedIndex(c *SubscriberCursor, index int) (advanced bool) {
+	// First lock the cursors to ensure we don't move them backwards
+	c.cursorMutex.Lock()
+	defer c.cursorMutex.Unlock()
+
+	if c.ackCursor == index {
+		c.ackCursor = b.start
+		advanced = true
+	}
+	if c.sendCursor == index {
+		c.sendCursor = b.start
+		advanced = true
+	}
+	return
+}
+
+func (b *MultiCursorRingBuffer) dropStart() (oldStart int, seqID uint64) {
+	oldStart = b.start
+	b.start = b.nextIndex(b.start)
+	seqID = b.buffer[oldStart].SeqId
+	b.buffer[oldStart] = nil
+	return oldStart, seqID
 }
 
 // GetEvent() returns the next event for the provided subscriberID and moves the sendCursor forward by one.
@@ -625,4 +619,51 @@ func (b *MultiCursorRingBuffer) searchIndexOfSeqID(startIndex int, endIndex int,
 	}
 
 	return nextLowest, false
+}
+
+const noAckCursor = -1
+
+// getIndex returns the index adjusted by the offset, handling any wrapping that may be needed. The
+// index must be a valid buffer index and offset may be any integer.
+func (b *MultiCursorRingBuffer) getIndex(index int, offset int) int {
+	size := len(b.buffer)
+	if offset >= size || offset <= -size {
+		offset %= size
+	}
+
+	if offset >= 0 {
+		return (index + offset) % size
+	}
+
+	index += offset
+	if index < 0 {
+		return size + index
+	}
+	return index
+}
+
+// nextIndex returns the next buffer index.
+func (b *MultiCursorRingBuffer) nextIndex(index int) int {
+	index += 1
+	if index == len(b.buffer) {
+		return 0
+	}
+	return index
+}
+
+// previousIndex returns the previous buffer index.
+func (b *MultiCursorRingBuffer) previousIndex(index int) int {
+	index -= 1
+	if index == -1 {
+		return len(b.buffer) - 1
+	}
+	return index
+}
+
+// getDistance returns the indexes from start to the end indexes.
+func (b *MultiCursorRingBuffer) getDistance(start int, end int) int {
+	if start <= end {
+		return end - start
+	}
+	return len(b.buffer) - start + end
 }
