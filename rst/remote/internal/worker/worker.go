@@ -46,16 +46,14 @@ type Worker interface {
 //
 //   - connect: Establishes a gRPC connection and initializes a gRPC client of the appropriate type
 //     that is reused for all unary RPCs. After the new client is setup it should update the
-//     configuration and state of any existing work requests on the node. It returns (true, err) for
-//     transient RPC/network errors, (false, err) for configuration issues requiring manual changes,
-//     and (false, nil) when the connection succeeds.
+//     configuration and state of any existing work requests on the node.
 //   - heartbeat: Sends a heartbeat request to verify the node is online and ready.
 //   - disconnect: Cleanup the gRPC connection and client that was created for this node.
 //     It should return an error if there were any problems freeing these resources.
 //
 // Note: Connect and disconnect operations should be idempotent and safe to call multiple times.
 type grpcClientHandler interface {
-	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) (isErrorTransient bool, err error)
+	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) error
 	heartbeat(*flex.HeartbeatRequest) (*flex.HeartbeatResponse, error)
 	disconnect() error
 }
@@ -189,8 +187,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 }
 
 // waitUntilConnected attempts to connect to a worker node until either a connection succeeds or the
-// node context is cancelled. For any transient errors, an exponential backoff delay will be observed
-// before retrying. For all other errors the MaxReconnectBackOff delay will be observed before
+// node context is cancelled. For any error, an exponential backoff delay will be observed before
 // retrying.
 func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var reconnectBackOff float64 = 1
@@ -206,20 +203,14 @@ func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdate
 		case <-n.nodeCtx.Done():
 			return n.nodeCtx.Err()
 		case <-time.After(retryDelay):
-			if isErrorTransient, err := n.connect(config, wrUpdates, requiredFeatures); err != nil {
-				if isErrorTransient {
-					// We'll retry to connect with an exponential back off. We'll add some jitter to avoid load spikes.
-					reconnectBackOff *= 2 + rand.Float64()
-					if reconnectBackOff > float64(n.config.MaxReconnectBackOff) {
-						reconnectBackOff = float64(n.config.MaxReconnectBackOff) - rand.Float64()
-					}
-					retryDelay = time.Duration(reconnectBackOff * float64(time.Second))
-					n.log.Warn("unable to connect to node because of transient error (retrying)", zap.Error(err), zap.Duration("retry_in", retryDelay))
-				} else {
-					// We'll retry to connect after the maximum reconnect backoff. We'll subtract some jitter to avoid load spikes.
-					retryDelay = time.Duration((float64(n.config.MaxReconnectBackOff) - rand.Float64()) * float64(time.Second))
-					n.log.Warn("unable to connect to node because of non-transient error (retrying). Check node configuration", zap.Error(err), zap.Duration("retry_in", retryDelay))
+			if err := n.connect(config, wrUpdates, requiredFeatures); err != nil {
+				// We'll retry to connect with an exponential back off. We'll add some jitter to avoid load spikes.
+				reconnectBackOff *= 2 + rand.Float64()
+				if reconnectBackOff > float64(n.config.MaxReconnectBackOff) {
+					reconnectBackOff = float64(n.config.MaxReconnectBackOff) - rand.Float64()
 				}
+				retryDelay = time.Duration(reconnectBackOff * float64(time.Second))
+				n.log.Warn("unable to connect to node (retrying)", zap.Error(err), zap.Duration("retry_in", retryDelay))
 			} else {
 				n.setState(ONLINE)
 				n.log.Info("connected to node")
