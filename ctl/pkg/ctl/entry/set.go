@@ -147,11 +147,14 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 	return handleFile(ctx, store, entry, cfg, path)
 }
 func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, path string) (SetEntryResult, error) {
+	if entry.Entry.Details == nil {
+		return SetEntryResult{}, fmt.Errorf("full entry details unavailable for %s: %s", path, entry.Entry.EntryInfoPopulated)
+	}
 	// Start with the current settings for this entry:
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
-		Pattern:   entry.Entry.Pattern.StripePattern,
-		RST:       entry.Entry.Remote.RemoteStorageTarget,
+		Pattern:   entry.Entry.Details.Pattern.StripePattern,
+		RST:       entry.Entry.Details.Remote.RemoteStorageTarget,
 	}
 	request.SetUID(*cfg.actorEUID)
 
@@ -185,7 +188,7 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 				poolID = *cfg.Pool
 			} else {
 				poolID = beegfs.LegacyId{
-					NumId:    beegfs.NumId(entry.Entry.Pattern.StoragePoolID),
+					NumId:    beegfs.NumId(entry.Entry.Details.Pattern.StoragePoolID),
 					NodeType: beegfs.Storage,
 				}
 			}
@@ -228,11 +231,14 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 
 // Handles regular files and all non-directory types (e.g., symlinks).
 func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
+	if entry.Entry.Details == nil {
+		return SetEntryResult{}, fmt.Errorf("full entry details unavailable for %s: %s", searchPath, entry.Entry.EntryInfoPopulated)
+	}
 
 	// Start with the current settings for this entry
 	request := &msg.SetFilePatternRequest{
 		EntryInfo: *entry.Entry.origEntryInfoMsg,
-		RST:       entry.Entry.Remote.RemoteStorageTarget,
+		RST:       entry.Entry.Details.Remote.RemoteStorageTarget,
 	}
 
 	// Determine whether any RST related fields are provided in newCfg
@@ -287,8 +293,11 @@ func handleFile(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCom
 var setFileStateIoctl = probecache.New(5 * time.Minute)
 
 func handleFileStateUpdate(ctx context.Context, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, searchPath string) (SetEntryResult, error) {
+	if entry.Entry.Details == nil {
+		return SetEntryResult{}, fmt.Errorf("full entry details unavailable for %s: %s", searchPath, entry.Entry.EntryInfoPopulated)
+	}
 	// Get current file state from entry
-	currentFileState := entry.Entry.FileState
+	currentFileState := entry.Entry.Details.FileState
 
 	// Start with current access flags and data state
 	newAccessFlags := currentFileState.GetAccessFlags()

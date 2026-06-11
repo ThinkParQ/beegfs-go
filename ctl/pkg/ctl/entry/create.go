@@ -81,6 +81,10 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 		return nil, fmt.Errorf("permissions must be set")
 	}
 
+	if parent.Entry.Details == nil {
+		return nil, fmt.Errorf("full entry details unavailable for parent: %s", parent.Entry.EntryInfoPopulated)
+	}
+
 	var err error
 	request := &msg.MakeFileWithPatternRequest{
 		UserID:  *userCfg.UserID,
@@ -91,8 +95,8 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 		Umask:      0000,
 		ParentInfo: *parent.Entry.origEntryInfoMsg,
 		// Start with the parent pattern and RST config.
-		Pattern: parent.Entry.Pattern.StripePattern,
-		RST:     parent.Entry.Remote.RemoteStorageTarget,
+		Pattern: parent.Entry.Details.Pattern.StripePattern,
+		RST:     parent.Entry.Details.Remote.RemoteStorageTarget,
 		// NewFileName must be set by the caller.
 	}
 
@@ -124,7 +128,7 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 		// below to ensure it is valid for the configured stripe pattern.
 		storagePool, err = mappings.StoragePoolToConfig.Get(beegfs.LegacyId{
 			NodeType: beegfs.Storage,
-			NumId:    beegfs.NumId(parent.Entry.Pattern.StoragePoolID),
+			NumId:    beegfs.NumId(parent.Entry.Details.Pattern.StoragePoolID),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("error looking up pool for parent entry %s: %w", *userCfg.FileCfg.Pool, err)

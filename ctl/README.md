@@ -76,10 +76,11 @@ func main() {
 			log.Fatal(err)
 		}
 
-		fmt.Printf("Entry Info - Path: %s, Entry ID: %s, File State: %s\n",
-			entryInfo.Entry.FileName,
-			entryInfo.Entry.EntryID,
-			entryInfo.Entry.FileState.String())
+		fmt.Printf("Entry Info - Path: %s, Entry ID: %s", entryInfo.Entry.FileName, entryInfo.Entry.EntryID)
+		if entryInfo.Entry.Details != nil {
+			fmt.Printf(", File State: %s", entryInfo.Entry.Details.FileState.String())
+		}
+		fmt.Println()
 	}
 	getAndPrintEntry()
 

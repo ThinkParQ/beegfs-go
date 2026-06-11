@@ -561,13 +561,21 @@ func getPathStatusFromDatabase(
 		if err != nil {
 			return nil, err
 		}
-		if len(entry.Entry.Remote.RSTIDs) != 0 {
-			for _, tgt := range entry.Entry.Remote.RSTIDs {
+		if entry.Entry.Details == nil {
+			return &GetStatusResult{
+				Path:       fsPath,
+				SyncStatus: Unknown,
+				SyncReason: fmt.Sprintf("Entry details unavailable (%s); check if the inode is locked by another process such as background rebalancing.", entry.Entry.EntryInfoPopulated),
+				Warning:    true,
+			}, nil
+		}
+		if len(entry.Entry.Details.Remote.RSTIDs) != 0 {
+			for _, tgt := range entry.Entry.Details.Remote.RSTIDs {
 				remoteTargets[tgt] = nil
 			}
 		} else {
 			syncReason := "No remote targets were specified or configured on this entry."
-			if entry.Entry.FileState.GetDataState() == rst.DataStateOffloaded {
+			if entry.Entry.Details.FileState.GetDataState() == rst.DataStateOffloaded {
 				syncReason = "No remote targets were specified or configured on this entry. The contents are offloaded."
 			}
 			return &GetStatusResult{

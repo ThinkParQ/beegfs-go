@@ -189,9 +189,12 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	if err != nil {
 		return nil, err
 	}
-	entry := entryInfo.Entry
+	e := entryInfo.Entry
+	if e.Details == nil {
+		return nil, fmt.Errorf("full entry details unavailable for %s: %s", pathInfo.Path, e.EntryInfoPopulated)
+	}
 
-	if entry.FileState.GetDataState() == DataStateOffloaded {
+	if e.Details.FileState.GetDataState() == DataStateOffloaded {
 		// Attempt to retrieve the stub file content from remote and use the rstId to create the job
 		// requests. Otherwise, send the request to job-builder to complete.
 		resp, err := remote.GetStubContents(ctx, &beeremote.GetStubContentsRequest{Path: pathInfo.Path})
@@ -210,12 +213,12 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		return []*beeremote.JobRequest{request}, nil
 	}
 
-	if len(entry.Remote.RSTIDs) == 0 {
+	if len(e.Details.Remote.RSTIDs) == 0 {
 		return nil, fmt.Errorf("unable to build job request(s)! --%s must be specified: %w", RemoteTargetFlag, ErrFileHasNoRSTs)
 	}
 
 	var requests []*beeremote.JobRequest
-	for _, rstId := range entry.Remote.RSTIDs {
+	for _, rstId := range e.Details.Remote.RSTIDs {
 		client, ok := rstMap[rstId]
 		if !ok {
 			return nil, fmt.Errorf("remote storage target ID %d from file metadata does not exist in the configuration: %w", rstId, ErrFileHasNoRSTs)
