@@ -99,9 +99,7 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 		}
 		logMgr.Logger = l
 
-		undo := zap.ReplaceGlobals(logMgr.Logger)
 		if err := logMgr.initTelemetry(effectiveCfg, telemetryOpts...); err != nil {
-			undo()
 			return nil, err
 		}
 
@@ -184,7 +182,6 @@ func New(newConfig Config, telemetryCfg *telemetry.Config, telemetryOpts ...tele
 			return nil, fmt.Errorf("failed to apply log level to otelzap core: %w", err)
 		}
 		logMgr.Logger = zap.New(zapcore.NewTee(baseCore, leveledOtelCore))
-		zap.ReplaceGlobals(logMgr.Logger)
 		logMgr.telemetry.SetLogger(logMgr.Logger)
 	}
 
