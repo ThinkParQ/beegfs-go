@@ -165,7 +165,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 		activeWorkQueue:      make(chan workAssignment, config.ActiveWorkQueueSize),
 	}
 
-	workRequests, err := meter.Int64Counter("beesync.work.requests",
+	workRequests, err := meter.Int64Counter("sync.work.requests",
 		metric.WithDescription("Work request lifecycle transitions"),
 		metric.WithUnit("{work}"),
 	)

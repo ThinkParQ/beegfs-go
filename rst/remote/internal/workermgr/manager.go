@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -145,18 +146,18 @@ func NewManager(
 	}
 
 	meter := log.Meter("workermgr")
-	workActive, err := meter.Int64Counter("beeremote.work.active",
+	workActive, err := meter.Int64Counter("remote.work.active",
 		metric.WithDescription("Number of times work requests entered each non-terminal state. "+
 			"Use rate() for throughput. To compute current occupancy of state S: "+
 			"increase(work.active{state=S}) minus the sum of increase(work.active{state=T}) "+
-			"for all states T directly reachable from S, minus increase(beeremote.work.terminal) "+
+			"for all states T directly reachable from S, minus increase(remote.work.terminal) "+
 			"for WRs whose last non-terminal state was S."),
 		metric.WithUnit("{work}"),
 	)
 	if err != nil {
 		log.Warn("failed to create work active counter, metrics will be no-ops", zap.Error(err))
 	}
-	workTerminal, err := meter.Int64Counter("beeremote.work.terminal",
+	workTerminal, err := meter.Int64Counter("remote.work.terminal",
 		metric.WithDescription("Work requests that reached a terminal state"),
 		metric.WithUnit("{work}"),
 	)
@@ -451,32 +452,10 @@ func isTerminalWorkState(state flex.Work_State) bool {
 }
 
 // WorkStateString returns the metric attribute string for a work state.
+// Unrecognized numeric values fall through to "unrecognized".
 func WorkStateString(state flex.Work_State) string {
-	switch state {
-	case flex.Work_CREATED:
-		return "created"
-	case flex.Work_SCHEDULED:
-		return "scheduled"
-	case flex.Work_RUNNING:
-		return "running"
-	case flex.Work_RESCHEDULED:
-		return "rescheduled"
-	case flex.Work_ERROR:
-		return "error"
-	case flex.Work_COMPLETED:
-		return "completed"
-	case flex.Work_CANCELLED:
-		return "cancelled"
-	case flex.Work_FAILED:
-		return "failed"
-	case flex.Work_UNKNOWN:
-		return "unknown"
-	case flex.Work_UNSPECIFIED:
-		// UNSPECIFIED is treated as non-terminal (WorkActive) since there is no production path
-		// that transitions a WR into this state — it is the proto zero value.
-		return "unspecified"
-	default:
-		// Use a distinct label so default-fallthrough is distinguishable from Work_UNKNOWN.
-		return "unrecognized"
+	if name, ok := flex.Work_State_name[int32(state)]; ok {
+		return strings.ToLower(name)
 	}
+	return "unrecognized"
 }

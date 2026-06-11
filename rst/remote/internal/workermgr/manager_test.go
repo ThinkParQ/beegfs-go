@@ -45,9 +45,9 @@ func newWorkTestManager(t *testing.T, workerConfigs []worker.Config) (*Manager, 
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	meter := mp.Meter("workermgr")
 
-	workActive, err := meter.Int64Counter("beeremote.work.active")
+	workActive, err := meter.Int64Counter("remote.work.active")
 	require.NoError(t, err)
-	workTerminal, err := meter.Int64Counter("beeremote.work.terminal")
+	workTerminal, err := meter.Int64Counter("remote.work.terminal")
 	require.NoError(t, err)
 
 	mgr.WorkActive = workActive
@@ -71,11 +71,11 @@ func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[workCoun
 	result := make(map[workCounterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.work.active" {
+			if m.Name != "remote.work.active" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.active must be Sum[int64] (Counter)")
+			require.True(t, ok, "remote.work.active must be Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -95,11 +95,11 @@ func workTerminalValues(t *testing.T, reader *sdkmetric.ManualReader) map[workCo
 	result := make(map[workCounterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.work.terminal" {
+			if m.Name != "remote.work.terminal" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.terminal must be Sum[int64] (Counter)")
+			require.True(t, ok, "remote.work.terminal must be Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)

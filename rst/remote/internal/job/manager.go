@@ -9,6 +9,7 @@ import (
 	"path"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	stdtime "time"
@@ -133,29 +134,29 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		opt(cfg)
 	}
 
-	jobRequests, err := meter.Int64Counter("beeremote.job.requests",
+	jobRequests, err := meter.Int64Counter("remote.job.requests",
 		metric.WithDescription("Total job requests received"),
 		metric.WithUnit("{job}"),
 	)
 	if err != nil {
 		log.Warn("failed to create job requests counter, metrics will be no-ops", zap.Error(err))
 	}
-	jobTerminal, err := meter.Int64Counter("beeremote.job.terminal",
+	jobTerminal, err := meter.Int64Counter("remote.job.terminal",
 		metric.WithDescription("Jobs that reached a terminal state"),
 		metric.WithUnit("{job}"),
 	)
 	if err != nil {
 		log.Warn("failed to create job terminal counter, metrics will be no-ops", zap.Error(err))
 	}
-	jobDuration, err := meter.Float64Histogram("beeremote.job.duration",
+	jobDuration, err := meter.Float64Histogram("remote.job.duration",
 		metric.WithDescription("Time from job creation to terminal state"),
 		metric.WithUnit("s"),
 	)
 	if err != nil {
 		log.Warn("failed to create job duration histogram, metrics will be no-ops", zap.Error(err))
 	}
-	jobActive, err := meter.Int64Counter("beeremote.job.active",
-		metric.WithDescription("Number of times jobs entered each non-terminal state; use rate() for throughput or subtract beeremote.job.terminal from beeremote.job.requests for current active count"),
+	jobActive, err := meter.Int64Counter("remote.job.active",
+		metric.WithDescription("Number of times jobs entered each non-terminal state; use rate() for throughput or subtract remote.job.terminal from remote.job.requests for current active count"),
 		metric.WithUnit("{job}"),
 	)
 	if err != nil {
@@ -955,7 +956,7 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 	// (e.g., COMPLETED → CANCELLED) are not re-recorded.
 	defer func() {
 		if !isTerminalState(initialState) && isTerminalState(status.GetState()) {
-			m.recordJobTerminal(job, terminalStateString(status.GetState()))
+			m.recordJobTerminal(job, jobStateString(status.GetState()))
 		}
 	}()
 
@@ -1112,7 +1113,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		finalState := status.GetState()
 
 		if !isTerminalState(initialState) && isTerminalState(finalState) {
-			m.recordJobTerminal(job, terminalStateString(finalState))
+			m.recordJobTerminal(job, jobStateString(finalState))
 		}
 
 		if finalState != initialState && !isTerminalState(finalState) {
@@ -1256,53 +1257,13 @@ func isTerminalState(state beeremote.Job_State) bool {
 	return false
 }
 
-// terminalStateString maps a terminal job state to the string used for
-// metrics attributes and log fields.
-func terminalStateString(state beeremote.Job_State) string {
-	switch state {
-	case beeremote.Job_COMPLETED:
-		return "completed"
-	case beeremote.Job_CANCELLED:
-		return "cancelled"
-	case beeremote.Job_OFFLOADED:
-		return "offloaded"
-	case beeremote.Job_UNKNOWN:
-		return "unknown"
-	case beeremote.Job_FAILED:
-		return "failed"
-	default:
-		return "unknown"
-	}
-}
-
 // jobStateString returns the metric attribute string for any job state.
-// If a new proto state is added and this switch is not updated, counts will
-// accumulate under "unknown" as a visible signal rather than crashing the process.
+// Unrecognized numeric values fall through to "unrecognized"
 func jobStateString(state beeremote.Job_State) string {
-	switch state {
-	case beeremote.Job_UNSPECIFIED:
-		return "unspecified"
-	case beeremote.Job_UNASSIGNED:
-		return "unassigned"
-	case beeremote.Job_SCHEDULED:
-		return "scheduled"
-	case beeremote.Job_RUNNING:
-		return "running"
-	case beeremote.Job_ERROR:
-		return "error"
-	case beeremote.Job_COMPLETED:
-		return "completed"
-	case beeremote.Job_OFFLOADED:
-		return "offloaded"
-	case beeremote.Job_CANCELLED:
-		return "cancelled"
-	case beeremote.Job_FAILED:
-		return "failed"
-	case beeremote.Job_UNKNOWN:
-		return "unknown"
-	default:
-		return "unknown"
+	if name, ok := beeremote.Job_State_name[int32(state)]; ok {
+		return strings.ToLower(name)
 	}
+	return "unrecognized"
 }
 
 func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {

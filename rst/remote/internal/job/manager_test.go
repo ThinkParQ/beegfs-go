@@ -1034,7 +1034,7 @@ func newObserverManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 }
 
 // TestTerminalStateLogLevels verifies that the full chain from beeremote.Job_State
-// through terminalStateString into recordJobTerminal emits the correct log level
+// through jobStateString into recordJobTerminal emits the correct log level
 // and preserves the state field for each terminal state.
 func TestTerminalStateLogLevels(t *testing.T) {
 	tests := []struct {
@@ -1057,7 +1057,7 @@ func TestTerminalStateLogLevels(t *testing.T) {
 					Status:  beeremote.Job_Status_builder{}.Build(),
 				}.Build(),
 			}
-			stateStr := terminalStateString(tt.state)
+			stateStr := jobStateString(tt.state)
 			m.recordJobTerminal(testJob, stateStr)
 			logs := observed.All()
 			require.Len(t, logs, 1)
@@ -1227,8 +1227,8 @@ func TestJobStateString(t *testing.T) {
 		{beeremote.Job_OFFLOADED, "offloaded"},
 		{beeremote.Job_CANCELLED, "cancelled"},
 		{beeremote.Job_FAILED, "failed"},
-		// Unrecognized values fall through to "unknown".
-		{beeremote.Job_State(9999), "unknown"},
+		// Unrecognized values fall through to "unrecognized".
+		{beeremote.Job_State(9999), "unrecognized"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
@@ -1252,11 +1252,11 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	meter := mp.Meter("job")
-	jobTerminal, err := meter.Int64Counter("beeremote.job.terminal")
+	jobTerminal, err := meter.Int64Counter("remote.job.terminal")
 	require.NoError(t, err)
-	jobDuration, err := meter.Float64Histogram("beeremote.job.duration")
+	jobDuration, err := meter.Float64Histogram("remote.job.duration")
 	require.NoError(t, err)
-	jobActive, err := meter.Int64Counter("beeremote.job.active")
+	jobActive, err := meter.Int64Counter("remote.job.active")
 	require.NoError(t, err)
 
 	pathDBOpts := badger.DefaultOptions(tmpPath).WithLogger(nil)
@@ -1302,11 +1302,11 @@ func jobActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterKe
 	result := make(map[counterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.job.active" {
+			if m.Name != "remote.job.active" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.job.active should be a Sum[int64] (Counter)")
+			require.True(t, ok, "remote.job.active should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -1327,11 +1327,11 @@ func jobTerminalValues(t *testing.T, reader *sdkmetric.ManualReader) map[counter
 	result := make(map[counterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.job.terminal" {
+			if m.Name != "remote.job.terminal" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.job.terminal should be a Sum[int64] (Counter)")
+			require.True(t, ok, "remote.job.terminal should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -1750,21 +1750,21 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	jobMeter := mp.Meter("job")
-	jobRequests, err := jobMeter.Int64Counter("beeremote.job.requests")
+	jobRequests, err := jobMeter.Int64Counter("remote.job.requests")
 	require.NoError(t, err)
-	jobTerminal, err := jobMeter.Int64Counter("beeremote.job.terminal")
+	jobTerminal, err := jobMeter.Int64Counter("remote.job.terminal")
 	require.NoError(t, err)
-	jobDuration, err := jobMeter.Float64Histogram("beeremote.job.duration")
+	jobDuration, err := jobMeter.Float64Histogram("remote.job.duration")
 	require.NoError(t, err)
-	jobActive, err := jobMeter.Int64Counter("beeremote.job.active")
+	jobActive, err := jobMeter.Int64Counter("remote.job.active")
 	require.NoError(t, err)
 
 	// Wire workermgr instruments from the same provider so the shared reader
 	// captures both job and work metrics.
 	workMeter := mp.Meter("workermgr")
-	workActive, err := workMeter.Int64Counter("beeremote.work.active")
+	workActive, err := workMeter.Int64Counter("remote.work.active")
 	require.NoError(t, err)
-	workTerminal, err := workMeter.Int64Counter("beeremote.work.terminal")
+	workTerminal, err := workMeter.Int64Counter("remote.work.terminal")
 	require.NoError(t, err)
 	workerManager.WorkActive = workActive
 	workerManager.WorkTerminal = workTerminal
@@ -2174,11 +2174,11 @@ func workActiveValues(t *testing.T, reader *sdkmetric.ManualReader) map[counterK
 	result := make(map[counterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.work.active" {
+			if m.Name != "remote.work.active" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.active should be a Sum[int64] (Counter)")
+			require.True(t, ok, "remote.work.active should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
@@ -2199,11 +2199,11 @@ func workTerminalValues(t *testing.T, reader *sdkmetric.ManualReader) map[counte
 	result := make(map[counterKey]int64)
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "beeremote.work.terminal" {
+			if m.Name != "remote.work.terminal" {
 				continue
 			}
 			data, ok := m.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "beeremote.work.terminal should be a Sum[int64] (Counter)")
+			require.True(t, ok, "remote.work.terminal should be a Sum[int64] (Counter)")
 			for _, dp := range data.DataPoints {
 				s, _ := dp.Attributes.Value(attrState)
 				r, _ := dp.Attributes.Value(attrRSTID)
