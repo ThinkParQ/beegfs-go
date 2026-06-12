@@ -153,3 +153,13 @@ func (d *DiskStore) Retrieve() (map[uint32]uint64, error) {
 	maps.Copy(result, d.state)
 	return result, nil
 }
+
+// NoopCheckpointer satisfies the Checkpointer interface without persisting anything. It is
+// intended for testing and scenarios where checkpoint recovery across restarts is not needed.
+type NoopCheckpointer struct{}
+
+var _ Checkpointer = &NoopCheckpointer{}
+
+func (NoopCheckpointer) Store(_ uint32, _ uint64)             {}
+func (NoopCheckpointer) Flush() error                         { return nil }
+func (NoopCheckpointer) Retrieve() (map[uint32]uint64, error) { return nil, nil }
