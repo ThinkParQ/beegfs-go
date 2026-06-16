@@ -27,7 +27,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thinkparq/protobuf v0.8.3-0.20260212175550-a80b99765f45
+	github.com/thinkparq/protobuf v0.8.4-0.20260512100505-4d5e5db08506
 	go.opentelemetry.io/contrib/bridges/otelzap v0.18.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0
