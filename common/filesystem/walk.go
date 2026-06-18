@@ -138,39 +138,35 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	startAfter = preparePath(startAfter)
 
 	isGlob := IsGlobPattern(pattern)
-	if isGlob {
-		// Append '/**' so the glob pattern matches everything under the directories instead of just
-		// the directory itself. Without it, a pattern like 'deep/*' would match '/deep/a' but skip
-		// '/deep/a/b.txt'; adding '**' turns it into 'deep/*/**' so all descendants qualify while
-		// still matching whole directories.
-		pattern = filepath.Join(pattern, "**")
-	} else if stat, err := mountPoint.Lstat(pattern); err != nil {
-		return nil, fmt.Errorf("unable walk path: %w", err)
-	} else if !stat.IsDir() {
+	if !isGlob {
+		if stat, err := mountPoint.Lstat(pattern); err != nil {
+			return nil, fmt.Errorf("unable walk path: %w", err)
+		} else if !stat.IsDir() {
 
-		// prefix is a file path so only stream it back if it's a match.
-		walkChan := make(chan *StreamPathResult, 1)
-		go func() {
-			defer close(walkChan)
-			if pattern <= startAfter {
-				return
-			}
-
-			inMountPath := "/" + pattern
-			statT, ok := stat.Sys().(*syscall.Stat_t)
-			if !ok {
-				walkChan <- &StreamPathResult{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
-			} else if keep, err := ApplyFilterByStatT(inMountPath, statT, filter); err != nil {
-				walkChan <- &StreamPathResult{Err: err}
-			} else if keep {
-				select {
-				case <-ctx.Done():
-					walkChan <- &StreamPathResult{Err: ctx.Err()}
-				case walkChan <- &StreamPathResult{Path: inMountPath}:
+			// prefix is a file path so only stream it back if it's a match.
+			walkChan := make(chan *StreamPathResult, 1)
+			go func() {
+				defer close(walkChan)
+				if pattern <= startAfter {
+					return
 				}
-			}
-		}()
-		return walkChan, nil
+
+				inMountPath := "/" + pattern
+				statT, ok := stat.Sys().(*syscall.Stat_t)
+				if !ok {
+					walkChan <- &StreamPathResult{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
+				} else if keep, err := ApplyFilterByStatT(inMountPath, statT, filter); err != nil {
+					walkChan <- &StreamPathResult{Err: err}
+				} else if keep {
+					select {
+					case <-ctx.Done():
+						walkChan <- &StreamPathResult{Err: ctx.Err()}
+					case walkChan <- &StreamPathResult{Path: inMountPath}:
+					}
+				}
+			}()
+			return walkChan, nil
+		}
 	}
 
 	root := pattern
@@ -247,10 +243,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 						emitDir := false
 						if !isGlob {
 							emitDir = path > startAfter
-						} else if match, err := doublestar.Match(pattern, path); err != nil {
-							send(&StreamPathResult{Err: fmt.Errorf("failed to match path %q with pattern %q: %w", path, pattern, err)})
-							return false
-						} else if match {
+						} else if match := doublestar.MatchUnvalidated(pattern, path); match {
 							emitDir = path > startAfter
 						}
 
@@ -276,10 +269,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				}
 
 				if isGlob {
-					if match, err := doublestar.Match(pattern, path); err != nil {
-						send(&StreamPathResult{Err: fmt.Errorf("failed to match path %q with pattern %q: %w", path, pattern, err)})
-						return false
-					} else if !match {
+					if match := doublestar.MatchUnvalidated(pattern, path); !match {
 						continue
 					}
 				}
@@ -364,38 +354,71 @@ func readDir(root string, directory string, startAfter string) (entries []os.Dir
 	return
 }
 
-const globCharacters = "*?["
-
-// IsGlobPattern returns whether the pattern contains a glob pattern.
-func IsGlobPattern(pattern string) bool {
-	return strings.ContainsAny(pattern, globCharacters)
+// GlobMatchDirs expands a doublestar glob pattern against the directory tree
+// rooted at root and returns the matching directory paths, relative to root and
+// in lexicographical order. Like the streaming glob in
+// StreamPathsLexicographically, it matches the pattern itself rather than
+// descending into matched subtrees, mirroring shell glob expansion: each match
+// is one result rather than a whole subtree. Non-directory matches are skipped,
+// so for a GUFI index the per-directory db.db and other internal files are
+// ignored. ctx cancellation aborts the walk.
+func GlobMatchDirs(ctx context.Context, root, pattern string) ([]string, error) {
+	var matches []string
+	err := doublestar.GlobWalk(os.DirFS(root), filepath.ToSlash(pattern), func(p string, d fs.DirEntry) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if d.IsDir() {
+			matches = append(matches, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	return matches, nil
 }
 
-// StripGlobPattern extracts the longest leading substring from the given pattern that contains
-// no glob characters (e.g., '*', '?', or '['). This base prefix is used to efficiently list
-// objects in an S3 bucket, while the original glob pattern is later applied to filter the results.
+const noGlobPattern = -1
+
+// IsGlobPattern reports whether pattern contains a glob meta character ('*', '?', or a complete
+// '[...]' or '{...}' bracket expression). The pattern is validated by doublestar before scanning,
+// so an invalid pattern (e.g. an unclosed '[' or '{') is treated as a literal path rather than a
+// glob, the same as if no meta character were present.
+func IsGlobPattern(pattern string) bool {
+	return globPatternStart(pattern) != noGlobPattern
+}
+
+// StripGlobPattern returns the longest leading substring of pattern that contains no glob meta
+// characters. Invalid patterns (e.g. an unclosed '[' or '{') are treated as literal paths and the
+// full pattern is returned unchanged.
 func StripGlobPattern(pattern string) string {
-	position := 0
-	for {
-		index := strings.IndexAny(pattern[position:], globCharacters)
-		if index == -1 {
-			return pattern
-		}
-		candidate := position + index
+	index := globPatternStart(pattern)
+	if index == noGlobPattern {
+		return pattern
+	}
+	return pattern[:index]
+}
 
-		// Check for escape characters
-		backslashCount := 0
-		for i := candidate - 1; i >= 0 && pattern[i] == '\\'; i-- {
-			backslashCount++
-		}
-		if backslashCount%2 == 0 {
-			return pattern[:candidate]
-		}
-
-		// Check whether the last character was escaped
-		position = candidate + 1
-		if position >= len(pattern) {
-			return pattern
+func globPatternStart(pattern string) int {
+	if doublestar.ValidatePathPattern(pattern) {
+		escaped := false
+		for i := 0; i < len(pattern); i++ {
+			switch pattern[i] {
+			case '*', '?', '[', '{':
+				if escaped {
+					escaped = false
+					continue
+				}
+				return i
+			case '\\':
+				escaped = !escaped
+			default:
+				escaped = false
+			}
 		}
 	}
+
+	return noGlobPattern
 }

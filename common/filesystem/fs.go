@@ -164,7 +164,12 @@ func (fs BeeGFS) GetRelativePathWithinMount(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Clean("/" + strings.TrimPrefix(absPath, fs.MountPoint)), nil
+	mount := filepath.Clean(fs.MountPoint)
+	if absPath == mount || strings.HasPrefix(absPath, mount+string(filepath.Separator)) {
+		return filepath.Clean("/" + absPath[len(mount):]), nil
+	}
+	// Not mount-prefixed: presumed already relative to the mount point (doc contract).
+	return filepath.Clean("/" + path), nil
 }
 
 func (fs BeeGFS) Stat(name string) (os.FileInfo, error) {

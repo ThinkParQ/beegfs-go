@@ -482,7 +482,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				for _, content := range output.Contents {
 					key = aws.ToString(content.Key)
 					if !isKey {
-						if match, _ := doublestar.Match(prefix, key); !match {
+						if match := doublestar.MatchUnvalidated(prefix, key); !match {
 							continue
 						}
 					}
