@@ -137,6 +137,8 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	pattern = preparePath(pattern)
 	startAfter = preparePath(startAfter)
 
+	hasDoublestar := HasGlobDoublestarUnvalidated(pattern)
+	patternSeparators := PathSeparatorCount(pattern)
 	isGlob := IsGlobPattern(pattern)
 	if !isGlob {
 		if stat, err := mountPoint.Lstat(pattern); err != nil {
@@ -258,6 +260,13 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 								lastPath = path
 							}
 						}
+					}
+
+					if isGlob && !hasDoublestar && PathSeparatorCount(path) >= patternSeparators {
+						// Prune directory branch since it will contain no matches. Unless a glob
+						// pattern contains a doublestar, any entry inside a directory with the same
+						// or more path separators as the pattern will never match the glob pattern.
+						continue
 					}
 
 					if !walkDir(path) {
@@ -421,4 +430,35 @@ func globPatternStart(pattern string) int {
 	}
 
 	return noGlobPattern
+}
+
+func HasGlobDoublestarUnvalidated(pattern string) bool {
+	stars := 0
+	escaped := false
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			if escaped {
+				escaped = false
+				stars = 0
+				continue
+			}
+			stars++
+			if stars == 2 {
+				return true
+			}
+		case '\\':
+			escaped = !escaped
+			stars = 0
+		default:
+			escaped = false
+			stars = 0
+		}
+	}
+
+	return false
+}
+
+func PathSeparatorCount(path string) int {
+	return strings.Count(path, "/")
 }

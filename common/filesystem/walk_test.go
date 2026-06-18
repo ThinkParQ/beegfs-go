@@ -523,3 +523,32 @@ func TestGlobMatchDirs(t *testing.T) {
 		})
 	}
 }
+
+func TestHasGlobDoublestarUnvalidated(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    bool
+	}{
+		{"**", true},
+		{"foo/**/bar", true},
+		{"**/foo", true},
+		{"foo/**", true},
+		{"a**b", true},
+		{"*", false},
+		{"foo/*/bar", false},
+		// Two separate single stars must not be counted as **:
+		{"*/bar/*", false},
+		{"*/*", false},
+		// Escaped stars are not glob stars:
+		{`\**`, false},  // escaped star then plain star → only one glob star
+		{`*\*`, false},  // plain star then escaped star → only one glob star
+		{`\*\*`, false}, // both escaped
+		// Escaped backslash followed by **: `\\` is a literal backslash, then ** is a real doublestar:
+		{`\\**`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasGlobDoublestarUnvalidated(tc.pattern))
+		})
+	}
+}
