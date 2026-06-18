@@ -370,11 +370,11 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 	}
 
 	prefix = r.SanitizeRemotePath(prefix)
-	if _, err := filepath.Match(prefix, ""); err != nil {
-		return nil, fmt.Errorf("invalid prefix %s: %w", prefix, err)
-	}
 	prefixWithoutPattern := filesystem.StripGlobPattern(prefix)
 	isKey := prefix == prefixWithoutPattern
+	// All s3 api calls must use unescapedPrefixWithoutPattern to avoid sending escaped path
+	// characters that are otherwise handled by doublestar.
+	unescapedPrefixWithoutPattern := filesystem.Unescape(prefixWithoutPattern)
 
 	rt, err := decodeResumeToken(resumeToken)
 	if err != nil {
@@ -420,7 +420,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 			input := &s3.ListObjectsV2Input{
 				Bucket:  aws.String(r.config.GetS3().Bucket),
-				Prefix:  aws.String(prefixWithoutPattern),
+				Prefix:  aws.String(unescapedPrefixWithoutPattern),
 				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
 			}
 			if r.isListStartAfterKeySupported != nil && *r.isListStartAfterKeySupported && rt.StartAfter != "" {
@@ -482,7 +482,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				for _, content := range output.Contents {
 					key = aws.ToString(content.Key)
 					if !isKey {
-						if match, _ := doublestar.Match(prefix, key); !match {
+						if match := doublestar.MatchUnvalidated(prefix, key); !match {
 							continue
 						}
 					}
@@ -523,7 +523,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		if isKey {
 			_, err := r.client.HeadObject(ctx, &s3.HeadObjectInput{
 				Bucket: aws.String(r.config.GetS3().Bucket),
-				Key:    aws.String(prefix),
+				Key:    aws.String(unescapedPrefixWithoutPattern),
 			})
 			if err != nil {
 				var apiErr smithy.APIError
@@ -531,7 +531,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					// Try walking as a prefix since there was no key. If not a valid prefix
 					// fallback to the original error.
 					if !prefixWalk() {
-						send(&filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", prefix)})
+						send(&filesystem.StreamPathResult{Err: fmt.Errorf("key not found: %s", unescapedPrefixWithoutPattern)})
 					}
 				} else {
 					send(&filesystem.StreamPathResult{Err: fmt.Errorf("query failed: %w", err)})
@@ -539,7 +539,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 				return
 			}
 
-			send(&filesystem.StreamPathResult{Path: prefix})
+			send(&filesystem.StreamPathResult{Path: unescapedPrefixWithoutPattern})
 			return
 		}
 
