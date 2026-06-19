@@ -2,75 +2,66 @@ package index
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/thinkparq/beegfs-go/ctl/internal/bflag"
+	"github.com/spf13/pflag"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 	"go.uber.org/zap"
 )
 
-const createCmd = "index"
+func newCreateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobra.Command {
+	backendCfg := indexPkg.CreateCfg{}
 
-func newGenericCreateCmd() *cobra.Command {
-	var bflagSet *bflag.FlagSet
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Generates or updates the index for the specified file system.",
+		Args:  cobra.NoArgs,
+		Long: `Generate a new index by traversing the source directory.
 
-	var cmd = &cobra.Command{
+The index is created at <index-root>/<basename(fs-path)>. Tree summary
+is computed automatically after indexing unless --skip-treesummary is set.
+
+The filesystem path, index root and address come from the
+.beegfs.index entry when --fs-path/--index-root/--index-addr are not given.
+
+Example: create an index for /mnt/beegfs at /mnt/index
+  (index lands at /mnt/index/beegfs)
+
+  beegfs index create --fs-path /mnt/beegfs --index-root /mnt/index
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkBeeGFSConfig(); err != nil {
+			log, _ := config.GetLogger()
+			if backendCfg.FSPath == "" {
+				backendCfg.FSPath = indexPkg.DotIndexPath(discoverBeeGFSMountPath())
+			}
+			if backendCfg.FSPath == "" {
+				return fmt.Errorf("no filesystem path to index: pass --fs-path or configure a path in %s at the BeeGFS mount root", indexPkg.DotIndexFileName)
+			}
+			backendCfg.GlobalCfg = resolveGlobalCfg(cmd.Context(), *globalCfg, backendCfg.FSPath)
+			log.Debug("running beegfs index create", zap.Any("cfg", backendCfg))
+
+			lines, errWait, err := indexPkg.Create(cmd.Context(), backendCfg)
+			if err != nil {
 				return err
 			}
-			return runPythonCreateIndex(bflagSet)
+
+			if err := drain(cmd.Context(), lines, errWait, func(line string) {
+				fmt.Println(line)
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("Indexed filesystem path: %s\n", backendCfg.FSPath)
+			fmt.Printf("Index root:              %s\n", backendCfg.IndexRoot)
+			return nil
 		},
 	}
 
-	bflagSet = bflag.NewFlagSet(commonIndexFlags, cmd)
+	cmd.Flags().AddFlagSet(parentFlags)
+	cmd.Flags().StringVarP(&backendCfg.FSPath, "fs-path", "F", "", "Source filesystem path to index.")
+	cmd.Flags().BoolVar(&backendCfg.SkipTreesummary, "skip-treesummary", false, "Skip computing tree summary after indexing.")
+	cmd.Flags().BoolVarP(&backendCfg.Xattrs, "xattrs", "x", false, "Index extended attributes.")
+	cmd.Flags().BoolVarP(&backendCfg.NoMetadata, "no-beegfs-metadata", "B", false, "Skip BeeGFS plugin (do not collect BeeGFS metadata).")
+
 	return cmd
-}
-
-func newCreateCmd() *cobra.Command {
-	s := newGenericCreateCmd()
-	s.Use = "create"
-	s.Short = "Generates or updates the index for the specified file system."
-	s.Long = `Generate or updates the index by traversing the source directory.
-
-The index can exist within the source directory or in a separate index directory.
-The program performs a breadth-first readdirplus traversal to list the contents, or it creates
-an output database and/or files listing directories and files it encounters. This program serves two main purposes:
-
-1. To identify directories with changes, allowing incremental updates to a Hive index from changes in the source file system.
-2. To create a comprehensive dump of directories, files, and links. You can choose to output in traversal order
-   (each directory followed by its files) or to stride inodes across multiple files for merging with inode-strided attribute lists.
-
-Example: Create or update the index for the file system at /mnt/fs, limiting memory usage to 8GB:
-
-$ beegfs index create --fs-path /mnt/fs --index-path /mnt/index --max-memory 8GB
-`
-	return s
-}
-
-func runPythonCreateIndex(bflagSet *bflag.FlagSet) error {
-	log, _ := config.GetLogger()
-	wrappedArgs := bflagSet.WrappedArgs()
-	allArgs := make([]string, 0, len(wrappedArgs)+2)
-	allArgs = append(allArgs, createCmd)
-	allArgs = append(allArgs, wrappedArgs...)
-	log.Debug("Running BeeGFS Hive Index create command",
-		zap.Any("wrappedArgs", wrappedArgs),
-		zap.Any("createCmd", createCmd),
-		zap.Any("allArgs", allArgs),
-	)
-	cmd := exec.Command(beeBinary, allArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("unable to start index command: %w", err)
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("error executing index command: %w", err)
-	}
-	return nil
 }

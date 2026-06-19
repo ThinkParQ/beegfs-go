@@ -801,7 +801,7 @@ func IsValidRstId(rstId uint32) bool {
 }
 
 // GetDownloadRemotePathDirectory returns the directory part of remotePath before any globbing
-// pattern.
+// pattern. Any escaped characters in the directory will be unescaped.
 func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob bool) {
 	normalizedRemotePath := NormalizePath(remotePath)
 	directory = filesystem.StripGlobPattern(normalizedRemotePath)
@@ -810,6 +810,7 @@ func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob
 		directory = filepath.Dir(directory)
 	}
 
+	directory = filesystem.Unescape(directory)
 	return
 }
 

@@ -189,6 +189,7 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		"/deep/a/b/c/d/e.txt",
 		"/deep/a/b/c/d/e/f0",
 		"/deep/a/b/c/d/e/f.txt",
+		"/brackets/file[abc",
 	}
 
 	mountDir := t.TempDir()
@@ -239,8 +240,11 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			},
 		},
 		{
+			// '?' matches exactly one non-separator character. The full pattern
+			// must reach the file depth; /data? alone only matches the sibling
+			// directories themselves.
 			name:     "single-character-wildcard-data-siblings",
-			pattern:  "/data?",
+			pattern:  "/data?/a/a.txt",
 			maxPaths: -1,
 			expectedPaths: []string{
 				"/data1/a/a.txt",
@@ -248,31 +252,26 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			},
 		},
 		{
+			// '*' matches zero or more non-separator characters, so /data*
+			// covers /data, /data1, /data2. A deeper pattern is required to
+			// reach files inside those directories.
 			name:     "root-directory-with-wildcard",
-			pattern:  "/data*",
+			pattern:  "/data*/a/a.txt",
 			maxPaths: -1,
 			expectedPaths: []string{
 				"/data/a/a.txt",
-				"/data/a/z.txt",
-				"/data/b.txt",
-				"/data/b/b.txt",
-				"/data/b/b/b.txt",
-				"/data/b/y.txt",
-				"/data/b0.txt",
-				"/data/c/c.txt",
-				"/data/c/c.txt2",
-				"/data/c/x.txt",
 				"/data1/a/a.txt",
 				"/data2/a/a.txt",
 			},
 		},
 		{
+			// The trailing '*' does not cross '/': /data/b/b/b.txt requires two
+			// path components after /b/ and is no longer matched.
 			name:     "files-from-common-directories-in-root-directories",
 			pattern:  "/data*/b/*",
 			maxPaths: -1,
 			expectedPaths: []string{
 				"/data/b/b.txt",
-				"/data/b/b/b.txt",
 				"/data/b/y.txt",
 			},
 		},
@@ -282,6 +281,16 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			maxPaths: -1,
 			expectedPaths: []string{
 				"/data/a/a.txt",
+			},
+		},
+		{
+			// An invalid glob pattern (unclosed bracket) is not a glob: it is
+			// treated as a literal file path and streamed back if the file exists.
+			name:     "invalid-glob-treated-as-literal-path",
+			pattern:  "/brackets/file[abc",
+			maxPaths: -1,
+			expectedPaths: []string{
+				"/brackets/file[abc",
 			},
 		},
 		{
@@ -369,20 +378,14 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			},
 		},
 		{
+			// '*' does not cross path separators: deep/a/* matches only the
+			// direct file children of deep/a/, not files in deeper subdirs.
 			name:     "deeply-nested-glob-pattern",
-			pattern:  "deep/*",
+			pattern:  "deep/a/*",
 			maxPaths: -1,
 			expectedPaths: []string{
 				"/deep/a/b0",
 				"/deep/a/b.txt",
-				"/deep/a/b/c0",
-				"/deep/a/b/c.txt",
-				"/deep/a/b/c/d0",
-				"/deep/a/b/c/d.txt",
-				"/deep/a/b/c/d/e0",
-				"/deep/a/b/c/d/e.txt",
-				"/deep/a/b/c/d/e/f0",
-				"/deep/a/b/c/d/e/f.txt",
 			},
 		},
 		{
@@ -428,6 +431,117 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			} else {
 				assert.Equal(t, commonTestPaths, paths)
 			}
+		})
+	}
+}
+
+func TestIsGlobPattern(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    bool
+	}{
+		{"plain.txt", false},
+		{"*.txt", true},
+		{"a?b", true},
+		{"a[bc]", true},
+		{"a[bc", false},        // unclosed bracket is not a glob
+		{"abc]", false},        // closing bracket without an opener is literal
+		{`foo\*.txt`, false},   // escaped meta char is literal
+		{`foo\\*.txt`, true},   // escaped backslash, bare meta char
+		{`foo\\\*.txt`, false}, // escaped backslash + escaped meta char
+		{`a\?b`, false},
+		{`a\[b`, false},
+		{`a\[b]`, false}, // escaped '[' is not a glob opener; trailing ']' is literal
+		{`{a,b}`, true},  // valid alternation expression
+		{`{a,b`, false},  // unclosed brace is not a glob
+		{`dir/*/file`, true},
+		{`dir/**/file`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsGlobPattern(tc.pattern))
+		})
+	}
+}
+
+func TestStripGlobPattern(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"plain/path.txt", "plain/path.txt"}, // no meta characters: returned as is
+		{"prefix/*.txt", "prefix/"},
+		{"a/b?c", "a/b"},
+		{"a/b[cd]e", "a/b"},  // strip at the start of the bracket expression
+		{"a/b[cd", "a/b[cd"}, // unclosed bracket: not a glob, returned as is
+		{`a/b\*c`, `a/b\*c`},
+		{"data/2024/file", "data/2024/file"},
+		{"data/20??/file", "data/20"},
+		{"{a,b}/file", ""},          // '{' at index 0: entire pattern is the glob
+		{"prefix/{a,b}", "prefix/"}, // strip at the start of the alternation expression
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			assert.Equal(t, tc.want, StripGlobPattern(tc.pattern))
+		})
+	}
+}
+
+func TestUnescape(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"plain/path.txt", "plain/path.txt"},             // no backslash: fast path
+		{`files/\*.txt`, "files/*.txt"},                  // escaped wildcard
+		{`files/\?.txt`, "files/?.txt"},                  // escaped '?'
+		{`files/\[data\].txt`, "files/[data].txt"},       // escaped brackets
+		{`files/\{a,b\}`, `files/{a,b}`},                 // escaped '{' and '}'
+		{`a\\b`, `a\b`},                                  // escaped backslash
+		{`prefix/\[2024\]/*.csv`, "prefix/[2024]/*.csv"}, // escaped prefix, real glob suffix
+		{`a\bc`, `abc`},                                  // ordinary characters can be escaped
+		{`trailing\`, `trailing\`},                       // trailing backslash: kept as-is
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			assert.Equal(t, tc.want, Unescape(tc.pattern))
+		})
+	}
+}
+
+// TestGlobMatchDirs verifies shell-style glob expansion for index globs: the
+// pattern matches itself (no implicit descent into matched subtrees), only
+// directories are returned (the per-directory db.db and sibling files are
+// skipped), and results are sorted.
+func TestGlobMatchDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"proj-a/sub/deep", "proj-b", "other"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	for _, f := range []string{"db.db", "proj-a.txt", "proj-a/db.db"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, f), nil, 0o644))
+	}
+
+	tests := []struct {
+		name    string
+		pattern string
+		want    []string
+	}{
+		{name: "single-level glob returns matching dirs, not files or descendants", pattern: "proj-*", want: []string{"proj-a", "proj-b"}},
+		{name: "star matches every immediate dir and skips files", pattern: "*", want: []string{"other", "proj-a", "proj-b"}},
+		{name: "multi-segment glob matches at that depth only", pattern: "proj-*/sub", want: []string{"proj-a/sub"}},
+		// A '**' token matches the directory AND every descendant directory; callers
+		// that turn each match into a recursive search root must dedupe these (see
+		// pruneNestedDirs in the index command) to avoid duplicated output.
+		{name: "doublestar returns a dir and all its descendants", pattern: "proj-a/**", want: []string{"proj-a", "proj-a/sub", "proj-a/sub/deep"}},
+		{name: "no match returns empty", pattern: "nope-*", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := GlobMatchDirs(context.Background(), root, tc.pattern)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
