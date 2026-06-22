@@ -1,0 +1,1680 @@
+{
+  "dashboard": {
+    "uid": "beegfs-remote-sync-exp",
+    "title": "BeeGFS Remote & Sync (experimental)",
+    "tags": [
+      "experimental",
+      "beegfs",
+      "rst"
+    ],
+    "schemaVersion": 39,
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "rst_id",
+          "label": "RST",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cfh9rfys1kd1cd"
+          },
+          "definition": "label_values(remote_job_terminal_total{rst_id!=\"0\"}, rst_id)",
+          "query": {
+            "qryType": 1,
+            "query": "label_values(remote_job_terminal_total{rst_id!=\"0\"}, rst_id)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "type": "query",
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "refresh": 2,
+          "sort": 1,
+          "current": {
+            "selected": true,
+            "text": [
+              "All"
+            ],
+            "value": [
+              "$__all"
+            ]
+          }
+        },
+        {
+          "name": "sync_instance",
+          "label": "Sync instance",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cfh9rfys1kd1cd"
+          },
+          "definition": "label_values(sync_work_requests_total, service_instance_id)",
+          "query": {
+            "qryType": 1,
+            "query": "label_values(sync_work_requests_total, service_instance_id)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "type": "query",
+          "multi": true,
+          "includeAll": true,
+          "allValue": ".+",
+          "refresh": 2,
+          "sort": 1,
+          "current": {
+            "selected": true,
+            "text": [
+              "All"
+            ],
+            "value": [
+              "$__all"
+            ]
+          }
+        },
+        {
+          "name": "log_severity",
+          "label": "Log severity",
+          "type": "custom",
+          "query": "error,warn,info,debug,fatal,trace",
+          "options": [
+            {
+              "text": "error",
+              "value": "error",
+              "selected": true
+            },
+            {
+              "text": "warn",
+              "value": "warn",
+              "selected": true
+            },
+            {
+              "text": "info",
+              "value": "info",
+              "selected": false
+            },
+            {
+              "text": "debug",
+              "value": "debug",
+              "selected": false
+            },
+            {
+              "text": "fatal",
+              "value": "fatal",
+              "selected": false
+            },
+            {
+              "text": "trace",
+              "value": "trace",
+              "selected": false
+            }
+          ],
+          "multi": true,
+          "includeAll": true,
+          "allValue": "error|warn|info|debug|fatal|trace",
+          "current": {
+            "selected": true,
+            "text": [
+              "error",
+              "warn"
+            ],
+            "value": [
+              "error",
+              "warn"
+            ]
+          }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 999,
+        "type": "row",
+        "title": "Service status (availability + version)",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 100,
+        "type": "stat",
+        "title": "beegfs-remote online",
+        "description": "Green = beegfs-remote is currently exporting metrics to Prometheus (at least one series visible). Red = no series; service is either down, OTLP push is failing, or all metrics filtered out.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 1,
+          "w": 6,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "value",
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "count(remote_job_requests_total{job=\"beegfs-remote\"}) >= bool 1",
+            "legendFormat": "online",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 101,
+        "type": "stat",
+        "title": "beegfs-remote \u2014 freshness (s since last sample)",
+        "description": "Seconds since the most recent sample for `remote_job_requests_total`. Should normally be < OTLP interval (30s). Yellow > 60s, Red > 120s \u2014 indicates export pipeline stalled or service died.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 6,
+          "y": 1,
+          "w": 6,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "value",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "decimals": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 60
+                },
+                {
+                  "color": "red",
+                  "value": 120
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "time() - max(timestamp(remote_job_requests_total{job=\"beegfs-remote\"}))",
+            "legendFormat": "age",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 102,
+        "type": "stat",
+        "title": "beegfs-sync online",
+        "description": "Same as the remote indicator but for beegfs-sync. Uses `sync_work_requests_total` as the heartbeat series.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 1,
+          "w": 6,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "value",
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "count(sync_work_requests_total{job=\"beegfs-sync\"}) >= bool 1",
+            "legendFormat": "online",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 103,
+        "type": "stat",
+        "title": "beegfs-sync \u2014 freshness (s since last sample)",
+        "description": "Freshness of beegfs-sync's metric stream. Spikes if sync stalls or OTLP exporter has trouble shipping.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 18,
+          "y": 1,
+          "w": 6,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "value",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "decimals": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 60
+                },
+                {
+                  "color": "red",
+                  "value": 120
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "time() - max(timestamp(sync_work_requests_total{job=\"beegfs-sync\"}))",
+            "legendFormat": "age",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 1000,
+        "type": "row",
+        "title": "Triage \u2014 what's broken now",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 5,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 1,
+        "type": "stat",
+        "title": "Failed jobs (last 15m)",
+        "description": "Count of jobs that reached the `failed` terminal state in the last 15m, summed across all RSTs selected by $rst_id. Drill into panel 6 + 7 to identify which RST.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 6,
+          "w": 5,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.5
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(increase(remote_job_terminal_total{state=\"failed\", rst_id=~\"$rst_id\"}[15m]))",
+            "legendFormat": "failed",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 2,
+        "type": "stat",
+        "title": "Cancelled jobs (last 15m)",
+        "description": "Same as panel 1 but for the `cancelled` state. Cancellations are user-initiated; if you didn't cancel and this is non-zero, investigate.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 5,
+          "y": 6,
+          "w": 5,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(increase(remote_job_terminal_total{state=\"cancelled\", rst_id=~\"$rst_id\"}[15m]))",
+            "legendFormat": "cancelled",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 3,
+        "type": "stat",
+        "title": "Job throughput (1m)",
+        "description": "Aggregate completion rate across all RSTs (1m rate, jobs/sec). Use this to gauge current cluster activity.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 10,
+          "y": 6,
+          "w": 5,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(rate(remote_job_terminal_total{rst_id=~\"$rst_id\"}[1m]))",
+            "legendFormat": "jobs/s",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 4,
+        "type": "stat",
+        "title": "Sync completion Hz (now)",
+        "description": "Current per-second completion Hz of the busiest sync scheduler. Already a rate from the scheduler \u2014 no `rate()` needed.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 15,
+          "y": 6,
+          "w": 5,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "Hz",
+            "decimals": 2
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "max(scheduler_completed_work_rate_per_second{service_instance_id=~\"$sync_instance\"})",
+            "legendFormat": "Hz",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 5,
+        "type": "stat",
+        "title": "Net arrivals (in \u2212 out, 5m)",
+        "description": "Net job arrivals in last 5m: `requests - terminal`. A growing positive value means jobs are coming in faster than they finish \u2014 backlog forming. Negative is clamped to 0. NOT a live 'active jobs' count.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 20,
+          "y": 6,
+          "w": 4,
+          "h": 4
+        },
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "decimals": 0
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "clamp_min(sum(increase(remote_job_requests_total[5m])) - sum(increase(remote_job_terminal_total[5m])), 0)",
+            "legendFormat": "net",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 1001,
+        "type": "row",
+        "title": "Per-RST troubleshooting",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 10,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 6,
+        "type": "timeseries",
+        "title": "Failures over time per RST",
+        "description": "Per-RST stacked rate of `failed|cancelled|unknown` terminal states (5m window). Lines stack so total height = total bad-outcome rate. Empty band = all RSTs healthy.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 11,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 20,
+              "showPoints": "never",
+              "stacking": {
+                "mode": "normal",
+                "group": "A"
+              }
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (rst_id, state)(rate(remote_job_terminal_total{state=~\"failed|cancelled|unknown\", rst_id!=\"0\", rst_id=~\"$rst_id\"}[5m]))",
+            "legendFormat": "{{rst_id}} / {{state}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 7,
+        "type": "table",
+        "title": "Per-RST status (5m rate + 1h count)",
+        "description": "Table with one row per (RST, state). `Rate 5m` shows current jobs/sec for that outcome; `Count last 1h` is the absolute number in the last hour. Use to compare absolute volume vs current trend.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 11,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "showHeader": true,
+          "cellHeight": "sm",
+          "footer": {
+            "show": false,
+            "reducer": [
+              "sum"
+            ],
+            "countRows": false,
+            "fields": ""
+          }
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (rst_id, state)(rate(remote_job_terminal_total{rst_id!=\"0\"}[5m]))",
+            "legendFormat": "",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            },
+            "format": "table"
+          },
+          {
+            "refId": "B",
+            "expr": "sum by (rst_id, state)(increase(remote_job_terminal_total{rst_id!=\"0\"}[1h]))",
+            "legendFormat": "",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            },
+            "format": "table"
+          }
+        ],
+        "pluginVersion": "12.4.2",
+        "transformations": [
+          {
+            "id": "merge",
+            "options": {}
+          },
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true,
+                "Time 1": true,
+                "Time 2": true
+              },
+              "renameByName": {
+                "Value #A": "Rate 5m (jobs/s)",
+                "Value #B": "Count last 1h",
+                "rst_id": "RST",
+                "state": "State"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 1002,
+        "type": "row",
+        "title": "Job pipeline \u2014 volume & completed-job latency",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 19,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 8,
+        "type": "timeseries",
+        "title": "Job request vs completion rate",
+        "description": "Two lines: arrival rate of new job requests vs rate of jobs reaching a terminal state. When these diverge (requests > terminal), backlog is building.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 20,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 5,
+              "showPoints": "never"
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum(rate(remote_job_requests_total[5m]))",
+            "legendFormat": "requests/s",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          },
+          {
+            "refId": "B",
+            "expr": "sum(rate(remote_job_terminal_total[5m]))",
+            "legendFormat": "terminal/s",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 9,
+        "type": "piechart",
+        "title": "Job outcomes (range)",
+        "description": "Share of terminal states (completed/failed/cancelled/offloaded/unknown) over the dashboard's current time range. Useful for at-a-glance outcome quality.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 20,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": ""
+          },
+          "pieType": "donut",
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          },
+          "legend": {
+            "showLegend": true,
+            "placement": "right",
+            "displayMode": "table",
+            "values": [
+              "value",
+              "percent"
+            ]
+          },
+          "displayLabels": [
+            "name",
+            "percent"
+          ]
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (state)(increase(remote_job_terminal_total{rst_id=~\"$rst_id\"}[$__range]))",
+            "legendFormat": "{{state}}",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 10,
+        "type": "heatmap",
+        "title": "Completed-job duration heatmap",
+        "description": "Heatmap of completed-job duration distribution over time. Y-axis = duration buckets (seconds), color intensity = number of completions falling in that bucket per second. Wide spread = highly variable durations.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 28,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "calculate": false,
+          "yAxis": {
+            "axisPlacement": "left",
+            "reverse": false,
+            "unit": "s"
+          },
+          "rowsFrame": {
+            "layout": "auto"
+          },
+          "color": {
+            "mode": "scheme",
+            "scheme": "Spectral",
+            "steps": 64,
+            "exponent": 0.5,
+            "reverse": false
+          },
+          "cellGap": 1,
+          "filterValues": {
+            "le": 1e-09
+          },
+          "tooltip": {
+            "show": true,
+            "yHistogram": true
+          },
+          "legend": {
+            "show": true
+          },
+          "exemplars": {
+            "color": "rgba(255,0,255,0.7)"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[1m]))",
+            "legendFormat": "{{le}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            },
+            "format": "heatmap"
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 11,
+        "type": "timeseries",
+        "title": "Completed-job duration p50 / p95 / p99",
+        "description": "p50/p95/p99 of completed-job duration. Histogram populated only at terminal \u2014 in-flight long jobs are invisible. p99 reads the highest `le` bucket where data lands, so usefulness depends on bucket boundaries.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 28,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 5,
+              "showPoints": "never"
+            },
+            "unit": "s"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "histogram_quantile(0.50, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))",
+            "legendFormat": "p50",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          },
+          {
+            "refId": "B",
+            "expr": "histogram_quantile(0.95, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))",
+            "legendFormat": "p95",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          },
+          {
+            "refId": "C",
+            "expr": "histogram_quantile(0.99, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))",
+            "legendFormat": "p99",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 1003,
+        "type": "row",
+        "title": "Sync worker pipeline",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 36,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 12,
+        "type": "timeseries",
+        "title": "Sync work lifecycle (per state)",
+        "description": "Stacked per-state rate of sync work transitions (new/queued/processed/completed/rescheduled). Each line is a counter rate; height shows current activity in that lifecycle stage.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 37,
+          "w": 8,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 20,
+              "showPoints": "never",
+              "stacking": {
+                "mode": "normal",
+                "group": "A"
+              }
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (state)(rate(sync_work_requests_total{service_instance_id=~\"$sync_instance\"}[5m]))",
+            "legendFormat": "{{state}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 13,
+        "type": "timeseries",
+        "title": "Sync work by priority",
+        "description": "Stacked sync work rate broken down by priority label (1 highest, 5 lowest). Identifies which priority tier is consuming worker time.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 8,
+          "y": 37,
+          "w": 8,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 20,
+              "showPoints": "never",
+              "stacking": {
+                "mode": "normal",
+                "group": "A"
+              }
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (priority)(rate(sync_work_requests_total{service_instance_id=~\"$sync_instance\"}[5m]))",
+            "legendFormat": "prio {{priority}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 14,
+        "type": "timeseries",
+        "title": "Sync scheduler Hz (completion + token release)",
+        "description": "Two scheduler-internal gauges: jobs completed/sec (work done) and tokens released/sec (concurrency budget). Tokens > completed means workers idle; completed > tokens means tokens are the bottleneck.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 16,
+          "y": 37,
+          "w": 8,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 5,
+              "showPoints": "never"
+            },
+            "unit": "Hz"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "scheduler_completed_work_rate_per_second{service_instance_id=~\"$sync_instance\"}",
+            "legendFormat": "completed {{service_instance_id}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          },
+          {
+            "refId": "B",
+            "expr": "scheduler_tokens_allowed_rate_per_second{service_instance_id=~\"$sync_instance\"}",
+            "legendFormat": "tokens {{service_instance_id}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 1004,
+        "type": "row",
+        "title": "Logs (Loki)",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 45,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 15,
+        "type": "timeseries",
+        "title": "Log volume by service + severity",
+        "description": "Log volume from beegfs-remote + beegfs-sync, stacked by severity. Filter via the `Log severity` template var at top. Spikes in warn/error correlate with bad behaviour in row 2/3.",
+        "datasource": {
+          "type": "loki",
+          "uid": "bfhc8n0pzh2wwa"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 46,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 20,
+              "showPoints": "never",
+              "stacking": {
+                "mode": "normal",
+                "group": "A"
+              }
+            },
+            "unit": "lps"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (service_name, severity_text)(count_over_time({service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"${log_severity:pipe}\" [1m]))",
+            "legendFormat": "{{service_name}} {{severity_text}}",
+            "editorMode": "code",
+            "datasource": {
+              "type": "loki",
+              "uid": "bfhc8n0pzh2wwa"
+            },
+            "queryType": "range",
+            "range": true,
+            "instant": false,
+            "maxLines": 1000,
+            "step": "",
+            "resolution": 1
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 16,
+        "type": "timeseries",
+        "title": "Error/warn rate per service",
+        "description": "Per-service rate of error+warn log lines (5m window). Use to detect when a service starts emitting warnings even before metrics react.",
+        "datasource": {
+          "type": "loki",
+          "uid": "bfhc8n0pzh2wwa"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 46,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 5,
+              "showPoints": "never"
+            },
+            "unit": "cps"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (service_name)(rate({service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"error|warn\" [5m]))",
+            "legendFormat": "{{service_name}}",
+            "editorMode": "code",
+            "datasource": {
+              "type": "loki",
+              "uid": "bfhc8n0pzh2wwa"
+            },
+            "queryType": "range",
+            "range": true,
+            "instant": false,
+            "maxLines": 1000,
+            "step": "",
+            "resolution": 1
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 17,
+        "type": "logs",
+        "title": "Recent log lines (filtered by severity)",
+        "description": "Raw log lines from both services, filtered by `Log severity`. Time-aligned with the panels above \u2014 click on a spike in 15/16 to jump here.",
+        "datasource": {
+          "type": "loki",
+          "uid": "bfhc8n0pzh2wwa"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 54,
+          "w": 24,
+          "h": 12
+        },
+        "options": {
+          "showTime": true,
+          "showLabels": false,
+          "showCommonLabels": true,
+          "wrapLogMessage": true,
+          "prettifyLogMessage": false,
+          "enableLogDetails": true,
+          "dedupStrategy": "none",
+          "sortOrder": "Descending"
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "{service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"${log_severity:pipe}\"",
+            "legendFormat": "",
+            "editorMode": "code",
+            "datasource": {
+              "type": "loki",
+              "uid": "bfhc8n0pzh2wwa"
+            },
+            "queryType": "range",
+            "range": true,
+            "instant": false,
+            "maxLines": 1000,
+            "step": "",
+            "resolution": 1
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 1005,
+        "type": "row",
+        "title": "RST distribution \u2014 which RST is in use",
+        "collapsed": false,
+        "gridPos": {
+          "x": 0,
+          "y": 66,
+          "w": 24,
+          "h": 1
+        },
+        "panels": []
+      },
+      {
+        "id": 18,
+        "type": "piechart",
+        "title": "Job terminal-share per RST (range)",
+        "description": "Slice = share of jobs that reached a terminal state per RST in the dashboard's current time range. Tells you which RST is hottest right now.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 67,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": ""
+          },
+          "pieType": "donut",
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          },
+          "legend": {
+            "showLegend": true,
+            "placement": "right",
+            "displayMode": "table",
+            "values": [
+              "value",
+              "percent"
+            ]
+          },
+          "displayLabels": [
+            "name",
+            "percent"
+          ]
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (rst_id)(increase(remote_job_terminal_total{rst_id!=\"0\"}[$__range]))",
+            "legendFormat": "rst {{rst_id}}",
+            "editorMode": "code",
+            "range": false,
+            "instant": true,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      },
+      {
+        "id": 19,
+        "type": "timeseries",
+        "title": "Job throughput per RST (5m rate)",
+        "description": "Per-RST throughput over time (5m rate). Use to spot RST-specific slowdowns or to verify load is going where you expect.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "cfh9rfys1kd1cd"
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 67,
+          "w": 12,
+          "h": 8
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "fillOpacity": 5,
+              "showPoints": "never"
+            },
+            "unit": "ops"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "sum by (rst_id)(rate(remote_job_terminal_total{rst_id!=\"0\", rst_id=~\"$rst_id\"}[5m]))",
+            "legendFormat": "rst {{rst_id}}",
+            "editorMode": "code",
+            "range": true,
+            "instant": false,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "cfh9rfys1kd1cd"
+            }
+          }
+        ],
+        "pluginVersion": "12.4.2"
+      }
+    ],
+    "editable": true,
+    "graphTooltip": 1,
+    "links": [],
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": {
+            "type": "grafana",
+            "uid": "-- Grafana --"
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        }
+      ]
+    },
+    "version": 1,
+    "weekStart": ""
+  },
+  "folderUid": "beegfs-demo",
+  "overwrite": true,
+  "message": "experimental dashboard auto-generated"
+}

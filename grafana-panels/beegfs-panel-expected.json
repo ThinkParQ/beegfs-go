@@ -1,0 +1,303 @@
+[
+  {
+    "id": 100,
+    "title": "beegfs-remote online",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "count(remote_job_requests_total{job=\"beegfs-remote\"}) >= bool 1"
+      }
+    ]
+  },
+  {
+    "id": 101,
+    "title": "beegfs-remote \u2014 freshness (s since last sample)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "time() - max(timestamp(remote_job_requests_total{job=\"beegfs-remote\"}))"
+      }
+    ]
+  },
+  {
+    "id": 102,
+    "title": "beegfs-sync online",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "count(sync_work_requests_total{job=\"beegfs-sync\"}) >= bool 1"
+      }
+    ]
+  },
+  {
+    "id": 103,
+    "title": "beegfs-sync \u2014 freshness (s since last sample)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "time() - max(timestamp(sync_work_requests_total{job=\"beegfs-sync\"}))"
+      }
+    ]
+  },
+  {
+    "id": 1,
+    "title": "Failed jobs (last 15m)",
+    "expected": "empty_if_no_failures",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum(increase(remote_job_terminal_total{state=\"failed\", rst_id=~\"$rst_id\"}[15m]))"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "title": "Cancelled jobs (last 15m)",
+    "expected": "empty_if_no_failures",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum(increase(remote_job_terminal_total{state=\"cancelled\", rst_id=~\"$rst_id\"}[15m]))"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "title": "Job throughput (1m)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum(rate(remote_job_terminal_total{rst_id=~\"$rst_id\"}[1m]))"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "title": "Sync completion Hz (now)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "max(scheduler_completed_work_rate_per_second{service_instance_id=~\"$sync_instance\"})"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "title": "Net arrivals (in \u2212 out, 5m)",
+    "expected": "warmup_required",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "clamp_min(sum(increase(remote_job_requests_total[5m])) - sum(increase(remote_job_terminal_total[5m])), 0)"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "title": "Failures over time per RST",
+    "expected": "empty_if_no_failures",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (rst_id, state)(rate(remote_job_terminal_total{state=~\"failed|cancelled|unknown\", rst_id!=\"0\", rst_id=~\"$rst_id\"}[5m]))"
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "title": "Per-RST status (5m rate + 1h count)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (rst_id, state)(rate(remote_job_terminal_total{rst_id!=\"0\"}[5m]))"
+      },
+      {
+        "refId": "B",
+        "datasource": "prometheus",
+        "expr": "sum by (rst_id, state)(increase(remote_job_terminal_total{rst_id!=\"0\"}[1h]))"
+      }
+    ]
+  },
+  {
+    "id": 8,
+    "title": "Job request vs completion rate",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum(rate(remote_job_requests_total[5m]))"
+      },
+      {
+        "refId": "B",
+        "datasource": "prometheus",
+        "expr": "sum(rate(remote_job_terminal_total[5m]))"
+      }
+    ]
+  },
+  {
+    "id": 9,
+    "title": "Job outcomes (range)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (state)(increase(remote_job_terminal_total{rst_id=~\"$rst_id\"}[$__range]))"
+      }
+    ]
+  },
+  {
+    "id": 10,
+    "title": "Completed-job duration heatmap",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[1m]))"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "title": "Completed-job duration p50 / p95 / p99",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "histogram_quantile(0.50, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))"
+      },
+      {
+        "refId": "B",
+        "datasource": "prometheus",
+        "expr": "histogram_quantile(0.95, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))"
+      },
+      {
+        "refId": "C",
+        "datasource": "prometheus",
+        "expr": "histogram_quantile(0.99, sum by (le)(rate(remote_job_duration_seconds_bucket{rst_id=~\"$rst_id\"}[5m])))"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "title": "Sync work lifecycle (per state)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (state)(rate(sync_work_requests_total{service_instance_id=~\"$sync_instance\"}[5m]))"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "title": "Sync work by priority",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (priority)(rate(sync_work_requests_total{service_instance_id=~\"$sync_instance\"}[5m]))"
+      }
+    ]
+  },
+  {
+    "id": 14,
+    "title": "Sync scheduler Hz (completion + token release)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "scheduler_completed_work_rate_per_second{service_instance_id=~\"$sync_instance\"}"
+      },
+      {
+        "refId": "B",
+        "datasource": "prometheus",
+        "expr": "scheduler_tokens_allowed_rate_per_second{service_instance_id=~\"$sync_instance\"}"
+      }
+    ]
+  },
+  {
+    "id": 15,
+    "title": "Log volume by service + severity",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "loki",
+        "expr": "sum by (service_name, severity_text)(count_over_time({service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"${log_severity:pipe}\" [1m]))"
+      }
+    ]
+  },
+  {
+    "id": 16,
+    "title": "Error/warn rate per service",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "loki",
+        "expr": "sum by (service_name)(rate({service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"error|warn\" [5m]))"
+      }
+    ]
+  },
+  {
+    "id": 17,
+    "title": "Recent log lines (filtered by severity)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "loki",
+        "expr": "{service_name=~\"beegfs-remote|beegfs-sync\"} | severity_text=~\"${log_severity:pipe}\""
+      }
+    ]
+  },
+  {
+    "id": 18,
+    "title": "Job terminal-share per RST (range)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (rst_id)(increase(remote_job_terminal_total{rst_id!=\"0\"}[$__range]))"
+      }
+    ]
+  },
+  {
+    "id": 19,
+    "title": "Job throughput per RST (5m rate)",
+    "expected": "nonempty",
+    "targets": [
+      {
+        "refId": "A",
+        "datasource": "prometheus",
+        "expr": "sum by (rst_id)(rate(remote_job_terminal_total{rst_id!=\"0\", rst_id=~\"$rst_id\"}[5m]))"
+      }
+    ]
+  }
+]

@@ -1,0 +1,292 @@
+[
+  {
+    "uid": "beegfs-job-failed",
+    "title": "BeeGFS \u2014 failed jobs detected",
+    "ruleGroup": "beegfs_remote_sync_demo",
+    "condition": "B",
+    "data": [
+      {
+        "refId": "A",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "cfh9rfys1kd1cd",
+        "model": {
+          "editorMode": "code",
+          "expr": "sum by (rst_id)(increase(remote_job_terminal_total{state=\"failed\", rst_id!=\"0\"}[5m]))",
+          "instant": true,
+          "range": false,
+          "intervalMs": 60000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        }
+      },
+      {
+        "refId": "B",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "__expr__",
+        "model": {
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "$A > 3",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "B",
+          "type": "math"
+        }
+      }
+    ],
+    "for": "5m",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "annotations": {
+      "summary": "Failed jobs > 3 in 5m for some rst_id",
+      "scope": "beegfs-remote-sync experimental"
+    },
+    "labels": {
+      "severity": "critical",
+      "service": "beegfs-rst"
+    },
+    "isPaused": false
+  },
+  {
+    "uid": "beegfs-job-backlog",
+    "title": "BeeGFS \u2014 job arrivals outpacing completions",
+    "ruleGroup": "beegfs_remote_sync_demo",
+    "condition": "B",
+    "data": [
+      {
+        "refId": "A",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "cfh9rfys1kd1cd",
+        "model": {
+          "editorMode": "code",
+          "expr": "sum(increase(remote_job_requests_total[15m])) - sum(increase(remote_job_terminal_total[15m]))",
+          "instant": true,
+          "range": false,
+          "intervalMs": 60000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        }
+      },
+      {
+        "refId": "B",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "__expr__",
+        "model": {
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "$A > 2000",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "B",
+          "type": "math"
+        }
+      }
+    ],
+    "for": "15m",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "annotations": {
+      "summary": "Net job arrivals exceed completions by >2000 in 15m",
+      "scope": "beegfs-remote-sync experimental"
+    },
+    "labels": {
+      "severity": "warning",
+      "service": "beegfs-rst"
+    },
+    "isPaused": false
+  },
+  {
+    "uid": "beegfs-sync-stuck",
+    "title": "BeeGFS \u2014 sync completion stalled with queued work",
+    "ruleGroup": "beegfs_remote_sync_demo",
+    "condition": "B",
+    "data": [
+      {
+        "refId": "A",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "cfh9rfys1kd1cd",
+        "model": {
+          "editorMode": "code",
+          "expr": "(sum by (service_instance_id)(sum_over_time(scheduler_completed_work_rate_per_second[15m])) == bool 0) * on(service_instance_id) group_left() (sum by (service_instance_id)(increase(sync_work_requests_total{state=\"queued\"}[15m])) > bool 0)",
+          "instant": true,
+          "range": false,
+          "intervalMs": 60000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        }
+      },
+      {
+        "refId": "B",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "__expr__",
+        "model": {
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "$A > 0",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "B",
+          "type": "math"
+        }
+      }
+    ],
+    "for": "15m",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "annotations": {
+      "summary": "Sync worker not completing work but has queued work",
+      "scope": "beegfs-remote-sync experimental"
+    },
+    "labels": {
+      "severity": "critical",
+      "service": "beegfs-rst"
+    },
+    "isPaused": false
+  },
+  {
+    "uid": "beegfs-remote-down",
+    "title": "BeeGFS \u2014 beegfs-remote not reporting",
+    "ruleGroup": "beegfs_remote_sync_demo",
+    "condition": "B",
+    "data": [
+      {
+        "refId": "A",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "cfh9rfys1kd1cd",
+        "model": {
+          "editorMode": "code",
+          "expr": "absent_over_time(remote_job_requests_total{job=\"beegfs-remote\"}[10m])",
+          "instant": true,
+          "range": false,
+          "intervalMs": 60000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        }
+      },
+      {
+        "refId": "B",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "__expr__",
+        "model": {
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "$A > 0",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "B",
+          "type": "math"
+        }
+      }
+    ],
+    "for": "10m",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "annotations": {
+      "summary": "No remote_job_requests_total samples from beegfs-remote in 10m",
+      "scope": "beegfs-remote-sync experimental"
+    },
+    "labels": {
+      "severity": "critical",
+      "service": "beegfs-rst"
+    },
+    "isPaused": false
+  },
+  {
+    "uid": "beegfs-sync-down",
+    "title": "BeeGFS \u2014 beegfs-sync not reporting",
+    "ruleGroup": "beegfs_remote_sync_demo",
+    "condition": "B",
+    "data": [
+      {
+        "refId": "A",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "cfh9rfys1kd1cd",
+        "model": {
+          "editorMode": "code",
+          "expr": "absent_over_time(sync_work_requests_total{job=\"beegfs-sync\"}[10m])",
+          "instant": true,
+          "range": false,
+          "intervalMs": 60000,
+          "maxDataPoints": 43200,
+          "refId": "A"
+        }
+      },
+      {
+        "refId": "B",
+        "queryType": "",
+        "relativeTimeRange": {
+          "from": 600,
+          "to": 0
+        },
+        "datasourceUid": "__expr__",
+        "model": {
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__"
+          },
+          "expression": "$A > 0",
+          "intervalMs": 1000,
+          "maxDataPoints": 43200,
+          "refId": "B",
+          "type": "math"
+        }
+      }
+    ],
+    "for": "10m",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "annotations": {
+      "summary": "No sync_work_requests_total samples from beegfs-sync in 10m",
+      "scope": "beegfs-remote-sync experimental"
+    },
+    "labels": {
+      "severity": "critical",
+      "service": "beegfs-rst"
+    },
+    "isPaused": false
+  }
+]
