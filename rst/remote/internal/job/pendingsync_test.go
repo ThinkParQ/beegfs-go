@@ -14,6 +14,9 @@ import (
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -82,7 +85,7 @@ func (s *stubSubmit) callsFor(path string) []*beeremote.JobRequest {
 
 func newTestTracker(t *testing.T, clock *fakeClock, submit *stubSubmit) *pendingSyncTracker {
 	t.Helper()
-	tracker := newPendingSyncTracker(zaptest.NewLogger(t), submit.submit)
+	tracker := newPendingSyncTracker(zaptest.NewLogger(t), submit.submit, func(dispatchAction, dispatchReason) {})
 	tracker.now = clock.Now
 	return tracker
 }
@@ -138,6 +141,77 @@ func TestPendingSyncTracker_MultipleRSTs(t *testing.T) {
 	assert.Equal(t, uint32(1), calls[0].RemoteStorageTarget)
 	assert.Equal(t, uint32(2), calls[1].RemoteStorageTarget)
 	assert.Equal(t, uint32(3), calls[2].RemoteStorageTarget)
+}
+
+func TestPendingSyncTracker_PendingCount(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	stub := newStubSubmit()
+	tr := newTestTracker(t, clock, stub)
+
+	assert.Equal(t, 0, tr.pendingCount(), "no entries initially")
+
+	tr.Mark("/a", 10*time.Second, []uint32{1})
+	tr.Mark("/b", 10*time.Second, []uint32{1})
+	tr.Mark("/c", 10*time.Second, []uint32{1})
+	assert.Equal(t, 3, tr.pendingCount(), "three distinct paths pending")
+
+	// Re-marking an existing path must not double-count.
+	tr.Mark("/a", 10*time.Second, []uint32{2})
+	assert.Equal(t, 3, tr.pendingCount(), "re-marking an existing path should not change the count")
+
+	clock.Advance(11 * time.Second)
+	tr.drainReady(context.Background())
+	assert.Equal(t, 0, tr.pendingCount(), "all entries submitted and removed after cooldown")
+}
+
+// collectPendingSyncGauge collects metrics from the reader and returns the observed value of the
+// remote.dispatch.pending_sync gauge.
+func collectPendingSyncGauge(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "remote.dispatch.pending_sync" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Gauge[int64])
+			require.True(t, ok, "remote.dispatch.pending_sync should be a Gauge[int64]")
+			require.Len(t, data.DataPoints, 1)
+			return data.DataPoints[0].Value
+		}
+	}
+	t.Fatal("remote.dispatch.pending_sync gauge not found")
+	return 0
+}
+
+func TestPendingSyncTracker_PendingSyncGauge(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	stub := newStubSubmit()
+	tr := newTestTracker(t, clock, stub)
+
+	// Mirror the gauge wiring done in NewManager against a ManualReader-backed meter so we can
+	// assert the callback observes the tracker's pending count.
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("job")
+	gauge, err := meter.Int64ObservableGauge("remote.dispatch.pending_sync")
+	require.NoError(t, err)
+	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(gauge, int64(tr.pendingCount()))
+		return nil
+	}, gauge)
+	require.NoError(t, err)
+	defer func() { _ = reg.Unregister() }()
+
+	assert.Equal(t, int64(0), collectPendingSyncGauge(t, reader))
+
+	tr.Mark("/a", 10*time.Second, []uint32{1})
+	tr.Mark("/b", 10*time.Second, []uint32{1})
+	assert.Equal(t, int64(2), collectPendingSyncGauge(t, reader))
+
+	clock.Advance(11 * time.Second)
+	tr.drainReady(context.Background())
+	assert.Equal(t, int64(0), collectPendingSyncGauge(t, reader))
 }
 
 func TestPendingSyncTracker_INUSEBailsAndBumpsReadyAt(t *testing.T) {

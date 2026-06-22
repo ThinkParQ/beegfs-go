@@ -78,16 +78,31 @@ type pendingSyncTracker struct {
 	now func() time.Time
 	// submit is the function called after the cooldown elapses for an entry.
 	submit func(jr *beeremote.JobRequest) (*beeremote.JobResult, error)
+	// recordResult reports the outcome of a deferred upload submission. The deferred UPLOAD for a
+	// LAST_WRITER_CLOSED event is actually submitted here (not in dispatchLastWriterClosed), so its
+	// submission outcomes are recorded from processOne via this recorder (pre-bound by the manager
+	// to the LAST_WRITER_CLOSED event type).
+	recordResult dispatchResultRecorder
 }
 
-func newPendingSyncTracker(log *zap.Logger, submit func(*beeremote.JobRequest) (*beeremote.JobResult, error)) *pendingSyncTracker {
+func newPendingSyncTracker(log *zap.Logger, submit func(*beeremote.JobRequest) (*beeremote.JobResult, error), recordResult dispatchResultRecorder) *pendingSyncTracker {
 	return &pendingSyncTracker{
-		log:     log.With(zap.String("component", "pendingSyncTracker")),
-		entries: make(map[string]*pendingSync),
-		wake:    make(chan struct{}, 1),
-		now:     time.Now,
-		submit:  submit,
+		log:          log.With(zap.String("component", "pendingSyncTracker")),
+		entries:      make(map[string]*pendingSync),
+		wake:         make(chan struct{}, 1),
+		now:          time.Now,
+		submit:       submit,
+		recordResult: recordResult,
 	}
+}
+
+// pendingCount returns the number of files currently awaiting their cooldown before an automatic
+// upload is submitted. Uses len(entries) (the authoritative set) rather than the heap, which can
+// hold stale entries.
+func (t *pendingSyncTracker) pendingCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.entries)
 }
 
 func (t *pendingSyncTracker) signalWake() {
@@ -229,6 +244,7 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 		if err == nil {
 			t.log.Debug("automatic sync upload submitted",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID))
+			t.recordResult(actionSubmitted, reasonOK)
 			continue
 		}
 
@@ -250,15 +266,26 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 			}
 			t.mu.Unlock()
 			t.signalWake()
+			t.recordResult(actionDeferred, reasonFileInUse)
 			return
 		}
 
+		// The file was deleted before its deferred upload ran — nothing to sync.
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			t.log.Debug("automatic sync skipped — file no longer exists",
+				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Error(err))
+			t.recordResult(actionSkipped, reasonPathNotExists)
+			continue
+		}
+
+		// A job already exists for this path/RST (in progress, already complete, or already
+		// offloaded), so no new upload is needed.
 		if errors.Is(err, rst.ErrJobAlreadyExists) ||
 			errors.Is(err, rst.ErrJobAlreadyComplete) ||
-			errors.Is(err, rst.ErrJobAlreadyOffloaded) ||
-			errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
-			t.log.Debug("automatic sync skipped — job already terminal for RST",
+			errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+			t.log.Debug("automatic sync skipped — a job already exists for this path/RST",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Error(err))
+			t.recordResult(actionSkipped, reasonAlreadyHandled)
 			continue
 		}
 
@@ -267,9 +294,11 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 		if errors.Is(err, rst.ErrJobNotAllowed) {
 			t.log.Warn("automatic sync blocked — a failed job already exists for RST; clear it to resume auto-sync",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Error(err))
+			t.recordResult(actionError, reasonBlockedByFailedJob)
 			continue
 		}
 
+		t.recordResult(actionError, reasonSubmitFailed)
 		t.log.Warn("automatic sync upload failed",
 			zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Error(err))
 	}
