@@ -110,7 +110,6 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 			seg := proto.Clone(wr.GetSegment()).(*flex.WorkRequest_Segment)
 			j.Segments = append(j.Segments, &Segment{segment: seg})
 		}
-
 	} else {
 		workRequests = rst.RecreateWorkRequests(j.Get(), j.GetSegments())
 	}
@@ -129,7 +128,6 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 // largely just a wrapper around the rst.Client CompleteRequests method to handle converting between
 // data types used by the Job and the RST packages.
 func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) error {
-
 	workResults := make([]*flex.Work, 0, len(j.WorkResults))
 	for _, r := range j.WorkResults {
 		workResults = append(workResults, r.WorkResult)

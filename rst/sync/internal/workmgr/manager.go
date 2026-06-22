@@ -416,6 +416,7 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 		return
 	}
 
+	currentTime := time.Now()
 	var lastSubmissionId string
 	for item != nil && *availableTokens > 0 {
 		submissionId := item.Key
@@ -427,22 +428,31 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			workRequestID: entry.WorkRequest.RequestId,
 		}
 
-		// Check based on the work identifier if there is already an existing workContext in the
-		// activeWork map. If so skip adding it to the map or queue again as we could block a worker
-		// when it tries to lock the journal entry if another worker is already handling the WR.
-		if _, ok := m.activeWork[workId]; !ok {
-			workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
-			activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
-			m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
-			m.activeWorkQueue <- activeWork
-			*availableTokens -= 1
-			m.scheduler.RemoveWorkToken(submissionId)
-			m.metrics.workRequests.Add(context.Background(), 1,
-				metric.WithAttributes(
-					attrState.String("queued"),
-					attrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
-				),
-			)
+		if currentTime.Before(entry.ExecuteAfter) {
+			if err = m.rescheduleWork(workId); err != nil {
+				return
+			}
+		} else {
+			// Check based on the work identifier if there is already an existing workContext in the
+			// activeWork map. If so skip adding it to the map or queue again as we could block a worker
+			// when it tries to lock the journal entry if another worker is already handling the WR.
+			if _, ok := m.activeWork[workId]; !ok {
+				// Check based on the work identifier if there is already an existing workContext in the
+				// activeWork map. If so skip adding it to the map or queue again as we could block a worker
+				// when it tries to lock the journal entry if another worker is already handling the WR.
+				workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
+				activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
+				m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
+				m.activeWorkQueue <- activeWork
+				*availableTokens -= 1
+				m.scheduler.RemoveWorkToken(submissionId)
+				m.metrics.workRequests.Add(context.Background(), 1,
+					metric.WithAttributes(
+						attrState.String("queued"),
+						attrPriority.Int(normalizedPriority(entry.WorkRequest.GetPriority())),
+					),
+				)
+			}
 		}
 
 		item, err = nextItem()
@@ -462,6 +472,32 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 		return lastSubmissionId, fmt.Errorf("failed to increment to next submissionId after %s: %w", lastSubmissionId, err)
 	}
 	return nextSubmissionId, nil
+}
+
+// rescheduleWork moves the work to the wait-queue until executeAfter expires.
+func (m *Manager) rescheduleWork(workId workIdentifier) error {
+	submissionId := workId.submissionID
+	journalEntry, commitJournalEntry, err := m.workJournal.GetAndLockEntry(submissionId)
+	if err != nil {
+		if errors.Is(err, kvstore.ErrEntryAlreadyDeleted) || errors.Is(err, kvstore.ErrEntryNotInDB) {
+			// If the entry was already deleted or not found, then likely it was cancelled before we
+			// picked it up. There is nothing more for us to do. Just ignore the reschedule.
+			return nil
+		}
+		return fmt.Errorf("unable to reschedule work: %w", err)
+	}
+
+	entry := journalEntry.Value
+	status := entry.WorkResult.GetStatus()
+	status.SetState(flex.Work_RESCHEDULED)
+	status.SetMessage("waiting for work request to be ready")
+	if err := commitJournalEntry(); err != nil {
+		return err
+	}
+
+	m.scheduler.RemoveWorkToken(submissionId)
+	m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
+	return nil
 }
 
 // pullInRescheduledWork moves ready rescheduled work from the priority range to the activeWork map
@@ -564,8 +600,10 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		return
 	}
 
-	var rescheduledCount int
 	var scheduledCount int
+	var rescheduledCount int
+	var replayCount int
+	var unrecoverableCount int
 	var submissionId string
 	isNextSubmissionIdSet := false
 	workRequestPriority := priorityIdMap[int32(priority+1)]
@@ -573,7 +611,17 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		submissionId = submission.Key
 		entry := submission.Entry.Value
 
-		if entry.ExecuteAfter.IsZero() {
+		var status *flex.Work_Status
+		var state flex.Work_State
+		if entry.WorkResult != nil {
+			status = entry.WorkResult.GetStatus()
+		}
+		if status != nil {
+			state = status.GetState()
+		}
+
+		switch state {
+		case flex.Work_SCHEDULED:
 			m.scheduler.AddWorkToken(submissionId)
 			if !isNextSubmissionIdSet {
 				m.scheduler.SetNextSubmissionId(submissionId, priority)
@@ -586,7 +634,7 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		} else {
+		case flex.Work_RESCHEDULED:
 			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
 			rescheduledCount++
 			m.metrics.workRequests.Add(context.Background(), 1,
@@ -595,9 +643,27 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		}
-		entriesFound++
 
+		case flex.Work_RUNNING, flex.Work_COMPLETED:
+			// Submission has already been scheduled and executed so treat it as rescheduled work
+			// since this preserves the next submissionId priority scheduler boundary.
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			replayCount++
+		default:
+			m.log.Warn("skipping unrecoverable work journal entry during scheduler init",
+				zap.String("submissionId", submissionId),
+				zap.String("jobId", entry.WorkRequest.GetJobId()),
+				zap.String("requestId", entry.WorkRequest.GetRequestId()),
+				zap.String("state", state.String()),
+				zap.Time("executeAfter", entry.ExecuteAfter),
+				zap.Bool("hasWorkResult", entry.WorkResult != nil),
+				zap.Bool("hasStatus", status != nil),
+			)
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			unrecoverableCount++
+		}
+
+		entriesFound++
 		submission, err = nextItem()
 		if err != nil {
 			err = fmt.Errorf("unable to get work journal entry: %w", err)
@@ -605,7 +671,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount == 0 && rescheduledCount > 0 {
+	allRescheduledCount := rescheduledCount + replayCount
+	if scheduledCount == 0 && allRescheduledCount > 0 {
 		// All recovered were rescheduled work request so increment the last known rescheduled
 		// submissionId to get the nextExpectedSubmissionId.
 		nextExpectedSubmissionId, _, err := scheduler.IncrementSubmissionId(submissionId)
@@ -616,8 +683,14 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount > 0 || rescheduledCount > 0 {
-		m.log.Info("  recovered work requests", zap.String("priority", workRequestPriority), zap.Int("scheduled", scheduledCount), zap.Int("rescheduled", rescheduledCount))
+	if scheduledCount > 0 || rescheduledCount > 0 || replayCount > 0 || unrecoverableCount > 0 {
+		m.log.Info("  recovered work requests",
+			zap.String("priority", workRequestPriority),
+			zap.Int("scheduled", scheduledCount),
+			zap.Int("rescheduled", rescheduledCount),
+			zap.Int("replayed", replayCount),
+			zap.Int("unrecoverable", unrecoverableCount),
+		)
 	}
 	return
 }
@@ -683,6 +756,10 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	wr.SetPriority(priority)
 	workEntry.Value.WorkRequest = &workRequest{WorkRequest: wr}
 	workResult := newWorkFromRequest(workEntry.Value.WorkRequest)
+	if wr.GetDelayExecution() != nil {
+		executeAfter := time.Now().Add(wr.GetDelayExecution().AsDuration())
+		workEntry.Value.ExecuteAfter = executeAfter
+	}
 	workEntry.Value.WorkResult = workResult
 	job.Value[workRequestId] = submissionId
 

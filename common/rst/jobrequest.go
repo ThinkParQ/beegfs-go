@@ -44,13 +44,13 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 		return nil, err
 	}
 
-	respChan := make(chan *JobResponse, chanSize)
+	respCh := make(chan *JobResponse, chanSize)
 	go func() {
-		defer close(respChan)
+		defer close(respCh)
 
 		requests, err := prepareJobRequests(ctx, remote, cfg)
 		if err != nil {
-			respChan <- &JobResponse{Path: cfg.Path, Err: err}
+			respCh <- &JobResponse{Path: cfg.Path, Err: err}
 		}
 
 		for _, request := range requests {
@@ -65,7 +65,7 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 					case codes.Unavailable:
 						resp.Err = fmt.Errorf("fatal error sending request to BeeRemote: %w", err)
 						resp.FatalErr = true
-						respChan <- resp
+						respCh <- resp
 						return
 					}
 				}
@@ -74,11 +74,11 @@ func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int
 				resp.Status = submission.GetStatus()
 			}
 
-			respChan <- resp
+			respCh <- resp
 		}
 	}()
 
-	return respChan, nil
+	return respCh, nil
 }
 
 // prepareJobRequests creates all job requests required. If the path does not exist, unknown, glob

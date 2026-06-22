@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,4 +88,21 @@ func TestBeeGFSWriteAndReadFileParts(t *testing.T) {
 	readBytes, err := filePart.Read(buf)
 	require.NoError(t, err)
 	assert.Equal(t, expectedFileLen, readBytes)
+}
+
+func TestBeeGFSRemoveAll(t *testing.T) {
+	testDir, cleanup, err := tempPathForTesting(baseTestDir)
+	require.NoError(t, err)
+	defer cleanup(t)
+
+	mount := BeeGFS{MountPoint: testDir}
+	targetDir := filepath.Join(testDir, testFileName, "nested")
+	targetFile := filepath.Join(targetDir, "data")
+	require.NoError(t, os.MkdirAll(targetDir, 0755))
+	require.NoError(t, os.WriteFile(targetFile, []byte("test"), 0644))
+
+	require.NoError(t, mount.RemoveAll(testFileName))
+
+	_, err = os.Stat(filepath.Join(testDir, testFileName))
+	require.ErrorIs(t, err, os.ErrNotExist)
 }

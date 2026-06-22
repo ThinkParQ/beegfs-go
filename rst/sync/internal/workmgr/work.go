@@ -319,10 +319,15 @@ func (w *worker) process(work workAssignment) {
 		return
 	}
 
-	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
+	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
-	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	err = commitJournalEntry(kvstore.WithUpdateOnly(true))
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(work, client, entry)
 	} else {
@@ -405,55 +410,73 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 
 func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry workEntry) (cleanupEntries bool) {
 	request := entry.WorkRequest
-	result := entry.WorkResult
-	status := result.GetStatus()
+	workRequest := request.WorkRequest
+	builder := workRequest.GetBuilder()
+	workResult := entry.WorkResult
+	status := workResult.GetStatus()
 
-	var reschedule bool
-	var err error
-	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
+	schedulingResultCh := make(chan *rst.SchedulingResult)
+	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 	go func() {
-		defer close(jobSubmissionChan)
-		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		defer close(jobSubmissionCh)
+		schedulingResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
 	}()
 
-	total := 0
+	var schedulingResult *rst.SchedulingResult
 	totalErrors := 0
-processJobs:
 	for {
+		if schedulingResultCh == nil && jobSubmissionCh == nil {
+			break
+		}
+
 		select {
-		case <-work.ctx.Done():
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("work context was cancelled before job requests could be created")
-			if w.sendWorkResult(work, result.Work) {
-				cleanupEntries = true
-			}
-			for range jobSubmissionChan {
-			}
-			return
-		case jobRequest, ok := <-jobSubmissionChan:
+		case schedulingResult = <-schedulingResultCh:
+			schedulingResultCh = nil
+		case jobRequest, ok := <-jobSubmissionCh:
 			if !ok {
-				break processJobs
+				jobSubmissionCh = nil
+				continue
 			}
 
 			if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
 				totalErrors += 1
 			}
-			total++
 		}
 	}
+	if schedulingResult == nil {
+		schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
+	}
 
-	if err != nil {
-		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage("job builder failed to complete: " + err.Error())
-	} else if reschedule {
+	bulkOperations := builder.GetBulkOperations()
+	if bulkOperations == nil {
+		bulkOperations = []*flex.BulkOperation{}
+	}
+	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
+
+	if schedulingResult.Err != nil {
+		err := schedulingResult.Err
+		// Builder-level termination is driven by classified err. Individual request errors should already
+		// have been reported on the submitted requests via GenerationStatus and accounted for in the builder
+		// counters rather than forcing builder termination here.
+		if errors.Is(err, rst.ErrBuilderCancelled) {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("job builder failed to complete: " + err.Error())
+		} else if errors.Is(err, rst.ErrBuilderFailed) {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder failed to complete: " + err.Error())
+		} else {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder returned unclassified error: " + err.Error())
+		}
+	} else if schedulingResult.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		message := "waiting for builder job to continue"
 		if totalErrors > 0 {
 			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
 		}
 		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now()
-		w.sendWorkResult(work, result.Work)
+		entry.ExecuteAfter = time.Now().Add(schedulingResult.Delay)
+		w.sendWorkResult(work, workResult.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -470,7 +493,7 @@ processJobs:
 		status.SetMessage("all jobs were submitted")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(work, workResult.Work) {
 		cleanupEntries = true
 	}
 	return

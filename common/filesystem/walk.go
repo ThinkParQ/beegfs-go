@@ -108,6 +108,16 @@ type StreamPathResult struct {
 	Err         error
 }
 
+type PathStreamFunc func(
+	ctx context.Context,
+	mountPoint Provider,
+	pattern string,
+	startAfter string,
+	maxPaths int,
+	chanSize int,
+	filter FileInfoFilter,
+) (<-chan *StreamPathResult, error)
+
 // StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
 // lexicographically increasing order. If startAfter != "" then only files lexically greater than
 // will be considered. maxPaths limits the number of paths returned and can be set to -1 for all

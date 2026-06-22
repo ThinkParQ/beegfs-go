@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +34,87 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// s3ApiClient is the low-level s3 transport layer used by S3Client. Provider specific wrappers can
+// customize SDK calls here without reimplementing the higher-level RST behavior.
+type s3ApiClient interface {
+	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error
+	RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error)
+	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
+	CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+}
+
+// defaultS3ApiClient is the default s3ApiClient backed by the AWS SDK's s3 client.
+type defaultS3ApiClient struct {
+	client *s3.Client
+}
+
+var _ s3ApiClient = &defaultS3ApiClient{}
+
+func (d *defaultS3ApiClient) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	return d.client.ListObjectsV2(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) ListObjectsV2Pages(ctx context.Context, params *s3.ListObjectsV2Input, pageFn func(*s3.ListObjectsV2Output) (bool, error)) error {
+	paginator := s3.NewListObjectsV2Paginator(d.client, params)
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		cont, err := pageFn(output)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (d *defaultS3ApiClient) RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error) {
+	return d.client.RestoreObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return d.client.HeadObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	return d.client.CreateMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return d.client.AbortMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return d.client.CompleteMultipartUpload(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return d.client.PutObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	return d.client.UploadPart(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return d.client.GetObject(ctx, params, optFns...)
+}
+
+func (d *defaultS3ApiClient) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	return d.client.DeleteObject(ctx, params, optFns...)
+}
+
 type S3StorageClass struct {
 	retrievalTier types.Tier
 	archival      bool
@@ -44,11 +124,14 @@ type S3StorageClass struct {
 	autoRestore   bool          // defines whether archived objects should be permitted to be restored.
 }
 
+// S3Client implements the shared Provider behavior for s3 compatible backends and uses s3ApiClient
+// to perform the low-level s3 operations.
 type S3Client struct {
 	config *flex.RemoteStorageTarget
-	// TODO: https://github.com/thinkparq/gobee/issues/28
-	// Rework client into an `s3Provider` interface type.
-	client                         *s3.Client
+	// s3Config holds provider-specific S3 options used by this client. This allows providers such
+	// as xtreemstore to reuse the S3 implementation while keeping their own top-level RST type.
+	s3Config                       *flex.RemoteStorageTarget_S3
+	apiClient                      s3ApiClient
 	mountPoint                     filesystem.Provider
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
@@ -58,15 +141,61 @@ type S3Client struct {
 var _ Provider = &S3Client{}
 
 func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
-	s3Provider := rstConfig.GetS3()
+	return newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), mountPoint)
+}
+
+type s3ProviderOption func(*s3ProviderBuildCfg)
+type s3ProviderBuildCfg struct {
+	apiClient func(base s3ApiClient) s3ApiClient
+	s3Options []func(*s3.Options)
+}
+
+func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
+	return s3ProviderBuildCfg{
+		apiClient: func(base s3ApiClient) s3ApiClient { return base },
+	}
+}
+
+func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		if fn != nil {
+			cfg.apiClient = fn
+		}
+	}
+}
+
+func withS3Options(optFns ...func(*s3.Options)) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		for _, optFn := range optFns {
+			if optFn != nil {
+				cfg.s3Options = append(cfg.s3Options, optFn)
+			}
+		}
+	}
+}
+
+// newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
+// created, so shared wrapper state can rely on apiClient already being populated.
+func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (Provider, error) {
+	if s3Config == nil {
+		return nil, fmt.Errorf("s3 configuration must be specified")
+	}
+
+	buildCfg := defaultS3ProviderBuildCfg()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&buildCfg)
+		}
+	}
+
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
-		awsConfig.WithBaseEndpoint(s3Provider.GetEndpointUrl()),
-		awsConfig.WithRegion(s3Provider.GetRegion()),
+		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
+		awsConfig.WithRegion(s3Config.GetRegion()),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
-				s3Provider.GetAccessKey(),
-				s3Provider.GetSecretKey(),
+				s3Config.GetAccessKey(),
+				s3Config.GetSecretKey(),
 				"", // session token
 			),
 		),
@@ -79,26 +208,34 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 	// was deprecated for new regions in 2020. So, check whether the provided endpoint url starts
 	// with the bucket as part of the hostname. Otherwise, use the path-style.
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html
-	endpointUrl, err := url.Parse(s3Provider.GetEndpointUrl())
+	endpointUrl, err := url.Parse(s3Config.GetEndpointUrl())
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse s3 end-point: %w", err)
 	}
-	bucket := s3Provider.GetBucket()
+	bucket := s3Config.GetBucket()
 	host := endpointUrl.Hostname()
 	usePathStyle := !strings.HasPrefix(host, bucket+".")
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	awsClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = usePathStyle
+		for _, optFn := range buildCfg.s3Options {
+			optFn(o)
+		}
 	})
 
+	apiClient := buildCfg.apiClient(&defaultS3ApiClient{client: awsClient})
+	if apiClient == nil {
+		return nil, fmt.Errorf("s3 api client wrapper returned nil")
+	}
 	s3Client := &S3Client{
 		config:                         rstConfig,
-		client:                         client,
+		s3Config:                       s3Config,
+		apiClient:                      apiClient,
 		mountPoint:                     mountPoint,
 		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
 		isListStartAfterKeySupportedMu: sync.Mutex{},
 	}
 
-	for _, class := range s3Provider.StorageClass {
+	for _, class := range s3Config.StorageClass {
 		name := types.StorageClass(class.GetName())
 		if name == "" {
 			return nil, fmt.Errorf("storage class must specify a valid storage class name")
@@ -148,12 +285,12 @@ func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {
 	}
 
 	input := &s3.ListObjectsV2Input{
-		Bucket:     aws.String(s.config.GetS3().Bucket),
+		Bucket:     aws.String(s.s3Config.Bucket),
 		StartAfter: aws.String("-"),
 		MaxKeys:    aws.Int32(0),
 	}
 
-	if _, err := s.client.ListObjectsV2(ctx, input); err != nil {
+	if _, err := s.apiClient.ListObjectsV2(ctx, input); err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidArgument" && strings.Contains(strings.ToLower(apiErr.ErrorMessage()), "startafter") {
 			s.isListStartAfterKeySupported = new(bool)
@@ -241,6 +378,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	}
 
 	var writeLockSet bool
+	var undoPrepare func() error
 	defer func() {
 		if err == nil || errors.Is(err, ErrJobAlreadyOffloaded) {
 			return
@@ -253,9 +391,17 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}()
 
-	if writeLockSet, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
+	if writeLockSet, undoPrepare, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err == nil || IsErrJobTerminalSentinel(err) {
+			return
+		}
+		if undoErr := undoPrepare(); undoErr != nil {
+			err = errors.Join(err, undoErr)
+		}
+	}()
 	job.SetExternalId(sync.LockedInfo.ExternalId)
 
 	switch sync.Operation {
@@ -270,8 +416,16 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
-	return false, ErrUnsupportedOpForRST
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
+	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
+}
+
+func (r *S3Client) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	return false, ""
+}
+
+func (r *S3Client) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	return nil, ErrFileTypeUnsupported
 }
 
 func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
@@ -298,7 +452,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				}
 
 				restoreObjectInput := &s3.RestoreObjectInput{
-					Bucket:         aws.String(r.config.GetS3().Bucket),
+					Bucket:         aws.String(r.s3Config.Bucket),
 					Key:            aws.String(sync.RemotePath),
 					RestoreRequest: restoreRequest,
 				}
@@ -306,7 +460,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				// Multiple workers may attempt to restore the same object concurrently. In that
 				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
 				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
-				if _, err := r.client.RestoreObject(ctx, restoreObjectInput); err != nil {
+				if _, err := r.apiClient.RestoreObject(ctx, restoreObjectInput); err != nil {
 					var apiErr smithy.APIError
 					if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "RestoreAlreadyInProgress" {
 						return false, 0, err
@@ -393,22 +547,22 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		}
 	}
 
-	walkChan := make(chan *filesystem.StreamPathResult, chanSize)
+	walkCh := make(chan *filesystem.StreamPathResult, chanSize)
 	send := func(result *filesystem.StreamPathResult) bool {
 		select {
 		case <-ctx.Done():
 			select {
-			case walkChan <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
+			case walkCh <- &filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", ctx.Err())}:
 			default:
 			}
 			return false
-		case walkChan <- result:
+		case walkCh <- result:
 			return true
 		}
 	}
 
 	go func() {
-		defer close(walkChan)
+		defer close(walkCh)
 
 		prefixWalk := func() (keysFound bool) {
 			// Size the request's MaxKeys to minimize requests. Sizing with respect to maxKeys
@@ -423,7 +577,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 			}
 
 			input := &s3.ListObjectsV2Input{
-				Bucket:  aws.String(r.config.GetS3().Bucket),
+				Bucket:  aws.String(r.s3Config.Bucket),
 				Prefix:  aws.String(unescapedPrefixWithoutPattern),
 				MaxKeys: aws.Int32(int32(maxKeysPerPage)),
 			}
@@ -440,18 +594,8 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 
 			var key string
 			var lastKey string
-			objectPaginator := s3.NewListObjectsV2Paginator(r.client, input)
-			keysFound = objectPaginator.HasMorePages()
-			for objectPaginator.HasMorePages() {
-				output, err := objectPaginator.NextPage(ctx)
-				if err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
-					} else {
-						send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
-					}
-					return
-				}
+			pageFn := func(output *s3.ListObjectsV2Output) (bool, error) {
+				keysFound = true
 
 				// When resuming with s3ResumeToken ContinuationToken and ContinuationStartKey,
 				// search for ContinuationStartKey on the page. If it does not exist and there's a
@@ -474,7 +618,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 					if len(filteredContents) == 0 {
 						if nextGreaterKeyIndex == -1 {
 							// There were no greater keys on the current page. So check the next page.
-							continue
+							return true, nil
 						}
 						continuationFindStart = false
 						filteredContents = append(filteredContents, output.Contents[nextGreaterKeyIndex:]...)
@@ -499,7 +643,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 							} else {
 								send(&filesystem.StreamPathResult{ResumeToken: token})
 							}
-							return
+							return false, nil
 						}
 
 						rt := s3ResumeToken{ContinuationToken: aws.ToString(output.ContinuationToken), ContinuationStartKey: key}
@@ -508,11 +652,11 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 						} else {
 							send(&filesystem.StreamPathResult{ResumeToken: token})
 						}
-						return
+						return false, nil
 					}
 
 					if !send(&filesystem.StreamPathResult{Path: key}) {
-						return
+						return false, nil
 					}
 
 					lastKey = key
@@ -520,15 +664,24 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 						maxKeys--
 					}
 				}
+
+				return true, nil
+			}
+
+			err := r.apiClient.ListObjectsV2Pages(ctx, input, pageFn)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk was cancelled: %w", err)})
+				} else {
+					send(&filesystem.StreamPathResult{Err: fmt.Errorf("prefix walk failed: %w", err)})
+				}
+				return
 			}
 			return
 		}
 
 		if isKey {
-			_, err := r.client.HeadObject(ctx, &s3.HeadObjectInput{
-				Bucket: aws.String(r.config.GetS3().Bucket),
-				Key:    aws.String(unescapedPrefixWithoutPattern),
-			})
+			_, err := r.headObject(ctx, unescapedPrefixWithoutPattern)
 			if err != nil {
 				var apiErr smithy.APIError
 				if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound" {
@@ -550,7 +703,7 @@ func (r *S3Client) GetWalk(ctx context.Context, prefix string, chanSize int, res
 		prefixWalk()
 	}()
 
-	return walkChan, nil
+	return walkCh, nil
 }
 
 // s3ResumeToken holds pagination state so a walk can be resumed. When the list-object api supports
@@ -715,63 +868,129 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 
+	if abort {
+		if isWorkStarted(workResults) {
+			// The download was incomplete so replace with a stub file for the requested resource.
+			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy())); err != nil {
+				return fmt.Errorf("failed to replace incomplete download with stub file: %w", err)
+			}
+			return nil
+		}
+
+		if IsFileOffloaded(sync.LockedInfo) {
+			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.LockedInfo.StubUrlPath, sync.LockedInfo.StubUrlRstId, true, restorePolicyToDataState(request.GetRestorePolicy())); err != nil {
+				return fmt.Errorf("failed to restore original stub file: %w", err)
+			}
+			return nil
+		}
+
+		if !sync.LockedInfo.Exists {
+			return r.mountPoint.Remove(request.Path)
+		}
+
+		// File exist and no changes were made so restore the mtime and if needed, restore the file size.
+		job.SetStopMtime(sync.LockedInfo.Mtime)
+		mtime := sync.LockedInfo.Mtime.AsTime()
+		if sync.LockedInfo.Size < sync.LockedInfo.RemoteSize {
+			// The existing file was enlarged but no changes were made to original contents so we
+			// can safely restore the contents by reducing the file to its original size.
+			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.Size, true); err != nil {
+				return fmt.Errorf("failed to restore original file size: %w", err)
+			}
+		}
+		if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+			return fmt.Errorf("failed to restore original mtime: %w", err)
+		}
+		return nil
+	}
+
 	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
 		return fmt.Errorf("unable to verify the remote object has not changed: %w", err)
 	}
 	job.SetStopMtime(timestamppb.New(mtime))
 
-	// Skip checking the file was modified if we were told to abort since the mtime may not have
-	// been set correctly anyway given the error check is skipped above.
-	if !abort {
-		start := job.GetStartMtime().AsTime()
-		stop := job.GetStopMtime().AsTime()
-		if !start.Equal(stop) {
-			return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
-				start.Format(time.RFC3339), stop.Format(time.RFC3339))
-		}
+	start := job.GetStartMtime().AsTime()
+	stop := job.GetStopMtime().AsTime()
+	if !start.Equal(stop) {
+		return fmt.Errorf("successfully completed all work requests but the remote file or object appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
+			start.Format(time.RFC3339), stop.Format(time.RFC3339))
+	}
 
-		// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
-		absPath := filepath.Join(r.mountPoint.GetMountPath(), request.Path)
-		if err := os.Chtimes(absPath, mtime, mtime); err != nil {
-			return fmt.Errorf("failed to update download's mtime: %w", err)
-		}
+	// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
+	if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+		return fmt.Errorf("failed to update download's mtime: %w", err)
+	}
 
+	if !request.StubLocal {
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
-		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
+		if IsFileOffloaded(sync.LockedInfo) {
 			if err := entry.SetFileDataState(ctx, request.Path, beegfs.DataStateAvailable); err != nil {
 				return fmt.Errorf("unable to clear offloaded data state: %w", err)
 			}
+		}
+
+		// Reduce the file size if it's larger than the remote object. This situation means the original
+		// file size was larger than needed so no additional space was preallocated.
+		if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
+			r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true)
 		}
 	}
 
 	return nil
 }
 
+// isWorkStarted returns true whenever a part indicates it was started or, in order to maintain
+// backwards compatibility, when the part's optional Started field is nil.
+func isWorkStarted(workResults []*flex.Work) bool {
+	for _, result := range workResults {
+		for _, part := range result.GetParts() {
+			if part == nil || part.Started == nil || *part.Started {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // prepareJobRequest ensures that sync.LockedInfo is full populated.
-func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, err error) {
+func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, undo func() error, err error) {
+	undo = func() error { return nil }
+
 	lockedInfo := sync.LockedInfo
 	if IsFileLocked(lockedInfo) && HasRemotePathInfo(lockedInfo) {
 		return
 	}
 
-	var currentRSTCfg msg.RemoteStorageTarget
 	var entryInfoMsg msg.EntryInfo
+	var currentRSTCfg msg.RemoteStorageTarget
 	var ownerNode beegfs.Node
-	var getLockedInfoCalled bool
+	var lockAquired bool
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, currentRSTCfg, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
-			err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, fmt.Errorf("failed to acquire lock: %w", err))
+		var pathState PathState
+		if pathState, err = GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock); err != nil {
+			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
 			return
 		}
-		getLockedInfoCalled = true
+		lockedInfo = pathState.LockedInfo
+		writeLockSet = pathState.LockAcquired
+		entryInfoMsg = pathState.EntryInfo
+		currentRSTCfg = pathState.RstCfg
+		ownerNode = pathState.OwnerNode
+
+		lockAquired = true
 		cfg.SetLockedInfo(lockedInfo)
 		sync.SetLockedInfo(lockedInfo)
 	}
 
+	if !cfg.GetOverwrite() && IsFileOffloaded(lockedInfo) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
+		err = fmt.Errorf("%w: supplied --%s does not match stub file", ErrJobFailedPrecondition, RemoteTargetFlag)
+		return
+	}
+
 	if !HasRemotePathInfo(lockedInfo) {
-		request := BuildJobRequest(ctx, r, r.mountPoint, cfg)
+		request := BuildJobRequest(ctx, r, cfg)
 		status := request.GetGenerationStatus()
 		if status != nil {
 			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, status.Message)
@@ -779,7 +998,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		}
 
 		// Same logic as GetLockedInfo just without getting the lock.
-		if !getLockedInfoCalled {
+		if !lockAquired {
 			var entryInfo *entry.GetEntryCombinedInfo
 			if entryInfo, err = entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
 				Verbose:        false,
@@ -802,7 +1021,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 			ownerNode = entryInfo.Entry.MetaOwnerNode
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, cfg); err != nil {
+		if undo, err = PrepareFileStateForWorkRequests(ctx, r.mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}
@@ -844,6 +1063,14 @@ func (r *S3Client) archiveStatus(storageClass types.StorageClass, restoreMsg *st
 	return status
 }
 
+func (r *S3Client) headObject(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(r.s3Config.Bucket),
+		Key:    aws.String(key),
+	}
+	return r.apiClient.HeadObject(ctx, input)
+}
+
 // getObjectMetadata returns the object's size in bytes, modification time if it exists.
 func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExist bool) (int64, time.Time, *s3ArchiveInfo, error) {
 	if key == "" {
@@ -853,15 +1080,9 @@ func (r *S3Client) getObjectMetadata(ctx context.Context, key string, keyMustExi
 		return 0, time.Time{}, nil, nil
 	}
 
-	headObjectInput := &s3.HeadObjectInput{
-		Bucket: aws.String(r.config.GetS3().Bucket),
-		Key:    aws.String(key),
-	}
-
-	resp, err := r.client.HeadObject(ctx, headObjectInput)
+	resp, err := r.headObject(ctx, key)
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
+		if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
 				return 0, time.Time{}, nil, os.ErrNotExist
 			}
@@ -895,7 +1116,7 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	}
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(path),
 		Metadata: metadata,
 		Tagging:  tagging,
@@ -904,7 +1125,7 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
 	}
 
-	result, err := r.client.CreateMultipartUpload(ctx, createMultipartUploadInput)
+	result, err := r.apiClient.CreateMultipartUpload(ctx, createMultipartUploadInput)
 	if err != nil {
 		return "", err
 	}
@@ -914,11 +1135,11 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 func (r *S3Client) abortUpload(ctx context.Context, uploadID string, remotePath string) error {
 	abortMultipartUploadInput := &s3.AbortMultipartUploadInput{
 		UploadId: aws.String(uploadID),
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(remotePath),
 	}
 
-	_, err := r.client.AbortMultipartUpload(ctx, abortMultipartUploadInput)
+	_, err := r.apiClient.AbortMultipartUpload(ctx, abortMultipartUploadInput)
 	return err
 }
 
@@ -939,7 +1160,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 	})
 
 	completeMultipartUploadInput := &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String(r.config.GetS3().Bucket),
+		Bucket:   aws.String(r.s3Config.Bucket),
 		Key:      aws.String(remotePath),
 		UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{
@@ -947,7 +1168,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 		},
 	}
 
-	_, err := r.client.CompleteMultipartUpload(ctx, completeMultipartUploadInput)
+	_, err := r.apiClient.CompleteMultipartUpload(ctx, completeMultipartUploadInput)
 	return err
 }
 
@@ -1000,7 +1221,7 @@ func (r *S3Client) upload(
 		}
 
 		input := &s3.PutObjectInput{
-			Bucket:         aws.String(r.config.GetS3().Bucket),
+			Bucket:         aws.String(r.s3Config.Bucket),
 			Key:            aws.String(remotePath),
 			Body:           filePart,
 			ChecksumSHA256: aws.String(part.ChecksumSha256),
@@ -1013,7 +1234,7 @@ func (r *S3Client) upload(
 			input.StorageClass = types.StorageClass(*storageClass)
 		}
 
-		resp, err := r.client.PutObject(ctx, input)
+		resp, err := r.apiClient.PutObject(ctx, input)
 
 		if err != nil {
 			return err
@@ -1023,7 +1244,7 @@ func (r *S3Client) upload(
 	}
 
 	uploadPartReq := &s3.UploadPartInput{
-		Bucket:         aws.String(r.config.GetS3().Bucket),
+		Bucket:         aws.String(r.s3Config.Bucket),
 		Key:            aws.String(remotePath),
 		UploadId:       aws.String(uploadID),
 		PartNumber:     aws.Int32(part.PartNumber),
@@ -1031,7 +1252,8 @@ func (r *S3Client) upload(
 		ChecksumSHA256: aws.String(part.ChecksumSha256),
 	}
 
-	resp, err := r.client.UploadPart(ctx, uploadPartReq)
+	part.SetStarted(true)
+	resp, err := r.apiClient.UploadPart(ctx, uploadPartReq)
 	if err != nil {
 		return err
 	}
@@ -1055,17 +1277,19 @@ func (r *S3Client) download(ctx context.Context, path string, remotePath string,
 	defer filePart.Close()
 
 	getObjectInput := &s3.GetObjectInput{
-		Bucket: aws.String(r.config.GetS3().Bucket),
+		Bucket: aws.String(r.s3Config.Bucket),
 		Key:    aws.String(remotePath),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", part.OffsetStart, part.OffsetStop)),
 	}
 
-	resp, err := r.client.GetObject(ctx, getObjectInput)
+	resp, err := r.apiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	copiedBytes, err := io.Copy(filePart, resp.Body)
+	part.SetStarted(copiedBytes > 0)
 	if err != nil {
 		return err
 	}
