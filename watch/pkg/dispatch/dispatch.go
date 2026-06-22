@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"expvar"
 	"fmt"
 	"path"
 	"reflect"
@@ -10,18 +9,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beewatch"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
 var (
-	dispatchEventsRateLimited = expvar.NewInt("dispatch_events_rate_limited")
-	dispatchEventsAccepted    = expvar.NewInt("dispatch_events_accepted")
-	dispatchEventsRejected    = expvar.NewInt("dispatch_events_rejected")
-	dispatchEventsIgnored     = expvar.NewInt("dispatch_events_ignored")
+	attrOutcome   = attribute.Key("outcome")
+	attrEventType = attribute.Key("event.type")
 )
+
+// dispatchMetrics holds the OTel instruments used to report dispatcher metrics.
+type dispatchMetrics struct {
+	// events counts file system events processed by the dispatcher, broken down by the "outcome"
+	// (ignored, rate_limited, accepted, rejected) and "event.type" attributes.
+	events metric.Int64Counter
+}
 
 // DispatchFunc is called for each event that passes rate limiting. It returns true if the event
 // triggered an action, which causes the event to count against the user's rate limit. The caller
@@ -92,6 +99,10 @@ type Manager struct {
 	serverErrs        chan<- error
 	events            chan *beewatch.Event
 	acks              chan subscriber.Ack
+	// metricPrefix is prepended to metric names emitted by the dispatcher (set via
+	// WithMetricPrefix). Because this is a common package, the owning component supplies it.
+	metricPrefix string
+	metrics      dispatchMetrics
 }
 
 type DispatchOption func(*Manager)
@@ -102,6 +113,14 @@ func WithDefaultDispatchFn(fn DispatchFunc) DispatchOption {
 
 func WithDispatchFns(fns map[beewatch.V2Event_Type]DispatchFunc) DispatchOption {
 	return func(m *Manager) { m.dispatchFns = fns }
+}
+
+// WithMetricPrefix sets the prefix applied to metric names emitted by the dispatcher (e.g.
+// "remote" yields "remote.dispatch.events"). When empty, metrics are named "dispatch.events"; the
+// service.name resource attribute still identifies the emitting binary. This package is common, so
+// the owning component supplies its own prefix.
+func WithMetricPrefix(prefix string) DispatchOption {
+	return func(m *Manager) { m.metricPrefix = prefix }
 }
 
 // WithExistingGRPCServer attaches the subscriber services to an existing gRPC server. Mutually
@@ -120,7 +139,7 @@ func WithNewGRPCServer(config subscriber.Config, errChan chan<- error) DispatchO
 	}
 }
 
-func New(cfg Config, log *zap.Logger, serviceOpts []subscriber.ServiceOption, opts ...DispatchOption) (*Manager, error) {
+func New(cfg Config, log *logger.Logger, serviceOpts []subscriber.ServiceOption, opts ...DispatchOption) (*Manager, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	if !cfg.Enabled {
 		log.Warn("automatically dispatching jobs from file system modification events is disabled")
@@ -139,7 +158,7 @@ func New(cfg Config, log *zap.Logger, serviceOpts []subscriber.ServiceOption, op
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		log:           log,
+		log:           log.Logger,
 		ctx:           ctx,
 		ctxCancel:     cancel,
 		wg:            &sync.WaitGroup{},
@@ -153,6 +172,21 @@ func New(cfg Config, log *zap.Logger, serviceOpts []subscriber.ServiceOption, op
 	for _, opt := range opts {
 		opt(m)
 	}
+
+	// Create metric instruments after applying options so the metric prefix is known. The returned
+	// counter is usable even on error (it degrades to a no-op), so failures are logged not fatal.
+	metricName := "dispatch.events"
+	if m.metricPrefix != "" {
+		metricName = m.metricPrefix + ".dispatch.events"
+	}
+	events, err := log.Meter("dispatch").Int64Counter(metricName,
+		metric.WithDescription("File system events processed by the dispatcher, by outcome and event type"),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		log.Warn("failed to create dispatch events counter, metrics will be no-ops", zap.Error(err))
+	}
+	m.metrics.events = events
 
 	if len(m.dispatchFns) == 0 && m.defaultDispatchFn == nil {
 		return nil, fmt.Errorf("no dispatch functions configured (this is likely a bug)")
@@ -170,9 +204,9 @@ func New(cfg Config, log *zap.Logger, serviceOpts []subscriber.ServiceOption, op
 	if m.serverCfg != nil && m.existingServer != nil {
 		return nil, fmt.Errorf("invalid dispatch configuration: cannot both attach to an existing server and start a new one (this is probably a bug)")
 	} else if m.serverCfg != nil {
-		m.server, err = subscriber.NewServer(log, *m.serverCfg, diskStore, serviceOpts...)
+		m.server, err = subscriber.NewServer(log.Logger, *m.serverCfg, diskStore, serviceOpts...)
 	} else if m.existingServer != nil {
-		m.eventSubscriber, err = subscriber.NewService(log, cfg.CheckpointFrequency, m.existingServer, diskStore, serviceOpts...)
+		m.eventSubscriber, err = subscriber.NewService(log.Logger, cfg.CheckpointFrequency, m.existingServer, diskStore, serviceOpts...)
 	} else {
 		return nil, fmt.Errorf("invalid dispatch configuration: either an existing gRPC server or configuration for a new server is required (this is probably a bug)")
 	}
@@ -284,7 +318,7 @@ func (m *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 				zap.String("path", e.V2.GetPath()),
 				zap.Any("type", eventType),
 				zap.String("pattern", pat))
-			dispatchEventsIgnored.Add(1)
+			m.recordEvent("ignored", eventType)
 			return ack
 		}
 	}
@@ -294,15 +328,23 @@ func (m *Manager) dispatch(event *beewatch.Event) subscriber.Ack {
 			zap.Uint32("userId", userId),
 			zap.String("path", e.V2.GetPath()),
 			zap.Any("type", eventType))
-		dispatchEventsRateLimited.Add(1)
+		m.recordEvent("rate_limited", eventType)
 		return ack
 	}
 
 	if dispatch(event) {
 		m.rateLimiter.record(userId, eventType)
-		dispatchEventsAccepted.Add(1)
+		m.recordEvent("accepted", eventType)
 	} else {
-		dispatchEventsRejected.Add(1)
+		m.recordEvent("rejected", eventType)
 	}
 	return ack
+}
+
+// recordEvent increments the dispatcher events counter for the given outcome and event type.
+func (m *Manager) recordEvent(outcome string, eventType beewatch.V2Event_Type) {
+	m.metrics.events.Add(context.Background(), 1, metric.WithAttributes(
+		attrOutcome.String(outcome),
+		attrEventType.String(eventType.String()),
+	))
 }

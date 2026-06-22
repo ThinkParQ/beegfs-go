@@ -336,7 +336,7 @@ Using environment variables:
 	// Setup the event dispatcher and wire it into the existing Remote gRPC server.
 	dispatchManager, err := dispatch.New(
 		initialCfg.Dispatch,
-		logger.Logger,
+		logger,
 		[]subscriber.ServiceOption{
 			subscriber.WithEventFilter(&beewatch.EventFilter{
 				V2Types: []beewatch.V2Event_Type{
@@ -347,6 +347,7 @@ Using environment variables:
 		},
 		dispatch.WithDefaultDispatchFn(jobManager.GetEventDispatchFunc(ctx, logger.Logger)),
 		dispatch.WithExistingGRPCServer(remoteServer.GetGRPCServer()),
+		dispatch.WithMetricPrefix("remote"),
 	)
 	if err != nil {
 		logger.Fatal("unable to initialize dispatcher", zap.Error(err))
