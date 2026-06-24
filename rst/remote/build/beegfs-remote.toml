@@ -133,7 +133,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
-# url-path = "/v1/metrics"
 # compression = "gzip"
 # timeout = "10s"
 # tls-cert-file = ""
@@ -144,7 +143,6 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
-# url-path = "/v1/logs"
 # compression = "gzip"
 # timeout = "10s"
 # tls-cert-file = ""
@@ -315,9 +313,9 @@ rate-limit-event-types = ["*"]
 
 # interval: How often metrics are pushed to the collector (e.g. "30s").
 
-# url-path: URL path for the metrics endpoint. Only applies when protocol is "http".
-# Default is "/v1/metrics". Some backends use different paths; for example
-# Loki-compatible backends that accept OTLP metrics use "/otlp/v1/metrics".
+# url-path: URL path for the metrics endpoint. Only applies when protocol is "http". There
+# is no default since "grpc" is the default protocol but "/v1/metrics" is the standard path;
+# however, Grafana Mimir uses "/otlp/v1/metrics".
 
 # compression: Compression to apply when sending metrics. Must be "gzip" or "none".
 
@@ -344,8 +342,7 @@ rate-limit-event-types = ["*"]
 
 # protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same
 # semantics as the corresponding [telemetry.otlp] fields, but applied to log export.
-# The url-path default for logs is "/v1/logs". For Loki direct ingestion use
-# "/otlp/v1/logs".
+# The standard url-path for logs is "/v1/logs" but Grafana Loki uses "/otlp/v1/logs".
 
 #
 # --- Section 3.6: [Automatic Sync and Restore Settings] ---
