@@ -244,7 +244,7 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 		if err == nil {
 			t.log.Debug("automatic sync upload submitted",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID))
-			t.recordResult(actionSubmitted, reasonSubmitted)
+			t.recordResult(actionSubmitted, reasonOK)
 			continue
 		}
 

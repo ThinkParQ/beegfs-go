@@ -83,8 +83,7 @@ const (
 	// dispatch time (LAST_WRITER_CLOSED) and when it is deleted before the deferred upload runs.
 	reasonPathNotExists dispatchReason = "path_not_exists"
 	reasonSubmitFailed  dispatchReason = "submit_failed"
-	reasonSubmitted     dispatchReason = "submitted"
-	reasonQueued        dispatchReason = "queued"
+	reasonOK            dispatchReason = "ok"
 	reasonUnhandledType dispatchReason = "unhandled_type"
 )
 
@@ -487,7 +486,7 @@ func (m *Manager) dispatchOpenBlocked(ctx context.Context, log *zap.Logger, e *b
 	}
 
 	log.Debug("stub file restore triggered", zap.Any("result", result))
-	m.recordDispatchResult(eventType, actionSubmitted, reasonSubmitted)
+	m.recordDispatchResult(eventType, actionSubmitted, reasonOK)
 	return true
 }
 
@@ -534,7 +533,7 @@ func (m *Manager) dispatchLastWriterClosed(ctx context.Context, log *zap.Logger,
 
 	cooldown := stdtime.Duration(entryInfo.Entry.Details.Remote.CoolDownPeriod) * stdtime.Second
 	m.pendingSync.Mark(path, cooldown, entryInfo.Entry.Details.Remote.RSTIDs)
-	m.recordDispatchResult(eventType, actionQueued, reasonQueued)
+	m.recordDispatchResult(eventType, actionQueued, reasonOK)
 	log.Debug("automatic sync queued",
 		zap.String("path", path), zap.Duration("cooldown", cooldown))
 	return true
