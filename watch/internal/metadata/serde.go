@@ -251,10 +251,15 @@ func (m *SendMessage) MsgID() MsgID {
 // handled by deserializeEvent() to allow Watch to support both v1 and v2 events. If support was
 // dropped for v1 events then deserializeEvent() could just be merged into this function.
 func (m *SendMessage) Deserialize(d *Deserializer) error {
-	var seqID uint64
-	var size uint16
-	binary.Read(d.Buf, binary.LittleEndian, &seqID)
-	binary.Read(d.Buf, binary.LittleEndian, &size)
+	// Use direct LittleEndian accessors instead of binary.Read: binary.Read uses reflection
+	// internally which allocates on every call. Since SendMessage is deserialized for every
+	// event, this is on the hot path and the allocations drive GC pressure at high event rates.
+	const headerSize = 8 + 2 // seqID (uint64) + size (uint16)
+	if d.Buf.Len() < headerSize {
+		return fmt.Errorf("SendMessage too short: %d bytes", d.Buf.Len())
+	}
+	seqID := binary.LittleEndian.Uint64(d.Buf.Next(8))
+	size := binary.LittleEndian.Uint16(d.Buf.Next(2))
 	// The metadata PMQ uses a uint16 size field but the length of the fields inside the events are
 	// length prefixed using a uint32. We need to check this throughout deserializeEvents as a
 	// uint32 so upcast it once here.
