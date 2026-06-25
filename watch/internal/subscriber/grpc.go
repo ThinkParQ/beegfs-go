@@ -71,6 +71,12 @@ func (s *GRPCSubscriber) Connect() (retry bool, err error) {
 		beegrpc.WithTLSDisableVerification(s.TLSDisableVerification),
 		beegrpc.WithTLSDisable(s.TlsDisable),
 		beegrpc.WithProxy(s.UseProxy),
+		// ForceCodecV2 is experimental but has no wire-compatible alternative: rawBytesCodec.Name()
+		// returns "proto", keeping the content-type as application/grpc+proto, and Marshal passes
+		// pre-marshaled bytes through unchanged, so the framing is byte-for-byte identical to the
+		// default proto codec. Any future replacement for ForceCodecV2 must preserve both invariants
+		// or it will silently break compatibility with subscribers.
+		beegrpc.WithDialOptions(grpc.WithDefaultCallOptions(grpc.ForceCodecV2(rawBytesCodec{}))),
 	)
 	if err != nil {
 		return true, fmt.Errorf("unable to connect to the subscriber: %w", err)
@@ -97,15 +103,13 @@ func (s *GRPCSubscriber) Connect() (retry bool, err error) {
 	return false, nil
 }
 
-// Send attempts to transmit an event to a remote subscriber.
-// It is expected to implement any logic for attempting to resend an event if the first attempt fails.
-func (s *GRPCSubscriber) Send(event *pb.Event) (err error) {
-
-	if err := s.stream.Send(event); err != nil {
+// Send attempts to transmit a pre-marshaled event to a remote subscriber. It is expected to
+// implement any logic for attempting to resend an event if the first attempt fails.
+func (s *GRPCSubscriber) Send(event []byte) (err error) {
+	if err := s.stream.SendMsg(event); err != nil {
 		// TODO: Is there ever a scenario where we'd want to retry to send the event?
 		return fmt.Errorf("unable to send event to subscriber: %w", err)
 	}
-
 	return nil
 }
 

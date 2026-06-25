@@ -308,17 +308,18 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 						// Continue sending events until there are no more events to send:
 						if event != nil {
 							// Don't send duplicate events.
-							if event.SeqId > h.lastSeqID || (event.SeqId == 0 && h.lastSeqID == 0) {
-								if !h.eventFilter.passes(event) {
+							if event.Meta.SeqId > h.lastSeqID || (event.Meta.SeqId == 0 && h.lastSeqID == 0) {
+								if !h.eventFilter.passes(event.Meta) {
 									// Auto-ack filtered events so the buffer's ack cursor advances
 									// and buffer space is freed even when nothing is being sent.
-									if err := h.metaEventBuffer.AckEvent(h.ID, event.SeqId); err != nil {
-										h.log.Debug("unable to auto-ack filtered event", zap.Error(err), zap.Uint64("seqId", event.SeqId))
+									if err := h.metaEventBuffer.AckEvent(h.ID, event.Meta.SeqId); err != nil {
+										h.log.Debug("unable to auto-ack filtered event", zap.Error(err), zap.Uint64("seqId", event.Meta.SeqId))
 									}
 									continue
 								}
-								if err := h.Send(event); err != nil {
-									h.log.Error("unable to send event", zap.Error(err), zap.Any("event", event.SeqId))
+
+								if err := h.Send(event.Message); err != nil {
+									h.log.Error("unable to send event", zap.Error(err), zap.Any("event", event.Meta.SeqId))
 									return
 								}
 							} else {
@@ -383,22 +384,22 @@ func newCompiledFilter(f *bw.EventFilter) *compiledFilter {
 // passes reports whether an event should be sent to a subscriber given its compiled filter.
 // A nil receiver, or a nil map for the event's version, passes all events of that version.
 // Events with an unrecognized version always pass.
-func (f *compiledFilter) passes(event *bw.Event) bool {
+func (f *compiledFilter) passes(meta types.EventMeta) bool {
 	if f == nil {
 		return true
 	}
-	switch e := event.EventData.(type) {
-	case *bw.Event_V1:
+	switch meta.Version {
+	case types.EventTypeV1:
 		if f.v1Types == nil {
 			return true
 		}
-		_, ok := f.v1Types[e.V1.GetType()]
+		_, ok := f.v1Types[bw.V1Event_Type(meta.EventType)]
 		return ok
-	case *bw.Event_V2:
+	case types.EventTypeV2:
 		if f.v2Types == nil {
 			return true
 		}
-		_, ok := f.v2Types[e.V2.GetType()]
+		_, ok := f.v2Types[bw.V2Event_Type(meta.EventType)]
 		return ok
 	default:
 		return true

@@ -20,8 +20,8 @@ type Interface interface {
 	// Otherwise retry should be false if there is a fatal error connecting to the subscriber (i.e., subscriber is misconfigured).
 	// In either case it is not expected to be idempotent, and if an error occurs Disconnect() should be called to cleanup before reconnecting.
 	Connect() (retry bool, err error)
-	// Send transmits a single event to a subscriber.
-	Send(*pb.Event) (err error)
+	// Send transmits a single pre-marshaled event to a subscriber.
+	Send([]byte) (err error)
 	// Receive starts a goroutine that listens responses from the subscriber and posts them to the returned channel.
 	// It is idempotent in that multiple calls are expected to return the same channel and not start a new goroutine.
 	Receive() chan *pb.Response
