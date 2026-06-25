@@ -149,9 +149,10 @@ poll-frequency = 1
 
 # event-buffer-size: How many events to keep in memory if the BeeGFS metadata service sends events
 # to Watch faster than they can be sent to subscribers, or a subscriber is temporarily disconnected.
-# Worst case memory usage is approximately (9KiB x event-buffer-size). Note the events stored in the
-# Watch event buffer are stored using protocol buffers, which are slightly larger than the raw
-# events sent from the Metadata server. 9KiB per event is a conservative "worst case" estimate.
+# Worst case memory usage is approximately (9KiB x event-buffer-size). Events are stored in the
+# buffer as pre-marshaled protocol buffer bytes plus a small metadata header (~40 bytes). The 9KiB
+# per event estimate is based on the maximum raw event size (~8,287 bytes) and is intentionally
+# conservative.
 #
 # The event-buffer-size should be set taking into consideration the number of events that may be
 # stored in the on-disk metadata event queue as determined by sysFileEventPersistSize in

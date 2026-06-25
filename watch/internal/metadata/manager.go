@@ -373,7 +373,13 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 			if sendMsg.Event.EventFlags&1 != 0 {
 				sendMsg.Event.SetMetaMirror(uint32(handshakeResp.MetaMirrorID))
 			}
-			droppedSeqID = m.EventBuffer.Push(sendMsg.Event)
+			var pushErr error
+			droppedSeqID, pushErr = m.EventBuffer.Push(sendMsg.Event)
+			if pushErr != nil {
+				m.log.Error("skipping event", zap.Error(pushErr), zap.Any("seqId", sendMsg.Event.SeqId))
+				m.lastSeqID = sendMsg.Event.SeqId
+				continue
+			}
 			m.lastSeqID = sendMsg.Event.SeqId
 			if droppedSeqID != nil && !loggedDroppedEvent {
 				// Outside actual scenarios where an event could not be sent to a subscriber before
@@ -451,7 +457,9 @@ func (m *Manager) handleV1Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		// start over limiting subscribers ability to check for duplicate or dropped events.
 		m.lastSeqID++
 		event.SeqId = m.lastSeqID
-		m.EventBuffer.Push(event)
+		if _, err := m.EventBuffer.Push(event); err != nil {
+			m.log.Error("skipping event", zap.Error(err), zap.Any("seqId", event.SeqId))
+		}
 
 	}
 }

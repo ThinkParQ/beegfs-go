@@ -25,6 +25,8 @@ type connOpts struct {
 	// AuthSecret is the contents of an auth file or nil if authentication should be disabled.
 	AuthSecret []byte
 	NodeID     *beegfs.LegacyId
+	// extraDialOpts are appended verbatim to the grpc.DialOption slice passed to grpc.NewClient.
+	extraDialOpts []grpc.DialOption
 }
 
 // applyConnOpts is a common constructor for connOpts. It exists because originally only
@@ -79,6 +81,14 @@ func WithProxy(enable bool) connOpt {
 func WithNode(nodeID *beegfs.LegacyId) connOpt {
 	return func(co *connOpts) {
 		co.NodeID = nodeID
+	}
+}
+
+// WithDialOptions appends extra grpc.DialOptions to the connection. This allows callers to
+// configure connection-scoped behavior (e.g. a custom codec) without affecting other connections.
+func WithDialOptions(opts ...grpc.DialOption) connOpt {
+	return func(co *connOpts) {
+		co.extraDialOpts = append(co.extraDialOpts, opts...)
 	}
 }
 
@@ -154,6 +164,7 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 		})
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	}
+	opts = append(opts, config.extraDialOpts...)
 	c, err := grpc.NewClient(address, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating gRPC client: %w", err)
