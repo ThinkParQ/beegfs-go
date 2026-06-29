@@ -33,7 +33,11 @@ Example: create an index for /mnt/beegfs at /mnt/index
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log, _ := config.GetLogger()
 			if backendCfg.FSPath == "" {
-				backendCfg.FSPath = indexPkg.DotIndexPath(discoverBeeGFSMountPath())
+				p, err := indexPkg.DotIndexPath(discoverBeeGFSMountPath())
+				if err != nil {
+					return err
+				}
+				backendCfg.FSPath = p
 			}
 			if backendCfg.FSPath == "" {
 				return fmt.Errorf("no filesystem path to index: pass --fs-path or configure a path in %s at the BeeGFS mount root", indexPkg.DotIndexFileName)

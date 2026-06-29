@@ -109,16 +109,35 @@ Example: include BeeGFS metadata
 			printed := false
 
 			for _, rp := range paths {
-				if err := checkIndexExists(cfg, rp.indexPath); err != nil {
+				if err := checkIndexExists(cfg, indexPkg.StatIndexDir(rp.indexPath)); err != nil {
 					return err
+				}
+				listCfg := backendCfg
+				isFile := false
+				if !rp.glob {
+					f, ferr := indexPkg.LsTargetIsFile(cmd.Context(), exec, listCfg, rp.walkRoot)
+					if ferr != nil {
+						return ferr
+					}
+					isFile = f
+				}
+				if isFile {
+					listCfg.Recursive = false
 				}
 
 				log.Debug("running beegfs index ls",
 					zap.String("indexPath", rp.indexPath),
-					zap.Any("cfg", backendCfg),
+					zap.Bool("isFile", isFile),
+					zap.Any("cfg", listCfg),
 				)
 
-				rows, errWait, err := indexPkg.Ls(cmd.Context(), exec, backendCfg, rp.walkRoot, rp.glob)
+				var rows <-chan []string
+				var errWait func() error
+				if isFile {
+					rows, errWait, err = indexPkg.LsFile(cmd.Context(), exec, listCfg, rp.walkRoot)
+				} else {
+					rows, errWait, err = indexPkg.Ls(cmd.Context(), exec, listCfg, rp.walkRoot, rp.glob)
+				}
 				if err != nil {
 					return err
 				}
@@ -134,7 +153,7 @@ Example: include BeeGFS metadata
 				tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 
 				err = drain(cmd.Context(), rows, errWait, func(row []string) {
-					tbl.AddItem(toAny(formatLsRow(row, backendCfg.Recursive, backendCfg.BeeGFS, human, backendCfg.BlockSize, backendCfg.FullTime, rp.indexPath, rp.fsPath, backendCfg.AbsolutePaths))...)
+					tbl.AddItem(toAny(formatLsRow(row, listCfg.Recursive, listCfg.BeeGFS, human, listCfg.BlockSize, listCfg.FullTime, rp.indexPath, rp.fsPath, listCfg.AbsolutePaths))...)
 				})
 				// Flush buffered rows before returning, so partial output is shown
 				// even when the query ends in an error.
@@ -172,7 +191,7 @@ Example: include BeeGFS metadata
 	cmd.Flags().BoolVarP(&backendCfg.NoGroup, "no-group", "G", false, "Suppress the group column in long listing.")
 	cmd.Flags().BoolVarP(&backendCfg.ShowBlockSize, "size", "s", false, "Print the allocated size of each file in blocks.")
 	cmd.Flags().StringVar(&backendCfg.BlockSize, "block-size", "", "Scale block sizes when using -s: K, M, or G.")
-	cmd.Flags().StringVar(&backendCfg.SkipFile, "skip", "", "Skip directories listed in FILE.")
+	cmd.Flags().StringVar(&backendCfg.SkipFile, "skip", "", "Prune directories whose basename appears in FILE (one name per line)")
 	cmd.Flags().BoolVar(&backendCfg.FullTime, "full-time", false, "Show full ISO-8601 timestamps (implies -l).")
 
 	return cmd
@@ -208,8 +227,8 @@ func formatLsRow(raw []string, recursive, beegfs, human bool, blockSize string, 
 	result := []string{
 		modeString(r.Mode, r.Type),
 		r.Nlink,
-		lookupUID(r.Uid),
-		lookupGID(r.Gid),
+		r.Uid,
+		r.Gid,
 		displaySize,
 		displayBlocks,
 		timeFmt(r.Mtime),

@@ -9,9 +9,9 @@ import (
 
 func TestFormatStatRow(t *testing.T) {
 	// Column order matches StatCoreE / StatBeeGFSE:
-	// name, type, inode, size, blocks, mode, uid, gid, nlink, atime, mtime, ctime [, beegfs...]
+	// name, type, inode, size, blocks, mode, uid, user, gid, group, nlink, atime, mtime, ctime [, beegfs...]
 	core := []string{
-		"1KB", "f", "3923730569762222354", "1024", "2", "33204", "0", "0", "1",
+		"1KB", "f", "3923730569762222354", "1024", "2", "33204", "0", "root", "0", "root", "1",
 		"1024", "1024", "1778598765",
 	}
 	beegfs := append(append([]string{}, core...),
@@ -41,9 +41,9 @@ func TestFormatStatRow(t *testing.T) {
 			assert.Equal(t, "2", got[3], "blocks")
 			assert.Equal(t, "3923730569762222354", got[4], "inode survives as text, no precision loss")
 			assert.Equal(t, "1", got[5], "links")
-			assert.Equal(t, "-rw-rw-r--", got[6], "mode rendered symbolic")
-			assert.Equal(t, "0", got[7], "uid")
-			assert.Equal(t, "0", got[8], "gid")
+			assert.Equal(t, "0664/-rw-rw-r--", got[6], "mode rendered octal/symbolic like stat(1)")
+			assert.Equal(t, "0/root", got[7], "uid rendered num/name")
+			assert.Equal(t, "0/root", got[8], "gid rendered num/name")
 			for i, label := range map[int]string{9: "atime", 10: "mtime", 11: "ctime"} {
 				assert.Regexp(t, `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} `, got[i],
 					"%s rendered stat(1)-style", label)

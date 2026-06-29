@@ -63,6 +63,46 @@ func (e *captureExecutor) Execute(_ context.Context, spec QuerySpec) (<-chan []s
 	return ch, func() error { return nil }, nil
 }
 
+// TestLsTargetIsFile_Remote: with no local stat available, a remote target is a
+// file iff the summary probe at its path returns no row (a real directory, even
+// empty, returns its own summary row).
+func TestLsTargetIsFile_Remote(t *testing.T) {
+	t.Parallel()
+	cfg := LsCfg{GlobalCfg: GlobalCfg{IndexAddr: "ssh:host"}}
+
+	t.Run("summary row present means directory", func(t *testing.T) {
+		t.Parallel()
+		ex := &rowsExecutor{rows: [][]string{{"data"}}}
+		isFile, err := LsTargetIsFile(context.Background(), ex, cfg, "/idx/mnt/data")
+		require.NoError(t, err)
+		assert.False(t, isFile)
+	})
+
+	t.Run("no summary row means file", func(t *testing.T) {
+		t.Parallel()
+		ex := &rowsExecutor{rows: nil}
+		isFile, err := LsTargetIsFile(context.Background(), ex, cfg, "/idx/mnt/data/file.c")
+		require.NoError(t, err)
+		assert.True(t, isFile)
+	})
+}
+
+// TestLsFile_ParentAndNamePredicate: a file target lists from its parent index
+// directory (level 0) with an exact name match on the basename.
+func TestLsFile_ParentAndNamePredicate(t *testing.T) {
+	t.Parallel()
+	ex := &captureExecutor{}
+	_, wait, err := LsFile(context.Background(), ex, LsCfg{}, "/idx/mnt/d/file_0.c")
+	require.NoError(t, err)
+	require.NoError(t, wait())
+
+	require.Len(t, ex.specs, 1)
+	spec := ex.specs[0]
+	assert.Equal(t, "/idx/mnt/d", spec.IndexRoot, "walks the parent directory")
+	assert.Equal(t, 0, spec.MaxLevel, "single directory, non-recursive")
+	assert.Contains(t, spec.SQLEntries, "name = 'file_0.c'", "exact name match on the basename")
+}
+
 // TestLs_NonRecursiveOrdersBeforeLimit: with a sort flag and NumResults set, the
 // non-recursive queries must push ORDER BY into the SQL ahead of LIMIT. If LIMIT
 // ran first the database would keep arbitrary rows and the later in-memory sort

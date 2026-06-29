@@ -21,7 +21,7 @@ func StatIndexDir(entryPath string) string {
 
 func statColumns(beegfs bool) []string {
 	cols := []string{"name", "type", "inode", "size", "blocks", "mode",
-		"uid", "gid", "nlink", "atime", "mtime", "ctime"}
+		"uid", "user", "gid", "group", "nlink", "atime", "mtime", "ctime"}
 	if beegfs {
 		cols = append(cols, "owner_id", "parent_entry_id", "entry_id",
 			"stripe_pattern_type", "stripe_chunk_size", "stripe_num_targets")

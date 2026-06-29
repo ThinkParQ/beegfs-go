@@ -26,6 +26,11 @@ func NewCmd() *cobra.Command {
 			if log, lerr := config.GetLogger(); lerr == nil {
 				log.Debug("verified feature io.beegfs.index is licensed", zap.Any("licenseDetail", detail))
 			}
+			if globalCfg.IndexRoot == "" {
+				if _, err := indexPkg.DotIndexPath(discoverBeeGFSMountPath()); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}

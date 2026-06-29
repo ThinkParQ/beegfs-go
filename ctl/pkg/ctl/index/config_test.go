@@ -110,30 +110,39 @@ func TestDotIndexPath(t *testing.T) {
 path = "/mnt/beegfs"
 root = "/idx/default"
 `)
-		assert.Equal(t, "/mnt/beegfs", DotIndexPath(mount))
+		p, err := DotIndexPath(mount)
+		require.NoError(t, err)
+		assert.Equal(t, "/mnt/beegfs", p)
 	})
 
 	t.Run("empty mount path", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", DotIndexPath(""))
+		p, err := DotIndexPath("")
+		require.NoError(t, err)
+		assert.Equal(t, "", p)
 	})
 
 	t.Run("missing file", func(t *testing.T) {
 		t.Parallel()
-		assert.Equal(t, "", DotIndexPath(t.TempDir()))
+		p, err := DotIndexPath(t.TempDir())
+		require.NoError(t, err)
+		assert.Equal(t, "", p)
 	})
 
-	t.Run("malformed file", func(t *testing.T) {
+	t.Run("malformed file returns an error", func(t *testing.T) {
 		t.Parallel()
 		mount := t.TempDir()
 		writeDotIndex(t, mount, "not [valid toml")
-		assert.Equal(t, "", DotIndexPath(mount))
+		_, err := DotIndexPath(mount)
+		require.Error(t, err)
 	})
 
 	t.Run("no entry configured", func(t *testing.T) {
 		t.Parallel()
 		mount := t.TempDir()
 		writeDotIndex(t, mount, "# only comments, no entry\n")
-		assert.Equal(t, "", DotIndexPath(mount))
+		p, err := DotIndexPath(mount)
+		require.NoError(t, err)
+		assert.Equal(t, "", p)
 	})
 }

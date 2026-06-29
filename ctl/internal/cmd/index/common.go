@@ -400,13 +400,9 @@ func defaultPathArgs(args []string, mountPath, cwd string) []string {
 }
 
 func resolveAndCheckIndexPath(cfg indexPkg.GlobalCfg, args []string) (string, error) {
-	var fsPath string
+	fsPath := "."
 	if len(args) > 0 {
 		fsPath = args[0]
-	} else if wd, err := os.Getwd(); err == nil {
-		fsPath = wd
-	} else {
-		return "", fmt.Errorf("getting working directory: %w", err)
 	}
 
 	indexPath, err := resolveFSPathToIndex(cfg, fsPath)
