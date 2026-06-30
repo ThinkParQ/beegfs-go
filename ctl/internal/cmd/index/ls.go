@@ -104,6 +104,7 @@ Example: include BeeGFS metadata
 			if viper.GetBool(config.DebugKey) {
 				defaultColumns = allColumns
 			}
+			backendCfg.ResolveOwnerNames = ownerNamesRequested(defaultColumns)
 
 			multiPath := len(paths) > 1
 			printed := false

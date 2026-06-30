@@ -37,6 +37,14 @@ func drain[T any](ctx context.Context, ch <-chan T, errWait func() error, handle
 	}
 }
 
+func ownerNamesRequested(defaultColumns []string) bool {
+	cols := defaultColumns
+	if viper.IsSet(config.ColumnsKey) {
+		cols = viper.GetStringSlice(config.ColumnsKey)
+	}
+	return slices.Contains(cols, "user") || slices.Contains(cols, "group")
+}
+
 func resolveGlobalCfg(ctx context.Context, base indexPkg.GlobalCfg, fsPath string) indexPkg.GlobalCfg {
 	cfg := base
 	if client, err := config.BeeGFSClient(fsPath); (err == nil || errors.Is(err, filesystem.ErrUnmounted)) && client != nil {

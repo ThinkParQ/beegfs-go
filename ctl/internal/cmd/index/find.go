@@ -190,6 +190,8 @@ Example: find BeeGFS files by metadata owner
 				defaultColumns = allColumns
 			}
 
+			backendCfg.ResolveOwnerNames = ownerNamesRequested(defaultColumns)
+
 			tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 			defer tbl.PrintRemaining()
 

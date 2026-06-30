@@ -173,6 +173,8 @@ type FindCfg struct {
 	NumResults int
 	Smallest   bool
 	Largest    bool
+
+	ResolveOwnerNames bool
 }
 
 func Ptr[T any](v T) *T { return &v }
@@ -415,6 +417,8 @@ type LsCfg struct {
 	SortByMtime bool
 
 	NumResults int
+
+	ResolveOwnerNames bool
 }
 
 func BuildLsPredicates(cfg LsCfg) PredicateSet {

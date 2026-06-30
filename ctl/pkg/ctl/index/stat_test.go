@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,15 +126,17 @@ func TestStat_LocalBranchSelection(t *testing.T) {
 // fakeStatExecutor returns canned rows depending on whether it was handed the
 // dir (summary) or file (entries) stat query, recording every spec it ran.
 type fakeStatExecutor struct {
-	dirRows  [][]string
-	fileRows [][]string
-	specs    []QuerySpec
+	dirRows    [][]string
+	fileRows   [][]string
+	dirWaitErr error // when set, the dir (summary) query's wait() reports this
+	specs      []QuerySpec
 }
 
 func (f *fakeStatExecutor) Execute(_ context.Context, spec QuerySpec) (<-chan []string, func() error, error) {
 	f.specs = append(f.specs, spec)
+	isDir := spec.SQLSummary != ""
 	data := f.fileRows
-	if spec.SQLSummary != "" {
+	if isDir {
 		data = f.dirRows
 	}
 	ch := make(chan []string, len(data))
@@ -141,7 +144,11 @@ func (f *fakeStatExecutor) Execute(_ context.Context, spec QuerySpec) (<-chan []
 		ch <- r
 	}
 	close(ch)
-	return ch, func() error { return nil }, nil
+	waitErr := error(nil)
+	if isDir {
+		waitErr = f.dirWaitErr
+	}
+	return ch, func() error { return waitErr }, nil
 }
 
 func collectRows(rows <-chan []string) [][]string {
@@ -184,5 +191,14 @@ func TestStat_RemoteDetection(t *testing.T) {
 		assert.NotEmpty(t, ex.specs[0].SQLSummary)
 		assert.Equal(t, "/idx/mnt/data", ex.specs[1].IndexRoot)
 		assert.Contains(t, ex.specs[1].SQLEntries, "name = 'README.md'")
+	})
+
+	t.Run("a dir-query failure is surfaced, not masked as not-found", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("ssh: connection refused")
+		ex := &fakeStatExecutor{dirWaitErr: wantErr}
+		_, _, err := Stat(context.Background(), ex, cfg, "/idx/mnt/data", false)
+		require.ErrorIs(t, err, wantErr, "a real failure must surface, not fall through")
+		require.Len(t, ex.specs, 1, "must not run the file fallback after a dir-query error")
 	})
 }

@@ -57,16 +57,16 @@ func LsTargetIsFile(ctx context.Context, exec Executor, cfg LsCfg, walkRoot stri
 func LsFile(ctx context.Context, exec Executor, cfg LsCfg, filePath string) (<-chan []string, func() error, error) {
 	var p PredicateSet
 	p.add(eqStr("name", filepath.Base(filePath)))
-	tmpl, cols := LsCoreE, lsCoreColumns
+	tmpl, cols, qual := LsCoreE, lsCoreColumns, ""
 	if cfg.BeeGFS {
-		tmpl, cols = LsBeeGFSE, lsBeeGFSColumns
+		tmpl, cols, qual = LsBeeGFSE, lsBeeGFSColumns, "e."
 	}
 	spec := QuerySpec{
 		IndexRoot:  filepath.Dir(filePath),
 		Threads:    cfg.Threads,
 		PluginPath: QueryPluginPath,
 		MaxLevel:   0,
-		SQLEntries: fmt.Sprintf(tmpl, p.WhereClause()),
+		SQLEntries: fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), p.WhereClause()),
 		Columns:    cols,
 	}
 	return exec.Execute(ctx, spec)
@@ -122,7 +122,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 			if cfg.BeeGFS {
 				tmpl, qual, cols = LsBeeGFSRecursiveE, "v.", lsRecursiveBeeGFSColumns
 			}
-			spec.SQLEntries = appendLimit(fmt.Sprintf(tmpl, preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+			spec.SQLEntries = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 			spec.Columns = cols
 			entriesSpec = &spec
 		}
@@ -136,7 +136,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 			if cfg.BeeGFS {
 				tmpl, qual, cols = LsBeeGFSRecursiveDirS, "s.", lsRecursiveBeeGFSColumns
 			}
-			spec.SQLSummary = appendLimit(fmt.Sprintf(tmpl, dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+			spec.SQLSummary = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 			spec.Columns = cols
 			dirSpec = &spec
 		}
@@ -164,7 +164,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 		if cfg.BeeGFS {
 			tmpl, qual = LsBeeGFSE, "e."
 		}
-		entriesSQL = appendLimit(fmt.Sprintf(tmpl, preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+		entriesSQL = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 	}
 
 	var dirSQL string
@@ -174,7 +174,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 		if cfg.BeeGFS {
 			tmpl, qual = LsBeeGFSDirS, "s."
 		}
-		dirSQL = appendLimit(fmt.Sprintf(tmpl, dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+		dirSQL = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 	}
 
 	var allRows [][]string
