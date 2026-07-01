@@ -22,6 +22,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/entry"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/health"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/index"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/iotest"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/license"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/node"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/pool"
@@ -110,6 +111,7 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cmd.AddCommand(quota.NewCmd())
 	cmd.AddCommand(health.NewHealthCmd())
 	cmd.AddCommand(benchmark.NewBenchmarkCmd())
+	cmd.AddCommand(iotest.NewIotestCmd())
 	cmd.AddCommand(index.NewCmd())
 	cmd.AddCommand(copy.NewCopyCmd())
 	cmd.AddCommand(debug.NewCmd())
