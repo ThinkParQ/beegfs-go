@@ -42,7 +42,7 @@ func ownerNamesRequested(defaultColumns []string) bool {
 	if viper.IsSet(config.ColumnsKey) {
 		cols = viper.GetStringSlice(config.ColumnsKey)
 	}
-	return slices.Contains(cols, "user") || slices.Contains(cols, "group")
+	return slices.Contains(cols, "user") || slices.Contains(cols, "group") || slices.Contains(cols, "all")
 }
 
 func resolveGlobalCfg(ctx context.Context, base indexPkg.GlobalCfg, fsPath string) indexPkg.GlobalCfg {

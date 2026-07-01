@@ -153,14 +153,19 @@ Example: include BeeGFS metadata
 
 				tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 
+				rowCount := 0
 				err = drain(cmd.Context(), rows, errWait, func(row []string) {
 					tbl.AddItem(toAny(formatLsRow(row, listCfg.Recursive, listCfg.BeeGFS, human, listCfg.BlockSize, listCfg.FullTime, rp.indexPath, rp.fsPath, listCfg.AbsolutePaths))...)
+					rowCount++
 				})
 				// Flush buffered rows before returning, so partial output is shown
 				// even when the query ends in an error.
 				tbl.PrintRemaining()
 				if err != nil {
 					return err
+				}
+				if isFile && rowCount == 0 {
+					return fmt.Errorf("no index entry found for %q", rp.fsPath)
 				}
 			}
 			return nil
