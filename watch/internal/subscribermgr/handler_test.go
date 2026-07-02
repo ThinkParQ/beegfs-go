@@ -1,6 +1,7 @@
 package subscribermgr
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewHandler(t *testing.T) {
@@ -77,25 +79,32 @@ func TestEvaluateChangedSubscribers(t *testing.T) {
 	assert.Len(t, toVerify, 1)
 }
 
-// fakeSubscriberConn is a minimal subscriber.Interface used to drive sendLoop directly.
+// fakeSubscriberConn is a minimal subscriber.Interface used to drive sendLoop and receiveLoop
+// directly. Sent events are recorded by sequence ID; recv (optional) feeds responses to
+// receiveLoop as a remote subscriber would.
 type fakeSubscriberConn struct {
 	mu   sync.Mutex
-	sent int
+	sent []uint64
+	recv chan *bw.Response
 }
 
 func (f *fakeSubscriberConn) Connect(forMetaID beegfs.NumId) (retry bool, err error) {
 	return false, nil
 }
 
-func (f *fakeSubscriberConn) Send([]byte) error {
+func (f *fakeSubscriberConn) Send(msg []byte) error {
+	var event bw.Event
+	if err := proto.Unmarshal(msg, &event); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sent++
+	f.sent = append(f.sent, event.SeqId)
 	return nil
 }
 
 func (f *fakeSubscriberConn) Receive() chan *bw.Response {
-	return nil
+	return f.recv
 }
 
 func (f *fakeSubscriberConn) Disconnect() error {
@@ -105,7 +114,13 @@ func (f *fakeSubscriberConn) Disconnect() error {
 func (f *fakeSubscriberConn) sendCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.sent
+	return len(f.sent)
+}
+
+func (f *fakeSubscriberConn) sentSeqs() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64{}, f.sent...)
 }
 
 // TestSendLoopFilteredEventAutoAck verifies filtered events are only auto-acked when nothing
@@ -125,9 +140,9 @@ func TestSendLoopFilteredEventAutoAck(t *testing.T) {
 		// Poll continuously so the test does not depend on multi-second poll ticks.
 		PollFrequency: 0,
 	})
-	handler.eventFilter = newCompiledFilter(&bw.EventFilter{
+	handler.eventFilter.Store(newCompiledFilter(&bw.EventFilter{
 		V2Types: []bw.V2Event_Type{bw.V2Event_LAST_WRITER_CLOSED},
-	})
+	}))
 
 	push := func(seq uint64, eventType bw.V2Event_Type) {
 		_, err := buffer.Push(&bw.Event{
@@ -201,4 +216,72 @@ func TestSendLoopFilteredEventAutoAck(t *testing.T) {
 		cancel()
 		<-done
 	})
+}
+
+// TestReceiveLoopLateInitialResponse verifies a subscriber's initial response arriving after a
+// finite wait-for-response-after-connect timeout is still honored by the ongoing ack loop. The
+// math.MaxUint64 "start from the end of the buffer" sentinel must trigger a seek — treating it as
+// a regular ack would store math.MaxUint64 in lastSeqID and permanently suppress every future
+// send, silently stalling the stream — and an event type filter carried by the late response must
+// be applied rather than silently dropped.
+func TestReceiveLoopLateInitialResponse(t *testing.T) {
+	fake := &fakeSubscriberConn{recv: make(chan *bw.Response)}
+	sub := &subscriber.Subscriber{
+		Config:    subscriber.Config{ID: 1, Name: "test"},
+		Interface: fake,
+	}
+	buffer := types.NewMultiCursorRingBuffer(64, 8)
+	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+		MaxReconnectBackOff: 1,
+		// A finite wait: the initial-response window closes after one second, after which any
+		// response from the subscriber is consumed by the ongoing ack loop instead.
+		MaxWaitForResponseAfterConnect: 1,
+		// Poll continuously so the test does not depend on multi-second poll ticks.
+		PollFrequency: 0,
+	})
+
+	push := func(seq uint64, eventType bw.V2Event_Type) {
+		t.Helper()
+		_, err := buffer.Push(&bw.Event{
+			SeqId:     seq,
+			EventData: &bw.Event_V2{V2: &bw.V2Event{Type: eventType}},
+		})
+		assert.NoError(t, err)
+	}
+
+	push(1, bw.V2Event_LAST_WRITER_CLOSED)
+	push(2, bw.V2Event_CREATE)
+	push(3, bw.V2Event_LAST_WRITER_CLOSED)
+
+	// receiveLoop blocks in waitForInitialAck until the one second timeout fires, then streaming
+	// begins from the last known acknowledged event with no filter set.
+	doneRecv, cancelRecv := handler.receiveLoop()
+	doneSend, cancelSend := handler.sendLoop()
+	assert.Eventually(t, func() bool { return fake.sendCount() == 3 }, 5*time.Second, time.Millisecond)
+
+	// Pause sending (as if between poll ticks) so later pushes cannot race the seek below.
+	cancelSend()
+	<-doneSend
+
+	// The subscriber's initial response arrives late: skip to the end of the buffer, with an event
+	// type filter. The ongoing ack loop must seek (adopting the buffer's last sequence ID, not
+	// poisoning lastSeqID with math.MaxUint64) and install the filter.
+	fake.recv <- &bw.Response{
+		CompletedSeq: math.MaxUint64,
+		Filter:       &bw.EventFilter{V2Types: []bw.V2Event_Type{bw.V2Event_LAST_WRITER_CLOSED}},
+	}
+	assert.Eventually(t, func() bool { return handler.lastSeqID.Load() == 3 }, 5*time.Second, time.Millisecond)
+
+	// The stream must still be alive after the late seek: newly pushed events that pass the late
+	// filter are delivered, filtered ones are not.
+	push(4, bw.V2Event_CREATE)             // dropped by the late filter
+	push(5, bw.V2Event_LAST_WRITER_CLOSED) // delivered
+	doneSend, cancelSend = handler.sendLoop()
+	assert.Eventually(t, func() bool { return fake.sendCount() == 4 }, 5*time.Second, time.Millisecond)
+	assert.Equal(t, []uint64{1, 2, 3, 5}, fake.sentSeqs())
+
+	cancelSend()
+	<-doneSend
+	cancelRecv()
+	<-doneRecv
 }

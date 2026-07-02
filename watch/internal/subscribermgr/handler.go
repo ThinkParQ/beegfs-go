@@ -52,9 +52,11 @@ type Handler struct {
 	// fails toward resending or deferring an ack, never toward acking too much.
 	lastSeqID atomic.Uint64
 	// eventFilter holds the per-version type allowlists received from the subscriber's initial
-	// Response. nil means no filter (all events delivered). Written synchronously in receiveLoop
-	// before the ongoing-acks goroutine is spawned, then read-only in sendLoop; no mutex required.
-	eventFilter *compiledFilter
+	// Response. A nil pointer means no filter (all events delivered). It is usually stored while
+	// receiveLoop waits for the initial response, but when a subscriber responds after a finite
+	// wait-for-response-after-connect timeout it is stored from the ongoing-acks goroutine while
+	// sendLoop is already reading it, so it must be accessed atomically.
+	eventFilter atomic.Pointer[compiledFilter]
 }
 
 type HandlerConfig struct {
@@ -220,6 +222,17 @@ func (h *Handler) connectLoop() bool {
 	}
 }
 
+// applyEventFilter compiles and installs a subscriber-provided event type filter. The filter
+// normally arrives with the initial response, but can arrive late when the subscriber responds
+// after a finite wait-for-response-after-connect timeout; sendLoop loads the filter atomically per
+// event so it can be installed at any time.
+func (h *Handler) applyEventFilter(f *bw.EventFilter) {
+	h.eventFilter.Store(newCompiledFilter(f))
+	h.log.Info("subscriber set an event type filter",
+		zap.Any("v1Types", f.GetV1Types()),
+		zap.Any("v2Types", f.GetV2Types()))
+}
+
 func (h *Handler) receiveLoop() (<-chan struct{}, context.CancelFunc) {
 
 	done := make(chan struct{})
@@ -291,10 +304,7 @@ waitForInitialAck:
 					h.lastSeqID.Store(response.CompletedSeq)
 				}
 				if f := response.GetFilter(); f != nil {
-					h.eventFilter = newCompiledFilter(f)
-					h.log.Info("subscriber set an event type filter",
-						zap.Any("v1Types", f.GetV1Types()),
-						zap.Any("v2Types", f.GetV2Types()))
+					h.applyEventFilter(f)
 				}
 			}
 			break waitForInitialAck
@@ -345,6 +355,11 @@ waitForInitialAck:
 					loggedAckError = false
 				}
 				h.lastSeqID.Store(response.CompletedSeq)
+				// A late initial response can also carry the subscriber's event type filter, which
+				// would otherwise be silently dropped when the waitForInitialAck window was missed.
+				if f := response.GetFilter(); f != nil {
+					h.applyEventFilter(f)
+				}
 
 				// TODO: https://linear.app/thinkparq/issue/BF-29/acknowledge-events-sent-to-all-subscribers-back-to-the-metadata-server
 				// Also consider if we need to better handle what we do with recvStream when we break out of the connectedLoop.
@@ -410,7 +425,7 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 							lastAckedSeq := h.lastSeqID.Load()
 							// Don't send duplicate events.
 							if event.Meta.SeqId > lastAckedSeq || (event.Meta.SeqId == 0 && lastAckedSeq == 0) {
-								if !h.eventFilter.passes(event.Meta) {
+								if !h.eventFilter.Load().passes(event.Meta) {
 									// Auto-ack filtered events so the buffer's ack cursor advances
 									// and buffer space is freed even when nothing is being sent.
 									// Because acks are cumulative this is only safe once the
