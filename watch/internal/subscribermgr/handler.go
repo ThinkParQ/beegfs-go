@@ -222,6 +222,23 @@ func (h *Handler) connectLoop() bool {
 	}
 }
 
+// seekToEndOfBuffer handles a subscriber request (CompletedSeq == math.MaxUint64) to skip all
+// historical events and resume from the end of the event buffer, adopting the sequence ID of the
+// last buffered event as the new lastSeqID. On an error the cursor state is unknown, so the caller
+// should tear down the connection rather than continue streaming.
+func (h *Handler) seekToEndOfBuffer() error {
+	h.log.Info("subscriber requested to resume sending events from the end of the buffer")
+	lastSeqID, err := h.metaEventBuffer.SeekToEnd(h.ID)
+	if err != nil {
+		// This probably indicates a bug. We should bail out since the subscriber specifically
+		// indicated they don't want to receive all historical events.
+		h.log.Error("error seeking subscriber ack cursor to the end of the buffer", zap.Error(err))
+		return err
+	}
+	h.lastSeqID.Store(lastSeqID)
+	return nil
+}
+
 // applyEventFilter compiles and installs a subscriber-provided event type filter. The filter
 // normally arrives with the initial response, but can arrive late when the subscriber responds
 // after a finite wait-for-response-after-connect timeout; sendLoop loads the filter atomically per
@@ -277,16 +294,10 @@ waitForInitialAck:
 			if ok {
 				// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
 				if response.CompletedSeq == math.MaxUint64 {
-					h.log.Info("subscriber requested to resume sending events from the end of the buffer", zap.Any("sequenceID", response.CompletedSeq))
-					lastSeqID, err := h.metaEventBuffer.SeekToEnd(h.ID)
-					if err != nil {
-						// This probably indicates a bug. We should bail out since the subscriber
-						// specifically indicated they don't want to receive all historical events.
-						h.log.Error("error seeking subscriber ack cursor to the end of the buffer", zap.Error(err))
+					if err := h.seekToEndOfBuffer(); err != nil {
 						close(done)
 						return done, cancel
 					}
-					h.lastSeqID.Store(lastSeqID)
 				} else {
 					// This branch also handles if the CompletedSeq is 0, which indicates to send
 					// everything in the buffer to the subscriber.
@@ -341,20 +352,34 @@ waitForInitialAck:
 					return
 				}
 				//h.log.Debug("received response from subscriber", zap.Any("response", response))
-				err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
-				if err != nil {
-					if !loggedAckError {
-						// Ignore errors, an error is expected if the event buffer is not fully
-						// repopulated, or if the subscriber is setup to acknowledge the most recent
-						// event on a timer and all sent events are already acknowledged. This is
-						// logged to avoid masking errors in other circumstances.
-						h.log.Debug("unable to acknowledge the specified sequence ID (further occurrences will not be logged until this operation succeeds)", zap.Error(err), zap.String("hint", "if Watch just started this likely indicates the event buffer is not fully repopulated yet"))
-						loggedAckError = true
+				if response.CompletedSeq == math.MaxUint64 {
+					// A request to skip to the end of the buffer is normally the first response on
+					// a connection and handled in waitForInitialAck above, but when a finite
+					// wait-for-response-after-connect timeout fires before a slow subscriber sends
+					// its initial response, that response is consumed here instead. It must not be
+					// treated as a regular ack: AckEvent would fail and storing math.MaxUint64 in
+					// lastSeqID would suppress every future send, silently stalling the stream.
+					if err := h.seekToEndOfBuffer(); err != nil {
+						// The cursor state is unknown, so tear the connection down and let the
+						// handler re-establish it cleanly.
+						return
 					}
 				} else {
-					loggedAckError = false
+					err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
+					if err != nil {
+						if !loggedAckError {
+							// Ignore errors, an error is expected if the event buffer is not fully
+							// repopulated, or if the subscriber is setup to acknowledge the most recent
+							// event on a timer and all sent events are already acknowledged. This is
+							// logged to avoid masking errors in other circumstances.
+							h.log.Debug("unable to acknowledge the specified sequence ID (further occurrences will not be logged until this operation succeeds)", zap.Error(err), zap.String("hint", "if Watch just started this likely indicates the event buffer is not fully repopulated yet"))
+							loggedAckError = true
+						}
+					} else {
+						loggedAckError = false
+					}
+					h.lastSeqID.Store(response.CompletedSeq)
 				}
-				h.lastSeqID.Store(response.CompletedSeq)
 				// A late initial response can also carry the subscriber's event type filter, which
 				// would otherwise be silently dropped when the waitForInitialAck window was missed.
 				if f := response.GetFilter(); f != nil {
