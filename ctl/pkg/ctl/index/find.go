@@ -44,11 +44,13 @@ func Find(ctx context.Context, exec Executor, cfg FindCfg, walkRoot, displayRoot
 		spec.MinLevel = *cfg.MinDepth
 	}
 
+	aggGSel := fmt.Sprintf(FindAggGSelect, ownerCols("", cfg.ResolveOwnerNames))
+
 	if preds.Empty {
 		spec.SQLInit = FindAggI
 		spec.SQLAggInit = FindAggK
 		spec.SQLIntermed = FindAggJ
-		spec.SQLAggregate = appendLimit(FindAggGSelect, cfg.NumResults)
+		spec.SQLAggregate = appendLimit(aggGSel, cfg.NumResults)
 		if cfg.Type != "d" {
 			spec.SQLEntries = FindAggESelect + " WHERE " + preds.entriesWhere() + " AND type='f' AND size=0"
 		}
@@ -72,9 +74,9 @@ func Find(ctx context.Context, exec Executor, cfg FindCfg, walkRoot, displayRoot
 			spec.SQLSummary = appendLimit(dirSQL, cfg.NumResults)
 			spec.SQLAggInit = FindAggK
 			spec.SQLIntermed = FindAggJ
-			spec.SQLAggregate = appendLimit(FindAggGSelect+" ORDER BY size "+order, cfg.NumResults)
+			spec.SQLAggregate = appendLimit(aggGSel+" ORDER BY size "+order, cfg.NumResults)
 		} else {
-			spec.SQLSummary = appendLimit(fmt.Sprintf(FindDirS, preds.summaryWhere()), cfg.NumResults)
+			spec.SQLSummary = appendLimit(fmt.Sprintf(FindDirS, ownerCols("", cfg.ResolveOwnerNames), preds.summaryWhere()), cfg.NumResults)
 		}
 		// Both NeedsSummary paths emit the 12 core columns (FindAggGSelect /
 		// FindDirS); declare them for remote arity validation.
@@ -89,7 +91,7 @@ func Find(ctx context.Context, exec Executor, cfg FindCfg, walkRoot, displayRoot
 		}
 		entriesSQL := FindAggESelect + " WHERE " + preds.entriesWhere() + " ORDER BY size " + order
 		entriesSQL = appendLimit(entriesSQL, cfg.NumResults)
-		aggSQL := FindAggGSelect + " ORDER BY size " + order
+		aggSQL := aggGSel + " ORDER BY size " + order
 		aggSQL = appendLimit(aggSQL, cfg.NumResults)
 		spec.SQLInit = FindAggI
 		spec.SQLEntries = entriesSQL
@@ -139,12 +141,13 @@ func findEntriesSQL(cfg FindCfg, preds PredicateSet) string {
 	// The path matchers reference rpath(sname, sroll, name), whose columns live in
 	// the vrpentries subquery, so they go into the first %s (the vrpentries WHERE),
 	// never the outer b.*/t.* position.
+	r := cfg.ResolveOwnerNames
 	switch {
 	case preds.NeedsTargets:
-		return fmt.Sprintf(FindTargetsE, preds.entriesWhere(), preds.BeeGFSWhereClause())
+		return fmt.Sprintf(FindTargetsE, ownerCols("v.", r), preds.entriesWhere(), preds.BeeGFSWhereClause())
 	case preds.NeedsBeeGFS || cfg.BeeGFS:
-		return fmt.Sprintf(FindBeeGFSE, preds.entriesWhere(), preds.BeeGFSWhereClause())
+		return fmt.Sprintf(FindBeeGFSE, ownerCols("v.", r), preds.entriesWhere(), preds.BeeGFSWhereClause())
 	default:
-		return fmt.Sprintf(FindCoreE, preds.entriesWhere())
+		return fmt.Sprintf(FindCoreE, ownerCols("", r), preds.entriesWhere())
 	}
 }

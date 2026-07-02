@@ -6,10 +6,42 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	indexPkg "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/index"
 )
+
+// TestOwnerNamesRequested checks that owner-name resolution is enabled exactly
+// when the user/group columns will be displayed: via the default column set, via
+// an explicit --columns user/group, and via --columns all (which cmdfmt expands
+// to every column). The "all" case is the regression guard: without it, `find
+// -l --columns all` / `ls -l --columns all` showed numeric uid/gid.
+func TestOwnerNamesRequested(t *testing.T) {
+	// Default path (no --columns): reads the passed defaultColumns. Guarded on
+	// IsSet so a viper value left by another test can't make this flaky.
+	if !viper.IsSet(config.ColumnsKey) {
+		assert.True(t, ownerNamesRequested([]string{"path", "user", "group"}), "default with user/group")
+		assert.False(t, ownerNamesRequested([]string{"path", "size"}), "default without owner columns")
+	}
+
+	// Override path (--columns ...): reads viper, ignoring defaultColumns.
+	prev := viper.Get(config.ColumnsKey)
+	t.Cleanup(func() { viper.Set(config.ColumnsKey, prev) })
+	for _, tc := range []struct {
+		cols []string
+		want bool
+	}{
+		{[]string{"all"}, true},
+		{[]string{"user"}, true},
+		{[]string{"group"}, true},
+		{[]string{"size", "mtime"}, false},
+	} {
+		viper.Set(config.ColumnsKey, tc.cols)
+		assert.Equal(t, tc.want, ownerNamesRequested([]string{"path"}), "--columns %v", tc.cols)
+	}
+}
 
 // newIndexRoot creates a temp index root containing the given mount-name
 // subdirectories (the <index-root>/<mount>/... layout).

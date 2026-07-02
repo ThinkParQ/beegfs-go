@@ -51,6 +51,50 @@ func TestLs_NumResultsCapsCombinedListing(t *testing.T) {
 	assert.Equal(t, n, got, "combined listing must be capped to NumResults, not 2N")
 }
 
+// TestLs_OwnerResolutionGating: every ls SQL-building path (and LsFile) must
+// fill the owner placeholder once, with numeric columns by default and GUFI
+// name resolution only when ResolveOwnerNames is set. The ls templates are
+// selected through a variable, so go vet cannot catch a Sprintf arity slip
+// here; this exercises each path and asserts no leftover %s/%!(arity) artifact.
+func TestLs_OwnerResolutionGating(t *testing.T) {
+	bases := []struct {
+		name string
+		cfg  LsCfg
+	}{
+		{"non-recursive core", LsCfg{}},
+		{"non-recursive beegfs", LsCfg{BeeGFS: true}},
+		{"recursive core", LsCfg{Recursive: true}},
+		{"recursive beegfs", LsCfg{Recursive: true, BeeGFS: true}},
+	}
+	for _, b := range bases {
+		for _, resolve := range []bool{false, true} {
+			t.Run(b.name+"/resolve="+strconv.FormatBool(resolve), func(t *testing.T) {
+				cfg := b.cfg
+				cfg.ResolveOwnerNames = resolve
+				ex := &captureExecutor{}
+				_, wait, err := Ls(context.Background(), ex, cfg, "/idx", false)
+				require.NoError(t, err)
+				require.NoError(t, wait())
+				require.NotEmpty(t, ex.specs)
+				for _, spec := range ex.specs {
+					assertOwnerSQL(t, spec.SQLEntries+spec.SQLSummary, resolve)
+				}
+			})
+		}
+	}
+
+	for _, resolve := range []bool{false, true} {
+		t.Run("lsfile/resolve="+strconv.FormatBool(resolve), func(t *testing.T) {
+			ex := &captureExecutor{}
+			_, wait, err := LsFile(context.Background(), ex, LsCfg{ResolveOwnerNames: resolve}, "/idx/d/f.c")
+			require.NoError(t, err)
+			require.NoError(t, wait())
+			require.Len(t, ex.specs, 1)
+			assertOwnerSQL(t, ex.specs[0].SQLEntries, resolve)
+		})
+	}
+}
+
 // captureExecutor records every QuerySpec it receives and returns no rows.
 type captureExecutor struct {
 	specs []QuerySpec
@@ -61,6 +105,46 @@ func (e *captureExecutor) Execute(_ context.Context, spec QuerySpec) (<-chan []s
 	ch := make(chan []string)
 	close(ch)
 	return ch, func() error { return nil }, nil
+}
+
+// TestLsTargetIsFile_Remote: with no local stat available, a remote target is a
+// file iff the summary probe at its path returns no row (a real directory, even
+// empty, returns its own summary row).
+func TestLsTargetIsFile_Remote(t *testing.T) {
+	t.Parallel()
+	cfg := LsCfg{GlobalCfg: GlobalCfg{IndexAddr: "ssh:host"}}
+
+	t.Run("summary row present means directory", func(t *testing.T) {
+		t.Parallel()
+		ex := &rowsExecutor{rows: [][]string{{"data"}}}
+		isFile, err := LsTargetIsFile(context.Background(), ex, cfg, "/idx/mnt/data")
+		require.NoError(t, err)
+		assert.False(t, isFile)
+	})
+
+	t.Run("no summary row means file", func(t *testing.T) {
+		t.Parallel()
+		ex := &rowsExecutor{rows: nil}
+		isFile, err := LsTargetIsFile(context.Background(), ex, cfg, "/idx/mnt/data/file.c")
+		require.NoError(t, err)
+		assert.True(t, isFile)
+	})
+}
+
+// TestLsFile_ParentAndNamePredicate: a file target lists from its parent index
+// directory (level 0) with an exact name match on the basename.
+func TestLsFile_ParentAndNamePredicate(t *testing.T) {
+	t.Parallel()
+	ex := &captureExecutor{}
+	_, wait, err := LsFile(context.Background(), ex, LsCfg{}, "/idx/mnt/d/file_0.c")
+	require.NoError(t, err)
+	require.NoError(t, wait())
+
+	require.Len(t, ex.specs, 1)
+	spec := ex.specs[0]
+	assert.Equal(t, "/idx/mnt/d", spec.IndexRoot, "walks the parent directory")
+	assert.Equal(t, 0, spec.MaxLevel, "single directory, non-recursive")
+	assert.Contains(t, spec.SQLEntries, "name = 'file_0.c'", "exact name match on the basename")
 }
 
 // TestLs_NonRecursiveOrdersBeforeLimit: with a sort flag and NumResults set, the

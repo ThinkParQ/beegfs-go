@@ -37,6 +37,14 @@ func drain[T any](ctx context.Context, ch <-chan T, errWait func() error, handle
 	}
 }
 
+func ownerNamesRequested(defaultColumns []string) bool {
+	cols := defaultColumns
+	if viper.IsSet(config.ColumnsKey) {
+		cols = viper.GetStringSlice(config.ColumnsKey)
+	}
+	return slices.Contains(cols, "user") || slices.Contains(cols, "group") || slices.Contains(cols, "all")
+}
+
 func resolveGlobalCfg(ctx context.Context, base indexPkg.GlobalCfg, fsPath string) indexPkg.GlobalCfg {
 	cfg := base
 	if client, err := config.BeeGFSClient(fsPath); (err == nil || errors.Is(err, filesystem.ErrUnmounted)) && client != nil {
@@ -400,13 +408,9 @@ func defaultPathArgs(args []string, mountPath, cwd string) []string {
 }
 
 func resolveAndCheckIndexPath(cfg indexPkg.GlobalCfg, args []string) (string, error) {
-	var fsPath string
+	fsPath := "."
 	if len(args) > 0 {
 		fsPath = args[0]
-	} else if wd, err := os.Getwd(); err == nil {
-		fsPath = wd
-	} else {
-		return "", fmt.Errorf("getting working directory: %w", err)
 	}
 
 	indexPath, err := resolveFSPathToIndex(cfg, fsPath)

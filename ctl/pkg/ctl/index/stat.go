@@ -21,7 +21,7 @@ func StatIndexDir(entryPath string) string {
 
 func statColumns(beegfs bool) []string {
 	cols := []string{"name", "type", "inode", "size", "blocks", "mode",
-		"uid", "gid", "nlink", "atime", "mtime", "ctime"}
+		"uid", "user", "gid", "group", "nlink", "atime", "mtime", "ctime"}
 	if beegfs {
 		cols = append(cols, "owner_id", "parent_entry_id", "entry_id",
 			"stripe_pattern_type", "stripe_chunk_size", "stripe_num_targets")
@@ -93,10 +93,16 @@ func Stat(ctx context.Context, ex Executor, cfg StatCfg, entryPath string, glob 
 		if glob {
 			return ex.Execute(ctx, statDirSpec(cfg, entryPath, true))
 		}
-		if rows, errWait, err := ex.Execute(ctx, statDirSpec(cfg, entryPath, false)); err == nil {
-			if buffered, werr := bufferRows(rows, errWait); werr == nil && len(buffered) > 0 {
-				return staticRows(buffered)
-			}
+		rows, errWait, err := ex.Execute(ctx, statDirSpec(cfg, entryPath, false))
+		if err != nil {
+			return nil, nil, err
+		}
+		buffered, werr := bufferRows(rows, errWait)
+		if werr != nil {
+			return nil, nil, werr
+		}
+		if len(buffered) > 0 {
+			return staticRows(buffered)
 		}
 		return ex.Execute(ctx, statFileSpec(cfg, entryPath))
 	}

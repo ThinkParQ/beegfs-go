@@ -3,7 +3,6 @@ package index
 import (
 	"fmt"
 	"math"
-	"os/user"
 	"strconv"
 	"time"
 )
@@ -124,20 +123,19 @@ func fmtSizeHuman(sizeStr string) string {
 	}
 }
 
-func lookupUID(uidStr string) string {
-	u, err := user.LookupId(uidStr)
+func modeOctalSymbolic(modeStr, typeChar string) string {
+	mode, err := strconv.ParseInt(modeStr, 10, 64)
 	if err != nil {
-		return uidStr
+		return "?---------"
 	}
-	return u.Username
+	return fmt.Sprintf("%04o/%s", mode&07777, modeString(modeStr, typeChar))
 }
 
-func lookupGID(gidStr string) string {
-	g, err := user.LookupGroupId(gidStr)
-	if err != nil {
-		return gidStr
+func numWithName(num, name string) string {
+	if name == "" || name == num {
+		return num
 	}
-	return g.Name
+	return num + "/" + name
 }
 
 func formatInfoRow(row []string, raw bool) []string {

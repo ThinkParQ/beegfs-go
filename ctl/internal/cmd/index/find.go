@@ -190,6 +190,8 @@ Example: find BeeGFS files by metadata owner
 				defaultColumns = allColumns
 			}
 
+			backendCfg.ResolveOwnerNames = ownerNamesRequested(defaultColumns)
+
 			tbl := cmdfmt.NewPrintomatic(allColumns, defaultColumns)
 			defer tbl.PrintRemaining()
 
@@ -300,8 +302,8 @@ func formatFindRow(raw []string, beegfs, targets, human bool, indexPath, fsPath 
 		displayPath(r.Path, indexPath, fsPath, absolute),
 		modeString(r.Mode, r.Type),
 		r.Nlink,
-		lookupUID(r.Uid),
-		lookupGID(r.Gid),
+		r.Uid,
+		r.Gid,
 		displaySize,
 		fmtTimestamp(r.Mtime),
 		fmtTimestamp(r.Atime),

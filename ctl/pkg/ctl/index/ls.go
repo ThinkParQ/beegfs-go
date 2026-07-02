@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 )
@@ -19,6 +20,57 @@ var (
 	lsRecursiveColumns       = []string{"path", "name", "type", "inode", "size", "mtime", "atime", "ctime", "mode", "uid", "gid", "nlink", "blocks"}
 	lsRecursiveBeeGFSColumns = []string{"path", "name", "type", "inode", "size", "mtime", "atime", "ctime", "mode", "uid", "gid", "nlink", "blocks", "owner_id", "parent_entry_id", "entry_id", "stripe_pattern_type", "stripe_chunk_size", "stripe_num_targets"}
 )
+
+// LsTargetIsFile reports whether walkRoot names a file (or symlink) rather than
+// an index directory, so the caller lists it from its parent like ls(1)/gufi_ls
+// (see LsFile). Local: a cheap os.Stat — no db.db means it is not an index dir.
+// Remote: the index can't be stat'd here, so probe the path's own summary row
+// over gufi_query — a real directory (even an empty one) returns one row, a file
+// none. A glob is dir-only and is never treated as a file.
+func LsTargetIsFile(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string) (bool, error) {
+	if !IsRemoteAddr(cfg.IndexAddr) {
+		return !IsIndexDir(walkRoot), nil
+	}
+	spec := QuerySpec{
+		IndexRoot:  walkRoot,
+		Threads:    cfg.Threads,
+		PluginPath: QueryPluginPath,
+		MaxLevel:   0,
+		SQLSummary: "SELECT name FROM summary WHERE isroot=1 LIMIT 1",
+		Columns:    []string{"name"},
+	}
+	rows, wait, err := exec.Execute(ctx, spec)
+	if err != nil {
+		return false, err
+	}
+	buffered, err := bufferRows(rows, wait)
+	if err != nil {
+		return false, err
+	}
+	return len(buffered) == 0, nil
+}
+
+// LsFile lists a single named entry from its parent index directory, for an ls
+// target that is a file rather than a directory (see LsTargetIsFile). It mirrors
+// statFileSpec: a parent-directory walk at level 0 with an exact name match, so
+// `ls <file>` prints just that file. It is always non-recursive.
+func LsFile(ctx context.Context, exec Executor, cfg LsCfg, filePath string) (<-chan []string, func() error, error) {
+	var p PredicateSet
+	p.add(eqStr("name", filepath.Base(filePath)))
+	tmpl, cols, qual := LsCoreE, lsCoreColumns, ""
+	if cfg.BeeGFS {
+		tmpl, cols, qual = LsBeeGFSE, lsBeeGFSColumns, "e."
+	}
+	spec := QuerySpec{
+		IndexRoot:  filepath.Dir(filePath),
+		Threads:    cfg.Threads,
+		PluginPath: QueryPluginPath,
+		MaxLevel:   0,
+		SQLEntries: fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), p.WhereClause()),
+		Columns:    cols,
+	}
+	return exec.Execute(ctx, spec)
+}
 
 func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob bool) (<-chan []string, func() error, error) {
 	preds := BuildLsPredicates(cfg)
@@ -70,7 +122,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 			if cfg.BeeGFS {
 				tmpl, qual, cols = LsBeeGFSRecursiveE, "v.", lsRecursiveBeeGFSColumns
 			}
-			spec.SQLEntries = appendLimit(fmt.Sprintf(tmpl, preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+			spec.SQLEntries = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 			spec.Columns = cols
 			entriesSpec = &spec
 		}
@@ -84,7 +136,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 			if cfg.BeeGFS {
 				tmpl, qual, cols = LsBeeGFSRecursiveDirS, "s.", lsRecursiveBeeGFSColumns
 			}
-			spec.SQLSummary = appendLimit(fmt.Sprintf(tmpl, dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+			spec.SQLSummary = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 			spec.Columns = cols
 			dirSpec = &spec
 		}
@@ -112,7 +164,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 		if cfg.BeeGFS {
 			tmpl, qual = LsBeeGFSE, "e."
 		}
-		entriesSQL = appendLimit(fmt.Sprintf(tmpl, preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+		entriesSQL = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), preds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 	}
 
 	var dirSQL string
@@ -122,7 +174,7 @@ func Ls(ctx context.Context, exec Executor, cfg LsCfg, walkRoot string, glob boo
 		if cfg.BeeGFS {
 			tmpl, qual = LsBeeGFSDirS, "s."
 		}
-		dirSQL = appendLimit(fmt.Sprintf(tmpl, dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
+		dirSQL = appendLimit(fmt.Sprintf(tmpl, ownerCols(qual, cfg.ResolveOwnerNames), dirPreds.WhereClause())+lsOrderBy(cfg, qual), cfg.NumResults)
 	}
 
 	var allRows [][]string

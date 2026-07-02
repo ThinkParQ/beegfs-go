@@ -54,6 +54,10 @@ func Info(ctx context.Context, executor Executor, cfg InfoCfg) (<-chan []string,
 	row[2] = lastUpdated
 	if len(tsRow) >= 15 {
 		copy(row[3:], tsRow[:15])
+	} else {
+		for i := 3; i < len(row); i++ {
+			row[i] = "-"
+		}
 	}
 
 	ch := make(chan []string, 1)

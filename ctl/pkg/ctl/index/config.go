@@ -4,6 +4,7 @@ package index
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,7 +12,6 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
-	"go.uber.org/zap"
 )
 
 // Paths to the GUFI binaries shipped with the BeeGFS index packages. These are
@@ -74,54 +74,54 @@ type dotIndexEntry struct {
 	Threads int    `toml:"threads"`
 }
 
-// loadDotIndex reads and parses the .beegfs.index file at mountPath. ok is false
-// when mountPath is empty or the file is missing or malformed, in which case
-// callers leave their configuration unchanged.
-func loadDotIndex(mountPath string) (cfg dotIndexConfig, ok bool) {
+// loadDotIndex reads and parses the .beegfs.index file at mountPath. It returns
+// a zero config and nil error when mountPath is empty or the file is absent (the
+// normal "no .beegfs.index configured" case). An existing-but-unreadable or
+// malformed file is a real misconfiguration and is returned as an error, so the
+// caller can surface it directly rather than silently ignoring the file and
+// failing later as an unrelated "index root not set".
+func loadDotIndex(mountPath string) (dotIndexConfig, error) {
+	var cfg dotIndexConfig
 	if mountPath == "" {
-		return cfg, false
+		return cfg, nil
 	}
 	path := filepath.Join(mountPath, DotIndexFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// A missing file is the normal "no .beegfs.index configured" case and stays
-		// silent; an existing-but-unreadable file is a real misconfiguration worth
-		// surfacing rather than failing later as an unrelated "index root not set".
-		if !os.IsNotExist(err) {
-			log, _ := config.GetLogger()
-			log.Warn("ignoring unreadable .beegfs.index", zap.String("path", path), zap.Error(err))
+		if os.IsNotExist(err) {
+			return cfg, nil
 		}
-		return cfg, false
+		return cfg, fmt.Errorf("reading %s: %w", path, err)
 	}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		log, _ := config.GetLogger()
-		log.Warn("ignoring malformed .beegfs.index", zap.String("path", path), zap.Error(err))
-		return cfg, false
+		return cfg, fmt.Errorf("parsing %s: %w (expected a single [index] table with path/root/addr/threads keys)", path, err)
 	}
-	return cfg, true
+	return cfg, nil
 }
 
 // DotIndexPath returns the "path" of the [index] entry in the .beegfs.index
-// file at mountPath, or "" when mountPath is empty or the file is missing,
-// malformed, or configures no path. It is the filesystem path 'beegfs index
-// create' indexes when --fs-path is omitted.
-func DotIndexPath(mountPath string) string {
-	fileCfg, ok := loadDotIndex(mountPath)
-	if !ok {
-		return ""
+// file at mountPath, or "" when mountPath is empty, the file is missing, or it
+// configures no path. A malformed or unreadable file returns an error. It is the
+// filesystem path 'beegfs index create' indexes when --fs-path is omitted.
+func DotIndexPath(mountPath string) (string, error) {
+	fileCfg, err := loadDotIndex(mountPath)
+	if err != nil {
+		return "", err
 	}
-	return fileCfg.Index.Path
+	return fileCfg.Index.Path, nil
 }
 
 // ApplyDotIndexOverrides returns cfg with unset fields filled from the [index]
 // entry of the .beegfs.index file at mountPath. Fields the user set explicitly
-// are never overridden, and a missing or malformed file leaves cfg unchanged.
+// are never overridden, and a missing file leaves cfg unchanged. A malformed or
+// unreadable file also leaves cfg unchanged here; it is reported up front by the
+// index command's PersistentPreRunE, so this path need not surface it again.
 func ApplyDotIndexOverrides(cfg GlobalCfg, mountPath string) GlobalCfg {
 	if cfg.IndexRoot != "" && cfg.IndexAddr != "" && cfg.Threads > 0 {
 		return cfg
 	}
-	fileCfg, ok := loadDotIndex(mountPath)
-	if !ok {
+	fileCfg, err := loadDotIndex(mountPath)
+	if err != nil {
 		return cfg
 	}
 	e := fileCfg.Index

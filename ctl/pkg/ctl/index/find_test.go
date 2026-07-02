@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -99,10 +100,73 @@ func TestFindEntriesSQL_PredicatePlacement(t *testing.T) {
 }
 
 func TestFindEntriesSQL_CoreHasSingleWhere(t *testing.T) {
-	preds := BuildFindPredicates(FindCfg{Type: "f"})
-	sql := findEntriesSQL(FindCfg{Type: "f"}, preds)
-	assert.Equal(t, FindCoreE[:len(FindCoreE)-2]+"type = 'f'", sql)
+	cfg := FindCfg{Type: "f"}
+	preds := BuildFindPredicates(cfg)
+	sql := findEntriesSQL(cfg, preds)
 	assert.Equal(t, 1, strings.Count(sql, "WHERE"))
+	assert.Contains(t, sql, "WHERE type = 'f'")
+	// Owner columns are numeric when the user/group columns won't be displayed,
+	// avoiding an uncached per-row uidtouser/gidtogroup lookup.
+	assert.Contains(t, sql, "mode, uid, gid, nlink")
+	assert.NotContains(t, sql, "uidtouser")
+	assert.NotContains(t, sql, "%s", "all placeholders must be filled")
+}
+
+// TestFindEntriesSQL_ResolvesOwnerNamesOnlyWhenRequested: the GUFI name
+// resolution is emitted only when ResolveOwnerNames is set (the user/group
+// columns will be displayed); the WHERE placement is unaffected.
+func TestFindEntriesSQL_ResolvesOwnerNamesOnlyWhenRequested(t *testing.T) {
+	cfg := FindCfg{Type: "f", ResolveOwnerNames: true}
+	preds := BuildFindPredicates(cfg)
+	sql := findEntriesSQL(cfg, preds)
+	assert.Contains(t, sql, "uidtouser(uid), gidtogroup(gid)")
+	assert.Equal(t, 1, strings.Count(sql, "WHERE"))
+	assert.NotContains(t, sql, "%s", "all placeholders must be filled")
+}
+
+// assertOwnerSQL checks that a generated find/ls statement filled its owner
+// placeholder exactly once: numeric columns when names are not displayed, GUFI
+// resolution when they are, and never a leftover %s or %!(arity) artifact.
+func assertOwnerSQL(t *testing.T, sql string, resolve bool) {
+	t.Helper()
+	if sql == "" {
+		return
+	}
+	assert.NotContains(t, sql, "%s", "unfilled placeholder in: %s", sql)
+	assert.NotContains(t, sql, "%!", "Sprintf arity artifact in: %s", sql)
+	if resolve {
+		assert.Contains(t, sql, "uidtouser(", "names must resolve when displayed: %s", sql)
+		assert.Contains(t, sql, "gidtogroup(", "names must resolve when displayed: %s", sql)
+	} else {
+		assert.NotContains(t, sql, "uidtouser(", "must not resolve when not displayed: %s", sql)
+		assert.NotContains(t, sql, "gidtogroup(", "must not resolve when not displayed: %s", sql)
+	}
+}
+
+// TestFind_OwnerResolutionGating: the --type d (FindDirS) and --empty
+// (FindAggGSelect) paths must gate uid/gid name resolution on ResolveOwnerNames
+// the same way the core entries path does.
+func TestFind_OwnerResolutionGating(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   FindCfg
+		field func(QuerySpec) string
+	}{
+		{"type-d summary", FindCfg{Type: "d"}, func(s QuerySpec) string { return s.SQLSummary }},
+		{"empty aggregate", FindCfg{Empty: true}, func(s QuerySpec) string { return s.SQLAggregate }},
+	}
+	for _, c := range cases {
+		for _, resolve := range []bool{false, true} {
+			t.Run(c.name+"/resolve="+strconv.FormatBool(resolve), func(t *testing.T) {
+				cfg := c.cfg
+				cfg.ResolveOwnerNames = resolve
+				rec := &specRecorder{}
+				_, _, err := Find(context.Background(), rec, cfg, "/idx", "/idx", "/mnt", false)
+				require.NoError(t, err)
+				assertOwnerSQL(t, c.field(rec.spec), resolve)
+			})
+		}
+	}
 }
 
 // specRecorder captures the QuerySpec passed to Execute so tests can assert

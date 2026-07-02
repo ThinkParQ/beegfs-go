@@ -53,18 +53,20 @@ func ParseFindRow(raw []string, beegfs, targets bool) FindRow {
 
 // StatRow holds one parsed result row of StatCoreE / StatBeeGFSE.
 type StatRow struct {
-	Name   string
-	Type   string
-	Inode  string
-	Size   string
-	Blocks string
-	Mode   string
-	Uid    string
-	Gid    string
-	Nlink  string
-	Atime  string
-	Mtime  string
-	Ctime  string
+	Name      string
+	Type      string
+	Inode     string
+	Size      string
+	Blocks    string
+	Mode      string
+	Uid       string
+	UserName  string
+	Gid       string
+	GroupName string
+	Nlink     string
+	Atime     string
+	Mtime     string
+	Ctime     string
 
 	OwnerID           string
 	ParentEntryID     string
@@ -78,26 +80,28 @@ type StatRow struct {
 // match StatCoreE / StatBeeGFSE.
 func ParseStatRow(raw []string, beegfs bool) StatRow {
 	r := StatRow{
-		Name:   colAt(raw, 0),
-		Type:   colAt(raw, 1),
-		Inode:  colAt(raw, 2),
-		Size:   colAt(raw, 3),
-		Blocks: colAt(raw, 4),
-		Mode:   colAt(raw, 5),
-		Uid:    colAt(raw, 6),
-		Gid:    colAt(raw, 7),
-		Nlink:  colAt(raw, 8),
-		Atime:  colAt(raw, 9),
-		Mtime:  colAt(raw, 10),
-		Ctime:  colAt(raw, 11),
+		Name:      colAt(raw, 0),
+		Type:      colAt(raw, 1),
+		Inode:     colAt(raw, 2),
+		Size:      colAt(raw, 3),
+		Blocks:    colAt(raw, 4),
+		Mode:      colAt(raw, 5),
+		Uid:       colAt(raw, 6),
+		UserName:  colAt(raw, 7),
+		Gid:       colAt(raw, 8),
+		GroupName: colAt(raw, 9),
+		Nlink:     colAt(raw, 10),
+		Atime:     colAt(raw, 11),
+		Mtime:     colAt(raw, 12),
+		Ctime:     colAt(raw, 13),
 	}
 	if beegfs {
-		r.OwnerID = colAt(raw, 12)
-		r.ParentEntryID = colAt(raw, 13)
-		r.EntryID = colAt(raw, 14)
-		r.StripePatternType = colAt(raw, 15)
-		r.StripeChunkSize = colAt(raw, 16)
-		r.StripeNumTargets = colAt(raw, 17)
+		r.OwnerID = colAt(raw, 14)
+		r.ParentEntryID = colAt(raw, 15)
+		r.EntryID = colAt(raw, 16)
+		r.StripePatternType = colAt(raw, 17)
+		r.StripeChunkSize = colAt(raw, 18)
+		r.StripeNumTargets = colAt(raw, 19)
 	}
 	return r
 }
