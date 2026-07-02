@@ -219,6 +219,10 @@ poll-frequency = 1
 # the metadata node's ID to each subscriber at the start of the stream, which may be required for a
 # subscriber to handle the stream, for example acknowledging the sequence ID of the last event
 # received from this metadata node.
+#
+# IMPORTANT: Node ID detection requires the v2 event protocol (BeeGFS 8). A metadata service using
+# event-version 1.0 can never identify itself, so skip-node-id-detection must be set to true for
+# every subscriber or they will never connect or receive events.
 
 # wait-for-response-after-connect: This allows individual subscribers to override the global
 # max-wait-for-response-after-connect configuration.

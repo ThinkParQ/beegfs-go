@@ -153,12 +153,20 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		}
 	}
 
+	eventBuffer := types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency)
+	if eventVersion.major == 1 {
+		// The v1 event protocol has no handshake through which the metadata service can identify
+		// itself, so the buffer's ring ID will never be set. Record this so subscribers configured
+		// to wait for node ID detection can warn instead of waiting silently forever.
+		eventBuffer.MarkV1ProtocolInUse()
+	}
+
 	return &Manager{
 		ctx:          ctx,
 		socket:       socket,
 		log:          log,
 		socketPath:   config.EventLogTarget,
-		EventBuffer:  types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency),
+		EventBuffer:  eventBuffer,
 		lastSeqID:    0,
 		eventVersion: eventVersion,
 	}, cleanup, nil

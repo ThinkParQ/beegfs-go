@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -216,6 +217,48 @@ func TestSendLoopFilteredEventAutoAck(t *testing.T) {
 		cancel()
 		<-done
 	})
+}
+
+// TestConnectLoopWarnsWhenV1ProtocolInUse verifies a subscriber configured to wait for metadata
+// node ID detection (skip-node-id-detection=false, the default) logs a warning when the metadata
+// service uses the v1 event protocol: a v1 metadata service can never identify itself, so without
+// the warning the handler waits silently forever with no indication of the misconfiguration.
+func TestConnectLoopWarnsWhenV1ProtocolInUse(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	fake := &fakeSubscriberConn{}
+	sub := &subscriber.Subscriber{
+		// SkipNodeIDDetection is intentionally left false (the default).
+		Config:    subscriber.Config{ID: 1, Name: "test"},
+		Interface: fake,
+	}
+	buffer := types.NewMultiCursorRingBuffer(64, 8)
+	buffer.MarkV1ProtocolInUse()
+	handler := newHandler(zap.New(core), sub, buffer, HandlerConfig{
+		MaxReconnectBackOff:            1,
+		MaxWaitForResponseAfterConnect: 1,
+		PollFrequency:                  0,
+	})
+
+	done := make(chan bool, 1)
+	go func() { done <- handler.connectLoop() }()
+
+	// The ring ID never becomes available, so the wait loop (which polls once per second) must
+	// notice the v1 protocol and warn.
+	assert.Eventually(t, func() bool {
+		return observed.FilterMessageSnippet("v1 event protocol").Len() > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// The handler is still waiting (only a warning was requested, not a behavior change), so
+	// shutting it down must release connectLoop.
+	handler.Stop()
+	select {
+	case connected := <-done:
+		assert.False(t, connected)
+	case <-time.After(5 * time.Second):
+		t.Fatal("connectLoop did not exit after the handler was stopped")
+	}
+	// The warning is logged once per connection attempt, not once per poll tick.
+	assert.Equal(t, 1, observed.FilterMessageSnippet("v1 event protocol").Len())
 }
 
 // TestReceiveLoopLateInitialResponse verifies a subscriber's initial response arriving after a

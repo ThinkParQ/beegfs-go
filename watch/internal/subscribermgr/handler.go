@@ -176,6 +176,7 @@ func (h *Handler) connectLoop() bool {
 		ringID := h.metaEventBuffer.GetRingID()
 		if ringID == 0 {
 			h.log.Info("waiting for metadata node ID to be available due to subscriber configuration")
+			loggedV1Warning := false
 		waitForRingID:
 			for {
 				select {
@@ -185,6 +186,13 @@ func (h *Handler) connectLoop() bool {
 				case <-time.After(time.Second):
 					if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
 						break waitForRingID
+					}
+					// Node ID detection requires the v2 event protocol handshake. A v1 metadata
+					// service can never identify itself, so this wait would otherwise continue
+					// silently forever with only the info log above.
+					if !loggedV1Warning && h.metaEventBuffer.V1ProtocolInUse() {
+						h.log.Warn("subscriber is configured to wait for the metadata node ID before connecting, but the metadata service uses the v1 event protocol and can never identify itself; this subscriber will never connect or receive events until skip-node-id-detection is set to true for this subscriber")
+						loggedV1Warning = true
 					}
 				}
 			}

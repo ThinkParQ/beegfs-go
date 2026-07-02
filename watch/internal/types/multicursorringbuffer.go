@@ -77,6 +77,11 @@ type MultiCursorRingBuffer struct {
 	gcFrequency int
 	ringID      uint64
 	ringIDMu    sync.RWMutex
+	// v1Protocol records that events are delivered using the v1 event protocol. Unlike v2 there is
+	// no handshake carrying the metadata node ID, so the ring ID will never be set. Components
+	// waiting on the ring ID use this to warn about the misconfiguration instead of waiting
+	// silently forever.
+	v1Protocol atomic.Bool
 }
 
 // SubscriberCursor is a single subscribers view into the buffer.
@@ -124,6 +129,19 @@ func (b *MultiCursorRingBuffer) GetRingID() uint64 {
 	b.ringIDMu.RLock()
 	defer b.ringIDMu.RUnlock()
 	return b.ringID
+}
+
+// MarkV1ProtocolInUse records that events in this buffer come from a metadata service using the v1
+// event protocol, which has no way to communicate its node ID (see SetRingID). It allows anyone
+// waiting for the ring ID to warn that it will never become available.
+func (b *MultiCursorRingBuffer) MarkV1ProtocolInUse() {
+	b.v1Protocol.Store(true)
+}
+
+// V1ProtocolInUse returns true when events come from a metadata service using the v1 event
+// protocol, meaning the ring ID will never be set.
+func (b *MultiCursorRingBuffer) V1ProtocolInUse() bool {
+	return b.v1Protocol.Load()
 }
 
 // Add cursor accepts a subscriberID and adds a new cursor for that subscriber to the ring buffer.
