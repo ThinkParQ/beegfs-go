@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"path"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -241,15 +241,14 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	metaId := uint32(legacyID.NumId)
 	s.log.Info("watching for events from metadata node", zap.Any("metaID", metaId))
 
-	// Automatically init the lastAck for this meta the first time we see it. Use math.MaxUint64 to
-	// start, which will tell Watch to start streaming from the next event it receives from the
-	// metadata service. This prevents having to process a large number of historical events that
-	// may no longer be relevant.
+	// Automatically init the lastAck for this meta the first time we see it. types.SeekToEndSeqID tells
+	// Watch to start streaming from the next event it receives from the metadata service, skipping
+	// historical events that may no longer be relevant.
 	s.lastAcksMu.Lock()
 	if _, ok := s.lastAcks[metaId]; !ok {
 		s.lastAcks[metaId] = &lastAck{
 			mu:    &sync.Mutex{},
-			seqID: math.MaxUint64,
+			seqID: types.SeekToEndSeqID,
 		}
 	}
 	s.lastAcksMu.Unlock()
@@ -442,10 +441,9 @@ func (s *Service) setAckedSeqID(metaId uint32, seqId uint64) error {
 			break
 		}
 		// The watermark never moves backwards: duplicates redelivered after a reconnect can
-		// complete behind it. The exception is math.MaxUint64, the initial "start from the end of
-		// the buffer" sentinel for a meta with no checkpoint, which is not real progress and is
-		// replaced by the first acknowledgment.
-		if p.seqID > ack.seqID || ack.seqID == math.MaxUint64 {
+		// complete behind it. The exception is types.SeekToEndSeqID, the initial sentinel for a meta
+		// with no checkpoint, which is not real progress and is replaced by the first acknowledgment.
+		if p.seqID > ack.seqID || ack.seqID == types.SeekToEndSeqID {
 			ack.seqID = p.seqID
 		}
 		completed++

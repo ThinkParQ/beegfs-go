@@ -403,7 +403,11 @@ func (b *MultiCursorRingBuffer) ResetSendCursor(subscriberID int) error {
 // buffer, so that the next event added via Push is the first event delivered to the subscriber.
 // This is useful when a subscriber connects and only wants events from that point onward, not the
 // historical events already in the buffer. If the subscriber doesn't exist it returns an error. It
-// returns the sequence ID of the last event in the buffer.
+// returns the sequence ID of the last event in the buffer, or NoSeqId when no event precedes the
+// seek position (an empty buffer). NoSeqId must be returned rather than 0 in that case so the caller
+// can distinguish "nothing buffered yet" from "the last buffered event was SeqId 0"; otherwise a
+// subsequently-pushed SeqId 0 event (a valid first event from the metadata PMQ) would be
+// indistinguishable from an already-acknowledged one and silently suppressed.
 func (b *MultiCursorRingBuffer) SeekToEnd(subscriberID int) (uint64, error) {
 	b.cursorsMutex.RLock()
 	defer b.cursorsMutex.RUnlock()
@@ -434,16 +438,16 @@ func (b *MultiCursorRingBuffer) SeekToEnd(subscriberID int) (uint64, error) {
 	//   - The caller has explicitly requested "skip everything currently in the buffer". A
 	//     wrapped-over read returns a slightly newer seqID than the snapshot would suggest, which
 	//     causes the caller to filter slightly further into events it was already discarding. A
-	//     nil read returns lastSeqID=0, but the cursor was set to the snapshot end above, so the
-	//     subscriber only ever sees events pushed at-or-after the seek — those all have seqIDs >
-	//     0 and pass the caller's lastSeqID filter regardless. Both outcomes preserve the
+	//     nil read returns NoSeqId, but the cursor was set to the snapshot end above, so the
+	//     subscriber only ever sees events pushed at-or-after the seek; the caller treats NoSeqId
+	//     as "nothing established yet" and delivers them from the cursor. Both outcomes preserve the
 	//     seek-to-end intent.
 	//
 	// While none of our current tests expose this, if a test was added that ran Push and SeekToEnd
 	// concurrently `go test -race` will flag this read; that is expected. The lock-free
 	// single-writer Push path (see the struct comment above) is intentional, so this is not "fixed"
 	// by introducing a buffer-wide mutex.
-	var lastSeqID uint64
+	lastSeqID := NoSeqId
 	lastIdx := b.prevIndex(end)
 	if event := b.buffer[lastIdx]; event != nil {
 		lastSeqID = event.Meta.SeqId

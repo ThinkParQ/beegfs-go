@@ -505,12 +505,14 @@ func TestSeekToEnd(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("empty buffer returns zero lastSeqID with cursors at start", func(t *testing.T) {
+	t.Run("empty buffer returns NoSeqId with cursors at start", func(t *testing.T) {
 		rb := NewMultiCursorRingBuffer(10, 5)
 		rb.AddCursor(1)
 		lastSeqID, err := rb.SeekToEnd(1)
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(0), lastSeqID)
+		// Must be NoSeqId, not 0: an empty buffer has no last event, and returning 0 would be
+		// indistinguishable from "the last event was SeqId 0" and suppress a later SeqId 0 event.
+		assert.Equal(t, NoSeqId, lastSeqID)
 		assert.Equal(t, 0, rb.cursors[1].sendCursor)
 		assert.Equal(t, 0, rb.cursors[1].ackCursor)
 	})

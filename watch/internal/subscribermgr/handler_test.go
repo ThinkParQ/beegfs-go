@@ -1,7 +1,6 @@
 package subscribermgr
 
 import (
-	"math"
 	"sync"
 	"testing"
 	"time"
@@ -219,6 +218,98 @@ func TestSendLoopFilteredEventAutoAck(t *testing.T) {
 	})
 }
 
+// TestSendLoopSeqIdZeroAutoAck verifies the SeqId=0 edge case: when the very first event from the
+// metadata PMQ has SeqId=0 and is followed immediately by a filtered event, the filtered event must
+// NOT be auto-acked until the subscriber explicitly confirms SeqId=0. Before the math.MaxUint64
+// sentinel was introduced, lastTransmittedSeq and lastAckedSeq were both 0 after transmitting
+// SeqId=0, making the safety check (lastAckedSeq >= lastTransmittedSeq) evaluate as 0 >= 0 and
+// incorrectly allow an auto-ack that would advance the ring buffer's cumulative ack cursor past
+// SeqId=0, breaking at-least-once delivery.
+func TestSendLoopSeqIdZeroAutoAck(t *testing.T) {
+	fake := &fakeSubscriberConn{}
+	sub := &subscriber.Subscriber{
+		Config:    subscriber.Config{ID: 1, Name: "test"},
+		Interface: fake,
+	}
+	buffer := types.NewMultiCursorRingBuffer(64, 8)
+	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+		MaxReconnectBackOff:            1,
+		MaxWaitForResponseAfterConnect: 1,
+		PollFrequency:                  0,
+	})
+	handler.eventFilter.Store(newCompiledFilter(&bw.EventFilter{
+		V2Types: []bw.V2Event_Type{bw.V2Event_LAST_WRITER_CLOSED},
+	}))
+
+	_, err := buffer.Push(&bw.Event{
+		SeqId:     0,
+		EventData: &bw.Event_V2{V2: &bw.V2Event{Type: bw.V2Event_LAST_WRITER_CLOSED}},
+	})
+	assert.NoError(t, err)
+	_, err = buffer.Push(&bw.Event{
+		SeqId:     1,
+		EventData: &bw.Event_V2{V2: &bw.V2Event{Type: bw.V2Event_CREATE}},
+	})
+	assert.NoError(t, err)
+
+	done, cancel := handler.sendLoop()
+	assert.Eventually(t, func() bool { return fake.sendCount() == 1 }, 5*time.Second, time.Millisecond)
+
+	// SeqId=0 was transmitted but the subscriber has not yet acknowledged it. The filtered event
+	// SeqId=1 must not be auto-acked: its cumulative ack would advance the ack cursor past SeqId=0,
+	// which would prevent redelivery of SeqId=0 if the connection dropped.
+	assert.False(t, buffer.AllEventsAcknowledged())
+
+	// Once the subscriber acknowledges SeqId=0, the deferred auto-ack of the filtered event
+	// SeqId=1 must be applied so the buffer space is freed.
+	handler.lastSeqID.Store(0)
+	assert.Eventually(t, buffer.AllEventsAcknowledged, 5*time.Second, time.Millisecond)
+	cancel()
+	<-done
+}
+
+// TestSeekToEndEmptyBufferDeliversSeqIdZero verifies the SeqId=0 edge case on the seek-to-end path.
+// A fresh subscriber's initial response is SeekToEndSeqID, which can arrive before the metadata
+// manager has pushed any event (a normal startup ordering). Seeking to the end of the empty buffer
+// must leave lastSeqID at NoSeqId, not 0: if it stored 0, a subsequently-pushed SeqId=0 event (a
+// valid first event from the metadata PMQ) would fail the sendLoop guard (0 > 0 is false) and be
+// silently dropped and auto-acked, breaking at-least-once delivery for exactly the SeqId=0 boundary.
+func TestSeekToEndEmptyBufferDeliversSeqIdZero(t *testing.T) {
+	fake := &fakeSubscriberConn{}
+	sub := &subscriber.Subscriber{
+		Config:    subscriber.Config{ID: 1, Name: "test"},
+		Interface: fake,
+	}
+	// The buffer is intentionally empty: the subscriber seeks before any event has been buffered.
+	buffer := types.NewMultiCursorRingBuffer(64, 8)
+	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+		MaxReconnectBackOff:            1,
+		MaxWaitForResponseAfterConnect: 1,
+		PollFrequency:                  0,
+	})
+
+	// Seek to the end of the empty buffer, as receiveLoop does for a fresh subscriber's initial
+	// SeekToEndSeqID response. It must leave lastSeqID at NoSeqId ("nothing established"), not 0.
+	assert.NoError(t, handler.seekToEndOfBuffer())
+	assert.Equal(t, types.NoSeqId, handler.lastSeqID.Load())
+
+	// The first event to arrive after the seek has SeqId=0. It is pushed before sendLoop starts so
+	// the single-writer Push does not race the reader (matching the other sendLoop tests).
+	_, err := buffer.Push(&bw.Event{
+		SeqId:     0,
+		EventData: &bw.Event_V2{V2: &bw.V2Event{Type: bw.V2Event_CREATE}},
+	})
+	assert.NoError(t, err)
+
+	// It must be delivered, not suppressed as an already-acknowledged duplicate.
+	done, cancel := handler.sendLoop()
+	assert.Eventually(t, func() bool { return fake.sendCount() == 1 }, 5*time.Second, time.Millisecond)
+	assert.Equal(t, []uint64{0}, fake.sentSeqs())
+
+	cancel()
+	<-done
+}
+
 // TestConnectLoopWarnsWhenV1ProtocolInUse verifies a subscriber configured to wait for metadata
 // node ID detection (skip-node-id-detection=false, the default) logs a warning when the metadata
 // service uses the v1 event protocol: a v1 metadata service can never identify itself, so without
@@ -263,10 +354,10 @@ func TestConnectLoopWarnsWhenV1ProtocolInUse(t *testing.T) {
 
 // TestReceiveLoopLateInitialResponse verifies a subscriber's initial response arriving after a
 // finite wait-for-response-after-connect timeout is still honored by the ongoing ack loop. The
-// math.MaxUint64 "start from the end of the buffer" sentinel must trigger a seek — treating it as
-// a regular ack would store math.MaxUint64 in lastSeqID and permanently suppress every future
-// send, silently stalling the stream — and an event type filter carried by the late response must
-// be applied rather than silently dropped.
+// types.SeekToEndSeqID sentinel must trigger a seek — treating it as a regular ack would store
+// types.SeekToEndSeqID in lastSeqID and permanently suppress every future send, silently stalling the
+// stream — and an event type filter carried by the late response must be applied rather than
+// silently dropped.
 func TestReceiveLoopLateInitialResponse(t *testing.T) {
 	fake := &fakeSubscriberConn{recv: make(chan *bw.Response)}
 	sub := &subscriber.Subscriber{
@@ -308,9 +399,9 @@ func TestReceiveLoopLateInitialResponse(t *testing.T) {
 
 	// The subscriber's initial response arrives late: skip to the end of the buffer, with an event
 	// type filter. The ongoing ack loop must seek (adopting the buffer's last sequence ID, not
-	// poisoning lastSeqID with math.MaxUint64) and install the filter.
+	// poisoning lastSeqID with types.SeekToEndSeqID) and install the filter.
 	fake.recv <- &bw.Response{
-		CompletedSeq: math.MaxUint64,
+		CompletedSeq: types.SeekToEndSeqID,
 		Filter:       &bw.EventFilter{V2Types: []bw.V2Event_Type{bw.V2Event_LAST_WRITER_CLOSED}},
 	}
 	assert.Eventually(t, func() bool { return handler.lastSeqID.Load() == 3 }, 5*time.Second, time.Millisecond)

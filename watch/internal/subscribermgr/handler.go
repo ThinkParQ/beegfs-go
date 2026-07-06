@@ -2,7 +2,6 @@ package subscribermgr
 
 import (
 	"context"
-	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -73,7 +72,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 	// Add cursor is idempotent so always ensure there is a cursor for this subscriber.
 	metaEventBuffer.AddCursor(subscriber.ID)
 
-	return &Handler{
+	h := &Handler{
 		ctx:             ctx,
 		cancel:          cancel,
 		log:             log,
@@ -81,6 +80,11 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 		config:          config,
 		Subscriber:      subscriber,
 	}
+	// types.NoSeqId means "no subscriber ack received yet." Zero is not usable as a sentinel
+	// because SeqId=0 is a valid first event from the metadata PMQ, and lastSeqID=0 would be
+	// indistinguishable from "subscriber acknowledged SeqId=0."
+	h.lastSeqID.Store(types.NoSeqId)
+	return h
 }
 
 // Handles the connection with a particular Subscriber.
@@ -230,7 +234,7 @@ func (h *Handler) connectLoop() bool {
 	}
 }
 
-// seekToEndOfBuffer handles a subscriber request (CompletedSeq == math.MaxUint64) to skip all
+// seekToEndOfBuffer handles a subscriber request (CompletedSeq == types.SeekToEndSeqID) to skip all
 // historical events and resume from the end of the event buffer, adopting the sequence ID of the
 // last buffered event as the new lastSeqID. On an error the cursor state is unknown, so the caller
 // should tear down the connection rather than continue streaming.
@@ -301,14 +305,18 @@ waitForInitialAck:
 		case response, ok := <-recvStream:
 			if ok {
 				// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
-				if response.CompletedSeq == math.MaxUint64 {
+				if response.CompletedSeq == types.SeekToEndSeqID {
 					if err := h.seekToEndOfBuffer(); err != nil {
 						close(done)
 						return done, cancel
 					}
 				} else {
-					// This branch also handles if the CompletedSeq is 0, which indicates to send
-					// everything in the buffer to the subscriber.
+					// types.SendFromStartSeqID (0) means "send everything from the start of the buffer";
+					// the subscriber has not confirmed any particular event. Do not store it in
+					// lastSeqID — it would be indistinguishable from "subscriber acknowledged
+					// SeqId=0" and would incorrectly permit auto-acking filtered events while
+					// SeqId=0 is still in flight. Leave lastSeqID at types.NoSeqId ("nothing confirmed")
+					// so sendLoop treats the cursor position as authoritative.
 					h.log.Info("subscriber acknowledged last event received before disconnect", zap.Any("sequenceID", response.CompletedSeq))
 					err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
 					if err != nil {
@@ -320,7 +328,9 @@ waitForInitialAck:
 						// circumstances.
 						h.log.Debug("error updating subscriber ack cursor with last event before disconnect", zap.Error(err))
 					}
-					h.lastSeqID.Store(response.CompletedSeq)
+					if response.CompletedSeq != types.SendFromStartSeqID {
+						h.lastSeqID.Store(response.CompletedSeq)
+					}
 				}
 				if f := response.GetFilter(); f != nil {
 					h.applyEventFilter(f)
@@ -360,12 +370,12 @@ waitForInitialAck:
 					return
 				}
 				//h.log.Debug("received response from subscriber", zap.Any("response", response))
-				if response.CompletedSeq == math.MaxUint64 {
+				if response.CompletedSeq == types.SeekToEndSeqID {
 					// A request to skip to the end of the buffer is normally the first response on
 					// a connection and handled in waitForInitialAck above, but when a finite
 					// wait-for-response-after-connect timeout fires before a slow subscriber sends
 					// its initial response, that response is consumed here instead. It must not be
-					// treated as a regular ack: AckEvent would fail and storing math.MaxUint64 in
+					// treated as a regular ack: AckEvent would fail and storing types.SeekToEndSeqID in
 					// lastSeqID would suppress every future send, silently stalling the stream.
 					if err := h.seekToEndOfBuffer(); err != nil {
 						// The cursor state is unknown, so tear the connection down and let the
@@ -423,10 +433,14 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 		defer close(done)
 		defer cancel()
 		// lastTransmittedSeq is the sequence ID of the last event actually sent to the subscriber
-		// on this connection. It intentionally differs from the buffer's send cursor, which also
+		// on this connection. types.NoSeqId means nothing has been transmitted yet — zero is not usable
+		// as a sentinel because SeqId=0 is a valid first event, and lastTransmittedSeq=0 after
+		// transmitting it would make the auto-ack safety check (lastAckedSeq >=
+		// lastTransmittedSeq) evaluate as 0 >= 0, incorrectly treating the in-flight event as
+		// acknowledged. It intentionally differs from the buffer's send cursor, which also
 		// advances past filtered events. Both variables below are only accessed from this
 		// goroutine; state resets on reconnect because a new sendLoop is started.
-		var lastTransmittedSeq uint64
+		lastTransmittedSeq := types.NoSeqId
 		// pendingFilteredAck is the most recent filtered event that could not be auto-acked
 		// because a transmitted event was still awaiting acknowledgement (zero means none).
 		var pendingFilteredAck uint64
@@ -456,8 +470,9 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 						// Continue sending events until there are no more events to send:
 						if event != nil {
 							lastAckedSeq := h.lastSeqID.Load()
-							// Don't send duplicate events.
-							if event.Meta.SeqId > lastAckedSeq || (event.Meta.SeqId == 0 && lastAckedSeq == 0) {
+							// Don't send duplicate events. types.NoSeqId means no subscriber ack has been
+							// received yet on this connection; send everything from the cursor.
+							if lastAckedSeq == types.NoSeqId || event.Meta.SeqId > lastAckedSeq {
 								if !h.eventFilter.Load().passes(event.Meta) {
 									// Auto-ack filtered events so the buffer's ack cursor advances
 									// and buffer space is freed even when nothing is being sent.
@@ -470,7 +485,7 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 									// order, so when nothing transmitted is outstanding everything
 									// between the last transmitted event and this one was also
 									// filtered and the cumulative ack only skips filtered events.
-									if lastAckedSeq >= lastTransmittedSeq {
+									if lastTransmittedSeq == types.NoSeqId || (lastAckedSeq != types.NoSeqId && lastAckedSeq >= lastTransmittedSeq) {
 										if err := h.metaEventBuffer.AckEvent(h.ID, event.Meta.SeqId); err != nil {
 											h.log.Debug("unable to auto-ack filtered event", zap.Error(err), zap.Uint64("seqId", event.Meta.SeqId))
 											pendingFilteredAck = event.Meta.SeqId
@@ -508,7 +523,8 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 							// everything transmitted the deferred ack becomes safe, and without
 							// it those filtered events would pin the buffer (and delay shutdown)
 							// until the next unfiltered event was sent and acknowledged.
-							if pendingFilteredAck != 0 && h.lastSeqID.Load() >= lastTransmittedSeq {
+							lastAcked := h.lastSeqID.Load()
+							if pendingFilteredAck != 0 && lastAcked != types.NoSeqId && lastAcked >= lastTransmittedSeq {
 								if err := h.metaEventBuffer.AckEvent(h.ID, pendingFilteredAck); err == nil {
 									pendingFilteredAck = 0
 								}

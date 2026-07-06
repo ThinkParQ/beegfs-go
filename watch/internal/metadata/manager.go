@@ -167,7 +167,7 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		log:          log,
 		socketPath:   config.EventLogTarget,
 		EventBuffer:  eventBuffer,
-		lastSeqID:    0,
+		lastSeqID:    types.NoSeqId,
 		eventVersion: eventVersion,
 	}, cleanup, nil
 }
@@ -342,7 +342,7 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	// frequently we could optimize this process, for example adding an exponential backoff here
 	// as well. But for now it seems redundant to have both Meta and Watch worry about this.
 	var startSeqNum uint64
-	if m.lastSeqID == 0 {
+	if m.lastSeqID == types.NoSeqId {
 		// This would be the state after we initially start up or if we've never received any
 		// events. Just take everything in the Meta buffer and move it into the Watch buffer.
 		startSeqNum = msgRange.OldestMSN
@@ -371,11 +371,10 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 			// be reestablished and simplify connection handling.
 			return
 		}
-		// Ensure we never push duplicate events into the buffer. Generally this is done by
-		// ensuring we never add an event with a SeqID greater than the lastSeqID. Since the
-		// very first event added to the PMQ will be SeqId 0, if Watch has just started and the
-		// buffer is empty (because lastSeqID==0) then we still add this event to the buffer.
-		if sendMsg.Event.SeqId > m.lastSeqID || (sendMsg.Event.SeqId == 0 && m.lastSeqID == 0) {
+		// Ensure we never push duplicate events into the buffer. types.NoSeqId means no events have been
+		// received yet — zero is not usable as a sentinel because the first event from the metadata
+		// PMQ can legitimately have SeqId 0.
+		if m.lastSeqID == types.NoSeqId || sendMsg.Event.SeqId > m.lastSeqID {
 			// Set event fields only provided in the handshake.
 			sendMsg.Event.MetaId = handshakeResp.MetaID
 			if sendMsg.Event.EventFlags&1 != 0 {
@@ -424,6 +423,14 @@ func (m *Manager) handleV1Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	// So we allocate a buffer once and reuse it.
 	buffer := make([]byte, 65536)
 	defer cancelConn()
+
+	// v1 has no sequence IDs, so Watch generates them from m.lastSeqID. It persists on the Manager
+	// across reconnects (Manage runs one handleV1Connection at a time) so IDs stay monotonic for the
+	// life of the process; they only restart if Watch itself restarts. m.lastSeqID starts at the
+	// types.NoSeqId sentinel, so reset it to 0 on first use to keep the first generated ID at 1.
+	if m.lastSeqID == types.NoSeqId {
+		m.lastSeqID = 0
+	}
 
 	for {
 		connMutex.Lock()
