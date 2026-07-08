@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -38,6 +40,8 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 		Path:                cfg.Path,
 		RemoteStorageTarget: 0,
 		StubLocal:           cfg.StubLocal,
+		RestorePolicy:       cfg.RestorePolicy,
+		CooldownSecs:        cfg.CooldownSecs,
 		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Builder{
@@ -88,7 +92,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	walkChanSize := cap(jobSubmissionChan)
 	var walkChan <-chan *filesystem.StreamPathResult
 	walkPaths := filesystem.StreamPathsLexicographically
-	if cfg.GetUpdate() {
+	if cfg.GetUpdate() || cfg.HasCooldownSecs() {
 		walkPaths = filesystem.StreamPathsLexicographicallyWithDirs
 	}
 	if cfg.Download {
@@ -242,9 +246,21 @@ func (c *JobBuilderClient) executeJobBuilderRequest(
 				}
 			}
 
-			if cfg.GetUpdate() {
+			if cfg.GetUpdate() || cfg.HasCooldownSecs() {
 				if stat, statErr := c.mountPoint.Lstat(inMountPath); statErr == nil && stat.IsDir() {
-					dirErr := updateDirRstConfig(ctx, cfg.RemoteStorageTarget, inMountPath)
+					var rstIds []uint32
+					if cfg.GetUpdate() && IsValidRstId(cfg.RemoteStorageTarget) {
+						rstIds = []uint32{cfg.RemoteStorageTarget}
+					}
+					var cooldownSecs *uint16
+					if cfg.HasCooldownSecs() {
+						v := uint16(math.MaxUint16)
+						if cfg.GetCooldownSecs() <= math.MaxUint16 {
+							v = uint16(cfg.GetCooldownSecs())
+						}
+						cooldownSecs = &v
+					}
+					dirErr := entry.SetDirRstPattern(ctx, inMountPath, rstIds, cooldownSecs)
 					builderStateMu.Lock()
 					builder.Submitted++
 					if dirErr != nil {

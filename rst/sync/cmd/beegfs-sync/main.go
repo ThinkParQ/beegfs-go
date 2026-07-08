@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -40,7 +41,8 @@ var (
 )
 
 var capabilities = map[string]*flex.Feature{
-	registry.FeatureFilterFiles: nil,
+	registry.FeatureFilterFiles:              nil,
+	registry.FeatureRestorePolicyAndCooldown: nil,
 }
 
 func main() {
@@ -58,7 +60,7 @@ func main() {
 	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
 	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
 	pflag.Duration("telemetry.otlp.interval", 30*time.Second, "OTLP export interval.")
-	pflag.String("telemetry.otlp.url-path", "/v1/metrics", "OTLP HTTP URL path. HTTP only; Loki-compatible backends use '/otlp/v1/metrics'.")
+	pflag.String("telemetry.otlp.url-path", "", "OTLP HTTP URL path. HTTP only; Grafana Mimir uses '/otlp/v1/metrics'.")
 	pflag.String("telemetry.otlp.compression", "gzip", "OTLP export compression ('gzip' or 'none').")
 	pflag.Duration("telemetry.otlp.timeout", 10*time.Second, "OTLP export timeout.")
 	pflag.String("telemetry.otlp.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP traffic. Leave empty to only use the system's default certificate pool.")
@@ -67,7 +69,7 @@ func main() {
 	pflag.Bool("telemetry.logs.enabled", false, "Enable exporting logs via OTLP.")
 	pflag.String("telemetry.logs.protocol", "grpc", "OTLP logs transport ('grpc' or 'http').")
 	pflag.String("telemetry.logs.endpoint", "localhost:4317", "OTLP logs collector endpoint.")
-	pflag.String("telemetry.logs.url-path", "/v1/logs", "OTLP logs HTTP URL path. HTTP only; Loki direct ingestion uses '/otlp/v1/logs'.")
+	pflag.String("telemetry.logs.url-path", "", "OTLP logs HTTP URL path. HTTP only; Grafana Loki uses '/otlp/v1/logs'.")
 	pflag.String("telemetry.logs.compression", "gzip", "OTLP logs export compression ('gzip' or 'none').")
 	pflag.Duration("telemetry.logs.timeout", 10*time.Second, "OTLP logs export timeout.")
 	pflag.String("telemetry.logs.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP log traffic. Leave empty to only use the system's default certificate pool.")
@@ -114,6 +116,12 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	if euid := syscall.Geteuid(); euid < 0 || euid > math.MaxUint32 {
+		log.Fatalf("effective user ID %d is out of bounds (not a uint32)", euid)
+	} else if euid != 0 {
+		log.Fatalf("%s must be run with root privileges", binaryName)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.

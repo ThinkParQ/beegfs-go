@@ -3,9 +3,40 @@ package types
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	pb "github.com/thinkparq/protobuf/go/beewatch"
+	"google.golang.org/protobuf/proto"
 )
+
+type EventTypeVersion uint8
+
+const (
+	EventTypeUnknown EventTypeVersion = 0
+	EventTypeV1      EventTypeVersion = 1
+	EventTypeV2      EventTypeVersion = 2
+)
+
+type EventMeta struct {
+	SeqId     uint64
+	EventType int32 // event type cast as an int32
+	Version   EventTypeVersion
+}
+
+type EventMessage []byte
+
+// RingEntry is the long-lived form of an event in the ring buffer. Storing a RingEntry instead of a
+// *pb.Event provides two benefits:
+//  1. Pre-marshaling: Event is marshalled once at Push time and reused for every subscriber, instead
+//     of being marshalled each time sent it's to a subscriber.
+//  2. GC pressure: a *pb.Event requires 4-8 heap allocations per slot (nested structs, strings,
+//     optional fields). RingEntry requires 2. The *pb.Event can be released immediately after Push.
+//
+// The RingEntry struct itself is 40 bytes vs 88 bytes for pb.Event.
+type RingEntry struct {
+	Meta    EventMeta
+	Message EventMessage
+}
 
 // MultiCursorRingBuffer is an optimized single writer multi-reader data structure.
 // It achieves this optimization by only requiring locks during garbage collection.
@@ -17,11 +48,16 @@ import (
 type MultiCursorRingBuffer struct {
 	// The buffer size is fixed when the buffer is initialized and should never change.
 	// Multiple functions rely on len(buf) to calculate when indices should "rollover" (len() is fast = O(1)).
-	buffer []*pb.Event
+	buffer []*RingEntry
 	// Start represents the index of the oldest event in the buffer.
 	start int
 	// End represents the index where the next (newest) event will be written.
 	end int
+	// endSnapshot is a thread safe snapshot of end. This is required so we can seek a subscriber
+	// cursor to the end of the buffer. We don't use an atomic.Int64 for end as it adds slight
+	// overhead. This way means we only need to make one Load() call in the hot path. Some research
+	// suggests on x86 the overhead is minimal, but these are more costly on arm.
+	endSnapshot atomic.Int64
 	// cursors is a map of subscriberIDs to SubscriberCursors.
 	cursors map[int]*SubscriberCursor
 	// cursorsMutex is used when adding or removing cursors from the map to coordinate with functions (like GC or AllEventsAcknowledged)
@@ -39,6 +75,13 @@ type MultiCursorRingBuffer struct {
 	// This only provides a benefit if all subscriber cursors are able to stay ahead of the start of the buffer.
 	// Otherwise we have to fall back on garbage collecting the oldest event with every Push.
 	gcFrequency int
+	ringID      uint64
+	ringIDMu    sync.RWMutex
+	// v1Protocol records that events are delivered using the v1 event protocol. Unlike v2 there is
+	// no handshake carrying the metadata node ID, so the ring ID will never be set. Components
+	// waiting on the ring ID use this to warn about the misconfiguration instead of waiting
+	// silently forever.
+	v1Protocol atomic.Bool
 }
 
 // SubscriberCursor is a single subscribers view into the buffer.
@@ -69,11 +112,36 @@ func NewMultiCursorRingBuffer(size int, gcFrequency int) *MultiCursorRingBuffer 
 	return &MultiCursorRingBuffer{
 		start:       0,
 		end:         0,
-		buffer:      make([]*pb.Event, size+1),
+		buffer:      make([]*RingEntry, size+1),
 		cursors:     make(map[int]*SubscriberCursor),
 		gcFrequency: gcFrequency,
 		gcCounter:   gcFrequency,
 	}
+}
+
+func (b *MultiCursorRingBuffer) SetRingID(id uint64) {
+	b.ringIDMu.Lock()
+	defer b.ringIDMu.Unlock()
+	b.ringID = id
+}
+
+func (b *MultiCursorRingBuffer) GetRingID() uint64 {
+	b.ringIDMu.RLock()
+	defer b.ringIDMu.RUnlock()
+	return b.ringID
+}
+
+// MarkV1ProtocolInUse records that events in this buffer come from a metadata service using the v1
+// event protocol, which has no way to communicate its node ID (see SetRingID). It allows anyone
+// waiting for the ring ID to warn that it will never become available.
+func (b *MultiCursorRingBuffer) MarkV1ProtocolInUse() {
+	b.v1Protocol.Store(true)
+}
+
+// V1ProtocolInUse returns true when events come from a metadata service using the v1 event
+// protocol, meaning the ring ID will never be set.
+func (b *MultiCursorRingBuffer) V1ProtocolInUse() bool {
+	return b.v1Protocol.Load()
 }
 
 // Add cursor accepts a subscriberID and adds a new cursor for that subscriber to the ring buffer.
@@ -131,10 +199,29 @@ func (b *MultiCursorRingBuffer) AllEventsAcknowledged() bool {
 // oldest event to the next oldest event.
 //
 // Returns nil unless a push drops an unacknowledged event then that seqID is returned.
-func (b *MultiCursorRingBuffer) Push(event *pb.Event) *uint64 {
-	var droppedSeqID *uint64
-	b.buffer[b.end] = event
+// Returns an error if the event cannot be marshaled; in that case the buffer is not modified.
+func (b *MultiCursorRingBuffer) Push(event *pb.Event) (*uint64, error) {
+	meta := EventMeta{SeqId: event.SeqId}
+	switch e := event.EventData.(type) {
+	case *pb.Event_V1:
+		meta.Version = EventTypeV1
+		meta.EventType = int32(e.V1.GetType())
+	case *pb.Event_V2:
+		meta.Version = EventTypeV2
+		meta.EventType = int32(e.V2.GetType())
+	}
+
+	message, err := proto.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	b.buffer[b.end] = &RingEntry{
+		Meta:    meta,
+		Message: message,
+	}
+
 	b.end = (b.end + 1) % len(b.buffer)
+	b.endSnapshot.Store(int64(b.end))
 
 	// Usually we should never run out of space in the buffer and just run garbage collection periodically leaving plenty of space between end and start.
 	// However if we run out of space we need to start overwriting old events.
@@ -143,12 +230,13 @@ func (b *MultiCursorRingBuffer) Push(event *pb.Event) *uint64 {
 	// To achieve this if on the next push the end cursor would wrap around to the start of the buffer we trigger garbage collection early freeing up at least one buffer.
 	// If we don't do this, on the next push the end would briefly point at the OLDEST event.
 	// This creates a corner case where a reader cursor could wrap around to point at the oldest event, and starts sending duplicate events.
+	var droppedSeqID *uint64
 	if b.gcCounter == 0 || b.start == (b.end+1)%len(b.buffer) {
 		droppedSeqID = b.collectGarbage()
 		b.gcCounter = b.gcFrequency
 	}
 	b.gcCounter--
-	return droppedSeqID
+	return droppedSeqID, nil
 }
 
 // collectGarbage frees up space in the ring buffer dropping the oldest events first. It first
@@ -177,6 +265,7 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 
 	// Otherwise we always clear at least the oldest event in the buffer:
 	currentStart := b.start
+	droppedUnackdSeqID := b.buffer[currentStart].Meta.SeqId
 	b.buffer[currentStart] = nil
 	b.start = (currentStart + 1) % len(b.buffer)
 
@@ -196,8 +285,7 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 			}
 		}
 		// This GC dropped an unacknowledged event.
-		seqID := b.buffer[b.start].SeqId
-		return &seqID
+		return &droppedUnackdSeqID
 	}
 
 	// Otherwise lets try and free up as much space as we can:
@@ -267,7 +355,7 @@ func (b *MultiCursorRingBuffer) getOldestAckCursor() int {
 // It checks if the buffer it is pointing at is nil, and if so treats that as the end of the buffer and doesn't advance the cursor.
 // This does mean there are corner cases where it could return nil when an event was just added to the buffer.
 // Thus the caller should periodically call GetEvent() or rely on another notification mechanism to determine how many events to get.
-func (b *MultiCursorRingBuffer) GetEvent(subscriberID int) (*pb.Event, error) {
+func (b *MultiCursorRingBuffer) GetEvent(subscriberID int) (*RingEntry, error) {
 	// Take a read lock so the list of cursors can't be changed out from under us:
 	b.cursorsMutex.RLock()
 	defer b.cursorsMutex.RUnlock()
@@ -280,14 +368,14 @@ func (b *MultiCursorRingBuffer) GetEvent(subscriberID int) (*pb.Event, error) {
 	defer c.cursorMutex.Unlock()
 
 	// We could just check if the end buffer is valid before reading or moving the cursor.
-	event := b.buffer[c.sendCursor]
+	entry := b.buffer[c.sendCursor]
 
 	// Advance the send cursor unless the buffer is empty:
-	if event != nil {
+	if entry != nil {
 		c.sendCursor = (c.sendCursor + 1) % len(b.buffer)
 	}
 
-	return event, nil
+	return entry, nil
 }
 
 // ResetCursor() moves the sendCursor for a subscriberID back to the ackCursor.
@@ -309,6 +397,62 @@ func (b *MultiCursorRingBuffer) ResetSendCursor(subscriberID int) error {
 	c.sendCursor = c.ackCursor
 
 	return nil
+}
+
+// SeekToEnd moves both the sendCursor and ackCursor for a subscriberID to the current end of the
+// buffer, so that the next event added via Push is the first event delivered to the subscriber.
+// This is useful when a subscriber connects and only wants events from that point onward, not the
+// historical events already in the buffer. If the subscriber doesn't exist it returns an error. It
+// returns the sequence ID of the last event in the buffer, or NoSeqId when no event precedes the
+// seek position (an empty buffer). NoSeqId must be returned rather than 0 in that case so the caller
+// can distinguish "nothing buffered yet" from "the last buffered event was SeqId 0"; otherwise a
+// subsequently-pushed SeqId 0 event (a valid first event from the metadata PMQ) would be
+// indistinguishable from an already-acknowledged one and silently suppressed.
+func (b *MultiCursorRingBuffer) SeekToEnd(subscriberID int) (uint64, error) {
+	b.cursorsMutex.RLock()
+	defer b.cursorsMutex.RUnlock()
+
+	c, ok := b.cursors[subscriberID]
+	if !ok {
+		return 0, fmt.Errorf("the specified subscriber ID doesn't exist: %d", subscriberID)
+	}
+	c.cursorMutex.Lock()
+	defer c.cursorMutex.Unlock()
+
+	end := int(b.endSnapshot.Load())
+	c.sendCursor = end
+	c.ackCursor = end
+	c.ackError = false
+
+	// Return the seqID of the last event currently in the buffer so the caller can update its
+	// lastSeqID and avoid re-sending events that were already buffered before the seek. end points
+	// at the nil sentinel slot, so we look at end-1 with wrapping.
+	//
+	// b.buffer[lastIdx] is read without any buffer-wide lock and races with concurrent Push if the
+	// buffer has wrapped past lastIdx since endSnapshot was loaded. The race is benign:
+	//   - The Go memory model guarantees a racy read of a single word-sized value (here a
+	//     *pb.Event) returns either some value written by a preceding write or the type's zero
+	//     value (nil), never a torn pointer. Events are only mutated before being placed in the
+	//     buffer (see metadata.Manager.handleV2Connection), so reading event.Meta.SeqID on a non-nil
+	//     pointer is safe (https://go.dev/ref/mem#overview).
+	//   - The caller has explicitly requested "skip everything currently in the buffer". A
+	//     wrapped-over read returns a slightly newer seqID than the snapshot would suggest, which
+	//     causes the caller to filter slightly further into events it was already discarding. A
+	//     nil read returns NoSeqId, but the cursor was set to the snapshot end above, so the
+	//     subscriber only ever sees events pushed at-or-after the seek; the caller treats NoSeqId
+	//     as "nothing established yet" and delivers them from the cursor. Both outcomes preserve the
+	//     seek-to-end intent.
+	//
+	// While none of our current tests expose this, if a test was added that ran Push and SeekToEnd
+	// concurrently `go test -race` will flag this read; that is expected. The lock-free
+	// single-writer Push path (see the struct comment above) is intentional, so this is not "fixed"
+	// by introducing a buffer-wide mutex.
+	lastSeqID := NoSeqId
+	lastIdx := b.prevIndex(end)
+	if event := b.buffer[lastIdx]; event != nil {
+		lastSeqID = event.Meta.SeqId
+	}
+	return lastSeqID, nil
 }
 
 // AckEvent moves the ackCursor for a subscriberID forward to the next unacknowledged seqID. It will
@@ -345,7 +489,7 @@ func (b *MultiCursorRingBuffer) AckEvent(subscriberID int, seqIDToAck uint64) er
 	// This should only happen if the subscriber calls AckEvent before any events were actually sent (and the buffer is empty).
 	if b.buffer[c.ackCursor] == nil {
 		c.ackError = true
-		return fmt.Errorf("subscriber tried to acknowledge an event but the next event to acknowledge is nil: is the buffer empty? (subscriber: %d, seqID %d)", subscriberID, seqIDToAck)
+		return fmt.Errorf("subscriber tried to acknowledge an event but the next event to acknowledge is nil: is the buffer empty? are there no new events for this subscriber? (subscriber: %d, seqID %d)", subscriberID, seqIDToAck)
 	}
 
 	// The sendCursor points at the next event to send.
@@ -353,11 +497,7 @@ func (b *MultiCursorRingBuffer) AckEvent(subscriberID int, seqIDToAck uint64) er
 	// To make things easier we'll always search for the event to ack between the ackCursor and the lastSentSeqID.
 	var lastSentSeqID uint64
 	// lastSentIndex is the buffer location of the last event that was actually sent to the subscriber.
-	lastSentIndex := c.sendCursor - 1
-	if lastSentIndex == -1 {
-		// If the send cursor was at the start of the buffer, wrap it back around to the end.
-		lastSentIndex = len(b.buffer) - 1
-	}
+	lastSentIndex := b.prevIndex(c.sendCursor)
 
 	if b.buffer[lastSentIndex] == nil {
 		// This should typically only happen immediately after startup if the subscriber tries to
@@ -368,21 +508,21 @@ func (b *MultiCursorRingBuffer) AckEvent(subscriberID int, seqIDToAck uint64) er
 
 	// TODO: Do we actually need more checking to account for "holes" in the buffer?
 	// For example if there are events that are nil surrounded by valid events we would panic.
-	lastSentSeqID = b.buffer[lastSentIndex].SeqId
+	lastSentSeqID = b.buffer[lastSentIndex].Meta.SeqId
 
 	if seqIDToAck > lastSentSeqID {
 		c.ackError = true
 		return fmt.Errorf("subscriber tried to acknowledge an event that wasn't sent yet (subscriber: %d, seqID %d)", subscriberID, seqIDToAck)
-	} else if b.buffer[c.ackCursor].SeqId > seqIDToAck {
+	} else if b.buffer[c.ackCursor].Meta.SeqId > seqIDToAck {
 		// Subscriber either sent a double ack or we dropped the event the subscriber tried to acknowledge.
 		// Either way don't move the ack cursor and don't return an error as there is nothing more we can do.
 		return nil
-	} else if b.buffer[c.ackCursor].SeqId == seqIDToAck {
+	} else if b.buffer[c.ackCursor].Meta.SeqId == seqIDToAck {
 		// Subscriber acknowledged the next expected event.
 		// Just increment the ack cursor by one.
 		c.ackCursor = (c.ackCursor + 1) % len(b.buffer)
 		return nil
-	} else if seqIDToAck > b.buffer[c.ackCursor].SeqId && seqIDToAck <= lastSentSeqID {
+	} else if seqIDToAck > b.buffer[c.ackCursor].Meta.SeqId && seqIDToAck <= lastSentSeqID {
 
 		// TODO: Evaluate if its faster to just fallback immediately on binary search.
 		// Having this may be confusing and not actually help speed things up.
@@ -393,11 +533,11 @@ func (b *MultiCursorRingBuffer) AckEvent(subscriberID int, seqIDToAck uint64) er
 		// it is likely we can calculate the location of this seqID in the buffer.
 		// Try adding the difference between the acknowledged seqID and the last acknowledged sequence ID (ackCursorSeqID).
 		// We then add this to the current location of the ackCursor wrapping it around the end of the buffer if needed.
-		expectedLocation := (uint64(c.ackCursor) + (seqIDToAck - b.buffer[c.ackCursor].SeqId)) % uint64(len(b.buffer))
+		expectedLocation := (uint64(c.ackCursor) + (seqIDToAck - b.buffer[c.ackCursor].Meta.SeqId)) % uint64(len(b.buffer))
 
 		// If we dropped an event, it is possible the calculated expectedLocation is the end of the buffer:
 		if b.buffer[expectedLocation] != nil {
-			expectedLocSeqID := b.buffer[expectedLocation].SeqId
+			expectedLocSeqID := b.buffer[expectedLocation].Meta.SeqId
 			if expectedLocSeqID == seqIDToAck {
 				c.ackCursor = (int(expectedLocation) + 1) % len(b.buffer)
 				return nil
@@ -441,6 +581,17 @@ func (b *MultiCursorRingBuffer) AckEvent(subscriberID int, seqIDToAck uint64) er
 	return fmt.Errorf("unable to acknowledge event (subscriber: %d, seqID %d)", subscriberID, seqIDToAck)
 }
 
+// prevIndex returns the index immediately before i in the ring buffer, wrapping around to the last
+// slot when i is at the start. Using a branch instead of modular arithmetic ((i-1+len)%len) keeps
+// the operation to a single subtraction and avoids the (purely theoretical) integer overflow that
+// adding len(b.buffer) would risk for an enormous buffer.
+func (b *MultiCursorRingBuffer) prevIndex(i int) int {
+	if i == 0 {
+		return len(b.buffer) - 1
+	}
+	return i - 1
+}
+
 // searchIndexOfSeqID is a ring buffer aware binary search implementation.
 // It looks for targetSeqID in the buffer between startIndex and endIndex.
 // If targetSeqID is found the index is returned along with true.
@@ -460,15 +611,15 @@ func (b *MultiCursorRingBuffer) searchIndexOfSeqID(startIndex int, endIndex int,
 		// realMid converts the logical index to the actual index taking into consideration the ring buffer wraps around:
 		realMid := (startIndex + mid) % size
 
-		if b.buffer[realMid].SeqId == targetSeqID {
+		if b.buffer[realMid].Meta.SeqId == targetSeqID {
 			return realMid, true
-		} else if b.buffer[realMid].SeqId < targetSeqID {
+		} else if b.buffer[realMid].Meta.SeqId < targetSeqID {
 			low = mid + 1
 		} else {
 			high = mid - 1
-			if nextLowestVal > b.buffer[realMid].SeqId {
+			if nextLowestVal > b.buffer[realMid].Meta.SeqId {
 				nextLowest = realMid
-				nextLowestVal = b.buffer[realMid].SeqId
+				nextLowestVal = b.buffer[realMid].Meta.SeqId
 			}
 		}
 	}

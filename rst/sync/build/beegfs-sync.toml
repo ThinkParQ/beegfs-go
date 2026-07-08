@@ -47,7 +47,6 @@ tls-disable = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
 # interval = "30s"
-# url-path = "/v1/metrics"
 # compression = "gzip"
 # timeout = "10s"
 # tls-cert-file = ""
@@ -58,7 +57,6 @@ tls-disable = false
 # enabled = false
 # protocol = "grpc"
 # endpoint = "localhost:4317"
-# url-path = "/v1/logs"
 # compression = "gzip"
 # timeout = "10s"
 # tls-cert-file = ""
@@ -175,9 +173,9 @@ tls-disable = false
 
 # interval: How often metrics are pushed to the collector (e.g. "30s").
 
-# url-path: URL path for the metrics endpoint. Only applies when protocol is "http".
-# Default is "/v1/metrics". Some backends use different paths; for example
-# Loki-compatible backends that accept OTLP metrics use "/otlp/v1/metrics".
+# url-path: URL path for the metrics endpoint. Only applies when protocol is "http". There
+# is no default since "grpc" is the default protocol but "/v1/metrics" is the standard path;
+# however, Grafana Mimir uses "/otlp/v1/metrics".
 
 # compression: Compression to apply when sending metrics. Must be "gzip" or "none".
 
@@ -202,10 +200,9 @@ tls-disable = false
 
 # enabled: Set to true to export logs via OTLP.
 
-# protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same
-# semantics as the corresponding [telemetry.otlp] fields, but applied to log export.
-# The url-path default for logs is "/v1/logs". For Loki direct ingestion use
-# "/otlp/v1/logs".
+# protocol / endpoint / url-path / compression / timeout / tls-* / headers: Same semantics as
+# the corresponding [telemetry.otlp] fields, but applied to log export. The standard url-path for
+# logs is "/v1/logs" but Grafana Loki uses "/otlp/v1/logs".
 
 
 # Configuration for the BeeGFS Remote node must be specified under [remote]. Most configuration such

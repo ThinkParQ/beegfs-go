@@ -4,10 +4,13 @@ import (
 	"context"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/watch/internal/subscriber"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
+	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
 )
 
@@ -29,17 +32,30 @@ type Handler struct {
 	// version has finished shutting down before we swap out the handler or
 	// delete it.
 	mu sync.Mutex
-	// lastSeqID is used to avoid sending duplicate events to subscribers after a restart. This is
-	// necessary because subscribers may acknowledge the last event they received before that event
-	// exists in the event buffer. Calling AckEvent() on an event that does not exist is essentially
-	// a no-op and the ack cursor is unmodified meaning it cannot be used to determine the next
-	// event expected by a subscriber.
+	// lastSeqID is the last sequence ID acknowledged by the subscriber. It is used to avoid
+	// sending duplicate events to subscribers after a restart. This is necessary because
+	// subscribers may acknowledge the last event they received before that event exists in the
+	// event buffer. Calling AckEvent() on an event that does not exist is essentially a no-op and
+	// the ack cursor is unmodified meaning it cannot be used to determine the next event expected
+	// by a subscriber.
 	//
 	// This approach avoids the need for a more complicated mechanism to collect the next event
 	// expected by all subscribers and wait for the event buffer to be repopulated. Once the event
 	// buffer is initialized and the subscribers ackCursor points at the correct event this field is
 	// redundant but still updated for consistency in case it is useful elsewhere in the future.
-	lastSeqID uint64
+	//
+	// It is written by receiveLoop and read concurrently by sendLoop, which uses it as a lower
+	// bound on what the subscriber has confirmed (both for duplicate suppression and to decide
+	// when filtered events can safely be auto-acked), so it must be accessed atomically. Acks only
+	// move it forward within a connection, so a stale read understates what was confirmed and
+	// fails toward resending or deferring an ack, never toward acking too much.
+	lastSeqID atomic.Uint64
+	// eventFilter holds the per-version type allowlists received from the subscriber's initial
+	// Response. A nil pointer means no filter (all events delivered). It is usually stored while
+	// receiveLoop waits for the initial response, but when a subscriber responds after a finite
+	// wait-for-response-after-connect timeout it is stored from the ongoing-acks goroutine while
+	// sendLoop is already reading it, so it must be accessed atomically.
+	eventFilter atomic.Pointer[compiledFilter]
 }
 
 type HandlerConfig struct {
@@ -56,7 +72,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 	// Add cursor is idempotent so always ensure there is a cursor for this subscriber.
 	metaEventBuffer.AddCursor(subscriber.ID)
 
-	return &Handler{
+	h := &Handler{
 		ctx:             ctx,
 		cancel:          cancel,
 		log:             log,
@@ -64,6 +80,11 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 		config:          config,
 		Subscriber:      subscriber,
 	}
+	// types.NoSeqId means "no subscriber ack received yet." Zero is not usable as a sentinel
+	// because SeqId=0 is a valid first event from the metadata PMQ, and lastSeqID=0 would be
+	// indistinguishable from "subscriber acknowledged SeqId=0."
+	h.lastSeqID.Store(types.NoSeqId)
+	return h
 }
 
 // Handles the connection with a particular Subscriber.
@@ -153,13 +174,44 @@ func (h *Handler) doDisconnect() bool {
 func (h *Handler) connectLoop() bool {
 	h.log.Info("connecting to subscriber")
 	var reconnectBackOff float64 = 1
+
+	var metaID beegfs.NumId
+	if !h.Subscriber.Config.SkipNodeIDDetection {
+		ringID := h.metaEventBuffer.GetRingID()
+		if ringID == 0 {
+			h.log.Info("waiting for metadata node ID to be available due to subscriber configuration")
+			loggedV1Warning := false
+		waitForRingID:
+			for {
+				select {
+				case <-h.ctx.Done():
+					h.log.Info("not attempting to detect metadata node ID for subscriber because the handler is shutting down")
+					return false
+				case <-time.After(time.Second):
+					if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
+						break waitForRingID
+					}
+					// Node ID detection requires the v2 event protocol handshake. A v1 metadata
+					// service can never identify itself, so this wait would otherwise continue
+					// silently forever with only the info log above.
+					if !loggedV1Warning && h.metaEventBuffer.V1ProtocolInUse() {
+						h.log.Warn("subscriber is configured to wait for the metadata node ID before connecting, but the metadata service uses the v1 event protocol and can never identify itself; this subscriber will never connect or receive events until skip-node-id-detection is set to true for this subscriber")
+						loggedV1Warning = true
+					}
+				}
+			}
+		}
+		metaID = beegfs.NumId(ringID)
+		h.log.Info("detected metadata node ID for subscriber", zap.Any("metaID", metaID))
+	}
+
 	for {
 		select {
 		case <-h.ctx.Done():
 			h.log.Info("not attempting to connect to subscriber because the handler is shutting down")
 			return false
 		case <-time.After(time.Second * time.Duration(reconnectBackOff)): // We use this instead of time.Ticker so we can change the duration.
-			retry, err := h.Connect()
+			retry, err := h.Connect(metaID)
 			if err != nil {
 				if !retry {
 					h.log.Error("unable to connect to subscriber (unable to retry)", zap.Error(err))
@@ -182,30 +234,120 @@ func (h *Handler) connectLoop() bool {
 	}
 }
 
+// seekToEndOfBuffer handles a subscriber request (CompletedSeq == types.SeekToEndSeqID) to skip all
+// historical events and resume from the end of the event buffer, adopting the sequence ID of the
+// last buffered event as the new lastSeqID. On an error the cursor state is unknown, so the caller
+// should tear down the connection rather than continue streaming.
+func (h *Handler) seekToEndOfBuffer() error {
+	h.log.Info("subscriber requested to resume sending events from the end of the buffer")
+	lastSeqID, err := h.metaEventBuffer.SeekToEnd(h.ID)
+	if err != nil {
+		// This probably indicates a bug. We should bail out since the subscriber specifically
+		// indicated they don't want to receive all historical events.
+		h.log.Error("error seeking subscriber ack cursor to the end of the buffer", zap.Error(err))
+		return err
+	}
+	h.lastSeqID.Store(lastSeqID)
+	return nil
+}
+
+// applyEventFilter compiles and installs a subscriber-provided event type filter. The filter
+// normally arrives with the initial response, but can arrive late when the subscriber responds
+// after a finite wait-for-response-after-connect timeout; sendLoop loads the filter atomically per
+// event so it can be installed at any time.
+func (h *Handler) applyEventFilter(f *bw.EventFilter) {
+	h.eventFilter.Store(newCompiledFilter(f))
+	h.log.Info("subscriber set an event type filter",
+		zap.Any("v1Types", f.GetV1Types()),
+		zap.Any("v2Types", f.GetV2Types()))
+}
+
 func (h *Handler) receiveLoop() (<-chan struct{}, context.CancelFunc) {
 
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	recvStream := h.Receive()
 	h.log.Info("receiving responses from subscriber")
-	// When we connect, some subscribers may acknowledge the last event they successfully received before a disconnect.
-	// TODO: Consider if the time we wait should be configurable based per subscriber.
-	select {
-	case response, ok := <-recvStream:
-		if ok {
-			// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
-			h.log.Info("subscriber acknowledged last event received before disconnect", zap.Any("sequenceID", response.CompletedSeq))
-			err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
-			if err != nil {
-				// Ignore errors, an error is expected if the event buffer is not fully repopulated.
-				// This is logged in case we start seeing errors unexpected under other circumstances.
-				h.log.Debug("error updating subscriber ack cursor with last event before disconnect", zap.Error(err))
-			}
-			h.lastSeqID = response.CompletedSeq
+
+	var timeout <-chan time.Time
+	waitForAckIndefinitely := false
+	// When waiting indefinitely we still want to log an warning if we don't get a quick response.
+	waitForAckIndefinitelyWarnTimeout := time.After(2 * time.Second)
+
+	if h.Subscriber.WaitForResponseAfterConnect != nil {
+		switch subscriberTimeout := *h.Subscriber.WaitForResponseAfterConnect; {
+		case subscriberTimeout <= 0:
+			waitForAckIndefinitely = true
+			timeout = waitForAckIndefinitelyWarnTimeout
+		default:
+			timeout = time.After(time.Duration(subscriberTimeout) * time.Second)
 		}
-		// TODO: Test what happens if we have a REMOTE_DISCONNECT here. Are we safe to just ignore it? It would be better to explicitly handle.
-	case <-time.After(time.Duration(h.config.MaxWaitForResponseAfterConnect) * time.Second):
-		h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event")
+	} else {
+		switch defaultTimeout := h.config.MaxWaitForResponseAfterConnect; {
+		case defaultTimeout <= 0:
+			waitForAckIndefinitely = true
+			timeout = waitForAckIndefinitelyWarnTimeout
+		default:
+			timeout = time.After(time.Duration(defaultTimeout) * time.Second)
+		}
+	}
+
+	// When we connect, subscribers can indicate where they want to resume reading in the buffer.
+	// They can request to receive only new events by indicating the max uint64 as the completed
+	// sequence, from the last event they successfully received before a disconnect, or all events.
+waitForInitialAck:
+	for {
+		select {
+		case <-h.ctx.Done():
+			h.log.Info("handler was shutdown before the subscriber acknowledged the last event received before disconnect")
+			close(done)
+			return done, cancel
+		case response, ok := <-recvStream:
+			if ok {
+				// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
+				if response.CompletedSeq == types.SeekToEndSeqID {
+					if err := h.seekToEndOfBuffer(); err != nil {
+						close(done)
+						return done, cancel
+					}
+				} else {
+					// types.SendFromStartSeqID (0) means "send everything from the start of the buffer";
+					// the subscriber has not confirmed any particular event. Do not store it in
+					// lastSeqID — it would be indistinguishable from "subscriber acknowledged
+					// SeqId=0" and would incorrectly permit auto-acking filtered events while
+					// SeqId=0 is still in flight. Leave lastSeqID at types.NoSeqId ("nothing confirmed")
+					// so sendLoop treats the cursor position as authoritative.
+					h.log.Info("subscriber acknowledged last event received before disconnect", zap.Any("sequenceID", response.CompletedSeq))
+					err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
+					if err != nil {
+						// Ignore errors, an error is expected if the event buffer is not fully
+						// repopulated or if there were no new events received while the subscriber
+						// was disconnected.
+						//
+						// This is logged in case we start seeing errors unexpected under other
+						// circumstances.
+						h.log.Debug("error updating subscriber ack cursor with last event before disconnect", zap.Error(err))
+					}
+					if response.CompletedSeq != types.SendFromStartSeqID {
+						h.lastSeqID.Store(response.CompletedSeq)
+					}
+				}
+				if f := response.GetFilter(); f != nil {
+					h.applyEventFilter(f)
+				}
+			}
+			break waitForInitialAck
+			// If we get a REMOTE_DISCONNECT here (!ok) we could bail out early. For now we just go
+			// into the sendLoop which will immediately exit because the receive loop below will
+			// have shutdown.
+		case <-timeout:
+			if !waitForAckIndefinitely {
+				h.log.Info("subscriber did not acknowledge last event received before disconnect, resending events from the last known acknowledged event", zap.Uint64("lastSeqID", h.lastSeqID.Load()))
+				break waitForInitialAck
+			}
+			h.log.Warn("subscriber did not acknowledge last event received before disconnect within the expected timeframe, waiting indefinitely due to subscriber configuration")
+			// The timeout fires once so this warning will not be logged again.
+		}
 	}
 
 	// Move the send cursor back to the last acknowledged event.
@@ -228,20 +370,39 @@ func (h *Handler) receiveLoop() (<-chan struct{}, context.CancelFunc) {
 					return
 				}
 				//h.log.Debug("received response from subscriber", zap.Any("response", response))
-				err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
-				if err != nil {
-					if !loggedAckError {
-						// Ignore errors, an error is expected if the event buffer is not fully
-						// repopulated, or if the subscriber is setup to acknowledge the most recent
-						// event on a timer and all sent events are already acknowledged. This is
-						// logged to avoid masking errors in other circumstances.
-						h.log.Debug("unable to acknowledge the specified sequence ID (further occurrences will not be logged until this operation succeeds)", zap.Error(err), zap.String("hint", "if Watch just started this likely indicates the event buffer is not fully repopulated yet"))
-						loggedAckError = true
+				if response.CompletedSeq == types.SeekToEndSeqID {
+					// A request to skip to the end of the buffer is normally the first response on
+					// a connection and handled in waitForInitialAck above, but when a finite
+					// wait-for-response-after-connect timeout fires before a slow subscriber sends
+					// its initial response, that response is consumed here instead. It must not be
+					// treated as a regular ack: AckEvent would fail and storing types.SeekToEndSeqID in
+					// lastSeqID would suppress every future send, silently stalling the stream.
+					if err := h.seekToEndOfBuffer(); err != nil {
+						// The cursor state is unknown, so tear the connection down and let the
+						// handler re-establish it cleanly.
+						return
 					}
 				} else {
-					loggedAckError = false
+					err := h.metaEventBuffer.AckEvent(h.ID, response.CompletedSeq)
+					if err != nil {
+						if !loggedAckError {
+							// Ignore errors, an error is expected if the event buffer is not fully
+							// repopulated, or if the subscriber is setup to acknowledge the most recent
+							// event on a timer and all sent events are already acknowledged. This is
+							// logged to avoid masking errors in other circumstances.
+							h.log.Debug("unable to acknowledge the specified sequence ID (further occurrences will not be logged until this operation succeeds)", zap.Error(err), zap.String("hint", "if Watch just started this likely indicates the event buffer is not fully repopulated yet"))
+							loggedAckError = true
+						}
+					} else {
+						loggedAckError = false
+					}
+					h.lastSeqID.Store(response.CompletedSeq)
 				}
-				h.lastSeqID = response.CompletedSeq
+				// A late initial response can also carry the subscriber's event type filter, which
+				// would otherwise be silently dropped when the waitForInitialAck window was missed.
+				if f := response.GetFilter(); f != nil {
+					h.applyEventFilter(f)
+				}
 
 				// TODO: https://linear.app/thinkparq/issue/BF-29/acknowledge-events-sent-to-all-subscribers-back-to-the-metadata-server
 				// Also consider if we need to better handle what we do with recvStream when we break out of the connectedLoop.
@@ -271,6 +432,18 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 	go func() {
 		defer close(done)
 		defer cancel()
+		// lastTransmittedSeq is the sequence ID of the last event actually sent to the subscriber
+		// on this connection. types.NoSeqId means nothing has been transmitted yet — zero is not usable
+		// as a sentinel because SeqId=0 is a valid first event, and lastTransmittedSeq=0 after
+		// transmitting it would make the auto-ack safety check (lastAckedSeq >=
+		// lastTransmittedSeq) evaluate as 0 >= 0, incorrectly treating the in-flight event as
+		// acknowledged. It intentionally differs from the buffer's send cursor, which also
+		// advances past filtered events. Both variables below are only accessed from this
+		// goroutine; state resets on reconnect because a new sendLoop is started.
+		lastTransmittedSeq := types.NoSeqId
+		// pendingFilteredAck is the most recent filtered event that could not be auto-acked
+		// because a transmitted event was still awaiting acknowledgement (zero means none).
+		var pendingFilteredAck uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -296,17 +469,45 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 
 						// Continue sending events until there are no more events to send:
 						if event != nil {
-							// Don't send duplicate events.
-							if event.SeqId > h.lastSeqID || (event.SeqId == 0 && h.lastSeqID == 0) {
-								if err := h.Send(event); err != nil {
-									h.log.Error("unable to send event", zap.Error(err), zap.Any("event", event.SeqId))
+							lastAckedSeq := h.lastSeqID.Load()
+							// Don't send duplicate events. types.NoSeqId means no subscriber ack has been
+							// received yet on this connection; send everything from the cursor.
+							if lastAckedSeq == types.NoSeqId || event.Meta.SeqId > lastAckedSeq {
+								if !h.eventFilter.Load().passes(event.Meta) {
+									// Auto-ack filtered events so the buffer's ack cursor advances
+									// and buffer space is freed even when nothing is being sent.
+									// Because acks are cumulative this is only safe once the
+									// subscriber has acknowledged everything transmitted so far:
+									// acking a filtered event while a transmitted event is still
+									// in flight would implicitly ack the in-flight event, and it
+									// would never be redelivered if the connection dropped before
+									// the subscriber acknowledged it. Events are processed in
+									// order, so when nothing transmitted is outstanding everything
+									// between the last transmitted event and this one was also
+									// filtered and the cumulative ack only skips filtered events.
+									if lastTransmittedSeq == types.NoSeqId || (lastAckedSeq != types.NoSeqId && lastAckedSeq >= lastTransmittedSeq) {
+										if err := h.metaEventBuffer.AckEvent(h.ID, event.Meta.SeqId); err != nil {
+											h.log.Debug("unable to auto-ack filtered event", zap.Error(err), zap.Uint64("seqId", event.Meta.SeqId))
+											pendingFilteredAck = event.Meta.SeqId
+										} else {
+											pendingFilteredAck = 0
+										}
+									} else {
+										pendingFilteredAck = event.Meta.SeqId
+									}
+									continue
+								}
+
+								if err := h.Send(event.Message); err != nil {
+									h.log.Error("unable to send event", zap.Error(err), zap.Any("event", event.Meta.SeqId))
 									return
 								}
+								lastTransmittedSeq = event.Meta.SeqId
 							} else {
 								// As an optimization, keep trying to ack the lastSeqID so once the
 								// buffer is repopulated we don't need to process/discard all events
 								// and can just immediately fast forward the ack cursor.
-								err := h.metaEventBuffer.AckEvent(h.ID, h.lastSeqID)
+								err := h.metaEventBuffer.AckEvent(h.ID, lastAckedSeq)
 								if err != nil {
 									if !loggedAckError {
 										h.log.Debug("ignoring event already sent to the subscriber and attempting to fast forward the ack cursor (further occurrences will not be logged until this operation succeeds)", zap.Error(err), zap.String("hint", "if Watch just started this likely indicates the event buffer is not fully repopulated yet"))
@@ -317,6 +518,17 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 								}
 							}
 						} else {
+							// The buffer is drained. If acking a trailing run of filtered events
+							// was deferred above, retry now: once the subscriber has caught up on
+							// everything transmitted the deferred ack becomes safe, and without
+							// it those filtered events would pin the buffer (and delay shutdown)
+							// until the next unfiltered event was sent and acknowledged.
+							lastAcked := h.lastSeqID.Load()
+							if pendingFilteredAck != 0 && lastAcked != types.NoSeqId && lastAcked >= lastTransmittedSeq {
+								if err := h.metaEventBuffer.AckEvent(h.ID, pendingFilteredAck); err == nil {
+									pendingFilteredAck = 0
+								}
+							}
 							break sendEvents
 						}
 					}
@@ -332,4 +544,56 @@ func (h *Handler) sendLoop() (<-chan struct{}, context.CancelFunc) {
 func (h *Handler) Stop() {
 	h.log.Info("shutting down subscriber")
 	h.cancel()
+}
+
+// compiledFilter is the hot-path representation of a subscriber's EventFilter. Each version's
+// allowlist is stored as a map so membership tests are O(1). A nil map for a version means all
+// events of that version pass (no filtering). A nil *compiledFilter means no filter at all.
+type compiledFilter struct {
+	v1Types map[bw.V1Event_Type]struct{}
+	v2Types map[bw.V2Event_Type]struct{}
+}
+
+// newCompiledFilter converts a proto EventFilter into a compiledFilter. Empty repeated fields are
+// left as nil maps (pass-all) rather than empty maps (pass-none).
+func newCompiledFilter(f *bw.EventFilter) *compiledFilter {
+	cf := &compiledFilter{}
+	if v1 := f.GetV1Types(); len(v1) > 0 {
+		cf.v1Types = make(map[bw.V1Event_Type]struct{}, len(v1))
+		for _, t := range v1 {
+			cf.v1Types[t] = struct{}{}
+		}
+	}
+	if v2 := f.GetV2Types(); len(v2) > 0 {
+		cf.v2Types = make(map[bw.V2Event_Type]struct{}, len(v2))
+		for _, t := range v2 {
+			cf.v2Types[t] = struct{}{}
+		}
+	}
+	return cf
+}
+
+// passes reports whether an event should be sent to a subscriber given its compiled filter.
+// A nil receiver, or a nil map for the event's version, passes all events of that version.
+// Events with an unrecognized version always pass.
+func (f *compiledFilter) passes(meta types.EventMeta) bool {
+	if f == nil {
+		return true
+	}
+	switch meta.Version {
+	case types.EventTypeV1:
+		if f.v1Types == nil {
+			return true
+		}
+		_, ok := f.v1Types[bw.V1Event_Type(meta.EventType)]
+		return ok
+	case types.EventTypeV2:
+		if f.v2Types == nil {
+			return true
+		}
+		_, ok := f.v2Types[bw.V2Event_Type(meta.EventType)]
+		return ok
+	default:
+		return true
+	}
 }

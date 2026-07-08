@@ -153,13 +153,21 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		}
 	}
 
+	eventBuffer := types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency)
+	if eventVersion.major == 1 {
+		// The v1 event protocol has no handshake through which the metadata service can identify
+		// itself, so the buffer's ring ID will never be set. Record this so subscribers configured
+		// to wait for node ID detection can warn instead of waiting silently forever.
+		eventBuffer.MarkV1ProtocolInUse()
+	}
+
 	return &Manager{
 		ctx:          ctx,
 		socket:       socket,
 		log:          log,
 		socketPath:   config.EventLogTarget,
-		EventBuffer:  types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency),
-		lastSeqID:    0,
+		EventBuffer:  eventBuffer,
+		lastSeqID:    types.NoSeqId,
 		eventVersion: eventVersion,
 	}, cleanup, nil
 }
@@ -301,10 +309,17 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	handshakeResp := &HandshakeResponse{}
 	if !handler.recv(handshakeResp) {
 		return
-	} else if handshakeResp.Major != m.eventVersion.major && handshakeResp.Minor != m.eventVersion.minor {
+	} else if handshakeResp.Major != m.eventVersion.major {
 		m.log.Error("unsupported metadata event protocol detected",
 			zap.String("metaProtocolVersion", fmt.Sprintf("%d.%d", handshakeResp.Major, handshakeResp.Minor)),
 			zap.String("watchProtocolVersion", fmt.Sprintf("%d.%d", m.eventVersion.major, m.eventVersion.minor)))
+		return
+	}
+
+	if currRingID := m.EventBuffer.GetRingID(); currRingID == 0 || currRingID == uint64(handshakeResp.MetaID) {
+		m.EventBuffer.SetRingID(uint64(handshakeResp.MetaID))
+	} else {
+		m.log.Error("metadata node ID changed unexpectedly, verify multiple meta nodes aren't trying to write to the same socket (restart Watch if this is intentional)", zap.Any("currMetaID", currRingID), zap.Any("newMetaID", handshakeResp.MetaID))
 		return
 	}
 
@@ -327,7 +342,7 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	// frequently we could optimize this process, for example adding an exponential backoff here
 	// as well. But for now it seems redundant to have both Meta and Watch worry about this.
 	var startSeqNum uint64
-	if m.lastSeqID == 0 {
+	if m.lastSeqID == types.NoSeqId {
 		// This would be the state after we initially start up or if we've never received any
 		// events. Just take everything in the Meta buffer and move it into the Watch buffer.
 		startSeqNum = msgRange.OldestMSN
@@ -356,17 +371,22 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 			// be reestablished and simplify connection handling.
 			return
 		}
-		// Ensure we never push duplicate events into the buffer. Generally this is done by
-		// ensuring we never add an event with a SeqID greater than the lastSeqID. Since the
-		// very first event added to the PMQ will be SeqId 0, if Watch has just started and the
-		// buffer is empty (because lastSeqID==0) then we still add this event to the buffer.
-		if sendMsg.Event.SeqId > m.lastSeqID || (sendMsg.Event.SeqId == 0 && m.lastSeqID == 0) {
+		// Ensure we never push duplicate events into the buffer. types.NoSeqId means no events have been
+		// received yet — zero is not usable as a sentinel because the first event from the metadata
+		// PMQ can legitimately have SeqId 0.
+		if m.lastSeqID == types.NoSeqId || sendMsg.Event.SeqId > m.lastSeqID {
 			// Set event fields only provided in the handshake.
 			sendMsg.Event.MetaId = handshakeResp.MetaID
 			if sendMsg.Event.EventFlags&1 != 0 {
 				sendMsg.Event.SetMetaMirror(uint32(handshakeResp.MetaMirrorID))
 			}
-			droppedSeqID = m.EventBuffer.Push(sendMsg.Event)
+			var pushErr error
+			droppedSeqID, pushErr = m.EventBuffer.Push(sendMsg.Event)
+			if pushErr != nil {
+				m.log.Error("skipping event", zap.Error(pushErr), zap.Any("seqId", sendMsg.Event.SeqId))
+				m.lastSeqID = sendMsg.Event.SeqId
+				continue
+			}
 			m.lastSeqID = sendMsg.Event.SeqId
 			if droppedSeqID != nil && !loggedDroppedEvent {
 				// Outside actual scenarios where an event could not be sent to a subscriber before
@@ -403,6 +423,14 @@ func (m *Manager) handleV1Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	// So we allocate a buffer once and reuse it.
 	buffer := make([]byte, 65536)
 	defer cancelConn()
+
+	// v1 has no sequence IDs, so Watch generates them from m.lastSeqID. It persists on the Manager
+	// across reconnects (Manage runs one handleV1Connection at a time) so IDs stay monotonic for the
+	// life of the process; they only restart if Watch itself restarts. m.lastSeqID starts at the
+	// types.NoSeqId sentinel, so reset it to 0 on first use to keep the first generated ID at 1.
+	if m.lastSeqID == types.NoSeqId {
+		m.lastSeqID = 0
+	}
 
 	for {
 		connMutex.Lock()
@@ -444,7 +472,9 @@ func (m *Manager) handleV1Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		// start over limiting subscribers ability to check for duplicate or dropped events.
 		m.lastSeqID++
 		event.SeqId = m.lastSeqID
-		m.EventBuffer.Push(event)
+		if _, err := m.EventBuffer.Push(event); err != nil {
+			m.log.Error("skipping event", zap.Error(err), zap.Any("seqId", event.SeqId))
+		}
 
 	}
 }

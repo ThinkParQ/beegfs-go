@@ -14,14 +14,17 @@ import (
 	"syscall"
 	stdtime "time"
 
-	"github.com/aws/smithy-go/time"
+	smithytime "github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -32,9 +35,62 @@ import (
 )
 
 var (
-	attrState = attribute.Key("state")
-	attrRSTID = attribute.Key("rst.id")
+	attrState     = attribute.Key("state")
+	attrRSTID     = attribute.Key("rst.id")
+	attrEventType = attribute.Key("event.type")
+	attrAction    = attribute.Key("action")
+	attrReason    = attribute.Key("reason")
 )
+
+// eventTypeLastWriterClosed is the canonical event.type attribute value for LAST_WRITER_CLOSED
+// events. The pending sync tracker has no event object of its own, so the recorder it is handed is
+// pre-bound to this value (see NewManager) — keeping its labels identical to dispatchLastWriterClosed.
+var eventTypeLastWriterClosed = beewatch.V2Event_LAST_WRITER_CLOSED.String()
+
+// dispatchAction and dispatchReason are the bounded vocabularies for the "action" and "reason"
+// attributes on remote.dispatch.results. Typed constants keep the label space enumerated in one
+// place and prevent a stray string literal from silently creating a new metric series. event.type
+// is deliberately left a plain string since its values come from beewatch.V2Event_Type.String()
+// (including arbitrary unhandled types in the default dispatch branch).
+type (
+	dispatchAction string
+	dispatchReason string
+)
+
+const (
+	actionSubmitted dispatchAction = "submitted"
+	actionQueued    dispatchAction = "queued"
+	actionDeferred  dispatchAction = "deferred"
+	actionSkipped   dispatchAction = "skipped"
+	actionError     dispatchAction = "error"
+)
+
+const (
+	// OPEN_BLOCKED (automatic restore) reasons.
+	reasonEntryLookupFailed  dispatchReason = "entry_lookup_failed"
+	reasonDataStateUnknown   dispatchReason = "data_state_unknown"
+	reasonStateNotRestorable dispatchReason = "state_not_restorable"
+	reasonStubUnreadable     dispatchReason = "stub_unreadable"
+	// LAST_WRITER_CLOSED (automatic sync) reasons recorded when the event is first handled.
+	reasonConfigUnavailable dispatchReason = "config_unavailable"
+	reasonAutosyncDisabled  dispatchReason = "autosync_disabled"
+	reasonNoRemoteTargets   dispatchReason = "no_remote_targets"
+	// LAST_WRITER_CLOSED reasons recorded later, when the deferred upload is actually submitted.
+	reasonFileInUse          dispatchReason = "file_in_use"
+	reasonAlreadyHandled     dispatchReason = "already_handled"
+	reasonBlockedByFailedJob dispatchReason = "blocked_by_failed_job"
+	// Shared / generic reasons. path_not_exists is recorded both when the file is already gone at
+	// dispatch time (LAST_WRITER_CLOSED) and when it is deleted before the deferred upload runs.
+	reasonPathNotExists dispatchReason = "path_not_exists"
+	reasonSubmitFailed  dispatchReason = "submit_failed"
+	reasonOK            dispatchReason = "ok"
+	reasonUnhandledType dispatchReason = "unhandled_type"
+)
+
+// dispatchResultRecorder records the result of acting on a dispatched event. The pending sync
+// tracker is handed one pre-bound to the LAST_WRITER_CLOSED event type so it stays free of any
+// metrics/attribute knowledge and simply reports a semantic outcome.
+type dispatchResultRecorder func(action dispatchAction, reason dispatchReason)
 
 // managerMetrics holds the OTel instruments used to report job manager metrics.
 type managerMetrics struct {
@@ -42,6 +98,11 @@ type managerMetrics struct {
 	jobTerminal metric.Int64Counter
 	jobDuration metric.Float64Histogram
 	jobActive   metric.Int64Counter
+	// dispatchResults counts the result of acting on each file system event that passed the
+	// dispatcher's gate, broken down by the "event.type", "action", and "reason" attributes. The
+	// accept/reject decision itself is owned by the dispatch package's "*.dispatch.events" metric;
+	// this records what the handler actually did (and why), with error paths first-class.
+	dispatchResults metric.Int64Counter
 }
 
 // Register custom types for serialization/deserialization via Gob when the
@@ -102,6 +163,12 @@ type Manager struct {
 	// function to release the file's access locks when no longer needed.
 	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
 	metrics                   managerMetrics
+	// pendingSync holds files that received V2Event_LAST_WRITER_CLOSED and are waiting out their
+	// per-entry cooldown before an UPLOAD job is submitted.
+	pendingSync *pendingSyncTracker
+	// pendingSyncGaugeReg is the registration for the remote.dispatch.pending_sync observable gauge
+	// callback; it is unregistered on Stop().
+	pendingSyncGaugeReg metric.Registration
 }
 
 type managerOptConfig struct {
@@ -162,6 +229,13 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	if err != nil {
 		log.Warn("failed to create job active counter, metrics will be no-ops", zap.Error(err))
 	}
+	dispatchResults, err := meter.Int64Counter("remote.dispatch.results",
+		metric.WithDescription("Result of acting on each file system event that passed the dispatcher gate, by event.type, action, and reason"),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		log.Warn("failed to create dispatch results counter, metrics will be no-ops", zap.Error(err))
+	}
 	m := &Manager{
 		log:                       log,
 		ctx:                       ctx,
@@ -177,12 +251,31 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
 		metrics: managerMetrics{
-			jobRequests: jobRequests,
-			jobTerminal: jobTerminal,
-			jobDuration: jobDuration,
-			jobActive:   jobActive,
+			jobRequests:     jobRequests,
+			jobTerminal:     jobTerminal,
+			jobDuration:     jobDuration,
+			jobActive:       jobActive,
+			dispatchResults: dispatchResults,
 		},
 	}
+
+	m.pendingSync = newPendingSyncTracker(log.Logger, m.SubmitJobRequest, func(action dispatchAction, reason dispatchReason) {
+		m.recordDispatchResult(eventTypeLastWriterClosed, action, reason)
+	})
+
+	pendingSyncGauge, err := meter.Int64ObservableGauge("remote.dispatch.pending_sync",
+		metric.WithDescription("Files awaiting their cooldown before an automatic upload is submitted"),
+		metric.WithUnit("{file}"),
+	)
+	if err != nil {
+		log.Warn("failed to create pending sync gauge, metrics will be no-ops", zap.Error(err))
+	}
+	// RegisterCallback only errors on a nil callback / zero instruments / cross-meter instruments,
+	// none of which apply here (mirrors scheduler.go).
+	m.pendingSyncGaugeReg, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(pendingSyncGauge, int64(m.pendingSync.pendingCount()))
+		return nil
+	}, pendingSyncGauge)
 
 	return m
 }
@@ -287,7 +380,163 @@ func (m *Manager) Start() error {
 			}
 		}
 	}()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.pendingSync.Run(m.ctx)
+	}()
+
 	return nil
+}
+
+// recordDispatchResult increments the dispatch results counter for the result of acting on a
+// single event. eventType is the beewatch V2Event_Type name (e.g. "OPEN_BLOCKED"), action is what
+// the handler did, and reason is the specific cause. It is the single place that builds the
+// attribute set and emits the metric; the pending sync tracker routes through it via a
+// dispatchResultRecorder closure.
+func (m *Manager) recordDispatchResult(eventType string, action dispatchAction, reason dispatchReason) {
+	m.metrics.dispatchResults.Add(context.Background(), 1, metric.WithAttributes(
+		attrEventType.String(eventType),
+		attrAction.String(string(action)),
+		attrReason.String(string(reason)),
+	))
+}
+
+func (m *Manager) GetEventDispatchFunc(ctx context.Context, log *zap.Logger) dispatch.DispatchFunc {
+	log = log.With(zap.String("component", "eventDispatcher"))
+	return func(event *beewatch.Event) bool {
+		// The dispatcher ensures we receive V2 events.
+		e := event.EventData.(*beewatch.Event_V2)
+		switch e.V2.Type {
+		case beewatch.V2Event_OPEN_BLOCKED:
+			return m.dispatchOpenBlocked(ctx, log, e.V2)
+		case beewatch.V2Event_LAST_WRITER_CLOSED:
+			return m.dispatchLastWriterClosed(ctx, log, e.V2)
+		default:
+			log.Debug("filtered out event type (ignoring)", zap.Any("type", e.V2.GetType()), zap.Any("seq", event.SeqId))
+			m.recordDispatchResult(e.V2.GetType().String(), actionSkipped, reasonUnhandledType)
+			return false
+		}
+	}
+}
+
+func (m *Manager) dispatchOpenBlocked(ctx context.Context, log *zap.Logger, e *beewatch.V2Event) bool {
+	path := e.GetPath()
+	eventType := e.GetType().String()
+
+	log.Debug("detected a blocked open event, checking if the stub file is eligible for automatic restore",
+		zap.String("path", path), zap.Any("type", e.GetType()))
+
+	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, path)
+	if err != nil {
+		log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(err))
+		m.recordDispatchResult(eventType, actionError, reasonEntryLookupFailed)
+		return false
+	}
+
+	if entryInfo.Entry.Details == nil {
+		log.Warn("skipping automatic restore as the stub file's data state could not be determined", zap.String("path", path), zap.Error(entryInfo.Entry.EntryInfoPopulated))
+		m.recordDispatchResult(eventType, actionError, reasonDataStateUnknown)
+		return false
+	}
+
+	if !(entryInfo.Entry.Details.FileState.GetDataState() == beegfs.DataStateAutoRestore ||
+		entryInfo.Entry.Details.FileState.GetDataState() == beegfs.DataStateDelayedRestore) {
+		log.Debug("stub file's data state does not allow an automatic restore",
+			zap.String("path", path), zap.Any("dataState", entryInfo.Entry.Details.FileState.GetDataState()))
+		m.recordDispatchResult(eventType, actionSkipped, reasonStateNotRestorable)
+		return false
+	}
+
+	// If a restore is currently in progress this will fail for "stub file is malformed". If a
+	// restore was already requested but not yet started, then the job submission below is
+	// rejected. We could add a dedupe map here, but if we set to short a TTL duplicates will
+	// slip through anyway, and too long and we might suppress legitimate retries after a failed
+	// restore or scenarios where a file was offloaded/restored/offloaded (weird, but possible).
+	// We already have a three layer defense against races between the data state check,
+	// GetStubContents failure, and SubmitJobRequest rejecting duplicate requests, no need to
+	// add extra complexity.
+	id, url, err := m.GetStubContents(path)
+	if err != nil {
+		log.Debug("skipping automatic restore as the stub file's contents could not be retrieved", zap.String("path", path), zap.Error(err))
+		m.recordDispatchResult(eventType, actionError, reasonStubUnreadable)
+		return false
+	}
+
+	result, err := m.SubmitJobRequest(&beeremote.JobRequest{
+		Path:                path,
+		Priority:            1,
+		RemoteStorageTarget: id,
+		Type: &beeremote.JobRequest_Sync{
+			Sync: &flex.SyncJob{
+				Operation:  flex.SyncJob_DOWNLOAD,
+				RemotePath: url,
+				// Overwrite=false is intentional to avoid a race where a file was restored or
+				// otherwise overwritten prior to this job getting a chance to execute. The system
+				// is already designed to safely permit downloading offloaded files.
+				Overwrite: false,
+			},
+		},
+	})
+	if err != nil {
+		log.Debug("unable to create sync job to restore the specified stub file's contents", zap.String("path", path), zap.Error(err))
+		m.recordDispatchResult(eventType, actionError, reasonSubmitFailed)
+		return false
+	}
+
+	log.Debug("stub file restore triggered", zap.Any("result", result))
+	m.recordDispatchResult(eventType, actionSubmitted, reasonOK)
+	return true
+}
+
+// dispatchLastWriterClosed queues a deferred sync for the file. It does not submit the job
+// directly — it just hands the path to the pending sync tracker, which holds it for
+// CoolDownPeriod and then attempts SubmitJobRequest. If the file is still in active use when the
+// cooldown elapses, the meta will reject the access-flag transition with OpsErr_INUSE and the
+// tracker will retry after another cooldown.
+func (m *Manager) dispatchLastWriterClosed(ctx context.Context, log *zap.Logger, e *beewatch.V2Event) bool {
+	path := e.GetPath()
+	eventType := e.GetType().String()
+
+	log.Debug("detected a last writer closed event, checking if the file is eligible for automatic sync",
+		zap.String("path", path), zap.Any("type", e.GetType()))
+
+	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, path)
+	if err != nil {
+		if errors.Is(err, beegfs.OpsErr_PATHNOTEXISTS) {
+			m.recordDispatchResult(eventType, actionSkipped, reasonPathNotExists)
+			return false
+		}
+		log.Warn("skipping automatic sync as the file's remote configuration could not be determined", zap.String("path", path), zap.Error(err))
+		m.recordDispatchResult(eventType, actionError, reasonConfigUnavailable)
+		return false
+	}
+
+	if entryInfo.Entry.Details == nil {
+		log.Warn("skipping automatic sync as the file's remote configuration could not be determined", zap.String("path", path), zap.Error(entryInfo.Entry.EntryInfoPopulated))
+		m.recordDispatchResult(eventType, actionError, reasonConfigUnavailable)
+		return false
+	}
+
+	if entryInfo.Entry.Details.Remote.CoolDownPeriod == 0 {
+		log.Debug("automatic sync not enabled for file (cooldown is zero)", zap.String("path", path))
+		m.recordDispatchResult(eventType, actionSkipped, reasonAutosyncDisabled)
+		return false
+	}
+
+	if len(entryInfo.Entry.Details.Remote.RSTIDs) == 0 {
+		log.Debug("automatic sync not possible (no RSTs configured)", zap.String("path", path))
+		m.recordDispatchResult(eventType, actionSkipped, reasonNoRemoteTargets)
+		return false
+	}
+
+	cooldown := stdtime.Duration(entryInfo.Entry.Details.Remote.CoolDownPeriod) * stdtime.Second
+	m.pendingSync.Mark(path, cooldown, entryInfo.Entry.Details.Remote.RSTIDs)
+	m.recordDispatchResult(eventType, actionQueued, reasonOK)
+	log.Debug("automatic sync queued",
+		zap.String("path", path), zap.Duration("cooldown", cooldown))
+	return true
 }
 
 func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest, responses chan<- *beeremote.GetJobsResponse) error {
@@ -552,7 +801,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
 				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
 				// mark the job as complete so ignore the err.
-				mtime, _ := time.ParseDateTime(status.Message)
+				mtime, _ := smithytime.ParseDateTime(status.Message)
 				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
 			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 				err = rst.ErrJobAlreadyOffloaded
@@ -1077,6 +1326,23 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		return status.Errorf(codes.NotFound, "path %s exists but does not have job ID %s", workResult.GetPath(), workResult.GetJobId())
 	}
 
+	// Guard: persist the work result for inspection but do not process it further if the job is
+	// already in a terminal state. This prevents a late COMPLETED result (e.g. from Sync journal
+	// replay after restart or a gRPC TOCTOU race) from triggering job completion — including file
+	// truncation via stub creation — on an already-cancelled job.
+	if job.InTerminalState() {
+		m.log.Debug("persisting work result but skipping processing for job in terminal state",
+			zap.String("jobID", workResult.GetJobId()),
+			zap.String("requestID", workResult.GetRequestId()),
+			zap.String("jobState", job.GetStatus().GetState().String()),
+			zap.String("workState", workResult.GetStatus().GetState().String()))
+		if entryToUpdate, ok := job.WorkResults[workResult.GetRequestId()]; ok {
+			entryToUpdate.WorkResult = workResult
+			job.WorkResults[workResult.GetRequestId()] = entryToUpdate
+		}
+		return nil
+	}
+
 	// Update the results entry.
 	entryToUpdate, ok := job.WorkResults[workResult.GetRequestId()]
 	if !ok {
@@ -1279,11 +1545,11 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 				return nil
 			}
 			return err
-		} else if dataState == rst.DataStateOffloaded {
+		} else if beegfs.IsDataStateOffloaded(dataState) {
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, path, rst.LockedAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
+		if err := entry.ClearAccessFlags(ctx, path, beegfs.LockedContentAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil
@@ -1321,5 +1587,8 @@ func (m *Manager) Stop() {
 	// can lead to a deadlock.
 	m.ctxCancel()
 	m.wg.Wait()
+	if m.pendingSyncGaugeReg != nil {
+		_ = m.pendingSyncGaugeReg.Unregister()
+	}
 	m.log.Info("stopped manager")
 }

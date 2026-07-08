@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -24,6 +25,9 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
+	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
+	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
+	"github.com/thinkparq/protobuf/go/beewatch"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 )
@@ -44,7 +48,8 @@ var (
 )
 
 var capabilities = map[string]*flex.Feature{
-	registry.FeatureFilterFiles: nil,
+	registry.FeatureFilterFiles:              nil,
+	registry.FeatureRestorePolicyAndCooldown: nil,
 }
 
 func main() {
@@ -67,7 +72,7 @@ func main() {
 	pflag.String("telemetry.otlp.protocol", "grpc", "OTLP transport ('grpc' or 'http').")
 	pflag.String("telemetry.otlp.endpoint", "localhost:4317", "OTLP collector endpoint.")
 	pflag.Duration("telemetry.otlp.interval", 30*time.Second, "OTLP export interval.")
-	pflag.String("telemetry.otlp.url-path", "/v1/metrics", "OTLP HTTP URL path. HTTP only; Loki-compatible backends use '/otlp/v1/metrics'.")
+	pflag.String("telemetry.otlp.url-path", "", "OTLP HTTP URL path. HTTP only; Grafana Mimir uses '/otlp/v1/metrics'.")
 	pflag.String("telemetry.otlp.compression", "gzip", "OTLP export compression ('gzip' or 'none').")
 	pflag.Duration("telemetry.otlp.timeout", 10*time.Second, "OTLP export timeout.")
 	pflag.String("telemetry.otlp.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP traffic. Leave empty to only use the system's default certificate pool.")
@@ -76,7 +81,7 @@ func main() {
 	pflag.Bool("telemetry.logs.enabled", false, "Enable exporting logs via OTLP.")
 	pflag.String("telemetry.logs.protocol", "grpc", "OTLP logs transport ('grpc' or 'http').")
 	pflag.String("telemetry.logs.endpoint", "localhost:4317", "OTLP logs collector endpoint.")
-	pflag.String("telemetry.logs.url-path", "/v1/logs", "OTLP logs HTTP URL path. HTTP only; Loki direct ingestion uses '/otlp/v1/logs'.")
+	pflag.String("telemetry.logs.url-path", "", "OTLP logs HTTP URL path. HTTP only; Grafana Loki uses '/otlp/v1/logs'.")
 	pflag.String("telemetry.logs.compression", "gzip", "OTLP logs export compression ('gzip' or 'none').")
 	pflag.Duration("telemetry.logs.timeout", 10*time.Second, "OTLP logs export timeout.")
 	pflag.String("telemetry.logs.tls-cert-file", "", "Use the specified certificate to verify and encrypt OTLP log traffic. Leave empty to only use the system's default certificate pool.")
@@ -130,6 +135,12 @@ Using environment variables:
 	if printVersion, _ := pflag.CommandLine.GetBool("version"); printVersion {
 		fmt.Printf("%s %s (commit: %s, built: %s)\n", binaryName, version, commit, buildTime)
 		os.Exit(0)
+	}
+
+	if euid := syscall.Geteuid(); euid < 0 || euid > math.MaxUint32 {
+		log.Fatalf("effective user ID %d is out of bounds (not a uint32)", euid)
+	} else if euid != 0 {
+		log.Fatalf("%s must be run with root privileges", binaryName)
 	}
 
 	// We initialize ConfigManager first because all components require the initial config to start up.
@@ -317,16 +328,37 @@ Using environment variables:
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	remoteServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities)
 	if err != nil {
-		logger.Fatal("failed to initialize Remote gRPC server", zap.Error(err))
+		logger.Fatal("unable to initialize Remote gRPC server", zap.Error(err))
 	}
+
+	// Setup the event dispatcher and wire it into the existing Remote gRPC server.
+	dispatchManager, err := dispatch.New(
+		initialCfg.Dispatch,
+		logger,
+		[]subscriber.ServiceOption{
+			subscriber.WithEventFilter(&beewatch.EventFilter{
+				V2Types: []beewatch.V2Event_Type{
+					beewatch.V2Event_OPEN_BLOCKED,
+					beewatch.V2Event_LAST_WRITER_CLOSED,
+				},
+			}),
+		},
+		dispatch.WithDefaultDispatchFn(jobManager.GetEventDispatchFunc(ctx, logger.Logger)),
+		dispatch.WithExistingGRPCServer(remoteServer.GetGRPCServer()),
+		dispatch.WithMetricPrefix("remote"),
+	)
+	if err != nil {
+		logger.Fatal("unable to initialize dispatcher", zap.Error(err))
+	}
+	dispatchManager.Start()
 
 	// Most components should not shutdown unexpectedly once they are started, but anything that
 	// might should return an error on this channel signalling the application to shutdown. Increase
 	// the channel size as needed if other components may also use this channel to log errors.
 	errChan := make(chan error, 2)
-	jobServer.ListenAndServe(errChan)
+	remoteServer.ListenAndServe(errChan)
 
 	// Block and wait for a shutdown signal:
 	select {
@@ -335,7 +367,8 @@ Using environment variables:
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-	jobServer.Stop()
+	remoteServer.Stop()
+	dispatchManager.Stop()
 	jobManager.Stop()
 	workerManager.Stop()
 

@@ -177,6 +177,8 @@ func (r *S3Client) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest 
 		Path:                cfg.Path,
 		RemoteStorageTarget: cfg.RemoteStorageTarget,
 		StubLocal:           cfg.StubLocal,
+		RestorePolicy:       cfg.RestorePolicy,
+		CooldownSecs:        cfg.CooldownSecs,
 		Priority:            cfg.GetPriority(),
 		Force:               cfg.Force,
 		Type: &beeremote.JobRequest_Sync{
@@ -204,6 +206,8 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 		RemotePath:          sync.RemotePath,
 		Download:            sync.Operation == flex.SyncJob_DOWNLOAD,
 		StubLocal:           request.StubLocal,
+		RestorePolicy:       request.RestorePolicy,
+		CooldownSecs:        request.CooldownSecs,
 		Overwrite:           sync.Overwrite,
 		Flatten:             sync.Flatten,
 		Priority:            &request.Priority,
@@ -243,7 +247,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, LockedAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -696,7 +700,7 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 		}
 
 		if request.StubLocal {
-			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true)
+			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy()))
 			if err != nil {
 				return fmt.Errorf("upload successful but failed to create stub file: %w", err)
 			}
@@ -735,7 +739,9 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if !request.StubLocal && IsFileOffloaded(sync.LockedInfo) {
-			entry.SetFileDataState(ctx, request.Path, DataStateNone)
+			if err := entry.SetFileDataState(ctx, request.Path, beegfs.DataStateAvailable); err != nil {
+				return fmt.Errorf("unable to clear offloaded data state: %w", err)
+			}
 		}
 	}
 
@@ -749,13 +755,14 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 		return
 	}
 
+	var currentRSTCfg msg.RemoteStorageTarget
 	var entryInfoMsg msg.EntryInfo
 	var ownerNode beegfs.Node
 	var getLockedInfoCalled bool
 
 	if !IsFileLocked(lockedInfo) {
-		if lockedInfo, writeLockSet, _, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
-			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
+		if lockedInfo, writeLockSet, _, currentRSTCfg, entryInfoMsg, ownerNode, err = GetLockedInfo(ctx, r.mountPoint, cfg, cfg.Path, false); err != nil {
+			err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, fmt.Errorf("failed to acquire lock: %w", err))
 			return
 		}
 		getLockedInfoCalled = true
@@ -771,14 +778,31 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 			return
 		}
 
+		// Same logic as GetLockedInfo just without getting the lock.
 		if !getLockedInfoCalled {
-			if entryInfoMsg, _, ownerNode, err = entry.GetEntryAndOwnerFromPath(ctx, nil, cfg.Path); err != nil {
+			var entryInfo *entry.GetEntryCombinedInfo
+			if entryInfo, err = entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
+				Verbose:        false,
+				IncludeOrigMsg: true,
+			}, cfg.Path); err != nil {
 				err = fmt.Errorf("failed to get entry info: %w", err)
 				return
 			}
+			origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
+			if origEntryInfoPtr != nil {
+				entryInfoMsg = *origEntryInfoPtr
+			} else {
+				entryInfoMsg = msg.EntryInfo{}
+			}
+			if entryInfo.Entry.Details == nil {
+				err = fmt.Errorf("unable to determine remote targets, full entry details unavailable for %s: %s", cfg.Path, entryInfo.Entry.EntryInfoPopulated)
+				return
+			}
+			currentRSTCfg = entryInfo.Entry.Details.Remote.RemoteStorageTarget
+			ownerNode = entryInfo.Entry.MetaOwnerNode
 		}
 
-		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, entryInfoMsg, ownerNode, cfg); err != nil {
+		if err = PrepareFileStateForWorkRequests(ctx, r, r.mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, cfg); err != nil {
 			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
 				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
 			}
