@@ -857,6 +857,13 @@ func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, 
 				return err
 			}
 
+			fs := info.FileState
+			if clearFlags {
+				fs = fs.WithoutAccessState(flags)
+			} else {
+				fs = fs.WithAccessState(flags)
+			}
+
 			if fs == info.FileState {
 				return nil
 			}
