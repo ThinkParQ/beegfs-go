@@ -52,16 +52,14 @@ type StripePatternType uint32
 const (
 	StripePatternInvalid StripePatternType = iota
 	StripePatternRaid0
-	StripePatternRaid10
-	StripePatternBuddyMirror
+	// "2" was previously used for the now deprecated/removed StripePatternRaid10.
+	StripePatternBuddyMirror = 3
 )
 
 func (p StripePatternType) String() string {
 	switch p {
 	case StripePatternRaid0:
 		return "RAID0"
-	case StripePatternRaid10:
-		return "RAID10"
 	case StripePatternBuddyMirror:
 		return "Buddy Mirror"
 	default:
