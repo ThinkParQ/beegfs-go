@@ -1,9 +1,9 @@
 package filesystem
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 )
@@ -81,8 +81,8 @@ func readFilePart(file io.ReadSeeker, offsetStart int64, offsetStop int64) ([]by
 	return buf, nil
 }
 
-func getFilePartChecksumSHA256(filePart []byte) string {
-	hasher := sha256.New()
+func getFilePartChecksumCRC32C(filePart []byte) string {
+	hasher := crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	hasher.Write(filePart)
 	hashSum := hasher.Sum(nil)
 	return base64.StdEncoding.EncodeToString(hashSum)
