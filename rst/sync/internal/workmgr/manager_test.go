@@ -222,6 +222,7 @@ func TestSubmitWorkRequest(t *testing.T) {
 	// First simulate a successful request:
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("0", "0"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_COMPLETED)).Return(nil).Times(1)
 	testRequest1 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	resp, err := mgr.SubmitWorkRequest(testRequest1)
@@ -234,6 +235,7 @@ func TestSubmitWorkRequest(t *testing.T) {
 	// Then simulate the RST returning an error (note if an error happens the state is always failed):
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "0"), mock.Anything).Return(fmt.Errorf("test wants an error")).Times(1)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "0")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "0", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "0", flex.Work_FAILED)).Return(nil).Times(1)
 	testRequest2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2.SetJobId("1")
@@ -252,6 +254,7 @@ func TestSubmitWorkRequest(t *testing.T) {
 	// Then simulate the request completing, but it was not able to be sent to BeeRemote.
 	// Also for some "reason" a job ID was skipped, but it should still get picked up.
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("3", "1"), mock.Anything).Return(nil).Times(2)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("3", "1", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("3", "1", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("3", "1")).Return(true, time.Duration(0), nil).Times(1)
 	testRequest3 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
@@ -302,6 +305,7 @@ func TestUpdateRequests(t *testing.T) {
 	// send a response to BeeRemote.
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(fmt.Errorf("test wants an error")).Times(1)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2.SetJobId("1")
@@ -330,6 +334,7 @@ func TestUpdateRequests(t *testing.T) {
 	// Force the the request to stay active because it can't send a response to BeeRemote.
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2_2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2_2.SetJobId("1")
@@ -355,6 +360,7 @@ func TestUpdateRequests(t *testing.T) {
 	// send a response to BeeRemote.
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "3"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "3")).Return(true, time.Duration(0), nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest3 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest3.SetJobId("1")
