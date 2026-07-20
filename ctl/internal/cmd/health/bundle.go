@@ -139,16 +139,16 @@ For example with tar when extracting a bundle from the same directory you must p
 			tmpBundlePath := filepath.Join(args[0], fmt.Sprintf("%s-beegfs-support-bundle", time.Now().Format(time.RFC3339)))
 			err := os.Mkdir(tmpBundlePath, 0755)
 			if err != nil {
-				return fmt.Errorf("error creating temporary directory at %s: %w", tmpBundlePath, err)
+				return fmt.Errorf("creating temporary directory at %s: %w", tmpBundlePath, err)
 			}
 			defer os.RemoveAll(tmpBundlePath)
 			err = collectSupportFiles(tmpBundlePath, getGlobalConfig())
 			if err != nil {
-				return fmt.Errorf("error collecting data: %w", err)
+				return fmt.Errorf("collecting data: %w", err)
 			}
 			err = bundleSupportFiles(tmpBundlePath)
 			if err != nil {
-				return fmt.Errorf("error bundling data into a tarball at %s: %w", tmpBundlePath, err)
+				return fmt.Errorf("bundling data into a tarball at %s: %w", tmpBundlePath, err)
 			}
 			cmdfmt.Printf("Successfully created support bundle at: %s%s\n", tmpBundlePath, bundleExtension)
 			cmdfmt.Printf(`
@@ -224,7 +224,7 @@ func collectSupportFiles(tmpBundlePath string, globalFlags []string) error {
 	for _, file := range supportBundleContents {
 		f, err := os.Create(filepath.Join(tmpBundlePath, file.name))
 		if err != nil {
-			return fmt.Errorf("error creating file %s: %w", filepath.Join(tmpBundlePath, file.name), err)
+			return fmt.Errorf("creating file %s: %w", filepath.Join(tmpBundlePath, file.name), err)
 		}
 		os.Stdout = f
 		os.Stderr = f
@@ -259,7 +259,7 @@ func bundleSupportFiles(tmpBundlePath string) error {
 
 	return filepath.Walk(tmpBundlePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return fmt.Errorf("error walking bundle directory: %w", err)
+			return fmt.Errorf("walking bundle directory: %w", err)
 		}
 
 		if info.IsDir() {
@@ -275,7 +275,7 @@ func bundleSupportFiles(tmpBundlePath string) error {
 func addFileToTar(tarWriter *tar.Writer, tmpBundlePath string, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("error opening file %s: %w", filePath, err)
+		return fmt.Errorf("opening file %s: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -290,12 +290,12 @@ func addFileToTar(tarWriter *tar.Writer, tmpBundlePath string, filePath string) 
 	}
 
 	if err := tarWriter.WriteHeader(header); err != nil {
-		return fmt.Errorf("error writing file %s header to tarball: %w", filePath, err)
+		return fmt.Errorf("writing file %s header to tarball: %w", filePath, err)
 	}
 
 	_, err = io.Copy(tarWriter, file)
 	if err != nil {
-		return fmt.Errorf("error copying file %s contents to tarball: %s", filePath, err)
+		return fmt.Errorf("copying file %s contents to tarball: %w", filePath, err)
 	}
 	return nil
 }

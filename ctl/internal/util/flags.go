@@ -149,7 +149,7 @@ func (f *rstsFlag) Set(value string) error {
 	for _, str := range rstStrings {
 		parsedRST, err := strconv.ParseUint(str, 10, 32)
 		if err != nil {
-			return fmt.Errorf("error parsing RST ID %s: %w", str, err)
+			return fmt.Errorf("parsing RST ID %s: %w", str, err)
 		}
 		if parsedRST == 0 {
 			return fmt.Errorf("using '0' as an RST ID is not allowed")

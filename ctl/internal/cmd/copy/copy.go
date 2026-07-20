@@ -127,7 +127,7 @@ should take measures to perform additional verification the source and destinati
 				if errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("to use this mode first install the beegfs-copy package")
 				} else {
-					return fmt.Errorf("error checking for required component at %s: %w (verify the beegfs-copy package is properly installed)", beegfsCopyPath, err)
+					return fmt.Errorf("checking for required component at %s: %w (verify the beegfs-copy package is properly installed)", beegfsCopyPath, err)
 				}
 			}
 			if mgmtdClient, err := config.ManagementClient(); err != nil {
@@ -222,7 +222,7 @@ func copyRunner(bflagSet *bflag.FlagSet, paths []string, dest string) error {
 			log.Debug("beegfs-copy exited with non-zero status, propagating exit code", zap.Error(err))
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("error waiting for copy to complete: %w", err)
+		return fmt.Errorf("waiting for copy to complete: %w", err)
 	}
 	return nil
 }

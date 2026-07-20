@@ -200,7 +200,7 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 				}
 				// Otherwise allow the pattern to be updated.
 			} else {
-				return SetEntryResult{}, fmt.Errorf("error looking up pool with ID %s for path %s: %w", poolID, path, err)
+				return SetEntryResult{}, fmt.Errorf("looking up pool with ID %s for path %s: %w", poolID, path, err)
 			}
 		}
 		request.Pattern.Type = *cfg.StripePattern

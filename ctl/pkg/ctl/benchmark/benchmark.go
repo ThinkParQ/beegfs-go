@@ -84,7 +84,7 @@ func ExecuteStorageBenchAction(ctx context.Context, benchConfig *StorageBenchCon
 
 	filteredTargetsByNode, err := filterTargetsByNode(ctx, mappings, benchConfig)
 	if err != nil {
-		return nil, fmt.Errorf("error filtering target list: %w", err)
+		return nil, fmt.Errorf("filtering target list: %w", err)
 	}
 	log.Debug("initialized storage bench mode", zap.String("filteredTargetsByNode", fmt.Sprintf("%+v", filteredTargetsByNode)))
 
