@@ -334,7 +334,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 	// The following checks/text should be printed at the bottom. Don't add checks after this point.
 	if failedCheck && !frontendCfg.ignoreFailedChecks {
 		util.TerminalAlert()
-		return util.NewCtlError(fmt.Errorf("one or more checks failed"), 1)
+		return util.NewCtlError(fmt.Errorf("one or more checks failed"), util.GeneralError)
 	}
 	return nil
 }

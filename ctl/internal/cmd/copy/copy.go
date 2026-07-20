@@ -197,7 +197,6 @@ destination have different modification times.`,
 For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().IntVar(&frontendCfg.batchSize, "stdin-batch", 1024, "At most this many paths will be read from stdin before triggering the parallel copy. Setting to higher values will consume more memory.")
 	cmd.MarkFlagRequired("machine-file")
-	cmd.Flags().MarkHidden("copy-help")
 	return cmd
 }
 
