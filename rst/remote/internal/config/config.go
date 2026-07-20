@@ -86,6 +86,10 @@ func (c *AppConfig) ValidateConfig() error {
 		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db-path must be set to a valid path (provided path: '%s')", c.Job.PathDBPath))
 	}
 
+	if c.Job.PathDBBlockCache < 0 {
+		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db-block-cache cannot be negative (provided value: %d)", c.Job.PathDBBlockCache))
+	}
+
 	if c.Job.MinJobEntriesPerRST < 1 {
 		return fmt.Errorf("the job.min-job-entries-per-rst must be one or greater (provided value: %d)", c.Job.MinJobEntriesPerRST)
 	}
