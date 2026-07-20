@@ -194,7 +194,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
 	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
-	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
+	workJournal, closeWorkJournal, err := kvstore.NewMapStore[*workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
 	}

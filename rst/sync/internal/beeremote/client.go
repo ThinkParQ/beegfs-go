@@ -147,13 +147,7 @@ func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.Job
 		return fmt.Errorf("BeeRemote client is not ready")
 	}
 
-	if err := c.submitJob(ctx, jobRequest); err != nil {
-		if _, ok := status.FromError(err); !ok {
-			return fmt.Errorf("received an unknown error (no gRPC status), most likely this is a bug: %w", err)
-		}
-		return err
-	}
-	return nil
+	return c.submitJob(ctx, jobRequest)
 }
 
 func (c *Client) Disconnect() error {
