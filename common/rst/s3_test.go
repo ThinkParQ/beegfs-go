@@ -13,14 +13,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// A client that can be used for methods that don't actually require interacting with a real S3
-// bucket. Note more complex unit tests would require reworking S3Client.client into an interface so
-// it could be mocked. These could be based off the previous sync_tests that existed before the RST
-// and Job packages were refactored:
-// https://github.com/ThinkParQ/bee-remote/blob/6cdea09384f4dc4446fec61ab968565a7c649a65/internal/job/sync_test.go
 var testS3Client = &S3Client{
 	config: &flex.RemoteStorageTarget{
 		Policies: &flex.RemoteStorageTarget_Policies{},
+	},
+	s3Config: &flex.RemoteStorageTarget_S3{
+		Bucket: "test-bucket",
 	},
 }
 
