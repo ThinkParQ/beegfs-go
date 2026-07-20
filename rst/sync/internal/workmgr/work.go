@@ -19,7 +19,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const workDelayMinimum time.Duration = time.Second
+const (
+	// UpdateWorkRequestTimeout bounds a single attempt to update a work request to remote.
+	UpdateWorkRequestTimeout               = 30 * time.Second
+	workDelayMinimum         time.Duration = time.Second
+)
 
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
@@ -322,7 +326,19 @@ func (w *worker) process(work workAssignment) {
 	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
-	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
+		log.Warn("error updating journal work entry to running", zap.Error(err))
+	}
+
+	// Make a best-effort attempt to notify remote that the job is running. A failure is
+	// logged and not retried because the final result is sent with retries when the work
+	// completes.
+	updateCtx, cancel := context.WithTimeout(work.ctx, UpdateWorkRequestTimeout)
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+	cancel()
+
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(work, client, entry)
 	} else {
