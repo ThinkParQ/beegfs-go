@@ -108,24 +108,34 @@ type StreamPathResult struct {
 	Err         error
 }
 
-// StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths in a
-// lexicographically increasing order. If startAfter != "" then only files lexically greater than
-// will be considered. maxPaths limits the number of paths returned and can be set to -1 for all
-// paths. chanSize is the buffer size for the returned *StreamPathResult channel.
-func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
-	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxPaths, chanSize, filter, false)
+type PathStreamFunc func(
+	ctx context.Context,
+	mountPoint Provider,
+	pattern string,
+	startAfter string,
+	maxFiles int,
+	chanSize int,
+	filter FileInfoFilter,
+) (<-chan *StreamPathResult, error)
+
+// StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths
+// in a lexicographically increasing order. If startAfter != "" then only files lexically greater
+// than will be considered. maxFiles limits the number of files returned and can be set to -1 for
+// all files. chanSize is the buffer size for the returned *StreamPathResult channel.
+func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxFiles, chanSize, filter, false)
 }
 
-// StreamPathsLexicographicallyWithDirs behaves like StreamPathsLexicographically but also emits
-// directories that match the filter (if provided). Directories are still traversed even if they
-// don't match the filter.
-func StreamPathsLexicographicallyWithDirs(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
-	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxPaths, chanSize, filter, true)
+// StreamPathsLexicographicallyWithDirs behaves like StreamPathsLexicographically but also emit
+// directories. Emitted directories are not counted against maxFiles. Also, the ResumeToken returned
+// will only be file paths.
+func StreamPathsLexicographicallyWithDirs(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxFiles, chanSize, filter, true)
 }
 
-func streamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxPaths int, chanSize int, filter FileInfoFilter, includeDirs bool) (<-chan *StreamPathResult, error) {
-	if maxPaths != -1 && maxPaths <= 0 {
-		return nil, fmt.Errorf("maxPaths must be greater than zero or -1")
+func streamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter, includeDirs bool) (<-chan *StreamPathResult, error) {
+	if maxFiles != -1 && maxFiles <= 0 {
+		return nil, fmt.Errorf("maxFiles must be greater than zero or -1")
 	}
 
 	preparePath := func(path string) string {
@@ -203,18 +213,29 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				return true
 			}
 		}
-		emitPath := func(path string, resumeToken string) bool {
-			if maxPaths == 0 {
-				send(&StreamPathResult{ResumeToken: resumeToken})
+
+		// Only files count against maxFiles or anchor the resume token: a directory never produces
+		// a job request on its own (see jobRequestBuilder.Process), and reapplying its RST config on
+		// a later pass is a no-op, so it's always sent immediately regardless of the remaining
+		// budget.
+		var lastSent string
+		emitFile := func(path string) bool {
+			if maxFiles == 0 {
+				send(&StreamPathResult{ResumeToken: lastSent})
 				return false
 			}
 			if !send(&StreamPathResult{Path: path}) {
 				return false
 			}
-			if maxPaths > 0 {
-				maxPaths--
+			lastSent = path
+			if maxFiles > 0 {
+				maxFiles--
 			}
 			return true
+		}
+
+		emitDir := func(path string) bool {
+			return send(&StreamPathResult{Path: path})
 		}
 
 		var walkDir func(string) bool
@@ -233,29 +254,25 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 				return false
 			}
 
-			lastPath := directory
 			for _, entry := range entries {
 				path := filepath.Join(directory, entry.Name())
 				inMountPath := "/" + path
 
 				if entry.IsDir() {
 					if includeDirs {
-						emitDir := false
+						shouldEmitDir := false
 						if !isGlob {
-							emitDir = path > startAfter
+							shouldEmitDir = path > startAfter
 						} else if match := doublestar.MatchUnvalidated(pattern, path); match {
-							emitDir = path > startAfter
+							shouldEmitDir = path > startAfter
 						}
 
-						if emitDir {
+						if shouldEmitDir {
 							if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
 								send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 								return false
-							} else if keep {
-								if !emitPath(inMountPath, lastPath) {
-									return false
-								}
-								lastPath = path
+							} else if keep && !emitDir(inMountPath) {
+								return false
 							}
 						}
 					}
@@ -281,10 +298,9 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					continue
 				}
 
-				if !emitPath(inMountPath, lastPath) {
+				if !emitFile(inMountPath) {
 					return false
 				}
-				lastPath = path
 			}
 
 			return true
@@ -298,7 +314,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 					return
 				} else if keep {
-					if !emitPath(inMountPath, root) {
+					if !emitDir(inMountPath) {
 						return
 					}
 				}

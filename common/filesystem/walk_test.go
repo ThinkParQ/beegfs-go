@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
@@ -432,6 +433,166 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 				assert.Equal(t, commonTestPaths, paths)
 			}
 		})
+	}
+}
+
+// TestWalkResumeAcrossNestedDirectory reproduces a bug where the resume token emitted when a walk
+// is cut off can point earlier than the last path actually sent. This happens when the cutoff
+// lands on a directory entry's sibling immediately after a nested subdirectory: the parent
+// directory's resume token only advances when it emits a file directly, so it does not account for
+// paths already sent from within the subdirectory. Resuming from that stale token causes the
+// subdirectory to be walked again and its already-sent paths to be duplicated.
+func TestWalkResumeAcrossNestedDirectory(t *testing.T) {
+	mountDir := t.TempDir()
+	paths := []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}
+	for _, path := range paths {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	// Cut the walk off right after /data/b/b/b.txt, which is sent from within the nested "b/b"
+	// subdirectory rather than directly from "b". This is the boundary that triggers the stale
+	// resume token.
+	firstChan, err := StreamPathsLexicographically(ctx, provider, "/data", "", 5, 0, nil)
+	require.NoError(t, err)
+
+	var firstPass []string
+	var resumeToken string
+	for resp := range firstChan {
+		require.NoError(t, resp.Err)
+		if resp.ResumeToken != "" {
+			resumeToken = resp.ResumeToken
+			continue
+		}
+		firstPass = append(firstPass, resp.Path)
+	}
+	require.Equal(t, []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+	}, firstPass)
+	require.NotEmpty(t, resumeToken, "expected more work to remain after the cutoff")
+
+	secondChan, err := StreamPathsLexicographically(ctx, provider, "/data", resumeToken, -1, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		if resp.ResumeToken != "" {
+			continue
+		}
+		secondPass = append(secondPass, resp.Path)
+	}
+
+	seen := make(map[string]bool, len(firstPass))
+	for _, path := range firstPass {
+		seen[path] = true
+	}
+	for _, path := range secondPass {
+		assert.Falsef(t, seen[path], "path %q was sent in both the first and resumed pass", path)
+	}
+}
+
+// TestWalkWithDirsDirectoriesDoNotAnchorResume guards against a bug specific to
+// StreamPathsLexicographicallyWithDirs: a directory can be a prefix of a sibling file's name (e.g.
+// directory "b" next to file "b.txt"), and under this package's directory-aware ordering (a period
+// sorts before a slash) the file sorts before the directory. If the directory's own bare path were
+// ever used as the resume anchor, plain string comparison of that sibling file's full path against
+// it would disagree with the true walk order and the file could be resent. Directories never produce
+// a job request on their own (see jobRequestBuilder.Process) and are idempotent to reprocess, so
+// they're emitted for free without counting against maxFiles or ever becoming the resume anchor -
+// this confirms the resume token always lands on a file even when a directory sits directly at the
+// cutoff boundary.
+func TestWalkWithDirsDirectoriesDoNotAnchorResume(t *testing.T) {
+	mountDir := t.TempDir()
+	paths := []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}
+	for _, path := range paths {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	// Cut the walk off right after the file "/data/b.txt", which is immediately followed in
+	// directory-aware sort order by the "/data/b" directory itself - so the directory is emitted
+	// for free directly at the cutoff boundary.
+	firstChan, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", "", 3, 0, nil)
+	require.NoError(t, err)
+
+	var firstPass []string
+	var resumeToken string
+	for resp := range firstChan {
+		require.NoError(t, resp.Err)
+		if resp.ResumeToken != "" {
+			resumeToken = resp.ResumeToken
+			continue
+		}
+		firstPass = append(firstPass, resp.Path)
+	}
+	require.Equal(t, []string{
+		"/data",
+		"/data/a",
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b",
+	}, firstPass)
+	require.Equal(t, "/data/b.txt", resumeToken, "the resume token should anchor on the last file sent, not the directory emitted alongside it")
+
+	secondChan, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", resumeToken, -1, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		if resp.ResumeToken != "" {
+			continue
+		}
+		secondPass = append(secondPass, resp.Path)
+	}
+	require.Equal(t, []string{
+		"/data/b/b.txt",
+		"/data/b/b",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}, secondPass)
+
+	seenFiles := map[string]bool{}
+	for _, path := range firstPass {
+		if !strings.HasSuffix(path, ".txt") {
+			continue
+		}
+		seenFiles[path] = true
+	}
+	for _, path := range secondPass {
+		if !strings.HasSuffix(path, ".txt") {
+			continue
+		}
+		assert.Falsef(t, seenFiles[path], "file %q was sent in both the first and resumed pass", path)
 	}
 }
 
