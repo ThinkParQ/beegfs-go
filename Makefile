@@ -174,3 +174,16 @@ check-licenses: generate-notices
 .PHONY: tidy
 tidy :
 	@go mod tidy
+
+# Download and install the version of Go requested by go.mod to /usr/local/go, following the
+# official install instructions (https://go.dev/doc/install).
+.PHONY: install-go
+install-go:
+	@set -eo pipefail; \
+	GO_VERSION=$$(grep '^go ' go.mod | awk '{print $$2}'); \
+	OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	ARCH=$$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/'); \
+	echo "Installing Go $$GO_VERSION ($$OS-$$ARCH) to /usr/local/go"; \
+	rm -rf /usr/local/go; \
+	curl -fSL "https://go.dev/dl/go$$GO_VERSION.$$OS-$$ARCH.tar.gz" | tar -C /usr/local -xz; \
+	echo 'Done. Ensure /usr/local/go/bin is on your PATH, e.g.: export PATH=$$PATH:/usr/local/go/bin'
