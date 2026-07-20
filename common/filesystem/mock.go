@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 )
@@ -47,6 +48,16 @@ func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	return nil
 }
 
+func (fs MockFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	file, err := fs.Fs.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	file.Truncate(size)
+	return nil
+}
+
 func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	file, err := fs.Fs.Create(path)
 	if err != nil {
@@ -63,6 +74,10 @@ func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrit
 
 func (fs MockFS) Remove(path string) error {
 	return fs.Fs.Remove(path)
+}
+
+func (fs MockFS) RemoveAll(path string) error {
+	return fs.Fs.RemoveAll(path)
 }
 
 func (fs MockFS) Open(path string) (io.ReadCloser, error) {
@@ -115,6 +130,10 @@ func (fs MockFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
 
 func (fs MockFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
+	return fs.Fs.Chtimes(path, atime, mtime)
 }
 
 func (fs MockFS) OverwriteFile(srcPath, dstPath string) error {
