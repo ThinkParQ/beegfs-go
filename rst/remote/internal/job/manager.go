@@ -788,16 +788,20 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 
 	}
 
-	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
-	if !ok {
-		return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
-	}
-
 	var jobSubmission workermgr.JobSubmission
-	if jr.GenerationStatus != nil {
-		status := jr.GenerationStatus
-		if status != nil {
-			switch status.State {
+	if jr.HasGenerationStatus() {
+		status := jr.GetGenerationStatus()
+		if _, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+			// A FAILED_PRECONDITION with an unknown rstId means the builder encountered a file
+			// whose RST config references an rstId that no longer exists (or never did). Treat it
+			// as ErrJobFailedPrecondition so the job gets the error rather than rejected.
+			if status.GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
+				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+			} else {
+				return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+			}
+		} else {
+			switch status.GetState() {
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
 				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
 				// mark the job as complete so ignore the err.
@@ -814,6 +818,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			}
 		}
 	} else {
+		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+		if !ok {
+			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+		}
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
 	}
 
