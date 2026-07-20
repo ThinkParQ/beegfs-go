@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
@@ -115,8 +116,10 @@ func (c *AppConfig) ValidateConfig() error {
 		if c.Metadata[0].EventBufferGCFrequency == 0 {
 			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-gc-frequency for this metadata service cannot be 0"))
 		}
-		if c.Metadata[0].EventBufferSize == 0 {
-			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-size for this metadata service cannot be 0"))
+		if c.Metadata[0].EventBufferSize < 1 {
+			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-size for this metadata service must be at least 1"))
+		} else if c.Metadata[0].EventBufferSize >= math.MaxInt/2 {
+			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-size for this metadata service must be less than %d", math.MaxInt/2))
 		}
 	}
 
