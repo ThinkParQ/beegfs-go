@@ -52,7 +52,7 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to connect to management: %w", err)
+		return nil, nil, err
 	}
 	ctlFsUUID, err := mgmtd.GetFsUUID(ctx)
 	if err != nil {

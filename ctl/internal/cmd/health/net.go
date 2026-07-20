@@ -54,7 +54,7 @@ func runNetCmd(cmd *cobra.Command, filterByMounts []string, frontendCfg netCfg, 
 	if !frontendCfg.noFilterByMgmtd {
 		mgmtd, err := config.ManagementClient()
 		if err != nil {
-			return fmt.Errorf("unable to connect to management node: %w", err)
+			return err
 		}
 		backendCfg.FilterByUUID, err = mgmtd.GetFsUUID(cmd.Context())
 		if err != nil {

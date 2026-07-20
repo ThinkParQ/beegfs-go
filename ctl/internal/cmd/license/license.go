@@ -296,7 +296,7 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return "", fmt.Errorf("unable to connect to management: %w", err)
+		return "", err
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)

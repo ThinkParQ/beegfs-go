@@ -157,7 +157,7 @@ func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+		return err
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)
