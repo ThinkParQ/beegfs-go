@@ -9,9 +9,14 @@ type CtlError struct {
 type CtlExitCode int
 
 const (
-	Success CtlExitCode = iota
-	GeneralError
-	PartialSuccess
+	Success        CtlExitCode = iota // 0
+	GeneralError                      // 1
+	PartialSuccess                    // 2
+
+	// NodesUnreachable is returned by "node list --reachability-error" when at least one node is
+	// unreachable. Its value (5) is fixed for backward compatibility with existing scripts; the
+	// values 3 and 4 are intentionally left unused.
+	NodesUnreachable CtlExitCode = 5
 )
 
 func (c CtlExitCode) String() string {
@@ -22,6 +27,8 @@ func (c CtlExitCode) String() string {
 		return "General Error"
 	case PartialSuccess:
 		return "Partial Success"
+	case NodesUnreachable:
+		return "Nodes Unreachable"
 	default:
 		return "Unknown"
 	}
@@ -39,4 +46,9 @@ func (err *CtlError) GetExitCode() int {
 
 func (err CtlError) Error() string {
 	return err.inner.Error()
+}
+
+// Unwrap exposes the wrapped error so errors.Is and errors.As can traverse into it.
+func (err CtlError) Unwrap() error {
+	return err.inner
 }

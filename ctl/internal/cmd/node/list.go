@@ -155,7 +155,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	}
 
 	if reachabilityError && hasUnreachableNode {
-		return util.NewCtlError(fmt.Errorf("at least one node is unreachable"), 5)
+		return util.NewCtlError(fmt.Errorf("at least one node is unreachable"), util.NodesUnreachable)
 	}
 
 	return nil

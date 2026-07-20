@@ -356,10 +356,11 @@ Exit Codes:
   %d - %s
   %d - %s
   %d - %s
+  %d - %s
 {{ else }}
 See "beegfs --help" for a list of global flags that also apply to this command.
 {{end}}
-`, util.Success, util.Success, util.GeneralError, util.GeneralError, util.PartialSuccess, util.PartialSuccess)
+`, util.Success, util.Success, util.GeneralError, util.GeneralError, util.PartialSuccess, util.PartialSuccess, util.NodesUnreachable, util.NodesUnreachable)
 
 // getTermWidthForHelp attempts to determine the width of the terminal, falling back to
 // helpMinTermWidth if there is an error (i.e., stdout is not a terminal). It also enforces a
