@@ -244,22 +244,28 @@ func collectSupportFiles(tmpBundlePath string, globalFlags []string) error {
 }
 
 // bundleSupportFile requires an absolute path to a directory that should be made into a tarball.
-func bundleSupportFiles(tmpBundlePath string) error {
+func bundleSupportFiles(tmpBundlePath string) (retErr error) {
 	tarGzFile, err := os.Create(tmpBundlePath + bundleExtension)
 	if err != nil {
 		return err
 	}
-	defer tarGzFile.Close()
+	defer func() {
+		retErr = errors.Join(retErr, tarGzFile.Close())
+	}()
 
 	gzipWriter := gzip.NewWriter(tarGzFile)
-	defer gzipWriter.Close()
+	defer func() {
+		retErr = errors.Join(retErr, gzipWriter.Close())
+	}()
 
 	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
+	defer func() {
+		retErr = errors.Join(retErr, tarWriter.Close())
+	}()
 
-	return filepath.Walk(tmpBundlePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return fmt.Errorf("error walking bundle directory: %w", err)
+	return filepath.Walk(tmpBundlePath, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("error walking bundle directory: %w", walkErr)
 		}
 
 		if info.IsDir() {
