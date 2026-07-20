@@ -888,12 +888,13 @@ func setAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags, 
 	return nil
 }
 
-// SetFileRstPattern applies the specified RST fields to a file using a single
-// SetFilePatternRequest, preserving all other RST fields (IDs, cooldown, policies, etc.). Pass nil
-// for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave the current
-// cooldown unchanged. When entryInfoMsg, ownerNode, and existingRst are already known (e.g. from a
-// prior GetLockedInfo call), pass them to avoid a redundant GetEntry round-trip; otherwise pass
-// zero values and the entry will be fetched internally.
+// SetFileRstPattern applies the specified rst fields (rstIds, cooldown, policies, etc) to a file
+// using a single SetFilePatternRequest, preserving all other rst fields. Pass nil for rstIds and
+// cooldownSecs to leave the current unchanged.
+//
+// When entryInfoMsg, ownerNode and currentRSTCfg are already known, for example from a prior
+// rst.GetPathState call, pass them to avoid a redundant GetEntry round-trip. Otherwise pass zero
+// values and the entry will be fetched internally.
 //
 // IMPORTANT: Does not check permissions - the caller must verify the effective user ID is root.
 func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
@@ -914,16 +915,15 @@ func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldo
 		}
 		ownerNode = entryInfo.Entry.MetaOwnerNode
 	}
+
+	newRSTCfg, updateRequired := resolveRstPatternUpdate(currentRSTCfg, rstIds, cooldownSecs)
+	if !updateRequired {
+		return nil
+	}
+
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return err
-	}
-	newRSTCfg := currentRSTCfg
-	if rstIds != nil {
-		newRSTCfg.RSTIDs = rstIds
-	}
-	if cooldownSecs != nil {
-		newRSTCfg.CoolDownPeriod = *cooldownSecs
 	}
 	req := &msg.SetFilePatternRequest{EntryInfo: entryInfoMsg, RST: newRSTCfg}
 	resp := &msg.SetFilePatternResponse{}
@@ -936,10 +936,48 @@ func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldo
 	return nil
 }
 
+// resolveRstPatternUpdate determines the rst configuration to send for the requested changes and
+// whether a SetFilePatternRequest or SetDirPatternRequest is needed at all. All fields the caller
+// did not ask to change are carried over from currentRSTCfg.
+func resolveRstPatternUpdate(currentRSTCfg msg.RemoteStorageTarget, rstIds []uint32, cooldownSecs *uint16) (msg.RemoteStorageTarget, bool) {
+	updateRequired := false
+	newRSTCfg := currentRSTCfg
+	if rstIds != nil && !rstIdsMatch(currentRSTCfg.RSTIDs, rstIds) {
+		newRSTCfg.RSTIDs = rstIds
+		updateRequired = true
+	}
+	if cooldownSecs != nil && currentRSTCfg.CoolDownPeriod != *cooldownSecs {
+		newRSTCfg.CoolDownPeriod = *cooldownSecs
+		updateRequired = true
+	}
+	return newRSTCfg, updateRequired
+}
+
+// rstIdsMatch returns whether the old match the new rstIds regardless of the order.
+func rstIdsMatch(old []uint32, new []uint32) bool {
+	if len(old) != len(new) {
+		return false
+	}
+
+	counts := make(map[uint32]int, len(old))
+	for _, rstId := range old {
+		counts[rstId]++
+	}
+
+	for _, rstId := range new {
+		counts[rstId]--
+		if counts[rstId] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // SetDirRstPattern fetches the directory entry once and applies the specified RST fields using a
 // single SetDirPatternRequest, preserving the existing stripe pattern and all other RST fields.
 // Pass nil for rstIds to leave the current IDs unchanged; pass nil for cooldownSecs to leave the
-// current cooldown unchanged.
+// current cooldown unchanged. No request is sent when the directory already has the requested
+// values.
 //
 // IMPORTANT: Does not check permissions - the caller must verify the effective user ID is root.
 func SetDirRstPattern(ctx context.Context, path string, rstIds []uint32, cooldownSecs *uint16) error {
@@ -959,16 +997,16 @@ func SetDirRstPattern(ctx context.Context, path string, rstIds []uint32, cooldow
 	if entryInfo.Entry.Details == nil {
 		return fmt.Errorf("full entry details unavailable for %s: %s", path, entryInfo.Entry.EntryInfoPopulated)
 	}
+
+	newRSTCfg, updateRequired := resolveRstPatternUpdate(entryInfo.Entry.Details.Remote.RemoteStorageTarget, rstIds, cooldownSecs)
+	if !updateRequired {
+		return nil
+	}
+
 	request := &msg.SetDirPatternRequest{
 		EntryInfo: *entryInfo.Entry.origEntryInfoMsg,
 		Pattern:   entryInfo.Entry.Details.Pattern.StripePattern,
-		RST:       entryInfo.Entry.Details.Remote.RemoteStorageTarget,
-	}
-	if rstIds != nil {
-		request.RST.RSTIDs = rstIds
-	}
-	if cooldownSecs != nil {
-		request.RST.CoolDownPeriod = *cooldownSecs
+		RST:       newRSTCfg,
 	}
 	store, err := config.NodeStore(ctx)
 	if err != nil {
