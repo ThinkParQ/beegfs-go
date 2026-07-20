@@ -63,70 +63,19 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return workRequests, nil
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error) {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
 	if !workRequest.HasBuilder() {
-		err = ErrReqAndRSTTypeMismatch
-		return
+		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
+	return &SchedulingResult{Err: errors.New("not implemented")}
+}
 
-	builder := workRequest.GetBuilder()
-	cfg := builder.GetCfg()
-	resumeToken := workRequest.GetExternalId()
+func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	return false, ""
+}
 
-	var filter filesystem.FileInfoFilter
-	filterExpr := cfg.GetFilterExpr()
-	if filterExpr != "" {
-		if filter, err = filesystem.CompileFilter(filterExpr); err != nil {
-			err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
-			return
-		}
-	}
-
-	// TODO: maxRequests limits the number of requests that can be created at a time before the
-	// builder job is rescheduled. This should probably be based on the client if possible;
-	// otherwise, client based metric that are based on builder short/long-term data collection.
-	// Each client should at least have some input since there may be costs associated with the
-	// requests as in s3.
-	maxRequests := 1000
-
-	walkChanSize := cap(jobSubmissionChan)
-	var walkChan <-chan *filesystem.StreamPathResult
-	walkPaths := filesystem.StreamPathsLexicographically
-	if cfg.GetUpdate() || cfg.HasCooldownSecs() {
-		walkPaths = filesystem.StreamPathsLexicographicallyWithDirs
-	}
-	if cfg.Download {
-
-		if filter != nil {
-			return false, fmt.Errorf("filter expressions (--%s) are not supported for downloads yet", filesystem.FilterExprFlag)
-		}
-
-		if walkLocalPathInsteadOfRemote(cfg) {
-			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
-			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
-			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			if walkChan, err = walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, nil); err != nil {
-				return
-			}
-		} else {
-			client, ok := c.rstMap[cfg.RemoteStorageTarget]
-			if !ok {
-				err = fmt.Errorf("failed to determine rst client")
-				return
-			}
-
-			if walkChan, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.RemotePath), walkChanSize, resumeToken, maxRequests); err != nil {
-				return
-			}
-		}
-	} else {
-		walkChan, err = walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, maxRequests, walkChanSize, filter)
-		if err != nil {
-			return
-		}
-	}
-
-	return c.executeJobBuilderRequest(ctx, workRequest, walkChan, jobSubmissionChan, cfg)
+func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	return nil, ErrUnsupportedOpForRST
 }
 
 func (r *JobBuilderClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
