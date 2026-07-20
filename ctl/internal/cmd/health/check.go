@@ -2,76 +2,52 @@ package health
 
 import (
 	"context"
-	"crypto/x509"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/strfmt"
 	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/health"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 )
-
-type Status int
-
-func (s *Status) updateStatusIfWorse(newStatus Status) {
-	if newStatus > *s {
-		*s = newStatus
-	}
-}
-
-const (
-	Unknown  Status = iota
-	Healthy  Status = 1
-	Degraded Status = 2
-	Critical Status = 3
-)
-
-const (
-	queuedReqsDegradedThreshold = 16
-	queuedReqsCriticalThreshold = 512
-)
-
-func (s Status) String() string {
-	representation, exists := healthCheckStatusMap[s]
-	if !exists {
-		return "�"
-	}
-	if !viper.GetBool(config.DisableEmojisKey) {
-		return representation.emoji
-	}
-	return representation.alternative
-}
-
-type healthCheckStatusEmoji struct {
-	emoji       string
-	alternative string
-}
-
-var healthCheckStatusMap = map[Status]healthCheckStatusEmoji{
-	0: {"❓", "(UNKNOWN)"},
-	1: {"✅", "(HEALTHY)"},
-	2: {"\u26A0\ufe0f ", "(DEGRADED)"},
-	3: {"🛑", "(CRITICAL)"},
-}
 
 const (
 	watchFlag              = "watch"
 	ignoreFailedChecksFlag = "ignore-failed-checks"
 )
+
+var statusIconMap = map[backend.Status]struct {
+	emoji       string
+	alternative string
+}{
+	backend.Unknown:  {"❓", "(UNKNOWN)"},
+	backend.Healthy:  {"✅", "(HEALTHY)"},
+	backend.Degraded: {"⚠️ ", "(DEGRADED)"},
+	backend.Critical: {"🛑", "(CRITICAL)"},
+}
+
+// statusIcon renders a status for human output as an emoji, or a text alternative when emojis are
+// disabled.
+func statusIcon(s backend.Status) string {
+	rep, ok := statusIconMap[s]
+	if !ok {
+		return "�"
+	}
+	if !viper.GetBool(config.DisableEmojisKey) {
+		return rep.emoji
+	}
+	return rep.alternative
+}
 
 type checkCfg struct {
 	noHints                 bool
@@ -80,54 +56,68 @@ type checkCfg struct {
 	watchInterval           time.Duration
 	ignoreFailedChecks      bool
 	connectionTimeout       time.Duration
+	forceConnections        bool
 }
 
 func newCheckCmd() *cobra.Command {
 
 	frontendCfg := checkCfg{}
-	procfsCfg := procfs.GetBeeGFSClientsConfig{}
 
 	cmd := &cobra.Command{
 		Use:   "check [<mount-path>] ...",
 		Short: "Runs a series of checks against BeeGFS to verify its health",
 		Long: fmt.Sprintf(`Runs a series of checks against BeeGFS to verify its health.
 
-If there are multiple file systems mounted to this client, only one can be checked at a time. 
+If there are multiple file systems mounted to this client, only one can be checked at a time.
 The file system that is checked is determined by the --%s parameter.
-If this file system is mounted multiple times, network connections will be checked for each mount point. 
+If this file system is mounted multiple times, network connections will be checked for each mount point.
 Optionally specify one or more <mount-paths> to limit the connection checks.
 		`, config.ManagementAddrKey),
 		Annotations: map[string]string{
 			"health.SkipAlerts": "",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed(watchFlag) {
-				ticker := time.NewTicker(frontendCfg.watchInterval)
-				for {
+			outputType := config.OutputType(viper.GetString(config.OutputKey))
+
+			if !cmd.Flags().Changed(watchFlag) {
+				return runHealthCheck(cmd.Context(), args, frontendCfg, outputType)
+			}
+
+			// Watch mode: a single JSON document cannot be streamed, so require NDJSON to stream.
+			if outputType == config.OutputJSON || outputType == config.OutputJSONPretty {
+				return fmt.Errorf("--%s is not supported with --%s %s; use --%s ndjson to stream results", watchFlag, config.OutputKey, outputType, config.OutputKey)
+			}
+
+			ticker := time.NewTicker(frontendCfg.watchInterval)
+			defer ticker.Stop()
+			for {
+				if outputType == config.OutputNDJSON {
+					// NDJSON streams one report object per refresh, no terminal clearing.
+					if err := runHealthCheck(cmd.Context(), args, frontendCfg, outputType); err != nil {
+						return err
+					}
+				} else {
 					t := util.TermRefresher{}
 					if err := t.StartRefresh(); err != nil {
 						return err
 					}
-					// Run the health checks:
-					if result := runHealthCheckCmd(cmd.Context(), args, frontendCfg, procfsCfg); result != nil {
+					if err := runHealthCheck(cmd.Context(), args, frontendCfg, outputType); err != nil {
 						t.FinishRefresh()
-						return result
+						return err
 					}
 					t.FinishRefresh(util.WithTermFooter(fmt.Sprintf("Refreshing every %s until Ctrl+C or a check fails (last refresh: %s).", frontendCfg.watchInterval, time.Now().Format(time.TimeOnly))))
-					select {
-					case <-cmd.Context().Done():
-						return nil
-					case <-ticker.C:
-						continue
-					}
 				}
-			} else {
-				return runHealthCheckCmd(cmd.Context(), args, frontendCfg, procfsCfg)
+				select {
+				case <-cmd.Context().Done():
+					return nil
+				case <-ticker.C:
+					continue
+				}
 			}
 		},
 	}
 	cmd.Flags().DurationVar(&frontendCfg.connectionTimeout, connectionTimeoutFlag, time.Second*5, "Timeout when attempting to establish connections for the network connection check.")
-	cmd.Flags().BoolVar(&procfsCfg.ForceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage server connections by running df. Connections may be <none> if this is set to false.")
+	cmd.Flags().BoolVar(&frontendCfg.forceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage server connections by running df. Connections may be <none> if this is set to false.")
 	cmd.Flags().BoolVar(&frontendCfg.printNetworkConnections, "print-net", false, "By default network connections are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.printDF, "print-df", false, "By default available disk capacity and inodes are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.noHints, "no-hints", false, "Disable printing additional hints.")
@@ -137,276 +127,153 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 	return cmd
 }
 
-// runHealthCheckCmd executes all currently defined health checks.
-//
-// When updating this function consider if QuickChecks() needs to be updated as well.
-func runHealthCheckCmd(ctx context.Context, filterByMounts []string, frontendCfg checkCfg, backendCfg procfs.GetBeeGFSClientsConfig) error {
-
-	log, _ := config.GetLogger()
-
-	// Should be set to true if any check falls and the command should return with a non-zero exit
-	// code after all checks are run and results printed (provided checks aren't ignored).
-	failedCheck := false
-
-	hint := func(hint string) string {
-		if frontendCfg.noHints {
-			return ""
-		}
-		return hint
-	}
-
-	mgmtd, err := config.ManagementClient()
+// runHealthCheck collects the health report and renders it in the requested output format. Structured
+// output (JSON/NDJSON) goes to stdout; operational messages always go to stderr.
+func runHealthCheck(ctx context.Context, filterByMounts []string, cfg checkCfg, outputType config.OutputType) error {
+	report, err := backend.Collect(ctx, backend.CollectConfig{
+		ConnectionTimeout: cfg.connectionTimeout,
+		ForceConnections:  cfg.forceConnections,
+		FilterByMounts:    filterByMounts,
+	})
 	if err != nil {
 		return err
 	}
 
-	fsUUID, err := mgmtd.GetFsUUID(ctx)
-	// If the mgmtd is not available other checks cannot proceed and fail in confusing ways.
-	if err != nil {
-		// TLS errors are vague, offer some hints for common misconfigurations:
-		if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
-			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
+	switch outputType {
+	case config.OutputJSON, config.OutputNDJSON:
+		emitConnNotices(report, cfg)
+		data, err := json.Marshal(report)
+		if err != nil {
+			return fmt.Errorf("marshaling health report: %w", err)
 		}
-		if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
-			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
+		fmt.Println(string(data))
+	case config.OutputJSONPretty:
+		emitConnNotices(report, cfg)
+		data, err := json.MarshalIndent(report, "", " ")
+		if err != nil {
+			return fmt.Errorf("marshaling health report: %w", err)
 		}
-		if strings.Contains(err.Error(), "failed to verify certificate") {
-			return fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
+		fmt.Println(string(data))
+	default:
+		renderHuman(ctx, report, cfg)
+	}
+
+	if report.Status != backend.Healthy && !cfg.ignoreFailedChecks {
+		if outputType == config.OutputTable || outputType == "" {
+			util.TerminalAlert()
 		}
-		return fmt.Errorf("unable to proceed without a working management node: %w", err)
-	}
-	printHeader(fmt.Sprintf("Running Health Check for beegfs://%s\n(Filesystem UUID: %s)", mgmtd.GetAddress(), fsUUID), "#")
-	printHeader(">>>>> General Checks <<<<<", "#")
-
-	log.Debug("getting target list")
-	// mgmtdPeer is extracted from the GetTargets resp to avoid a no-op gRPC to check TLS config.
-	var mgmtPeer peer.Peer
-	targets, err := tgtBackend.GetTargets(ctx, grpc.Peer(&mgmtPeer))
-	if err != nil {
-		return err
-	}
-
-	tlsStatus, tlsMsg := checkTLSCertificates(ctx, mgmtPeer)
-	if tlsStatus == Healthy {
-		fmt.Printf("\n%s Management TLS %s", Healthy, hint(fmt.Sprintf("-> %s.", tlsMsg)))
-	} else {
-		failedCheck = true
-		fmt.Printf("\n%s Management TLS %s", tlsStatus, hint(fmt.Sprintf("-> %s.", tlsMsg)))
-	}
-
-	result := license.Check(ctx, targets)
-	if result.IsHealthy() {
-		fmt.Printf("\n%s License Status %s", Healthy, hint("-> No issues detected. Run 'beegfs license' for more details."))
-	} else {
-		failedCheck = true
-		if result.Err != nil {
-			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Error checking status (%s).", err)))
-		} else if result.InvalidMsg != "" {
-			fmt.Printf("\n%s License Status %s", Critical, hint("-> No valid license found. Run 'beegfs license' for more details."))
-		} else if result.ViolationsMsg != "" {
-			fmt.Printf("\n%s License Status %s", Critical, hint(fmt.Sprintf("-> Violations found (%s). Run 'beegfs license' for more details.", result.ViolationsMsg)))
-		} else if result.ExpirationMsg != "" {
-			fmt.Printf("\n%s License Status %s", Degraded, hint(fmt.Sprintf("-> Nearing expiration (%s). Run 'beegfs license' for more details.", result.ExpirationMsg)))
-		} else {
-			// If a check failed but we couldn't map it to a known message string, a new result was
-			// probably added and the check needs to be updated.
-			fmt.Printf("\n%s License Status %s", Critical, hint("-> Unknown (run 'beegfs license' for details)."))
-		}
-	}
-	fmt.Print("\n\n")
-
-	printHeader(">>>>> Checking for Busy Nodes <<<<<", "#")
-	log.Debug("collecting meta stats")
-	metaNodes, err := stats.MultiServerNodes(ctx, beegfs.Meta)
-	if err != nil {
-		return err
-	}
-	metaBusy := checkForBusyNodes(metaNodes)
-	if metaBusy != Healthy {
-		fmt.Printf("\n%s Busy Metadata Nodes %s", metaBusy, hint(fmt.Sprintf("-> Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
-		failedCheck = true
-		fmt.Print("\n\n")
-		printBusyNodes(metaNodes)
-	} else {
-		fmt.Printf("\n%s Busy Metadata Nodes %s", metaBusy, hint(fmt.Sprintf("-> Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
-	}
-	log.Debug("collecting storage stats")
-	storageNodes, err := stats.MultiServerNodes(ctx, beegfs.Storage)
-	if err != nil {
-		return err
-	}
-	storBusy := checkForBusyNodes(storageNodes)
-	if storBusy != Healthy {
-		fmt.Printf("\n%s Busy Storage Nodes %s", storBusy, hint(fmt.Sprintf("-> Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
-		failedCheck = true
-		fmt.Print("\n\n")
-		printBusyNodes(storageNodes)
-	} else {
-		fmt.Printf("\n%s Busy Storage Nodes %s", storBusy, hint(fmt.Sprintf("-> Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", queuedReqsDegradedThreshold, queuedReqsCriticalThreshold)))
-	}
-	if metaBusy != Healthy || storBusy != Healthy {
-		fmt.Print(hint("\n\nHINT: Investigate further with 'beegfs stats server'"))
-	}
-	fmt.Print("\n\n")
-
-	printHeader(">>>>> Checking Targets <<<<<", "#")
-	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
-
-	if reachabilityStatus != Healthy {
-		fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> Not all targets are responding."))
-	} else {
-		fmt.Printf("\n%s Reachability %s\n", reachabilityStatus, hint("-> All targets are responding."))
-	}
-
-	if consistencyStatus != Healthy {
-		fmt.Printf("%s Consistency %s\n", consistencyStatus, hint("-> Not all mirrors are synchronized."))
-	} else {
-		fmt.Printf("%s Consistency %s\n", consistencyStatus, hint("-> All mirrors are synchronized."))
-	}
-
-	if capacityStatus != Healthy {
-		fmt.Printf("%s Available Capacity %s\n", capacityStatus, hint("-> Not all targets have sufficient free space based on the thresholds defined by the management service's configuration."))
-	} else {
-		fmt.Printf("%s Available Capacity %s\n", capacityStatus, hint("-> All targets have sufficient free space based on the thresholds defined by the management service's configuration."))
-	}
-
-	if mappingStatus != Healthy {
-		fmt.Printf("%s Mapping Status %s\n\n", mappingStatus, hint("-> Not all targets are mapped to a storage node."))
-	} else {
-		fmt.Printf("%s Mapping Status %s\n\n", mappingStatus, hint("-> All targets are mapped to a storage node."))
-	}
-
-	unhealthyTargets := reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy
-	if unhealthyTargets || frontendCfg.printDF {
-		if unhealthyTargets {
-			failedCheck = true
-		}
-		printDF(ctx, targets, tgtFrontend.PrintConfig{Capacity: true, State: true})
-	}
-
-	fmt.Print(hint("HINT: This mode does not check file system consistency. To check for file system inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n"))
-
-	fmt.Println()
-
-	printHeader(">>>>> Checking Connections to Server Nodes <<<<<", "#")
-	log.Debug("getting filtered client list")
-	backendCfg.FilterByUUID, err = mgmtd.GetFsUUID(ctx)
-	if err != nil {
-		return err
-	}
-	backendCfg.FilterByMounts = filterByMounts
-	procCtx, procCtxCancel := context.WithTimeout(ctx, frontendCfg.connectionTimeout)
-	clients, err := procfs.GetBeeGFSClients(procCtx, backendCfg, log)
-	procCtxCancel()
-	if err != nil {
-		if !errors.Is(err, procfs.ErrEstablishingConnections) {
-			return err
-		}
-		fmt.Printf("Error establishing new connections, further connection checks may be incomplete or skipped: %s (ignoring)\n", err)
-		fmt.Print(hint(fmt.Sprintf("HINT: Try increasing the '--%s' flag or setting '--%s=false` to skip establishing new connections.\n\n", connectionTimeoutFlag, forceConnectionsFlag)))
-	}
-
-	if len(clients) == 0 {
-		fmt.Printf("No client mounts found, skipping connection checks\n\n")
-	} else if len(clients) > 1 {
-		fmt.Print(hint("\nHINT: Multiple client mounts detected, connections will be checked from each mount point (specify <mount-path> if this is not what you want).\n\n"))
-	}
-
-	for _, c := range clients {
-		printClientHeader(c, "=")
-		netStatus := checkForFallbacks(c)
-		if netStatus != Healthy {
-			fmt.Printf("\n%s Fallbacks %s\n", netStatus, hint("-> Not all connections are using preferred NICs or protocols (such as Ethernet/TCP when RDMA is preferred)."))
-		} else {
-			fmt.Printf("\n%s Fallbacks %s\n", netStatus, hint("-> All connections are using preferred NICs and protocols."))
-		}
-		if netStatus != Healthy {
-			failedCheck = true
-			fmt.Println()
-			printBeeGFSNet(c)
-		} else if frontendCfg.printNetworkConnections {
-			fmt.Println()
-			printBeeGFSNet(c)
-		}
-		fmt.Println()
-	}
-
-	// The following checks/text should be printed at the bottom. Don't add checks after this point.
-	if failedCheck && !frontendCfg.ignoreFailedChecks {
-		util.TerminalAlert()
 		return util.NewCtlError(fmt.Errorf("one or more checks failed"), util.GeneralError)
 	}
 	return nil
 }
 
-func checkForFallbacks(client procfs.Client) Status {
-	hasFallbacks := func(nodes []procfs.Node) bool {
-		for _, node := range nodes {
-			for _, peer := range node.Peers {
-				if peer.Fallback {
-					return true
+// renderHuman prints the report as the human-readable text report. Structured/report content goes to
+// stdout; operational notices about the connection check go to stderr (see emitConnNotices).
+func renderHuman(ctx context.Context, report *backend.Report, cfg checkCfg) {
+	printHeader(fmt.Sprintf("Running Health Check for %s\n(Filesystem UUID: %s)", report.FS, report.FsUUID), "#")
+
+	for _, section := range report.Sections {
+		switch section.Title {
+		case backend.SectionGeneralChecks:
+			printHeader(">>>>> General Checks <<<<<", "#")
+			for _, c := range section.Checks {
+				fmt.Printf("\n%s", statusLine(c.Status, c.Name, c.Summary, cfg.noHints))
+			}
+			fmt.Print("\n\n")
+
+		case backend.SectionBusyNodes:
+			printHeader(">>>>> Checking for Busy Nodes <<<<<", "#")
+			anyBusy := false
+			for _, c := range section.Checks {
+				fmt.Printf("\n%s", statusLine(c.Status, c.Name, c.Summary, cfg.noHints))
+				if c.Status != backend.Healthy {
+					anyBusy = true
+					fmt.Print("\n\n")
+					if bd, ok := c.Detail.(backend.BusyDetail); ok {
+						printBusyNodes(bd.Raw)
+					}
 				}
 			}
+			if anyBusy && !cfg.noHints {
+				fmt.Print("\n\nHINT: Investigate further with 'beegfs stats server'")
+			}
+			fmt.Print("\n\n")
+
+		case backend.SectionTargets:
+			printHeader(">>>>> Checking Targets <<<<<", "#")
+			fmt.Print("\n")
+			unhealthy := false
+			for _, c := range section.Checks {
+				fmt.Printf("%s\n", statusLine(c.Status, c.Name, c.Summary, cfg.noHints))
+				if c.Status != backend.Healthy {
+					unhealthy = true
+				}
+			}
+			fmt.Print("\n")
+			if unhealthy || cfg.printDF {
+				if td, ok := section.Detail.(backend.TargetsDetail); ok {
+					printDF(ctx, td.Raw, tgtFrontend.PrintConfig{Capacity: true, State: true})
+				}
+			}
+			if !cfg.noHints {
+				fmt.Print("HINT: This mode does not check file system consistency. To check for file system inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n")
+			}
+			fmt.Println()
+
+		case backend.SectionConnections:
+			printHeader(">>>>> Checking Connections to Server Nodes <<<<<", "#")
+			emitConnNotices(report, cfg)
+			for _, cc := range connectionClients(report) {
+				printClientHeader(cc.Raw, "=")
+				fmt.Printf("\n%s\n", statusLine(cc.Status, "Fallbacks", cc.Summary, cfg.noHints))
+				if cc.Status != backend.Healthy || cfg.printNetworkConnections {
+					fmt.Println()
+					printBeeGFSNet(cc.Raw)
+				}
+				fmt.Println()
+			}
 		}
-		return false
 	}
-	if hasFallbacks(client.MgmtdNodes) || hasFallbacks(client.MetaNodes) || hasFallbacks(client.StorageNodes) {
-		return Degraded
-	}
-	return Healthy
 }
 
-// checkTargets() returns the overall reachability, consistency, capacity of all targets and returns
-// each status based on the target in the worst condition.
-func checkTargets(targets []tgtBackend.GetTargets_Result) (Status, Status, Status, Status) {
-	reachability, consistency, capacity, mapping := Healthy, Healthy, Healthy, Healthy
-	for _, t := range targets {
-		switch t.ReachabilityState {
-		case tgtBackend.ReachabilityOnline:
-			reachability.updateStatusIfWorse(Healthy)
-		case tgtBackend.ReachabilityProbablyOffline:
-			reachability.updateStatusIfWorse(Degraded)
-		case tgtBackend.ReachabilityOffline:
-			reachability.updateStatusIfWorse(Critical)
-		}
-
-		switch t.ConsistencyState {
-		case tgtBackend.ConsistencyGood:
-			consistency.updateStatusIfWorse(Healthy)
-		case tgtBackend.ConsistencyNeedsResync:
-			consistency.updateStatusIfWorse(Degraded)
-		case tgtBackend.ConsistencyBad:
-			consistency.updateStatusIfWorse(Critical)
-		}
-
-		switch t.CapacityPool {
-		case tgtBackend.CapacityNormal:
-			capacity.updateStatusIfWorse(Healthy)
-		case tgtBackend.CapacityLow:
-			capacity.updateStatusIfWorse(Degraded)
-		case tgtBackend.CapacityEmergency:
-			capacity.updateStatusIfWorse(Critical)
-		}
-
-		if t.Node == nil {
-			mapping = Degraded
-		}
+// statusLine formats a single "<icon> <name> -> <summary>" line. The summary (and its "-> " prefix)
+// is omitted when hints are disabled.
+func statusLine(status backend.Status, name, summary string, noHints bool) string {
+	hint := ""
+	if !noHints {
+		hint = "-> " + summary
 	}
-	return reachability, consistency, capacity, mapping
+	return fmt.Sprintf("%s %s %s", statusIcon(status), name, hint)
 }
 
-// checkForBusyNodes() checks if any nodes are busy and returns the overall status based on the node
-// in the worst condition.
-func checkForBusyNodes(nodes []stats.NodeStats) Status {
-	busy := Healthy
-	for _, node := range nodes {
-		if node.Stats.QueuedRequests > queuedReqsCriticalThreshold {
-			busy.updateStatusIfWorse(Critical)
-		} else if node.Stats.QueuedRequests > queuedReqsDegradedThreshold {
-			busy.updateStatusIfWorse(Degraded)
+// emitConnNotices writes operational notices about the connection check to stderr, regardless of the
+// output mode, so they never pollute stdout (essential for JSON output).
+func emitConnNotices(report *backend.Report, cfg checkCfg) {
+	if report.ConnCheckErr != nil {
+		cmdfmt.Printf("Error establishing new connections, further connection checks may be incomplete or skipped: %s (ignoring)\n", report.ConnCheckErr)
+		if !cfg.noHints {
+			cmdfmt.Printf("HINT: Try increasing the '--%s' flag or setting '--%s=false` to skip establishing new connections.\n\n", connectionTimeoutFlag, forceConnectionsFlag)
 		}
 	}
-	return busy
+	results := connectionClients(report)
+	if len(results) == 0 {
+		cmdfmt.Printf("No client mounts found, skipping connection checks\n\n")
+	} else if len(results) > 1 && !cfg.noHints {
+		cmdfmt.Printf("\nHINT: Multiple client mounts detected, connections will be checked from each mount point (specify <mount-path> if this is not what you want).\n\n")
+	}
+}
+
+// connectionClients returns the per-client connection results kept in the connection section's
+// Detail, or nil if there is no such section.
+func connectionClients(report *backend.Report) []backend.ClientConn {
+	for _, section := range report.Sections {
+		if section.Title == backend.SectionConnections {
+			if detail, ok := section.Detail.(backend.ConnectionsDetail); ok {
+				return detail.Clients
+			}
+		}
+	}
+	return nil
 }
 
 func printBusyNodes(nodes []stats.NodeStats) {
@@ -414,48 +281,9 @@ func printBusyNodes(nodes []stats.NodeStats) {
 		return nodes[i].Node.Id.NumId < nodes[j].Node.Id.NumId
 	})
 	for _, n := range nodes {
-		if n.Stats.QueuedRequests > queuedReqsDegradedThreshold {
+		if n.Stats.QueuedRequests > backend.QueuedReqsDegradedThreshold {
 			fmt.Printf("* %s [%s] has %d queued requests\n", n.Node.Alias, n.Node.Id, n.Stats.QueuedRequests)
 		}
-	}
-}
-
-// checkTLSCertificates checks the TLS certificates presented by a peer service and returns a health
-// status based on the earliest expiring certificate in the chain.
-func checkTLSCertificates(ctx context.Context, peer peer.Peer) (Status, string) {
-	tlsInfo, ok := peer.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return Degraded, "Not in use"
-	}
-	status, msg := tlsCertExpirationStatus(tlsInfo.State.PeerCertificates, time.Now())
-	return status, msg
-}
-
-// tlsCertExpirationStatus determines the health status based on the earliest expiring certificate.
-// It accepts the current time as a parameter to enable deterministic testing.
-func tlsCertExpirationStatus(certs []*x509.Certificate, now time.Time) (Status, string) {
-	if len(certs) == 0 {
-		return Critical, "No certificates were presented by the node"
-	}
-
-	earliest := certs[0].NotAfter
-	for _, cert := range certs[1:] {
-		if cert.NotAfter.Before(earliest) {
-			earliest = cert.NotAfter
-		}
-	}
-
-	remaining := earliest.Sub(now)
-	expirationMsg := "Certificate " + strfmt.ExpirationString(remaining)
-	switch {
-	case remaining <= 0:
-		return Critical, expirationMsg
-	case remaining < 30*24*time.Hour:
-		return Critical, expirationMsg
-	case remaining < 90*24*time.Hour:
-		return Degraded, expirationMsg
-	default:
-		return Healthy, expirationMsg
 	}
 }
 
@@ -500,11 +328,11 @@ Reason: %s.
 	}
 
 	dismissibleWarning := false
-	if tlsStatus, _ := checkTLSCertificates(ctx, mgmtdPeer); tlsStatus != Healthy {
+	if tlsStatus, _ := backend.CheckTLSCertificates(ctx, mgmtdPeer); tlsStatus != backend.Healthy {
 		dismissibleWarning = true
 	}
-	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := checkTargets(targets)
-	if reachabilityStatus != Healthy || consistencyStatus != Healthy || capacityStatus != Healthy || mappingStatus != Healthy {
+	reachabilityStatus, consistencyStatus, capacityStatus, mappingStatus := backend.CheckTargets(targets)
+	if reachabilityStatus != backend.Healthy || consistencyStatus != backend.Healthy || capacityStatus != backend.Healthy || mappingStatus != backend.Healthy {
 		dismissibleWarning = true
 	}
 	if dismissibleWarning {

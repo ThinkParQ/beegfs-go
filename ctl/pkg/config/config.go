@@ -113,6 +113,9 @@ const (
 	OutputJSON       OutputType = "json"
 	OutputJSONPretty OutputType = "json-pretty"
 	OutputNDJSON     OutputType = "ndjson"
+	// When adding new output types, keep in mind both the Printomatic and commands with custom
+	// output such as `health check` will need to be updated, at minimum to return an error if an
+	// unsupported OutputType is used with those modes.
 )
 
 var (
