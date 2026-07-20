@@ -908,16 +908,25 @@ func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldo
 		}
 		ownerNode = entryInfo.Entry.MetaOwnerNode
 	}
+
+	updateRequired := false
+	newRSTCfg := currentRSTCfg
+	if !rstIdsMatch(currentRSTCfg.RSTIDs, rstIds) {
+		newRSTCfg.RSTIDs = rstIds
+		updateRequired = true
+	}
+	if cooldownSecs != nil && currentRSTCfg.CoolDownPeriod != *cooldownSecs {
+		newRSTCfg.CoolDownPeriod = *cooldownSecs
+		updateRequired = true
+	}
+
+	if !updateRequired {
+		return nil
+	}
+
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return err
-	}
-	newRSTCfg := currentRSTCfg
-	if rstIds != nil {
-		newRSTCfg.RSTIDs = rstIds
-	}
-	if cooldownSecs != nil {
-		newRSTCfg.CoolDownPeriod = *cooldownSecs
 	}
 	req := &msg.SetFilePatternRequest{EntryInfo: entryInfoMsg, RST: newRSTCfg}
 	resp := &msg.SetFilePatternResponse{}
@@ -928,6 +937,26 @@ func SetFileRstPattern(ctx context.Context, path string, rstIds []uint32, cooldo
 		return fmt.Errorf("server returned an error setting RST pattern for %s: %w", path, resp.Result)
 	}
 	return nil
+}
+
+// rstIdsMatch returns whether the old match the new rstIds regardless of the order.
+func rstIdsMatch(old []uint32, new []uint32) bool {
+	if len(old) != len(new) {
+		return false
+	}
+
+	counts := make(map[uint32]int, len(old))
+	for _, rstId := range old {
+		counts[rstId]++
+	}
+
+	for _, rstId := range new {
+		counts[rstId]--
+		if counts[rstId] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // SetDirRstPattern fetches the directory entry once and applies the specified RST fields using a
