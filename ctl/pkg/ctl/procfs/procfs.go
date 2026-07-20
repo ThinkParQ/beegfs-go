@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	ErrEstablishingConnections = errors.New("error forcing establishment of BeeGFS client/server connections")
+	ErrEstablishingConnections = errors.New("forcing establishment of BeeGFS client/server connections")
 )
 
 const (

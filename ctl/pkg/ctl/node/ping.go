@@ -44,7 +44,7 @@ type PingError struct {
 }
 
 func (p PingError) Error() string {
-	return fmt.Sprintf("error during node ping: %v", p.Inner)
+	return fmt.Sprintf("node ping failed: %v", p.Inner)
 }
 
 func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan *PingError, error) {
@@ -67,7 +67,7 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 	}
 	clients, err := procfs.GetBeeGFSClients(ctx, clientsConf, log)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error while scanning mount points: %w", err)
+		return nil, nil, fmt.Errorf("scanning mount points: %w", err)
 	}
 	if len(clients) == 0 {
 		if cfg.Mountpoint != "" {

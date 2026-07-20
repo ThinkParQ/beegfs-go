@@ -557,7 +557,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		IncludeNics: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error getting node list from management: %w", err)
+		return nil, fmt.Errorf("getting node list from management: %w", err)
 	}
 
 	// Loop through the node entries
@@ -613,7 +613,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		if rootBuddy := nodes.GetMetaRootBuddyGroup(); rootBuddy != nil {
 			rootMirror, err := beegfs.EntityIdSetFromProto(rootBuddy)
 			if err != nil {
-				return nil, fmt.Errorf("error parsing meta root mirror: %w", err)
+				return nil, fmt.Errorf("parsing meta root mirror: %w", err)
 			}
 			nodeStore.SetMetaRootBuddyGroup(rootMirror)
 		}

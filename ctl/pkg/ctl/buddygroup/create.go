@@ -60,13 +60,13 @@ func AutoCreate(ctx context.Context, cfg AutoCreateConfig) ([]*pm.CreateBuddyGro
 	// Logging (especially debug logging) is useful here, because of the complex decision matrix
 	log, err := config.GetLogger()
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to get global logger")
+		return nil, nil, fmt.Errorf("unable to get global logger: %w", err)
 	}
 
 	// We need a node store to be able to get the owner of the root inode
 	nodeStore, err := config.NodeStore(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to get node store")
+		return nil, nil, fmt.Errorf("unable to get node store: %w", err)
 	}
 
 	// We also need a list of existing buddy groups to filter out nodes/targets that are already part
@@ -211,7 +211,7 @@ targets:
 		if err != nil {
 			sTarget, err = findSuitableTarget(nil, storagePool)
 			if err != nil {
-				warnings = append(warnings, fmt.Errorf("unable to find suitable secondary for %v: %v", pTarget.Target, err))
+				warnings = append(warnings, fmt.Errorf("unable to find suitable secondary for %v: %w", pTarget.Target, err))
 				continue
 			} else {
 				warnings = append(warnings, fmt.Errorf("unable to find buddy target on different node. Using target on the same node"))
@@ -245,7 +245,7 @@ targets:
 			SecondaryTarget: sTarget.Target.ToProto(),
 		})
 		if err != nil {
-			warnings = append(warnings, fmt.Errorf("error during buddy group creation: %v", err))
+			warnings = append(warnings, fmt.Errorf("creating buddy group: %w", err))
 		}
 		results = append(results, res)
 	}

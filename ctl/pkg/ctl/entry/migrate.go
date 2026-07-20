@@ -372,7 +372,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 			// The setDir request is validated once in MigrateEntries()
 			setResult, err := setEntry(ctx, mappings, *migration.setDir, path)
 			if err != nil {
-				return result, fmt.Errorf("error updating storage pool for directory %q: %w", path, err)
+				return result, fmt.Errorf("updating storage pool for directory %q: %w", path, err)
 			}
 			if setResult.Status != beegfs.OpsErr_SUCCESS {
 				result.Status = MigrateError

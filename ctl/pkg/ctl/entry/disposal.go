@@ -55,7 +55,7 @@ func CleanupDisposals(ctx context.Context, cfg DisposalCfg) (<-chan DisposalResu
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error initializing node store: %w", err)
+		return nil, nil, fmt.Errorf("initializing node store: %w", err)
 	}
 
 	buddyMirrors, err := buddygroup.GetBuddyGroups(ctx)
@@ -156,7 +156,7 @@ func (d *disposalCleaner) walkNode(node beegfs.Node, mirrored bool) error {
 		err := d.store.RequestTCP(d.ctx, node.Id, req, resp)
 		if err != nil {
 			// Failing to list the disposal directory is considered fatal.
-			return fmt.Errorf("error listing disposal directory: %w", err)
+			return fmt.Errorf("listing disposal directory: %w", err)
 		}
 
 		numEntriesThisRound = len(resp.EntryIDs)
@@ -177,7 +177,7 @@ func (d *disposalCleaner) walkNode(node beegfs.Node, mirrored bool) error {
 					// Treat network request failures as fatal. If unlinking the entry fails due to
 					// an internal metadata issue (i.e., its still open), this is indicated in the
 					// response's result field.
-					return fmt.Errorf("error unlinking entry ID %s: %w", entry, err)
+					return fmt.Errorf("unlinking entry ID %s: %w", entry, err)
 				}
 				disposalResult.Result = &delResp.Result
 			}
