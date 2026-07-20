@@ -21,9 +21,10 @@ func tempPathForTesting(path string) (string, func(tb testing.TB), error) {
 	}
 
 	cleanup := func(tb testing.TB) {
-		// If we cleanup to quickly the DB may not have shutdown.
-		time.Sleep(1 * time.Second)
-		require.NoError(tb, os.RemoveAll(tempDBPath), "error cleaning up after test")
+		// Poll for cleanup instead of sleeping a full second per temp path.
+		require.Eventually(tb, func() bool {
+			return os.RemoveAll(tempDBPath) == nil
+		}, 2*time.Second, 25*time.Millisecond, "error cleaning up after test")
 	}
 
 	return tempDBPath, cleanup, nil
@@ -178,4 +179,11 @@ func generatePartsFromSegment(segment *flex.WorkRequest_Segment) func() (int32, 
 		}
 		return partNumber, offsetStart, offsetStop
 	}
+}
+
+func appendMessage(original string, addition string) string {
+	if original == "" {
+		return addition
+	}
+	return original + "; " + addition
 }
