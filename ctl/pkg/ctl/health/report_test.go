@@ -110,3 +110,33 @@ func TestReportJSONSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &out))
 	assert.Equal(t, "degraded", out["status"])
 }
+
+// TestClientConnectionsForJSON pins the `health network` JSON projection.
+func TestClientConnectionsForJSON(t *testing.T) {
+	clients := []procfs.Client{{
+		ID:    "client-1",
+		Mount: procfs.MountPoint{Path: "/mnt/beegfs"},
+		MetaNodes: []procfs.Node{{
+			Alias: "meta_1",
+			NumID: 1,
+			Peers: []procfs.Peer{{Type: beegfs.Tcp, IP: "10.0.0.1", Connections: 2, Fallback: true}},
+		}},
+	}}
+
+	data, err := json.Marshal(ClientConnectionsFor(clients))
+	require.NoError(t, err)
+	s := string(data)
+
+	assert.Contains(t, s, `"id":"client-1"`)
+	assert.Contains(t, s, `"mount":"/mnt/beegfs"`)
+	assert.Contains(t, s, `"metaNodes":`)
+	assert.Contains(t, s, `"alias":"meta_1"`)
+	assert.Contains(t, s, `"ip":"10.0.0.1"`)
+	assert.Contains(t, s, `"connections":2`)
+	assert.Contains(t, s, `"fallback":true`)
+
+	// Valid JSON that decodes as an array.
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Len(t, out, 1)
+}

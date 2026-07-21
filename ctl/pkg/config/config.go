@@ -137,6 +137,18 @@ func (t OutputType) String() string {
 	}
 }
 
+// IsJSON reports whether the output type is one of the JSON-family formats (json, json-pretty, or
+// ndjson) rather than the human-readable table. Useful for commands with custom output that branch
+// between a human report and JSON.
+func (t OutputType) IsJSON() bool {
+	switch t {
+	case OutputJSON, OutputJSONPretty, OutputNDJSON:
+		return true
+	default:
+		return false
+	}
+}
+
 // InitLoggerFromExternal allows CTL to use an externally configured/managed *logger.Logger. By
 // default CTL uses an opinionated logger that is initialized on first call that logs to stderr
 // only. This allows CTL logging to respect the logging configuration of the application that is
