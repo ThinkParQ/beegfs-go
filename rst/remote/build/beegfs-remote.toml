@@ -48,6 +48,10 @@ tls-cert-file = "/etc/beegfs/cert.pem"
 tls-key-file = "/etc/beegfs/key.pem"
 tls-disable = false
 
+[builder]
+state-root = ".beegfs-rst"
+max-requests = 1000
+
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
 
@@ -117,6 +121,18 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #
 #   [remote-storage-target.s3]
 #   endpoint-url = "https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
+
+# [[remote-storage-target]]
+# id = "4"
+# name = "xtreemstore"
+# policies = { FastStartMaxSize = 104857600 }
+#
+#   [remote-storage-target.xtreemstore]
+#   endpoint-url = "https://<XTREEMSTORE_ENDPOINT>:<PORT>"
 #   region = "<REGION>"
 #   bucket = "<BUCKET>"
 #   access-key = "<ACCESS_KEY>"
@@ -275,7 +291,20 @@ rate-limit-event-types = ["*"]
 
 
 #
-# --- Section 3.4: [Job Settings] ---
+# --- Section 3.4: [Builder Settings] ---
+#
+
+# Builder configuration must be specified under [builder]. These settings affect builder-managed
+# execution and how builder jobs are processed.
+
+# state-root: Relative path under mount-point where builder state is stored.
+
+# max-requests: Maximum number of requests a single builder pass may emit before it is
+# rescheduled to continue later.
+
+
+#
+# --- Section 3.5: [Job Settings] ---
 #
 
 # Job configuration must be specified under [job]. These settings affect how jobs are tracked and

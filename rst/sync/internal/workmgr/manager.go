@@ -110,7 +110,7 @@ type Manager struct {
 	// entry while its being processed because it would be better to block another goroutine than
 	// risk two goroutines acting on the same entry concurrently. This should only ever happen if
 	// there is a bug.
-	workJournal *kvstore.MapStore[workEntry]
+	workJournal *kvstore.MapStore[*workEntry]
 	// The jobStore keeps a mapping of job IDs to submission IDs in the journal for each of their
 	// work requests. The inner map is a map of work request IDs to their submission ID in the
 	// workJournal. This allows the worker node to handle multiple work request for a single job.
@@ -194,7 +194,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
 	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
-	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
+	workJournal, closeWorkJournal, err := kvstore.NewMapStore[*workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
 	}
@@ -564,8 +564,10 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		return
 	}
 
-	var rescheduledCount int
 	var scheduledCount int
+	var rescheduledCount int
+	var replayCount int
+	var unrecoverableCount int
 	var submissionId string
 	isNextSubmissionIdSet := false
 	workRequestPriority := priorityIdMap[int32(priority+1)]
@@ -573,7 +575,16 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		submissionId = submission.Key
 		entry := submission.Entry.Value
 
-		if entry.ExecuteAfter.IsZero() {
+		var status *flex.Work_Status
+		var state flex.Work_State
+		if entry.WorkResult != nil {
+			if status = entry.WorkResult.GetStatus(); status != nil {
+				state = status.GetState()
+			}
+		}
+
+		switch state {
+		case flex.Work_SCHEDULED:
 			m.scheduler.AddWorkToken(submissionId)
 			if !isNextSubmissionIdSet {
 				m.scheduler.SetNextSubmissionId(submissionId, priority)
@@ -586,7 +597,7 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		} else {
+		case flex.Work_RESCHEDULED:
 			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
 			rescheduledCount++
 			m.metrics.workRequests.Add(context.Background(), 1,
@@ -595,9 +606,27 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		}
-		entriesFound++
 
+		case flex.Work_RUNNING, flex.Work_COMPLETED:
+			// Submission has already been scheduled and executed so treat it as rescheduled work
+			// since this preserves the next submissionId priority scheduler boundary.
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			replayCount++
+		default:
+			m.log.Warn("skipping unrecoverable work journal entry during scheduler init",
+				zap.String("submissionId", submissionId),
+				zap.String("jobId", entry.WorkRequest.GetJobId()),
+				zap.String("requestId", entry.WorkRequest.GetRequestId()),
+				zap.String("state", state.String()),
+				zap.Time("executeAfter", entry.ExecuteAfter),
+				zap.Bool("hasWorkResult", entry.WorkResult != nil),
+				zap.Bool("hasStatus", status != nil),
+			)
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			unrecoverableCount++
+		}
+
+		entriesFound++
 		submission, err = nextItem()
 		if err != nil {
 			err = fmt.Errorf("unable to get work journal entry: %w", err)
@@ -605,7 +634,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount == 0 && rescheduledCount > 0 {
+	allRescheduledCount := rescheduledCount + replayCount
+	if scheduledCount == 0 && allRescheduledCount > 0 {
 		// All recovered were rescheduled work request so increment the last known rescheduled
 		// submissionId to get the nextExpectedSubmissionId.
 		nextExpectedSubmissionId, _, err := scheduler.IncrementSubmissionId(submissionId)
@@ -616,8 +646,14 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount > 0 || rescheduledCount > 0 {
-		m.log.Info("  recovered work requests", zap.String("priority", workRequestPriority), zap.Int("scheduled", scheduledCount), zap.Int("rescheduled", rescheduledCount))
+	if scheduledCount > 0 || rescheduledCount > 0 || replayCount > 0 || unrecoverableCount > 0 {
+		m.log.Info("  recovered work requests",
+			zap.String("priority", workRequestPriority),
+			zap.Int("scheduled", scheduledCount),
+			zap.Int("rescheduled", rescheduledCount),
+			zap.Int("replayed", replayCount),
+			zap.Int("unrecoverable", unrecoverableCount),
+		)
 	}
 	return
 }
@@ -663,7 +699,7 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	}
 
 	submissionId, priority := scheduler.CreateSubmissionId(key, wr.GetPriority())
-	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId)
+	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId, kvstore.WithValue(&workEntry{}))
 	if err != nil {
 		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}

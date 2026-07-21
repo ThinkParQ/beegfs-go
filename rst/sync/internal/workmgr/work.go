@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,7 +129,7 @@ type worker struct {
 	workQueue            <-chan workAssignment
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
-	workJournal          *kvstore.MapStore[workEntry]
+	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
@@ -319,10 +320,17 @@ func (w *worker) process(work workAssignment) {
 		return
 	}
 
-	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
+	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
 	status.SetState(flex.Work_RUNNING)
 	status.SetMessage("attempting to carry out the work request")
-	commitJournalEntry(kvstore.WithUpdateOnly(true))
+	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
+		log.Warn("error updating journal work entry to running", zap.Error(err))
+	}
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(work, client, entry)
 	} else {
@@ -330,7 +338,7 @@ func (w *worker) process(work workAssignment) {
 	}
 }
 
-func (w *worker) processWork(work workAssignment, client rst.Provider, entry workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
+func (w *worker) processWork(work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -403,77 +411,47 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 	return
 }
 
-func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry workEntry) (cleanupEntries bool) {
-	request := entry.WorkRequest
-	result := entry.WorkResult
-	status := result.GetStatus()
+func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
+	workRequest := entry.WorkRequest.WorkRequest
+	workResult := entry.WorkResult
+	builder := workRequest.GetBuilder()
 
-	var reschedule bool
-	var err error
-	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
+	schedulingResultCh := make(chan *rst.SchedulingResult)
+	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 	go func() {
-		defer close(jobSubmissionChan)
-		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
+		defer close(jobSubmissionCh)
+		schedulingResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
 	}()
 
-	total := 0
-	totalErrors := 0
-processJobs:
+	var schedulingResult *rst.SchedulingResult
 	for {
+		if schedulingResultCh == nil && jobSubmissionCh == nil {
+			break
+		}
+
 		select {
-		case <-work.ctx.Done():
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("work context was cancelled before job requests could be created")
-			if w.sendWorkResult(work, result.Work) {
-				cleanupEntries = true
-			}
-			for range jobSubmissionChan {
-			}
-			return
-		case jobRequest, ok := <-jobSubmissionChan:
+		case schedulingResult = <-schedulingResultCh:
+			schedulingResultCh = nil
+		case jobRequest, ok := <-jobSubmissionCh:
 			if !ok {
-				break processJobs
+				jobSubmissionCh = nil
+				continue
 			}
-
-			if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
-				totalErrors += 1
-			}
-			total++
+			w.sendBuilderJobRequest(work, builder, jobRequest)
 		}
 	}
-
-	if err != nil {
-		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage("job builder failed to complete: " + err.Error())
-	} else if reschedule {
-		status.SetState(flex.Work_RESCHEDULED)
-		message := "waiting for builder job to continue"
-		if totalErrors > 0 {
-			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
-		}
-		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now()
-		w.sendWorkResult(work, result.Work)
-		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
-		w.metrics.workRequests.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attrState.String("rescheduled"),
-				attrPriority.Int(normalizedPriority(request.GetPriority())),
-			),
-		)
-		return
-	} else if totalErrors > 0 {
-		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage(fmt.Sprintf("%d job request(s) failed! See `beegfs remote status/job list` for details", totalErrors))
-	} else {
-		status.SetState(flex.Work_COMPLETED)
-		status.SetMessage("all jobs were submitted")
+	if schedulingResult == nil {
+		schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
 	}
 
-	if w.sendWorkResult(work, result.Work) {
-		cleanupEntries = true
+	bulkOperations := builder.GetBulkOperations()
+	if bulkOperations == nil {
+		bulkOperations = []*flex.BulkOperation{}
 	}
-	return
+	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
+
+	return w.updateBuilderJob(work, entry, schedulingResult)
+
 }
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state
@@ -506,7 +484,164 @@ func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool
 			case <-work.ctx.Done():
 				return false
 			}
-
 		}
 	}
+}
+
+func (w *worker) sendBuilderJobRequest(work workAssignment, builder *flex.BuilderJob, request *pbr.JobRequest) {
+	const maxSendBuilderJobDelay = 60 * time.Second
+	delay := 1 * time.Second
+
+	for {
+		if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, request); err != nil {
+			if errors.Is(err, beeremote.ErrUnavailable) {
+				// Retry with an exponential backoff until remote is available again.
+				select {
+				case <-time.After(delay):
+					delay *= 2
+					if delay > maxSendBuilderJobDelay {
+						delay = maxSendBuilderJobDelay
+					}
+				case <-work.ctx.Done():
+					return
+				}
+				continue
+			}
+
+			if errors.Is(err, rst.ErrJobAlreadyComplete) {
+				fmt.Println("ErrJobAlreadyComplete: ", request.Path)
+				builder.JobsAlreadyComplete++
+			} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+				fmt.Println("ErrJobAlreadyOffloaded: ", request.Path)
+				builder.JobsAlreadyOffloaded++
+			} else if errors.Is(err, rst.ErrJobAlreadyExists) {
+				fmt.Println("ErrJobAlreadyExists: ", request.Path)
+				builder.JobsAlreadyExist++
+			} else if errors.Is(err, rst.ErrJobNotAllowed) {
+				fmt.Println("ErrJobNotAllowed: ", request.Path)
+				builder.JobsNotAllowed++
+			} else {
+				fmt.Println("Error: ", request.Path)
+				builder.Errors++
+			}
+		} else {
+			builder.Submitted++
+		}
+
+		return
+	}
+}
+
+// updateBuilderJob uses result to update the builder job's work status and state.
+func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result *rst.SchedulingResult) (cleanupEntries bool) {
+	request := entry.WorkRequest
+	workRequest := request.WorkRequest
+	workResult := entry.WorkResult
+	builder := workRequest.GetBuilder()
+	status := workResult.GetStatus()
+
+	builderErr := getBuilderResults(builder)
+	defer func() {
+		status.SetMessage(appendMessage(status.Message, builderErr.Error()))
+		if !w.sendWorkResult(work, workResult.Work) {
+			cleanupEntries = false
+		}
+	}()
+
+	if result.Err != nil {
+		// Builder-level termination is driven by the classification of result.Err. Individual
+		// request errors should already have been reported on the submitted requests via
+		// GenerationStatus and accounted for in the builder counters rather than forcing builder
+		// termination here.
+		resultErr := result.Err
+		resultMessage := resultErr.Error()
+		if errors.Is(resultErr, rst.ErrBuilderCancelled) {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("job builder failed to complete: " + resultMessage)
+		} else if errors.Is(resultErr, rst.ErrBuilderFailed) {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder failed to complete: " + resultMessage)
+		} else {
+			status.SetState(flex.Work_FAILED)
+			status.SetMessage("job builder returned unclassified error: " + resultMessage)
+		}
+		cleanupEntries = true
+	} else if result.Reschedule {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for builder job to continue")
+		entry.ExecuteAfter = time.Now().Add(result.Delay)
+		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+		w.metrics.workRequests.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attrState.String("rescheduled"),
+				attrPriority.Int(normalizedPriority(request.GetPriority())),
+			),
+		)
+	} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("completed with errors")
+		cleanupEntries = true
+	} else {
+		status.SetState(flex.Work_COMPLETED)
+		status.SetMessage("completed successfully")
+		cleanupEntries = true
+	}
+
+	return
+}
+
+// getBuilderResults generates a status message based on the builder submission counters.
+func getBuilderResults(builder *flex.BuilderJob) (err error) {
+	cfg := builder.GetCfg()
+	jobsSubmitted := builder.GetSubmitted()
+	jobsErrors := builder.GetErrors()
+	jobsNotAllowed := builder.GetJobsNotAllowed()
+	jobsAlreadyComplete := builder.GetJobsAlreadyComplete()
+	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
+	jobsAlreadyExist := builder.GetJobsAlreadyExist()
+
+	var parts []string
+	markCancelled := false
+
+	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist
+	failures := jobsErrors + jobsNotAllowed
+	if jobsProcessed == 0 {
+		if cfg.Download {
+			if rst.WalkLocalPathInsteadOfRemote(cfg) {
+				parts = append(parts, fmt.Sprintf("walked local path since --%s was not provided; No matches found in path: %s", rst.RemotePathFlag, cfg.Path))
+			} else {
+				parts = append(parts, fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath))
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("no matches found in local path: %s", cfg.Path))
+		}
+		markCancelled = true
+	} else if failures > 0 {
+		markCancelled = true
+	}
+
+	if jobsSubmitted > 0 {
+		parts = append(parts, fmt.Sprintf("%d job request(s) submitted", jobsSubmitted))
+	}
+	if jobsAlreadyComplete > 0 {
+		parts = append(parts, fmt.Sprintf("%d already complete", jobsAlreadyComplete))
+	}
+	if jobsAlreadyOffloaded > 0 {
+		parts = append(parts, fmt.Sprintf("%d already offloaded", jobsAlreadyOffloaded))
+	}
+	if jobsAlreadyExist > 0 {
+		parts = append(parts, fmt.Sprintf("%d already exist", jobsAlreadyExist))
+	}
+	if jobsNotAllowed > 0 {
+		parts = append(parts, fmt.Sprintf("%d not allowed", jobsNotAllowed))
+	}
+	if jobsErrors > 0 {
+		parts = append(parts, fmt.Sprintf("%d submitted with errors", jobsErrors))
+	}
+
+	err = fmt.Errorf("%s", strings.Join(parts, "; "))
+	if markCancelled {
+		err = rst.MarkBuilderCancelled(err)
+	}
+	return
 }
