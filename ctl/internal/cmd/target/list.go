@@ -210,8 +210,8 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 							// where the sync state is unknown even though the resync was successful
 							// (in theory). But in all cases we should always only display the sync
 							// state for the current sync.
-							if resp.EndTime == 0 {
-								syncState = resp.State.String()
+							if resp.EndTime == "" {
+								syncState = resp.State
 							} else {
 								syncState = "Not-started"
 							}
@@ -220,8 +220,8 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 						if resp, err := resync.GetStorageResyncStats(ctx, primary); err != nil {
 							logger.Debug("error getting resync job state", zap.Error(err))
 						} else {
-							if resp.EndTime == 0 {
-								syncState = resp.State.String()
+							if resp.EndTime == "" {
+								syncState = resp.State
 							} else {
 								syncState = "Not-started"
 							}
