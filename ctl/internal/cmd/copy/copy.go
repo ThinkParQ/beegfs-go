@@ -193,6 +193,11 @@ destination have different modification times.`,
 	}
 
 	bflagSet = bflag.NewFlagSet(copyFlags, cmd)
+	// "0" suppresses pflag's auto "(default N)" usage suffix (see
+	// Flag.defaultIsZeroValue in spf13/pflag) -- the real default (128/1024)
+	// is already stated in each flag's description text above.
+	cmd.Flags().Lookup("chunksize").DefValue = "0"
+	cmd.Flags().Lookup("partition-threshold").DefValue = "0"
 	cmd.Flags().StringVar(&frontendCfg.stdinDelimiter, "stdin-delimiter", "\\n", `Change the string delimiter used to determine individual paths when read from stdin.
 For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().IntVar(&frontendCfg.batchSize, "stdin-batch", 1024, "At most this many paths will be read from stdin before triggering the parallel copy. Setting to higher values will consume more memory.")
