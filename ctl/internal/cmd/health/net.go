@@ -2,11 +2,14 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/health"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 )
 
@@ -69,9 +72,32 @@ func runNetCmd(cmd *cobra.Command, filterByMounts []string, frontendCfg netCfg, 
 	if err != nil {
 		return err
 	}
-	for _, client := range clients {
-		printClientHeader(client, "=")
-		printBeeGFSNet(client)
+	switch config.OutputType(viper.GetString(config.OutputKey)) {
+	case config.OutputJSON:
+		data, err := json.Marshal(backend.ClientConnectionsFor(clients))
+		if err != nil {
+			return fmt.Errorf("marshaling connections: %w", err)
+		}
+		fmt.Println(string(data))
+	case config.OutputJSONPretty:
+		data, err := json.MarshalIndent(backend.ClientConnectionsFor(clients), "", " ")
+		if err != nil {
+			return fmt.Errorf("marshaling connections: %w", err)
+		}
+		fmt.Println(string(data))
+	case config.OutputNDJSON:
+		for _, c := range backend.ClientConnectionsFor(clients) {
+			data, err := json.Marshal(c)
+			if err != nil {
+				return fmt.Errorf("marshaling connections: %w", err)
+			}
+			fmt.Println(string(data))
+		}
+	default:
+		for _, client := range clients {
+			printClientHeader(client, "=")
+			printBeeGFSNet(client)
+		}
 	}
 	return nil
 }

@@ -5,8 +5,10 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	tgtFrontend "github.com/thinkparq/beegfs-go/ctl/internal/cmd/target"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 )
 
@@ -22,7 +24,14 @@ func newDFCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printDF(cmd.Context(), targets, tgtFrontend.PrintConfig{Capacity: true})
+			cfg := tgtFrontend.PrintConfig{Capacity: true}
+			if config.OutputType(viper.GetString(config.OutputKey)).IsJSON() {
+				// PrintTargetList honors --output; call it once (without the human section headers)
+				// so JSON output is a single valid document rather than headers + two arrays.
+				tgtFrontend.PrintTargetList(cmd.Context(), cfg, targets)
+			} else {
+				printDF(cmd.Context(), targets, cfg)
+			}
 			return nil
 		},
 	}

@@ -113,6 +113,32 @@ type ConnectionsDetail struct {
 	Clients []ClientConn `json:"clients"`
 }
 
+// ClientConnections is the network-connection topology for one client mount, used by the
+// `health network` command's JSON output. (The health check reuses NodeConn/PeerConn via ClientConn,
+// which additionally carries a fallback verdict.)
+type ClientConnections struct {
+	ID           string     `json:"id"`
+	Mount        string     `json:"mount"`
+	MgmtdNodes   []NodeConn `json:"mgmtdNodes"`
+	MetaNodes    []NodeConn `json:"metaNodes"`
+	StorageNodes []NodeConn `json:"storageNodes"`
+}
+
+// ClientConnectionsFor projects a set of clients into their connection topology for JSON output.
+func ClientConnectionsFor(clients []procfs.Client) []ClientConnections {
+	result := make([]ClientConnections, 0, len(clients))
+	for _, c := range clients {
+		result = append(result, ClientConnections{
+			ID:           c.ID,
+			Mount:        c.Mount.Path,
+			MgmtdNodes:   nodeConns(c.MgmtdNodes),
+			MetaNodes:    nodeConns(c.MetaNodes),
+			StorageNodes: nodeConns(c.StorageNodes),
+		})
+	}
+	return result
+}
+
 func nodeConns(nodes []procfs.Node) []NodeConn {
 	result := make([]NodeConn, 0, len(nodes))
 	for _, n := range nodes {
