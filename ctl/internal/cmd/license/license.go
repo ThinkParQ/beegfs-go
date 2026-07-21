@@ -136,13 +136,21 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		return errors.Join(ret, errors.New(license.Message))
 	}
 
-	if viper.GetString(config.OutputKey) == config.OutputJSONPretty.String() {
-		pretty, _ := json.MarshalIndent(license, "", "  ")
-		fmt.Printf("%s\n", pretty)
-	} else if viper.GetString(config.OutputKey) == config.OutputJSON.String() {
-		json, _ := json.Marshal(license)
-		fmt.Printf("%s\n", json)
-	} else {
+	switch config.OutputType(viper.GetString(config.OutputKey)) {
+	case config.OutputJSONPretty:
+		data, err := json.MarshalIndent(license, "", "  ")
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	case config.OutputJSON, config.OutputNDJSON:
+		// A license is a single object, so NDJSON is the same single compact line as JSON.
+		data, err := json.Marshal(license)
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	default:
 		var features []string
 		var scopes []string
 		var numservers string
