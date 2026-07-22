@@ -67,7 +67,7 @@ func newSetDefaultCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "set-defaults",
-		Short: "Sets the default quota limits for a pool",
+		Short: "Set the default quota limits for a pool",
 		Long:  "Sets the default quota limits for a pool. These are the limits that apply to all users and/or groups if they are not subject to more specific user/group quotas.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -103,10 +103,10 @@ func newSetDefaultCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&userSpaceStr, "user-space", "", "User space limit")
-	cmd.Flags().StringVar(&userInodeStr, "user-inode", "", "User inode limit")
-	cmd.Flags().StringVar(&groupSpaceStr, "group-space", "", "Group space limit")
-	cmd.Flags().StringVar(&groupInodeStr, "group-inode", "", "Group inode limit")
+	cmd.Flags().StringVar(&userSpaceStr, "user-space", "", "User space limit.")
+	cmd.Flags().StringVar(&userInodeStr, "user-inode", "", "User inode limit.")
+	cmd.Flags().StringVar(&groupSpaceStr, "group-space", "", "Group space limit.")
+	cmd.Flags().StringVar(&groupInodeStr, "group-inode", "", "Group inode limit.")
 
 	return cmd
 }
@@ -124,14 +124,23 @@ func newSetLimitsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set-limits <pool>",
 		Short: "Set explicit quota limits for users and groups",
-		Args:  cobra.ExactArgs(1),
+		Long: `Set explicit quota limits for users and groups.
+
+Example: Set a 1TiB space limit and 1,000,000 inode limit for user 1001 in pool 1
+
+  beegfs quota set-limits --uid 1001 --space 1TiB --inode 1000000 1
+
+Example: Set a 10TiB space limit for groups 2000-2005 in pool 1
+
+  beegfs quota set-limits --gid 2000-2005 --space 10TiB 1`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSetLimitsCmd(cmd, args, cfg)
 		},
 	}
 
-	cmd.Flags().StringVar(&cfg.spaceStr, "space", "", "Space limit")
-	cmd.Flags().StringVar(&cfg.inodeStr, "inode", "", "Inode limit")
+	cmd.Flags().StringVar(&cfg.spaceStr, "space", "", "Space limit.")
+	cmd.Flags().StringVar(&cfg.inodeStr, "inode", "", "Inode limit.")
 	cmd.Flags().StringSliceVar(&cfg.uidStrs, "uid", []string{}, "Comma separated list of user ids to apply the limits to. Values can be single ids or ranges in the form `<min>-<max>`.")
 	cmd.Flags().StringSliceVar(&cfg.gidStrs, "gid", []string{}, "Comma separated list of group ids to apply the limits to. Values can be single ids or ranges in the form `<min>-<max>`.")
 
@@ -348,7 +357,7 @@ func newListUsageCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
-	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit")
+	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit.")
 
 	return cmd
 }
@@ -489,7 +498,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 
 	tbl.PrintRemaining()
 	if entriesFound {
-		cmdfmt.Printf("INFO: Quota usage information is fetched every %s from the server nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
+		cmdfmt.Printf("Note: Quota usage information is fetched every %s from the nodes, thus the displayed values might be slightly out of date.\n", refreshPeriod)
 	} else {
 		cmdfmt.Printf("WARNING: No information found for the specified ID(s). Either these ID(s) do not exist, or the management is not configured to query/enforce their quotas.\n")
 	}

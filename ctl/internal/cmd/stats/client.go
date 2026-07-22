@@ -74,23 +74,23 @@ func newGenericClientStatsCmd(perUserDefault bool) *cobra.Command {
 func newClientStatsCmd() *cobra.Command {
 	s := newGenericClientStatsCmd(false)
 	s.Use = "client"
-	s.Short = "Show IO statistics for BeeGFS clients"
-	s.Long = `Show IO statistics for BeeGFS clients.
-  This command queries statistics for client requests from the servers and
-  presents them in a sorted list, ordered by sum of requests per client.
-  This allows identification of those clients, which are currently
-  generating the most load on the servers.
+	s.Short = "Show I/O statistics for BeeGFS clients"
+	s.Long = `Show I/O statistics for BeeGFS clients.
+This command queries statistics for client requests from the servers and
+presents them in a sorted list, ordered by sum of requests per client.
+This allows identification of those clients, which are currently
+generating the most load on the servers.
 
-  The initial batch of statistics for time index 0 shows the absolute number of
-  operations since the servers were started, then the following batches only show
-  values for the given interval.
+The initial batch of statistics for time index 0 shows the absolute number of
+operations since the servers were started, then the following batches only show
+values for the given interval.
 
-Note: 
-  Some client operation related messages (e.g. close file messages) are forwarded
-  by metadata servers. Thus it is possible for servers to also appear in the client stats.
+Note: Some client operation related messages (e.g. close file messages) are forwarded
+by metadata servers. Thus it is possible for servers to also appear in the client stats.
 
 Example: Show per-client metadata access statistics, refresh every 5 seconds.
-  $ beegfs stats client --node-type meta --interval 5s
+
+  beegfs stats client --node-type meta --interval 5s
 `
 
 	return s
@@ -99,8 +99,8 @@ Example: Show per-client metadata access statistics, refresh every 5 seconds.
 func newUserStatsCmd() *cobra.Command {
 	s := newGenericClientStatsCmd(true)
 	s.Use = "user"
-	s.Short = "Show IO statistics for BeeGFS users"
-	s.Long = `Show IO statistics for BeeGFS users
+	s.Short = "Show I/O statistics for BeeGFS users"
+	s.Long = `Show I/O statistics for BeeGFS users
   This command queries statistics for user requests from the servers and
   presents them in a sorted list, ordered by sum of requests per user.
   This allows identification of those users, which are currently
@@ -116,7 +116,7 @@ Note:
   the operations are associated with the user ID "-1".
 
 Example: Show per-user storage access statistics, refresh every 5 seconds.
-  $ beegfs stats user --node-type storage --interval 5s
+  beegfs stats user --node-type storage --interval 5s
 `
 
 	return s

@@ -20,11 +20,11 @@ func newRefreshEntryInfoCmd() *cobra.Command {
 	var cfg frontendCfg
 	cmd := &cobra.Command{
 		Use:   "refresh <path> [<path>] ...",
-		Short: "Refresh the metadata information for the specified files or directories.",
+		Short: "Refresh the metadata information for the specified files or directories",
 		Long: `Refresh the metadata information for the specified files or directories. Under normal circumstances, this operation 
 is not required. However, it ensures that BeeGFS metadata is fully synchronized with the current state of the underlying
-file system. This can be particularly useful in scenarios where inconsistencies arise, such as after using beegfs-fsck
-to resolve corruptions or when there are delayed metadata updates from the supporting file systems.`,
+filesystem. This can be particularly useful in scenarios where inconsistencies arise, such as after using beegfs-fsck
+to resolve corruptions or when there are delayed metadata updates from the supporting filesystems.`,
 		Args: func(cmd *cobra.Command, paths []string) error {
 			if len(paths) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)

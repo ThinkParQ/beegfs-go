@@ -54,7 +54,7 @@ Alternatively multiple entries can be provided using stdin by specifying '-' as 
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	// TODO: https://github.com/thinkparq/ctl/issues/56
 	// Update help text when verbose no longer just applies to the retro mode.
-	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "In the \"retro\" mode, print more information about each entry, such as chunk and dentry paths on the servers.")
+	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "In the \"retro\" mode, print more information about each entry, such as chunk and dentry paths on the nodes.")
 	cmd.Flags().BoolVar(&frontendCfg.retro, "retro", false, "Display entry information using the \"retro\" vertical style of the original beegfs-ctl.")
 	// The same default used for stdin-delimiter to allow the help output to print correctly can't
 	// be used directly. If the default changes update where this is set in getDelimiterFromString.

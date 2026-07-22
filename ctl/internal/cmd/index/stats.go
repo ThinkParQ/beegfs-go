@@ -18,7 +18,7 @@ func newStatsCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cob
 
 	cmd := &cobra.Command{
 		Use:         "stats <stat-name> [path]",
-		Short:       "Calculate statistics of the index directory.",
+		Short:       "Calculate statistics of the index directory",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {

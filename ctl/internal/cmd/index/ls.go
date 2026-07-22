@@ -18,7 +18,7 @@ func newLsCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobra.
 
 	cmd := &cobra.Command{
 		Use:         "ls [path]",
-		Short:       "Lists the contents of the index directory.",
+		Short:       "List the contents of the index directory",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Long: `Display the contents of an indexed directory, similar to ls(1).
 

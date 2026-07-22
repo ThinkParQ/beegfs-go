@@ -36,8 +36,8 @@ func NewBenchmarkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "benchmark",
 		Aliases: []string{"bench"},
-		Short:   "Run, manage, and query file system benchmarks",
-		Long: `Run, manage, and query file system benchmarks.
+		Short:   "Run, manage, and query filesystem benchmarks",
+		Long: `Run, manage, and query filesystem benchmarks.
 By default operations are performed against all nodes and targets. Optionally a subset of nodes or targets can be specified instead.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("watch") {
@@ -76,13 +76,13 @@ func newStartCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchCon
 	readBench := false
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start a benchmark on one or more storage targets.",
+		Short: "Start a benchmark on one or more storage targets",
 		Long: `Start a benchmark on one or more storage targets.
 
 Storage nodes will run I/O directly to their target(s) without any data transfer to or from client nodes.
 This allows storage performance to be measured independent of network performance.
 
-Note benchmark files will not be deleted automatically. Use the "cleanup" mode to delete the files after benchmarking is complete.`,
+Note: benchmark files will not be deleted automatically. Use the "cleanup" mode to delete the files after benchmarking is complete.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdfmt.Printf("Starting storage benchmark...\n")
 			backendCfg.Action = beegfs.BenchStart
@@ -105,7 +105,7 @@ Note benchmark files will not be deleted automatically. Use the "cleanup" mode t
 func newStatusCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print the status and results from a benchmark.",
+		Short: "Print the status and results from a benchmark",
 		Long:  `Print the status and results from the current/last benchmark for the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(backendCfg.TargetIDs) == 0 && len(backendCfg.StorageNodes) == 0 {
@@ -124,7 +124,7 @@ func newStatusCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchCo
 func newStopCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop a running benchmark.",
+		Short: "Stop a running benchmark",
 		Long:  `Stop a running benchmark on the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdfmt.Printf("Stopping storage benchmark, this may take a few moments...\n")
@@ -139,8 +139,8 @@ func newStopCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConf
 func newCleanupCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "Cleanup the benchmark files from the storage targets.",
-		Long:  `Cleanup (delete) the benchmark files from the specified storage targets.`,
+		Short: "Clean up the benchmark files from the storage targets",
+		Long:  `Clean up (delete) the benchmark files from the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdfmt.Printf("Cleaning up storage benchmark folder on each target...\n")
 			backendCfg.Action = beegfs.BenchCleanup

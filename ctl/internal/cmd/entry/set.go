@@ -41,7 +41,7 @@ Specifying Paths:
 When supported by the current shell, standard wildcards (globbing patterns) can be used in each path to update multiple directories at once.
 Alternatively multiple entries can be provided using stdin by specifying '-' as the path (example: 'cat file_list.txt | beegfs entry set -').
 
-NOTE: When updating multiple entries, non-directory entries will be silently ignored.
+Note: When updating multiple entries, non-directory entries will be silently ignored.
 
 Required Permissions:
 This mode can only be used by non-root users if administrators have enabled the "sysAllowUserSetPattern" option in the metadata server config.
@@ -99,10 +99,10 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
 	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory.
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
-	NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
+	Note: This is an enterprise feature. See end-user license agreement for definition and usage.`)
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 	When the pattern is set to "mirrored", each target will be mirrored on a corresponding mirror target.
-	NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
+	Note: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
 	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
 	If the stripe pattern is "mirrored" this is the number of mirror groups.`)
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.

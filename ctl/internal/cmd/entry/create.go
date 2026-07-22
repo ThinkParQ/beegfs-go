@@ -34,7 +34,7 @@ func newCreateFileCmd() *cobra.Command {
 		Long: `Create a file in BeeGFS with specific configuration.
 Unless specified, striping configuration is inherited from the parent directory.
 
-NOTE: Files created using this mode do not trigger file system modification events.`,
+Note: Files created using this mode do not trigger filesystem modification events.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
@@ -61,13 +61,13 @@ NOTE: Files created using this mode do not trigger file system modification even
 	If the groups are not in the same storage pool that will be assigned to the new file, the force flag must be set.`)
 	cmd.Flags().Var(newPoolFlag(&backendCfg.FileCfg.Pool), "pool", `Use targets or buddy groups from this storage pool when creating the file. 
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
-	NOTE: This is an enterprise feature. See end-user license agreement for definition and usage.`)
+	Note: This is an enterprise feature. See end-user license agreement for definition and usage.`)
 	cmd.Flags().Var(newPermissionsFlag(&backendCfg.Permissions, 0644), "permissions", "The octal access permissions for user, group, and others.")
 	cmd.Flags().Var(newUserFlag(&backendCfg.UserID), "uid", "User ID of the file owner. Defaults to the current effective user ID.")
 	cmd.Flags().Var(newGroupFlag(&backendCfg.GroupID), "gid", "Group ID of the file owner. Defaults to the current effective group ID.")
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.FileCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 	When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
-	NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
+	Note: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.FileCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
 	cmd.Flags().Var(rst.NewCooldownFlag(&backendCfg.FileCfg.RemoteCooldownSecs), rst.RemoteCooldownFlag, rst.RemoteCooldownFlagHelp)
 	cmd.MarkFlagsMutuallyExclusive("pool", "targets", "buddy-groups")
@@ -89,7 +89,7 @@ func newCreateDirCmd() *cobra.Command {
 By default if the parent directory is mirrored, the new directory will also be mirrored.
 Optionally the new directory can always be unmirrored or created on specific metadata node(s).
 
-NOTE: Directories created using this mode do not trigger file system modification events.`,
+Note: Directories created using this mode do not trigger filesystem modification events.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)
