@@ -1,5 +1,7 @@
 package beegfs
 
+import "encoding/json"
+
 // This file contains common types related to working with BeeGFS storage bench.
 
 // StorageBenchAction is the user requested action for the benchmark mode.
@@ -156,4 +158,23 @@ func (s StorageBenchError) String() string {
 	default:
 		return "unknown benchmark error"
 	}
+}
+
+// The storage bench enums marshal to their human-readable String() form so JSON output is stable and
+// readable rather than a bare integer.
+
+func (a StorageBenchAction) MarshalJSON() ([]byte, error) {
+	return json.Marshal(a.String())
+}
+
+func (b StorageBenchType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(b.String())
+}
+
+func (s StorageBenchStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
+}
+
+func (s StorageBenchError) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
