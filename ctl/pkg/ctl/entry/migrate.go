@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -58,6 +59,11 @@ func (s MigrateStatus) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// MarshalJSON encodes the migrate status as its human-readable string.
+func (s MigrateStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 type MigrateStats struct {

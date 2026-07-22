@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"fmt"
 	"syscall"
 )
@@ -132,6 +133,11 @@ func (e OpsErr) String() string {
 	default:
 		return fmt.Sprintf("Unknown error (%d)", int(e))
 	}
+}
+
+// MarshalJSON encodes the operation result as its human-readable string.
+func (e OpsErr) MarshalJSON() ([]byte, error) {
+	return json.Marshal(e.String())
 }
 
 // Unwrap exposes the corresponding syscall.Errno (when available), enabling errors.Is(err,
