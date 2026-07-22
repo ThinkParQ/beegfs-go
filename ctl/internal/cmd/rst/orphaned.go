@@ -25,8 +25,8 @@ func newCleanupOrphanedCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "cleanup-orphaned <path-prefix>",
-		Short: "Remove Remote DB entries for paths that no longer exist in BeeGFS",
-		Long: `Remove Remote DB entries for paths that no longer exist in BeeGFS.
+		Short: "Clean up Remote DB entries for paths that no longer exist in BeeGFS",
+		Long: `Clean up Remote DB entries for paths that no longer exist in BeeGFS.
 This command only removes BeeGFS Remote database entries. It does not modify BeeGFS files
 or remote objects.
 

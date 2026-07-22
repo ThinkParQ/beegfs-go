@@ -30,7 +30,7 @@ func newServerStatsCmd() *cobra.Command {
 
 	var cmd = &cobra.Command{
 		Use:   "server [<node>]",
-		Short: "Show IO statistics for BeeGFS servers",
+		Short: "Show I/O statistics for BeeGFS servers",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				id, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
@@ -47,30 +47,33 @@ func newServerStatsCmd() *cobra.Command {
 
 			return runServerstatsCmd(cmd, &cfg)
 		},
-		Long: `Show IO statistics for BeeGFS servers.
-  This command shows the number of network requests that were processed per second
-  by the servers, the number of requests currently pending in the queue and the
-  number of worker threads that are currently busy processing requests at the
-  time of measurement on the servers, and the amount of read/written data per
-  second for storage servers. The time field shows Unix timestamps in seconds since
-  the epoch.
+		Long: `Show I/O statistics for BeeGFS servers.
+This command shows the number of network requests that were processed per second
+by the servers, the number of requests currently pending in the queue and the
+number of worker threads that are currently busy processing requests at the
+time of measurement on the servers, and the amount of read/written data per
+second for storage servers. The time field shows Unix timestamps in seconds since
+the epoch.
 
-  By default prints out stats for all server types refreshing every 1s until Ctrl+C.
+By default prints out stats for all server types refreshing every 1s until Ctrl+C.
 
-  When stats are requested for a single server by specifying <node>, the output displays 
-  a history of the last few seconds in rows, with the most recent values at the bottom.
+When stats are requested for a single server by specifying <node>, the output displays 
+a history of the last few seconds in rows, with the most recent values at the bottom.
 
-  When stats are requested for multiple servers (by omitting <node>), individual 
-  statistics for each server are displayed, with one row per server.
+When stats are requested for multiple servers (by omitting <node>), individual 
+statistics for each server are displayed, with one row per server.
 
 Example: Print individual stats of all servers, refreshed every second.
-  $ beegfs stats server --interval 1s
+
+  beegfs stats server --interval 1s
 
 Example: Print aggregate stats of metadata servers, refreshed every 3 seconds.
-  $ beegfs stats server --node-type meta --interval 3s --sum
+
+  beegfs stats server --node-type meta --interval 3s --sum
 
 Example: Print stats for a single metadata server:
-  $ beegfs stats server meta:1
+
+  beegfs stats server meta:1
 `,
 	}
 

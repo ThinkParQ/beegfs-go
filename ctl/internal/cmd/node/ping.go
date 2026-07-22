@@ -48,8 +48,8 @@ many pings to do in parallel. `, config.NumWorkersKey),
 
 	cmd.Flags().StringVarP(&cfg.Mountpoint, "mount-point", "m", "",
 		"Mount point of the client that will be used to ping the node. Optional.\nIf not configured the first mount point found for the configured mgmtd will be used.")
-	cmd.Flags().Uint32VarP(&cfg.Count, "count", "c", 10, "How many pings to send")
-	cmd.Flags().DurationVarP(&cfg.Interval, "interval", "i", 1*time.Millisecond, "Time in ms to wait between subsequent pings")
+	cmd.Flags().Uint32VarP(&cfg.Count, "count", "c", 10, "How many pings to send.")
+	cmd.Flags().DurationVarP(&cfg.Interval, "interval", "i", 1*time.Millisecond, "Time in ms to wait between subsequent pings.")
 	cmd.Flags().BoolVarP(&cfg.Parallel, "parallel", "p", false,
 		fmt.Sprintf("Ping nodes in parallel. Uses --%s to determine how many parallel pings to do.", config.NumWorkersKey))
 

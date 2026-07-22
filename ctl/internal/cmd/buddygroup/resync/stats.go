@@ -14,7 +14,7 @@ import (
 func newResyncStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats <buddy-group>",
-		Short: "Retrieves statistics for running or completed resyncs.",
+		Short: "Retrieve statistics for running or completed resyncs",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			buddyGroup, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
@@ -58,7 +58,7 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 		printStorageResults(result)
 
 	default:
-		return fmt.Errorf("invalid target %s, only meta and storage targets are supported", primary)
+		return fmt.Errorf("invalid target %s, only metadata and storage targets are supported", primary)
 	}
 
 	return nil

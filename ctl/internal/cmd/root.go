@@ -299,7 +299,7 @@ func isCommandAuthorized(cmd *cobra.Command) error {
 			// By forcing non-root users to interact with BeeGFS through a mount point Linux will
 			// handle verifying users have permissions for the entries they want to interact with.
 			// Otherwise users could guess file names and use CTL to see if those files exist.
-			return fmt.Errorf("only root can interact with an unmounted file system")
+			return fmt.Errorf("only root can interact with an unmounted filesystem")
 		}
 		return nil
 	}
@@ -339,8 +339,7 @@ Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCo
 Global Flags:
 {{ else }}
 Flags:
-{{end}}
-{{wrapFlagUsages .LocalFlags | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
+{{end}}{{wrapFlagUsages .LocalFlags | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{end}}
 {{if (eq .Name "beegfs")}}
 Global flags apply to all commands and can all be set persistently using environment variables.
 To specify configuration using environment variables specify BEEGFS_KEY=VALUE where KEY is the 

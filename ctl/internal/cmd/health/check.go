@@ -65,12 +65,12 @@ func newCheckCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check [<mount-path>] ...",
-		Short: "Runs a series of checks against BeeGFS to verify its health",
-		Long: fmt.Sprintf(`Runs a series of checks against BeeGFS to verify its health.
+		Short: "Run a series of checks against BeeGFS to verify its health",
+		Long: fmt.Sprintf(`Run a series of checks against BeeGFS to verify its health.
 
-If there are multiple file systems mounted to this client, only one can be checked at a time.
-The file system that is checked is determined by the --%s parameter.
-If this file system is mounted multiple times, network connections will be checked for each mount point.
+If there are multiple filesystems mounted to this client, only one can be checked at a time.
+The filesystem that is checked is determined by the --%s parameter.
+If this filesystem is mounted multiple times, network connections will be checked for each mount point.
 Optionally specify one or more <mount-paths> to limit the connection checks.
 		`, config.ManagementAddrKey),
 		Annotations: map[string]string{
@@ -117,7 +117,7 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 		},
 	}
 	cmd.Flags().DurationVar(&frontendCfg.connectionTimeout, connectionTimeoutFlag, time.Second*5, "Timeout when attempting to establish connections for the network connection check.")
-	cmd.Flags().BoolVar(&frontendCfg.forceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage server connections by running df. Connections may be <none> if this is set to false.")
+	cmd.Flags().BoolVar(&frontendCfg.forceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage node connections by running df. Connections may be <none> if this is set to false.")
 	cmd.Flags().BoolVar(&frontendCfg.printNetworkConnections, "print-net", false, "By default network connections are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.printDF, "print-df", false, "By default available disk capacity and inodes are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.noHints, "no-hints", false, "Disable printing additional hints.")
@@ -216,7 +216,7 @@ func renderHuman(ctx context.Context, report *backend.Report, cfg checkCfg) {
 				}
 			}
 			if !cfg.noHints {
-				fmt.Print("HINT: This mode does not check file system consistency. To check for file system inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n")
+				fmt.Print("HINT: This mode does not check filesystem consistency. To check for filesystem inconsistencies,\n      you can run 'beegfs-fsck --checkfs --readOnly' and consult with ThinkParQ support.\n")
 			}
 			fmt.Println()
 

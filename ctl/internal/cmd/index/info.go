@@ -19,7 +19,7 @@ func newInfoCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobr
 
 	cmd := &cobra.Command{
 		Use:         "info [path]",
-		Short:       "Display index configuration and tree summary statistics.",
+		Short:       "Display index configuration and tree summary statistics",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Long: `Show the active index configuration and summary statistics from
 the tree summary table at the index root.

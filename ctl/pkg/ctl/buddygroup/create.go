@@ -111,7 +111,7 @@ targets:
 		switch cfg.NodeType {
 		case beegfs.Meta:
 			if t.TotalInodes == nil {
-				return nil, nil, fmt.Errorf("unable to determine available inodes. Please wait until meta nodes are fully registered")
+				return nil, nil, fmt.Errorf("unable to determine available inodes. Please wait until metadata nodes are fully registered")
 			}
 			if !cfg.IgnoreSpace && *t.TotalInodes != total {
 				if total == 0 {

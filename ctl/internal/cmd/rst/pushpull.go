@@ -43,7 +43,15 @@ When uploading multiple entries, any entries that do not have RSTs configured ar
 If there is an error uploading any of the entries the return code will be 2.
 If a fatal error occurs and the command exits early before trying to upload all entries, the return code will be 1.
 
-WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.`,
+WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.
+
+Example: Push a file to the Remote Storage Target(s) configured on it
+
+  beegfs remote push /mnt/beegfs/data/file.bin
+
+Example: Push a directory to a specific Remote Storage Target
+
+  beegfs remote push -r 1 /mnt/beegfs/data/`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument")
@@ -97,7 +105,7 @@ WARNING: Files are always uploaded and existing files overwritten unless the rem
 	cmd.Flags().BoolVar(backendCfg.Update, rst.UpdateFlag, false, fmt.Sprintf("Set the file's persistent remote target. Requires --%s.", rst.RemoteTargetFlag))
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Include optional metadata specified as 'key=value,[key=value]'.")
 	cmd.Flags().StringToStringVar(&tagging, "tagging", nil, "Include optional tag-set specified as 'key=value,[key=value]'.")
-	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. Note: --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
+	cmd.Flags().StringVar(backendCfg.StorageClass, rst.StorageClassFlag, "", fmt.Sprintf("Assigns a storage class to the object during upload. Storage class identifiers are typically case-sensitive. --%s is non-idempotent and takes effect only when the object is uploaded.", rst.StorageClassFlag))
 	cmd.Flags().StringVar(backendCfg.FilterExpr, filesystem.FilterExprFlag, "", filesystem.FilterFilesHelp)
 	cmd.Flags().Var(rst.NewRestorePolicyFlag(&backendCfg.RestorePolicy), rst.RestorePolicyFlag, rst.RestorePolicyFlagHelp)
 	cmd.Flags().Var(rst.NewCooldownFlag(&backendCfg.CooldownSecs), rst.RemoteCooldownFlag, rst.RemoteCooldownFlagHelp)
@@ -120,6 +128,11 @@ func newPullCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   fmt.Sprintf("pull --%s=<id> --%s=<path> <path>", rst.RemoteTargetFlag, rst.RemotePathFlag),
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
+		Long: `Download a file to BeeGFS from a Remote Storage Target.
+
+Example: Pull an object from Remote Storage Target 1 into BeeGFS
+
+  beegfs remote pull -r 1 -p backups/file.bin /mnt/beegfs/restore/file.bin`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument")
@@ -264,6 +277,6 @@ writeResponses:
 	if errStartingSync != 0 || syncNotAllowed != 0 {
 		return util.NewCtlError(errors.New(result), util.PartialSuccess)
 	}
-	cmdfmt.Printf("Success: %s", result)
+	cmdfmt.Printf("%s", result)
 	return nil
 }

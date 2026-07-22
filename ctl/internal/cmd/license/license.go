@@ -80,9 +80,9 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&cfg.Reload, "reload", false,
-		"Reload and re-verify license certificate on the server.")
+		"Reload and re-verify license certificate on the management node.")
 	cmd.Flags().BoolVar(&cfg.Get, "get", false,
-		"Get and install a new license for this file system.")
+		"Get and install a new license for this filesystem.")
 
 	return cmd
 }
