@@ -251,5 +251,5 @@ func (fs FileState) WithAccessState(flags AccessFlags) FileState {
 
 // WithoutAccessState returns a copy of the FileState with the specified access flags cleared.
 func (fs FileState) WithoutAccessState(flags AccessFlags) FileState {
-	return (fs & DataStateMask) | (FileState(flags) &^ AccessFlagMask)
+	return (fs & DataStateMask) | ((fs & AccessFlagMask) &^ FileState(flags))
 }
