@@ -129,6 +129,12 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 			workers = viper.GetInt(config.NumWorkersKey)
 			log.Debug(fmt.Sprintf("Pinging in parallel with %d workers", workers))
 		}
+		// A non-positive worker count (from a misconfigured --num-workers) would otherwise panic
+		// make(chan) when negative, or deadlock the send loop below when zero (no worker to drain
+		// pingChan). Clamp to at least one worker.
+		if workers < 1 {
+			workers = 1
+		}
 		pingChan := make(chan beegfs.Node, workers)
 		for i := 0; i < workers; i++ {
 			go func() {
@@ -144,7 +150,9 @@ func PingNodes(ctx context.Context, cfg PingConfig) (<-chan *PingResult, <-chan 
 							NodeID: n.Id,
 							Inner:  err,
 						}
-						return
+						// A single failed node must not abandon the rest of this worker's queue;
+						// keep draining pingChan. Only channel close (!ok above) ends the worker.
+						continue
 					}
 					out := PingResult{
 						Node:         n,
