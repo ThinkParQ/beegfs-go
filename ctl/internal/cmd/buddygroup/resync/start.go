@@ -22,7 +22,7 @@ func newStartResyncCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "start <buddy-group>",
-		Short: "Start a resync of a storage or metadata target from its buddy target.",
+		Short: "Start a resync of a storage or metadata target from its buddy target",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.buddyGroup, err = beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])

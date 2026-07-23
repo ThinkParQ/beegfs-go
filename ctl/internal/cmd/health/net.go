@@ -2,11 +2,14 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
+	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/health"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 )
 
@@ -33,7 +36,7 @@ func newNetCmd() *cobra.Command {
 
 If there are multiple BeeGFS mount points, connections will be displayed for each.
 
-NOTE: BeeGFS clients establish connections on demand, and periodically drop idle connections.
+Note: BeeGFS clients establish connections on demand, and periodically drop idle connections.
 Thus the lack of connections (<none>) to a particular server does not indicate any issues.
 By default this command will first use "df" to force the client module to establish connections to storage nodes.
 This can cause the command to block if any storage nodes are unreachable (use --skip-df if needed).
@@ -44,7 +47,7 @@ This can cause the command to block if any storage nodes are unreachable (use --
 		},
 	}
 	cmd.Flags().DurationVar(&frontendCfg.connectionTimeout, connectionTimeoutFlag, time.Second*1, "Timeout when attempting to establish connections for the network connection check.")
-	cmd.Flags().BoolVar(&backendCfg.ForceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage server connections by running df. Connections may be <none> if this is set to false.")
+	cmd.Flags().BoolVar(&backendCfg.ForceConnections, forceConnectionsFlag, true, "By default the network connection check will first attempt to establish storage node connections by running df. Connections may be <none> if this is set to false.")
 	cmd.Flags().BoolVar(&frontendCfg.noFilterByMgmtd, "all", false, "By default only BeeGFS mounts for the management service configured with CTL are displayed. Set to include all BeeGFS mounts found on this client.")
 	return cmd
 }
@@ -54,7 +57,7 @@ func runNetCmd(cmd *cobra.Command, filterByMounts []string, frontendCfg netCfg, 
 	if !frontendCfg.noFilterByMgmtd {
 		mgmtd, err := config.ManagementClient()
 		if err != nil {
-			return fmt.Errorf("unable to connect to management node: %w", err)
+			return err
 		}
 		backendCfg.FilterByUUID, err = mgmtd.GetFsUUID(cmd.Context())
 		if err != nil {
@@ -69,9 +72,32 @@ func runNetCmd(cmd *cobra.Command, filterByMounts []string, frontendCfg netCfg, 
 	if err != nil {
 		return err
 	}
-	for _, client := range clients {
-		printClientHeader(client, "=")
-		printBeeGFSNet(client)
+	switch config.OutputType(viper.GetString(config.OutputKey)) {
+	case config.OutputJSON:
+		data, err := json.Marshal(backend.ClientConnectionsFor(clients))
+		if err != nil {
+			return fmt.Errorf("marshaling connections: %w", err)
+		}
+		fmt.Println(string(data))
+	case config.OutputJSONPretty:
+		data, err := json.MarshalIndent(backend.ClientConnectionsFor(clients), "", " ")
+		if err != nil {
+			return fmt.Errorf("marshaling connections: %w", err)
+		}
+		fmt.Println(string(data))
+	case config.OutputNDJSON:
+		for _, c := range backend.ClientConnectionsFor(clients) {
+			data, err := json.Marshal(c)
+			if err != nil {
+				return fmt.Errorf("marshaling connections: %w", err)
+			}
+			fmt.Println(string(data))
+		}
+	default:
+		for _, client := range clients {
+			printClientHeader(client, "=")
+			printBeeGFSNet(client)
+		}
 	}
 	return nil
 }

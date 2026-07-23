@@ -7,8 +7,8 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats",
-		Short: "Query and monitor IO statistics",
-		Long:  `Display IO statistics for BeeGFS servers, clients and users.`,
+		Short: "Query and monitor I/O statistics",
+		Long:  `Display I/O statistics for BeeGFS servers, clients and users.`,
 		Args:  cobra.NoArgs,
 	}
 

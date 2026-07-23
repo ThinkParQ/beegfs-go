@@ -13,8 +13,8 @@ func newRestartCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "restart <buddy-group>",
-		Short: "Abort any active resyncs for a storage mirror and start a new one.",
-		Long: `Abort any active resyncs for a storage mirror and start a new one.
+		Short: "Abort any active resyncs for a buddy group and start a new one",
+		Long: `Abort any active resyncs for a buddy group and start a new one.
 This mode is not supported with metadata targets because metadata targets must always be completely resynchronized and cannot be restarted based on a timestamp or timespan.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

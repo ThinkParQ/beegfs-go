@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,6 +27,7 @@ type frontendCfg struct {
 	wait            bool
 	watch           bool
 	verbose         bool
+	outputType      config.OutputType
 }
 
 func NewBenchmarkCmd() *cobra.Command {
@@ -34,8 +36,8 @@ func NewBenchmarkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "benchmark",
 		Aliases: []string{"bench"},
-		Short:   "Run, manage, and query file system benchmarks",
-		Long: `Run, manage, and query file system benchmarks.
+		Short:   "Run, manage, and query filesystem benchmarks",
+		Long: `Run, manage, and query filesystem benchmarks.
 By default operations are performed against all nodes and targets. Optionally a subset of nodes or targets can be specified instead.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("watch") {
@@ -74,15 +76,15 @@ func newStartCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchCon
 	readBench := false
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start a benchmark on one or more storage targets.",
+		Short: "Start a benchmark on one or more storage targets",
 		Long: `Start a benchmark on one or more storage targets.
 
 Storage nodes will run I/O directly to their target(s) without any data transfer to or from client nodes.
 This allows storage performance to be measured independent of network performance.
 
-Note benchmark files will not be deleted automatically. Use the "cleanup" mode to delete the files after benchmarking is complete.`,
+Note: benchmark files will not be deleted automatically. Use the "cleanup" mode to delete the files after benchmarking is complete.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Print("Starting storage benchmark...")
+			cmdfmt.Printf("Starting storage benchmark...\n")
 			backendCfg.Action = beegfs.BenchStart
 			backendCfg.Type = beegfs.WriteBench
 			if readBench {
@@ -103,7 +105,7 @@ Note benchmark files will not be deleted automatically. Use the "cleanup" mode t
 func newStatusCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print the status and results from a benchmark.",
+		Short: "Print the status and results from a benchmark",
 		Long:  `Print the status and results from the current/last benchmark for the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(backendCfg.TargetIDs) == 0 && len(backendCfg.StorageNodes) == 0 {
@@ -122,10 +124,10 @@ func newStatusCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchCo
 func newStopCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop a running benchmark.",
+		Short: "Stop a running benchmark",
 		Long:  `Stop a running benchmark on the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Print("Stopping storage benchmark, this may take a few moments...")
+			cmdfmt.Printf("Stopping storage benchmark, this may take a few moments...\n")
 			backendCfg.Action = beegfs.BenchStop
 			return storageBenchDispatcher(cmd.Context(), frontendCfg, backendCfg)
 		},
@@ -137,10 +139,10 @@ func newStopCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConf
 func newCleanupCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig, parentFlags *pflag.FlagSet) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "Cleanup the benchmark files from the storage targets.",
-		Long:  `Cleanup (delete) the benchmark files from the specified storage targets.`,
+		Short: "Clean up the benchmark files from the storage targets",
+		Long:  `Clean up (delete) the benchmark files from the specified storage targets.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Print("Cleaning up storage benchmark folder on each target...")
+			cmdfmt.Printf("Cleaning up storage benchmark folder on each target...\n")
 			backendCfg.Action = beegfs.BenchCleanup
 			return storageBenchDispatcher(cmd.Context(), frontendCfg, backendCfg)
 		},
@@ -150,23 +152,31 @@ func newCleanupCmd(frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchC
 }
 
 func storageBenchDispatcher(ctx context.Context, frontendCfg *frontendCfg, backendCfg *benchmark.StorageBenchConfig) error {
+	frontendCfg.outputType = config.OutputType(viper.GetString(config.OutputKey))
+	jsonOut := frontendCfg.outputType.IsJSON()
+
+	// json and json-pretty are single documents and cannot be streamed by --watch; ndjson can (one
+	// snapshot per refresh). Use --wait to poll for the final result with json/json-pretty.
+	if frontendCfg.watch && (frontendCfg.outputType == config.OutputJSON || frontendCfg.outputType == config.OutputJSONPretty) {
+		return fmt.Errorf("--watch is not supported with --output %s; use --output ndjson to stream results or --wait for the final result", frontendCfg.outputType)
+	}
+
 	results, err := benchmark.ExecuteStorageBenchAction(ctx, backendCfg)
 	if err != nil {
 		return err
 	}
 
-	// For all actions if we were not requested to wait for or watch the results return now.
+	// If we were not asked to wait for or watch the results, return now. Only the status query
+	// reports results; issuing an action (start/stop/cleanup) relies on the exit code (and any error
+	// on stderr) to signal success.
 	if !frontendCfg.wait && !frontendCfg.watch {
 		if backendCfg.Action == beegfs.BenchStatus {
-			// The status action should always print status.
-			printStorageBenchResults(results, *frontendCfg)
-		} else {
-			fmt.Println(" use 'status' to check the results (HINT: Use --wait or --watch to automatically poll for updates).")
+			return printStorageBenchResults(results, *frontendCfg)
 		}
+		cmdfmt.Printf("Use 'status' to check the results (HINT: use --wait or --watch to automatically poll for updates).\n")
 		return nil
-	} else {
-		fmt.Println("  waiting for the request to complete (use Ctrl+C to stop waiting and use 'status' instead to check on the request).")
 	}
+	cmdfmt.Printf("Waiting for the request to complete (use Ctrl+C to stop waiting and use 'status' instead to check on the request).\n")
 
 	// Otherwise update the action to collect the bench status.
 	backendCfg.Action = beegfs.BenchStatus
@@ -178,16 +188,25 @@ func storageBenchDispatcher(ctx context.Context, frontendCfg *frontendCfg, backe
 			return err
 		}
 		if frontendCfg.watch {
-			err := refreshScreenAndPrintResults(results, *frontendCfg)
-			if err != nil {
+			// json/json-pretty were rejected above, so here jsonOut means ndjson: stream a snapshot
+			// per refresh rather than re-rendering the terminal.
+			if jsonOut {
+				if err := printStorageBenchResults(results, *frontendCfg); err != nil {
+					return err
+				}
+			} else if err := refreshScreenAndPrintResults(results, *frontendCfg); err != nil {
 				return err
 			}
 		}
 		if !hasActiveBenchmark(results) {
 			if frontendCfg.wait {
-				printStorageBenchResults(results, *frontendCfg)
+				if err := printStorageBenchResults(results, *frontendCfg); err != nil {
+					return err
+				}
 			}
-			util.TerminalAlert()
+			if !jsonOut {
+				util.TerminalAlert()
+			}
 			return nil
 		}
 		select {
@@ -229,7 +248,9 @@ func refreshScreenAndPrintResults(results []benchmark.StorageBenchResult, fronte
 	if err != nil {
 		return err
 	}
-	printStorageBenchResults(results, frontendCfg)
+	if err := printStorageBenchResults(results, frontendCfg); err != nil {
+		return err
+	}
 	err = t.FinishRefresh(util.WithTermFooter(fmt.Sprintf("Refreshing every %s until Ctrl+C or the benchmark completes (last refresh: %s).", frontendCfg.refreshInterval, time.Now().Format(time.TimeOnly))))
 	if err != nil {
 		return err
@@ -237,7 +258,33 @@ func refreshScreenAndPrintResults(results []benchmark.StorageBenchResult, fronte
 	return nil
 }
 
-func printStorageBenchResults(results []benchmark.StorageBenchResult, frontendCfg frontendCfg) {
+// printBenchJSON writes the raw benchmark results as JSON. The results slice is the single source of
+// truth the human tables are also derived from, so a consumer can compute any summary it needs.
+func printBenchJSON(outputType config.OutputType, results []benchmark.StorageBenchResult) error {
+	// json and ndjson both emit the whole result set on a single line; ndjson's value is under
+	// --watch, where each tick prints one line containing all current results (one snapshot per
+	// line). json-pretty renders the same data indented as a single document.
+	var (
+		data []byte
+		err  error
+	)
+	if outputType == config.OutputJSONPretty {
+		data, err = json.MarshalIndent(results, "", " ")
+	} else {
+		data, err = json.Marshal(results)
+	}
+	if err != nil {
+		return fmt.Errorf("marshaling benchmark results: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func printStorageBenchResults(results []benchmark.StorageBenchResult, frontendCfg frontendCfg) error {
+	if frontendCfg.outputType.IsJSON() {
+		return printBenchJSON(frontendCfg.outputType, results)
+	}
+
 	t := table.NewWriter()
 
 	if frontendCfg.unadornedTable {
@@ -272,6 +319,7 @@ func printStorageBenchResults(results []benchmark.StorageBenchResult, frontendCf
 		t.ResetHeaders()
 		t.ResetRows()
 	}
+	return nil
 }
 
 func printOverallStatus(t table.Writer, results []benchmark.StorageBenchResult) {
@@ -350,10 +398,10 @@ func printResultsSummary(t table.Writer, results []benchmark.StorageBenchResult)
 			testType = strings.ToUpper(t.String())
 		}
 	} else if len(benchType) > 1 {
-		fmt.Println("Unable to summarize results - found results for both read and write benchmarks.")
+		cmdfmt.Printf("Unable to summarize results - found results for both read and write benchmarks.\n")
 		return
 	} else {
-		fmt.Println("Unable to summarize results - no results found.")
+		cmdfmt.Printf("Unable to summarize results - no results found.\n")
 		return
 	}
 

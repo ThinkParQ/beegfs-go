@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
@@ -12,46 +13,129 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/util"
 )
 
-// Retrieves resync statistics for metadata targets. Should be used with the primary target.
-func GetMetaResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (msg.GetMetaResyncStatsResp, error) {
+// MetaResyncStats is the projection of a metadata target's resync statistics. It is the type
+// returned to callers so they render display/JSON output without touching the BeeMsg wire type
+// (msg.GetMetaResyncStatsResp) or repeating conversions such as timestamp formatting.
+type MetaResyncStats struct {
+	TargetType               string `json:"targetType"`
+	State                    string `json:"state"`
+	StartTime                string `json:"startTime,omitempty"`
+	EndTime                  string `json:"endTime,omitempty"`
+	DiscoveredDirs           uint64 `json:"discoveredDirs"`
+	DiscoveryErrors          uint64 `json:"discoveryErrors"`
+	SyncedDirs               uint64 `json:"syncedDirs"`
+	SyncedFiles              uint64 `json:"syncedFiles"`
+	ErrorDirs                uint64 `json:"errorDirs"`
+	ErrorFiles               uint64 `json:"errorFiles"`
+	SessionsToSync           uint64 `json:"sessionsToSync"`
+	SyncedSessions           uint64 `json:"syncedSessions"`
+	SessionSyncErrors        bool   `json:"sessionSyncErrors"`
+	ModifiedObjectsSynced    uint64 `json:"modifiedObjectsSynced"`
+	ModifiedObjectSyncErrors uint64 `json:"modifiedObjectSyncErrors"`
+}
+
+func newMetaResyncStats(r msg.GetMetaResyncStatsResp) MetaResyncStats {
+	return MetaResyncStats{
+		TargetType:               "meta",
+		State:                    r.State.String(),
+		StartTime:                resyncTime(r.StartTime),
+		EndTime:                  resyncTime(r.EndTime),
+		DiscoveredDirs:           r.DiscoveredDirs,
+		DiscoveryErrors:          r.GatherErrors,
+		SyncedDirs:               r.SyncedDirs,
+		SyncedFiles:              r.SyncedFiles,
+		ErrorDirs:                r.ErrorDirs,
+		ErrorFiles:               r.ErrorFiles,
+		SessionsToSync:           r.SessionsToSync,
+		SyncedSessions:           r.SyncedSessions,
+		SessionSyncErrors:        r.SessionSyncErrors != 0,
+		ModifiedObjectsSynced:    r.ModObjectsSynced,
+		ModifiedObjectSyncErrors: r.ModSyncErrors,
+	}
+}
+
+// StorageResyncStats is the projection of a storage target's resync statistics (see MetaResyncStats).
+type StorageResyncStats struct {
+	TargetType      string `json:"targetType"`
+	State           string `json:"state"`
+	StartTime       string `json:"startTime,omitempty"`
+	EndTime         string `json:"endTime,omitempty"`
+	DiscoveredFiles uint64 `json:"discoveredFiles"`
+	DiscoveredDirs  uint64 `json:"discoveredDirs"`
+	MatchedFiles    uint64 `json:"matchedFiles"`
+	MatchedDirs     uint64 `json:"matchedDirs"`
+	SyncedFiles     uint64 `json:"syncedFiles"`
+	SyncedDirs      uint64 `json:"syncedDirs"`
+	ErrorFiles      uint64 `json:"errorFiles"`
+	ErrorDirs       uint64 `json:"errorDirs"`
+}
+
+func newStorageResyncStats(r msg.GetStorageResyncStatsResp) StorageResyncStats {
+	return StorageResyncStats{
+		TargetType:      "storage",
+		State:           r.State.String(),
+		StartTime:       resyncTime(r.StartTime),
+		EndTime:         resyncTime(r.EndTime),
+		DiscoveredFiles: r.DiscoveredFiles,
+		DiscoveredDirs:  r.DiscoveredDirs,
+		MatchedFiles:    r.MatchedFiles,
+		MatchedDirs:     r.MatchedDirs,
+		SyncedFiles:     r.SyncedFiles,
+		SyncedDirs:      r.SyncedDirs,
+		ErrorFiles:      r.ErrorFiles,
+		ErrorDirs:       r.ErrorDirs,
+	}
+}
+
+// resyncTime formats a resync unix timestamp as RFC3339, returning "" for a zero (unset) time so the
+// field is omitted from JSON and skipped in the human report.
+func resyncTime(unix int64) string {
+	if unix == 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).Format(time.RFC3339)
+}
+
+// GetMetaResyncStats retrieves resync statistics for a metadata target. Should be used with the
+// primary target.
+func GetMetaResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (MetaResyncStats, error) {
 	node, target, err := getNode(ctx, pTarget)
 	if err != nil {
-		return msg.GetMetaResyncStatsResp{}, err
+		return MetaResyncStats{}, err
 	}
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return msg.GetMetaResyncStatsResp{}, err
+		return MetaResyncStats{}, err
 	}
 
 	resp := msg.GetMetaResyncStatsResp{}
-	err = store.RequestTCP(ctx, node.Uid, &msg.GetMetaResyncStats{TargetID: uint16(target.LegacyId.NumId)}, &resp)
-	if err != nil {
-		return msg.GetMetaResyncStatsResp{}, err
+	if err := store.RequestTCP(ctx, node.Uid, &msg.GetMetaResyncStats{TargetID: uint16(target.LegacyId.NumId)}, &resp); err != nil {
+		return MetaResyncStats{}, err
 	}
 
-	return resp, err
+	return newMetaResyncStats(resp), nil
 }
 
-// Retrieves resync statistics for storage targets. Should be used with the primary target.
-func GetStorageResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (msg.GetStorageResyncStatsResp, error) {
+// GetStorageResyncStats retrieves resync statistics for a storage target. Should be used with the
+// primary target.
+func GetStorageResyncStats(ctx context.Context, pTarget beegfs.EntityIdSet) (StorageResyncStats, error) {
 	node, target, err := getNode(ctx, pTarget)
 	if err != nil {
-		return msg.GetStorageResyncStatsResp{}, err
+		return StorageResyncStats{}, err
 	}
 
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return msg.GetStorageResyncStatsResp{}, err
+		return StorageResyncStats{}, err
 	}
 
 	resp := msg.GetStorageResyncStatsResp{}
-	err = store.RequestTCP(ctx, node.Uid, &msg.GetStorageResyncStats{TargetID: uint16(target.LegacyId.NumId)}, &resp)
-	if err != nil {
-		return msg.GetStorageResyncStatsResp{}, err
+	if err := store.RequestTCP(ctx, node.Uid, &msg.GetStorageResyncStats{TargetID: uint16(target.LegacyId.NumId)}, &resp); err != nil {
+		return StorageResyncStats{}, err
 	}
 
-	return resp, err
+	return newStorageResyncStats(resp), nil
 }
 
 // Query the node for the given target

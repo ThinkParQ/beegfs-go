@@ -19,7 +19,7 @@ func newMigrateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *c
 
 	cmd := &cobra.Command{
 		Use:   "migrate [path]",
-		Short: "Migrate old .bdm.db index databases to the new format.",
+		Short: "Migrate old .bdm.db index databases to the new format",
 		Args:  cobra.MaximumNArgs(1),
 		Long: `Migrate legacy BeeGFS Index databases (.bdm.db) to the
 new BeeGFS Index format (db.db) introduced in 8.4.

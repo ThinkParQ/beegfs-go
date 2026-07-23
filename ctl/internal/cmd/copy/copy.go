@@ -65,23 +65,23 @@ A path to a machine file containing a list of nodes to use to execute the copy o
 EXAMPLES:
 Copy file1 and file2 to /path2/file1 and /path2/file2 using a single thread per node (-t 1):
 
-  $ beegfs copy -m /tmp/machinefile -t 1 /path1/file1 /path1/file1 /path2
+  beegfs copy -m /tmp/machinefile -t 1 /path1/file1 /path1/file1 /path2
 
 Copy folder /many_files/ and its contents to /path2/many_files/ using 8 threads per node (-t 8):
 
-  $ beegfs copy -m /tmp/machinefile -t 8 /path1/many_files/ /path2
+  beegfs copy -m /tmp/machinefile -t 8 /path1/many_files/ /path2
 
 Copy two files, one 100MB and one 200GB with a partition threshold of 5GB (-p 5120):
 
-  $ beegfs copy -m /tmp/machinefile -t 8 -p 5120 /path1/file100MB.file /path1/file200GB.file /path2
+  beegfs copy -m /tmp/machinefile -t 8 -p 5120 /path1/file100MB.file /path1/file200GB.file /path2
 
 Copy one file specifying the chunksize for each thread as 512MB (-c 512):
 
-  $ beegfs copy m /tmp/machinefile -t 8 -c 512 /path1/bigData.file /path2
+  beegfs copy -m /tmp/machinefile -t 8 -c 512 /path1/bigData.file /path2
 
 Copy a file with all possible options enabled: 
 
-  $ beegfs copy -m /tmp/machinefile -n 4 -t 8 -p 1024 -c 512 -v 3 -s /path1/file_256GB.file /path2
+  beegfs copy -m /tmp/machinefile -n 4 -t 8 -p 1024 -c 512 -v 3 -s /path1/file_256GB.file /path2
 
 This would copy using first four nodes in the machinefile with 8 threads per node, a partition threshold
 of 1024MB and chunksize of 512MB while printing out statistics and detailed logs about the copy process.
@@ -89,7 +89,7 @@ The nodes, threads, and partition configuration would result in 32 threads each 
 
 Compare the contents of one folder with another:
 
-  $ beegfs copy -m /tmp/machinefile -t 8 /path1/many_files_and_dir /path2/many_files_and_dir -l
+  beegfs copy -m /tmp/machinefile -t 8 /path1/many_files_and_dir /path2/many_files_and_dir -l
 
 This would list the missing subdirectories and files in the destination path, along with any files
 with different sizes or older modification timestamps in the destination. No changes will be made.
@@ -98,7 +98,7 @@ must match the source type.
 
 Update a destination path and its contents based on the source path:
 
-  $ beegfs-copy -m /tmp/machinefile -t 8 /path1/many_files_and_dir /path2/many_files_and_dir -u
+  beegfs-copy -m /tmp/machinefile -t 8 /path1/many_files_and_dir /path2/many_files_and_dir -u
 
 This will compare the source and destination path, only copying contents that are missing based on the
 same rules defined above for comparing source and destination paths.
@@ -113,7 +113,7 @@ LIMITATIONS:
   and exit return a message like: "Failed to open directory". If necessary, increase this limit.
 * Avoid copying multiple source paths with the same base name, since the final copy may be different
   from what is expected. For example avoid a copy like:
-  * $ beegfs copy -m machinefile dir1/dir dir2/dir dir3/dir destination
+  * beegfs copy -m machinefile dir1/dir dir2/dir dir3/dir destination
 
 IMPORTANT: The primary use case of the copy mode is staging data for compute jobs.
 As such it does not validate after the copy completes that the source was not modified in the meantime.
@@ -127,7 +127,7 @@ should take measures to perform additional verification the source and destinati
 				if errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("to use this mode first install the beegfs-copy package")
 				} else {
-					return fmt.Errorf("error checking for required component at %s: %w (verify the beegfs-copy package is properly installed)", beegfsCopyPath, err)
+					return fmt.Errorf("checking for required component at %s: %w (verify the beegfs-copy package is properly installed)", beegfsCopyPath, err)
 				}
 			}
 			if mgmtdClient, err := config.ManagementClient(); err != nil {
@@ -158,11 +158,11 @@ should take measures to perform additional verification the source and destinati
 		bflag.Flag("threads", "t", "Number of threads per node. The default is the number of CPUs on this machine minus one, or one if there is a single CPU.", "-t", defaultThreads),
 		bflag.Flag("nodes", "n", "Start the copy using this many nodes from the machine file (selected top to bottom). The default (0) will use all nodes.", "-n", 0),
 		bflag.Flag("keep-atime", "a", `Do not modify the access time of the source file(s). 
-This only works if supported and enabled on the source file system.`, "-a", false),
+This only works if supported and enabled on the source filesystem.`, "-a", false),
 		bflag.Flag("chunksize", "c", `Chunk size for copy operations (in MB).
 Default chunk size: 128 MB.`, "-c", 128),
 		bflag.Flag("keep-mtime", "k", `Keep the original modification time from the source in the destination. 
-This only works if supported and enabled on the destination file system.`, "-k", false),
+This only works if supported and enabled on the destination filesystem.`, "-k", false),
 		bflag.Flag("preserve-ownership", "O", "Preserve ownership (user/group) from source (requires root permissions). By default ownership of files in the destination is determined by the effective user/group ID of the Copy process (8.3+).", "-O", false),
 		bflag.Flag("preserve-permissions", "P", "Preserve permission bits when updating existing entries. By default only new entries will inherit their permission bits from the source (8.3+).", "-P", false),
 		bflag.Flag("partition-threshold", "p", `Partition copy threshold (in MB).
@@ -197,7 +197,6 @@ destination have different modification times.`,
 For example use --stdin-delimiter=\"\\x00\" for NULL.`)
 	cmd.Flags().IntVar(&frontendCfg.batchSize, "stdin-batch", 1024, "At most this many paths will be read from stdin before triggering the parallel copy. Setting to higher values will consume more memory.")
 	cmd.MarkFlagRequired("machine-file")
-	cmd.Flags().MarkHidden("copy-help")
 	return cmd
 }
 
@@ -223,7 +222,7 @@ func copyRunner(bflagSet *bflag.FlagSet, paths []string, dest string) error {
 			log.Debug("beegfs-copy exited with non-zero status, propagating exit code", zap.Error(err))
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("error waiting for copy to complete: %w", err)
+		return fmt.Errorf("waiting for copy to complete: %w", err)
 	}
 	return nil
 }

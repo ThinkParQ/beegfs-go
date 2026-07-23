@@ -23,7 +23,7 @@ func newDeleteCmd() *cobra.Command {
 		Short: "Delete a storage target",
 		Long: `Delete a storage target.
 
-NOTE: If this target is still referenced in existing directory stripe patterns, creating files in that directory will fail until either the directory is updated or a new target with the same ID is created. Note if you reuse the same target ID in the future, it will automatically be used by any existing directories with that target ID, which might be undesirable.
+Note: If this target is still referenced in existing directory stripe patterns, creating files in that directory will fail until either the directory is updated or a new target with the same ID is created. Note if you reuse the same target ID in the future, it will automatically be used by any existing directories with that target ID, which might be undesirable.
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,17 +55,17 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteTarget_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Target)
 	if cfg.execute {
 		if err != nil {
-			cmdfmt.Printf("Target deleted, but received no id info from the server. Please verify the deletion using the `target list` command.\n")
+			cmdfmt.Printf("Target deleted, but received no id info from the management node. Please verify the deletion using the `target list` command.\n")
 		} else {
 			cmdfmt.Printf("Target deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("received no id info from the server")
+			return fmt.Errorf("received no id info from the management node")
 		} else {
 			cmdfmt.Printf(`Target can be deleted: %s
-Deleting a target might cause adverse effects to your file system and should only be done if no files using it are left. If you really want to delete the target, please add the --yes flag to the command.
+Deleting a target might cause adverse effects to your filesystem and should only be done if no files using it are left. If you really want to delete the target, please add the --yes flag to the command.
 `, res)
 		}
 	}

@@ -56,8 +56,8 @@ func newCreatePoolCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Uint16Var(&cfg.poolId, "num-id", 0, "Set the numeric id of the new pool. Auto-generated if unspecified.")
-	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the new pool")
-	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the new pool")
+	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the new pool.")
+	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the new pool.")
 
 	return cmd
 }
@@ -89,7 +89,7 @@ func runCreatePoolCmd(cmd *cobra.Command, cfg createPool_Config) error {
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if err != nil {
-		cmdfmt.Printf("Pool created, but received no id info from the server. Please verify the creation using the `pool list` command.\n")
+		cmdfmt.Printf("Pool created, but received no id info from the management node. Please verify the creation using the `pool list` command.\n")
 	} else {
 		cmdfmt.Printf("Pool created: %s\n", res)
 	}

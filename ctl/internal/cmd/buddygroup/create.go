@@ -94,7 +94,7 @@ func runCreateBuddyGroupCmd(cmd *cobra.Command, cfg createBuddyGroup_Config) err
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Group)
 	if err != nil {
-		cmdfmt.Printf("Buddy group created, but received no id info from the server. Please verify the creation using the `mirror list` command.\n")
+		cmdfmt.Printf("Buddy group created, but received no id info from the management node. Please verify the creation using the `mirror list` command.\n")
 	} else {
 		cmdfmt.Printf("Buddy group created: %s\n", res)
 	}

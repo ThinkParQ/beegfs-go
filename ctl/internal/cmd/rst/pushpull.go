@@ -43,7 +43,15 @@ When uploading multiple entries, any entries that do not have RSTs configured ar
 If there is an error uploading any of the entries the return code will be 2.
 If a fatal error occurs and the command exits early before trying to upload all entries, the return code will be 1.
 
-WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.`,
+WARNING: Files are always uploaded and existing files overwritten unless the remote target has file/object versioning enabled.
+
+Example: Push a file to the Remote Storage Target(s) configured on it
+
+  beegfs remote push /mnt/beegfs/data/file.bin
+
+Example: Push a directory to a specific Remote Storage Target
+
+  beegfs remote push -r 1 /mnt/beegfs/data/`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument")
@@ -120,6 +128,11 @@ func newPullCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   fmt.Sprintf("pull --%s=<id> --%s=<path> <path>", rst.RemoteTargetFlag, rst.RemotePathFlag),
 		Short: "Download a file to BeeGFS from a Remote Storage Target",
+		Long: `Download a file to BeeGFS from a Remote Storage Target.
+
+Example: Pull an object from Remote Storage Target 1 into BeeGFS
+
+  beegfs remote pull -r 1 -p backups/file.bin /mnt/beegfs/restore/file.bin`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("missing <path> argument")
@@ -264,6 +277,6 @@ writeResponses:
 	if errStartingSync != 0 || syncNotAllowed != 0 {
 		return util.NewCtlError(errors.New(result), util.PartialSuccess)
 	}
-	cmdfmt.Printf("Success: %s", result)
+	cmdfmt.Printf("%s", result)
 	return nil
 }

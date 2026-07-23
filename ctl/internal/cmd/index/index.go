@@ -12,8 +12,8 @@ func NewCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "index",
-		Short: "Create/update and run operations on the the file system index",
-		Long:  "Create/update and run different metadata operations against the the file system index.",
+		Short: "Create/update and run operations on the filesystem index",
+		Long:  "Create/update and run different metadata operations against the filesystem index.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			mgmtdClient, err := config.ManagementClient()
 			if err != nil {

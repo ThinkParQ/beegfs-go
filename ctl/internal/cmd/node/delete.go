@@ -23,7 +23,7 @@ func newDeleteCmd() *cobra.Command {
 		Short: "Delete a node",
 		Long: `Delete a node.
 
-WARNING: Deleting non-empty nodes will break your file system. Don't do this unless you know what you are doing.
+WARNING: Deleting non-empty nodes will break your filesystem. Don't do this unless you know what you are doing.
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,18 +55,18 @@ func runDeleteCmd(cmd *cobra.Command, cfg deleteNode_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Node)
 	if cfg.execute {
 		if err != nil {
-			cmdfmt.Printf("Node deleted, but received no id info from the server. Please verify the deletion using the `node list` command.\n")
+			cmdfmt.Printf("Node deleted, but received no id info from the management node. Please verify the deletion using the `node list` command.\n")
 		} else {
 			cmdfmt.Printf("Node deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("received no id info from the server")
+			return fmt.Errorf("received no id info from the management node")
 		} else {
 			cmdfmt.Printf("Node can be deleted: %s\n", res)
 			if res.LegacyId.NodeType == beegfs.Meta {
-				cmdfmt.Printf("Deleting a meta node might cause adverse effects to your file system and should only be done if no files using it or its internal target are left. If you really want to delete the node, please add the --yes flag to the command. ")
+				cmdfmt.Printf("Deleting a meta node might cause adverse effects to your filesystem and should only be done if no files using it or its internal target are left. If you really want to delete the node, please add the --yes flag to the command. ")
 			} else {
 				cmdfmt.Printf("Deleting a node should be safe if no targets are left assigned to it. If you really want to delete the node, please add the --yes flag to the command. ")
 			}

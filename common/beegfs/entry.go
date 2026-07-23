@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -44,6 +45,11 @@ func (t EntryType) String() string {
 	default:
 		return "invalid"
 	}
+}
+
+// MarshalJSON encodes the entry type as its human-readable string.
+func (t EntryType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
 }
 
 // Equivalent of StripePatternType in C++.
@@ -222,6 +228,11 @@ func (f AccessFlags) String() string {
 	}
 }
 
+// MarshalJSON encodes the access flags as their human-readable string.
+func (f AccessFlags) MarshalJSON() ([]byte, error) {
+	return json.Marshal(f.String())
+}
+
 func (s DataState) String() string {
 	switch s {
 	case DataStateAvailable:
@@ -237,6 +248,11 @@ func (s DataState) String() string {
 	default:
 		return fmt.Sprintf("Unknown(%d)", s)
 	}
+}
+
+// MarshalJSON encodes the data state as its human-readable string.
+func (s DataState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 // WithDataState returns a copy of the FileState with the updated data state.

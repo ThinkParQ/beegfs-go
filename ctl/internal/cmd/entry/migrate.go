@@ -87,7 +87,15 @@ Symlinks are supported but the migrated links will look slightly different than 
   the link will always inherit its storage pool assignment from its parent directory (which may differ).
   
 These differences should never be problematic as typically the link itself is not important and most commands will
-actually redirect and return information from the linked file (i.e., stat, open, etc).`, msg.StartChunkBalanceMsgVersions),
+actually redirect and return information from the linked file (i.e., stat, open, etc).
+
+Example: Migrate files off storage target 3 into pool 2
+
+  beegfs entry migrate --from-targets 3 --pool 2 /mnt/beegfs/data
+
+Example: Recursively migrate a directory to buddy groups 10 and 11 using background rebalancing
+
+  beegfs entry migrate --from-pools 1 --groups 10,11 --rebalance --recurse /mnt/beegfs/project`, msg.StartChunkBalanceMsgVersions),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)

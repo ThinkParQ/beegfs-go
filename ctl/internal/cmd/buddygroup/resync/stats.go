@@ -1,19 +1,20 @@
 package resync
 
 import (
+	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
 )
 
 func newResyncStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats <buddy-group>",
-		Short: "Retrieves statistics for running or completed resyncs.",
+		Short: "Retrieve statistics for running or completed resyncs",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			buddyGroup, err := beegfs.NewEntityIdParser(16, beegfs.Meta, beegfs.Storage).Parse(args[0])
@@ -33,11 +34,16 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 		return err
 	}
 
+	outputType := config.OutputType(viper.GetString(config.OutputKey))
+
 	switch primary.LegacyId.NodeType {
 	case beegfs.Meta:
 		result, err := backend.GetMetaResyncStats(cmd.Context(), primary)
 		if err != nil {
 			return err
+		}
+		if outputType.IsJSON() {
+			return printResyncJSON(outputType, result)
 		}
 		printMetaResults(result)
 
@@ -45,6 +51,9 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 		result, err := backend.GetStorageResyncStats(cmd.Context(), primary)
 		if err != nil {
 			return err
+		}
+		if outputType.IsJSON() {
+			return printResyncJSON(outputType, result)
 		}
 		printStorageResults(result)
 
@@ -55,19 +64,42 @@ func runResyncStatsCmd(cmd *cobra.Command, buddyGroup *beegfs.EntityId) error {
 	return nil
 }
 
-func printMetaResults(result msg.GetMetaResyncStatsResp) {
+// printResyncJSON marshals a single resync-stats object to stdout. A resync report is a single
+// object, so NDJSON is the same compact single line as JSON.
+func printResyncJSON(outputType config.OutputType, v any) error {
+	var (
+		data []byte
+		err  error
+	)
+	if outputType == config.OutputJSONPretty {
+		data, err = json.MarshalIndent(v, "", " ")
+	} else {
+		data, err = json.Marshal(v)
+	}
+	if err != nil {
+		return fmt.Errorf("marshaling resync stats: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func printMetaResults(result backend.MetaResyncStats) {
 	fmt.Println("Status")
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
-	fmt.Printf("Start Time: %s\n", time.Unix(int64(result.StartTime), 0).Format(time.RFC3339))
-	if result.EndTime != 0 {
-		fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	startTime := result.StartTime
+	if startTime == "" {
+		startTime = "Not started"
+	}
+	fmt.Printf("Start Time: %s\n", startTime)
+	if result.EndTime != "" {
+		fmt.Printf("End Time: %s\n", result.EndTime)
 	}
 
 	fmt.Println("\nDiscovery Results")
 	fmt.Println("-----------------")
 	fmt.Printf("Directories Discovered: %d\n", result.DiscoveredDirs)
-	fmt.Printf("Discovery Errors: %d\n", result.GatherErrors)
+	fmt.Printf("Discovery Errors: %d\n", result.DiscoveryErrors)
 
 	fmt.Println("\nSync Results")
 	fmt.Println("------------")
@@ -83,21 +115,25 @@ func printMetaResults(result msg.GetMetaResyncStatsResp) {
 	fmt.Println("--------------------")
 	fmt.Printf("Sessions to Sync: %d\n", result.SessionsToSync)
 	fmt.Printf("Sessions Synced: %d\n", result.SyncedSessions)
-	fmt.Printf("Session Sync Errors: %t\n", result.SessionSyncErrors != 0)
+	fmt.Printf("Session Sync Errors: %t\n", result.SessionSyncErrors)
 
 	fmt.Println("\nModified Object Sync")
 	fmt.Println("--------------------")
-	fmt.Printf("Modified Objects Synced: %d\n", result.ModObjectsSynced)
-	fmt.Printf("Modified Object Sync Errors: %d\n", result.ModSyncErrors)
+	fmt.Printf("Modified Objects Synced: %d\n", result.ModifiedObjectsSynced)
+	fmt.Printf("Modified Object Sync Errors: %d\n", result.ModifiedObjectSyncErrors)
 }
 
-func printStorageResults(result msg.GetStorageResyncStatsResp) {
+func printStorageResults(result backend.StorageResyncStats) {
 	fmt.Println("Status")
 	fmt.Println("------")
 	fmt.Printf("Job State: %s\n", result.State)
-	fmt.Printf("Start Time: %s\n", time.Unix(int64(result.StartTime), 0).Format(time.RFC3339))
-	if result.EndTime != 0 {
-		fmt.Printf("End Time: %s\n", time.Unix(int64(result.EndTime), 0).Format(time.RFC3339))
+	startTime := result.StartTime
+	if startTime == "" {
+		startTime = "Not started"
+	}
+	fmt.Printf("Start Time: %s\n", startTime)
+	if result.EndTime != "" {
+		fmt.Printf("End Time: %s\n", result.EndTime)
 	}
 
 	fmt.Println("\nDiscovery Results")

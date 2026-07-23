@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"strings"
 
 	pb "github.com/thinkparq/protobuf/go/beegfs"
@@ -91,4 +92,8 @@ func (n NodeType) String() string {
 	default:
 		return "<invalid>"
 	}
+}
+
+func (n NodeType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
 }

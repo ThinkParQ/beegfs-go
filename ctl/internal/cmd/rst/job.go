@@ -82,8 +82,8 @@ func newCleanupCmd() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "cleanup <path>",
-		Short: "Cleanup (delete) jobs for the specified path",
-		Long: `Cleanup (delete) jobs for the specified path.
+		Short: "Clean up (delete) jobs for the specified path",
+		Long: `Clean up (delete) jobs for the specified path.
 By default all incomplete jobs for the exact <path> specified are deleted. Also specify the job ID to update a single job.
 To update multiple paths at once use the recurse flag to update all paths prefixed by <path>.
 
@@ -106,7 +106,7 @@ Note: Because jobs can exist for paths that no longer exist in BeeGFS, recursive
 			return updateJobRunner(cmd.Context(), &cfg)
 		},
 	}
-	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only cleanup the specified job.")
+	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only clean up the specified job.")
 	cmd.Flags().BoolVar(&cfg.Force, "force", false, `By default completed jobs are skipped when cleaning up so they can be used to determine when a path was synchronized with an RST.
 	Optionally completed jobs can be forcibly cleaned up (generally you will want to use the jobID flag to limit what jobs are deleted).`)
 	cmd.Flags().UintSliceVar(&cfg.RemoteTargets, "remote-targets", nil, "Only update jobs for the specified remote targets. By default jobs for all remote targets are updated.")
@@ -177,9 +177,9 @@ writeResponses:
 	if processedPaths == 0 {
 		cmdfmt.Printf("no jobs were found for the specified path\n")
 	} else if !cfg.Force {
-		cmdfmt.Printf("Success: updated all jobs except ones that were already completed for %d paths\n", processedPaths)
+		cmdfmt.Printf("Successfully updated all jobs except ones that were already completed for %d paths\n", processedPaths)
 	} else {
-		cmdfmt.Printf("Success: updated all jobs for %d paths\n", processedPaths)
+		cmdfmt.Printf("Successfully updated all jobs for %d paths\n", processedPaths)
 	}
 	return nil
 }
@@ -374,6 +374,6 @@ writeResponses:
 	if totalPaths == 0 {
 		return errors.New("no matching entries were found")
 	}
-	cmdfmt.Printf("Success: total entries found: %d\n", totalPaths)
+	cmdfmt.Printf("Total entries found: %d\n", totalPaths)
 	return nil
 }

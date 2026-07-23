@@ -113,6 +113,9 @@ const (
 	OutputJSON       OutputType = "json"
 	OutputJSONPretty OutputType = "json-pretty"
 	OutputNDJSON     OutputType = "ndjson"
+	// When adding new output types, keep in mind both the Printomatic and commands with custom
+	// output such as `health check` will need to be updated, at minimum to return an error if an
+	// unsupported OutputType is used with those modes.
 )
 
 var (
@@ -131,6 +134,18 @@ func (t OutputType) String() string {
 		return "ndjson"
 	default:
 		return "unknown"
+	}
+}
+
+// IsJSON reports whether the output type is one of the JSON-family formats (json, json-pretty, or
+// ndjson) rather than the human-readable table. Useful for commands with custom output that branch
+// between a human report and JSON.
+func (t OutputType) IsJSON() bool {
+	switch t {
+	case OutputJSON, OutputJSONPretty, OutputNDJSON:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -557,7 +572,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		IncludeNics: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error getting node list from management: %w", err)
+		return nil, fmt.Errorf("getting node list from management: %w", err)
 	}
 
 	// Loop through the node entries
@@ -613,7 +628,7 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		if rootBuddy := nodes.GetMetaRootBuddyGroup(); rootBuddy != nil {
 			rootMirror, err := beegfs.EntityIdSetFromProto(rootBuddy)
 			if err != nil {
-				return nil, fmt.Errorf("error parsing meta root mirror: %w", err)
+				return nil, fmt.Errorf("parsing meta root mirror: %w", err)
 			}
 			nodeStore.SetMetaRootBuddyGroup(rootMirror)
 		}
