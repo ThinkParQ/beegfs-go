@@ -22,20 +22,20 @@ func (t *trackingBulkOperation) AddRequest(ctx context.Context, request *beeremo
 	return nil
 }
 
-func (t *trackingBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkExecuteResultFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult)
+func (t *trackingBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
-func (t *trackingBulkOperation) Resume(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult)
+func (t *trackingBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil
 }
 
-func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult)
+func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
 	return walkCh, func() error {
 		t.cancelCalled = true
 		t.cancelReason = reason
@@ -43,6 +43,10 @@ func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-cha
 		close(walkCh)
 		return nil
 	}, nil
+}
+
+func (t *trackingBulkOperation) Close(ctx context.Context) error {
+	return nil
 }
 
 func TestGetBulkOperationsReturnsAllStartedBulkOperations(t *testing.T) {

@@ -8,10 +8,116 @@ import (
 	"path"
 	"sync"
 
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
+
+type BulkStreamPathResult struct {
+	BulkInfo *flex.BulkJobRequestInfo
+	RstId    uint32
+	Path     string
+	Err      error
+}
+
+type BulkStreamPathResultMultiplexer struct {
+	ctx           context.Context
+	mergeCh       chan *BulkStreamPathResult
+	mergeChClosed bool
+	mu            sync.RWMutex
+	done          *sync.Cond
+	activeInputs  int
+	closed        bool
+}
+
+func NewBulkStreamPathResultMultiplexer(ctx context.Context, bufferSize int) *BulkStreamPathResultMultiplexer {
+	mergeCh := make(chan *BulkStreamPathResult, max(1, bufferSize))
+	multiplexer := &BulkStreamPathResultMultiplexer{ctx: ctx, mergeCh: mergeCh}
+	multiplexer.done = sync.NewCond(&multiplexer.mu)
+	return multiplexer
+}
+
+func (m *BulkStreamPathResultMultiplexer) Output() <-chan *BulkStreamPathResult {
+	return m.mergeCh
+}
+
+func (m *BulkStreamPathResultMultiplexer) IsWalkInactive() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.activeInputs == 0
+}
+
+func (m *BulkStreamPathResultMultiplexer) AddWalks(walkChs []<-chan *BulkStreamPathResult) func() {
+	if len(walkChs) == 0 {
+		return func() {}
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return func() {}
+	}
+	m.activeInputs += len(walkChs)
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, ch := range walkChs {
+		wg.Add(1)
+		go func(ch <-chan *BulkStreamPathResult) {
+			defer wg.Done()
+			defer m.addWalksDone()
+
+			for {
+				select {
+				case <-m.ctx.Done():
+					return
+				case walkPath, ok := <-ch:
+					if !ok {
+						return
+					}
+
+					select {
+					case <-m.ctx.Done():
+						return
+					case m.mergeCh <- walkPath:
+					}
+				}
+			}
+		}(ch)
+	}
+
+	return func() {
+		wg.Wait()
+	}
+}
+
+func (m *BulkStreamPathResultMultiplexer) addWalksDone() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.activeInputs--
+	if m.closed && m.activeInputs == 0 && !m.mergeChClosed {
+		close(m.mergeCh)
+		m.mergeChClosed = true
+		m.done.Broadcast()
+	}
+}
+
+func (m *BulkStreamPathResultMultiplexer) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.closed = true
+
+	if m.activeInputs == 0 && !m.mergeChClosed {
+		close(m.mergeCh)
+		m.mergeChClosed = true
+		m.done.Broadcast()
+	}
+
+	for !m.mergeChClosed {
+		m.done.Wait()
+	}
+}
 
 type jobBuilderBulkOperationsManager struct {
 	managers              map[string]*bulkOperationManager
@@ -62,8 +168,8 @@ func (m *jobBuilderBulkOperationsManager) AddToBulkRequest(ctx context.Context, 
 		m.managersMu.Lock()
 		defer m.managersMu.Unlock()
 
-		manager := m.managers[m.bulkOperationKey(rstId, operation)]
-		if manager == nil {
+		manager, ok := m.managers[m.bulkOperationKey(rstId, operation)]
+		if !ok {
 			if _, manager, err = m.addManagerUnlocked(ctx, client, rstId, operation); err != nil {
 				return
 			}
@@ -93,6 +199,7 @@ func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controlle
 	handles := bulkExecuteHandles{}
 	for managerKey, manager := range managers {
 		walkCh, getResult, executeErr := manager.Execute(ctx)
+
 		if executeErr != nil {
 			manager.AppendError(executeErr)
 			result.Err = errors.Join(result.Err, manager.GetErrors())
@@ -100,8 +207,7 @@ func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controlle
 		}
 		handles.add(managerKey, walkCh, getResult)
 	}
-
-	waitForWalks := controller.AddWalks(handles.getWalkChs())
+	waitForWalks := controller.AddBulkOperationWalks(handles.getWalkChs())
 	waitForWalks()
 
 	mergedResult, executeErrs := handles.getMergedResults()
@@ -141,8 +247,7 @@ func (m *jobBuilderBulkOperationsManager) Resume(ctx context.Context, controller
 		handles.add(managerKey, walkCh, getResult)
 	}
 
-	waitForWalks := controller.AddWalks(handles.getWalkChs())
-
+	waitForWalks := controller.AddBulkOperationWalks(handles.getWalkChs())
 	wait = func() (err error) {
 		waitForWalks()
 		results := handles.getMergedResults()
@@ -157,6 +262,16 @@ func (m *jobBuilderBulkOperationsManager) Resume(ctx context.Context, controller
 		return err
 	}
 
+	return
+}
+
+// Resume continues processing any existing bulk operations started in a previous builder job execution.
+func (m *jobBuilderBulkOperationsManager) Close(ctx context.Context) (err error) {
+	for managerKey, manager := range m.getManagersSnapshot() {
+		if closeErr := manager.Close(ctx); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close bulk operation manager, %s: %w", managerKey, closeErr))
+		}
+	}
 	return
 }
 
@@ -179,7 +294,7 @@ func (m *jobBuilderBulkOperationsManager) Abort(ctx context.Context, controller 
 		handles.add(managerKey, walkCh, wait)
 	}
 
-	waitForWalks := controller.AddWalks(handles.getWalkChs())
+	waitForWalks := controller.AddBulkOperationWalks(handles.getWalkChs())
 	waitForWalks()
 
 	results := handles.getMergedResults()
@@ -206,7 +321,6 @@ type bulkOperationManager struct {
 	rstId          uint32
 	Operation      string
 	JobRequests    []*beeremote.JobRequest
-	nextJobIndex   *int64
 	mu             sync.Mutex
 	errors         *string
 	Completed      bool
@@ -226,13 +340,16 @@ func newBulkOperationManager(ctx context.Context, client Provider, jobId string,
 		StateMountPath:      stateMountPath,
 		rstId:               bulkOperation.RstId,
 		Operation:           bulkOperation.Operation,
-		nextJobIndex:        &bulkOperation.NextJobIndex,
 		JobRequests:         []*beeremote.JobRequest{},
 		errors:              bulkOperation.Errors,
 	}
 	return manager, nil
 }
 
+// AddRequest attaches the bulk operation's StateMountPath and Operation to the request. JobIndex is
+// intentionally left unset here; the provider-specific clientBulkOperation assigns it based on its
+// own persisted state (e.g. the count of requests already recorded on disk) since it's the one that
+// must be able to reconstruct a correct index after a builder reschedule reopens the operation.
 func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -240,22 +357,20 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 	request.SetBulkInfo(&flex.BulkJobRequestInfo{
 		StateMountPath: m.StateMountPath,
 		Operation:      m.Operation,
-		JobIndex:       *m.nextJobIndex,
 	})
-	*m.nextJobIndex++
 
 	return m.clientBulkOperation.AddRequest(ctx, request)
 }
 
-func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, getResults BulkExecuteResultFn, err error) {
+func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
 	return m.clientBulkOperation.Execute(ctx)
 }
 
-func (m *bulkOperationManager) Resume(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
+func (m *bulkOperationManager) Resume(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {
 	return m.clientBulkOperation.Resume(ctx)
 }
 
-func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error) {
+func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {
 	return m.clientBulkOperation.Cancel(ctx, reason)
 }
 
@@ -282,13 +397,13 @@ func (m *bulkOperationManager) GetErrors() error {
 }
 
 type bulkExecuteHandles struct {
-	walkChs    map[string]<-chan *filesystem.StreamPathResult
+	walkChs    map[string]<-chan *BulkStreamPathResult
 	getResults map[string]BulkExecuteResultFn
 }
 
-func (b *bulkExecuteHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, getResult BulkExecuteResultFn) {
+func (b *bulkExecuteHandles) add(managerKey string, walkCh <-chan *BulkStreamPathResult, getResult BulkExecuteResultFn) {
 	if b.walkChs == nil {
-		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+		b.walkChs = map[string]<-chan *BulkStreamPathResult{}
 	}
 	if b.getResults == nil {
 		b.getResults = map[string]BulkExecuteResultFn{}
@@ -297,7 +412,7 @@ func (b *bulkExecuteHandles) add(managerKey string, walkCh <-chan *filesystem.St
 	b.getResults[managerKey] = getResult
 }
 
-func (b *bulkExecuteHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+func (b *bulkExecuteHandles) getWalkChs() (walkChs []<-chan *BulkStreamPathResult) {
 	for _, walkCh := range b.walkChs {
 		walkChs = append(walkChs, walkCh)
 	}
@@ -323,13 +438,13 @@ func (b *bulkExecuteHandles) getMergedResults() (result *SchedulingResult, errs 
 }
 
 type bulkWaitHandles struct {
-	walkChs map[string]<-chan *filesystem.StreamPathResult
+	walkChs map[string]<-chan *BulkStreamPathResult
 	waits   map[string]BulkWaitFn
 }
 
-func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn) {
+func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn) {
 	if b.walkChs == nil {
-		b.walkChs = map[string]<-chan *filesystem.StreamPathResult{}
+		b.walkChs = map[string]<-chan *BulkStreamPathResult{}
 	}
 	if b.waits == nil {
 		b.waits = map[string]BulkWaitFn{}
@@ -338,7 +453,7 @@ func (b *bulkWaitHandles) add(managerKey string, walkCh <-chan *filesystem.Strea
 	b.waits[managerKey] = wait
 }
 
-func (b *bulkWaitHandles) getWalkChs() (walkChs []<-chan *filesystem.StreamPathResult) {
+func (b *bulkWaitHandles) getWalkChs() (walkChs []<-chan *BulkStreamPathResult) {
 	for _, walkCh := range b.walkChs {
 		walkChs = append(walkChs, walkCh)
 	}

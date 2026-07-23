@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 )
 
@@ -20,16 +19,20 @@ type testBulkOperation struct {
 	waitErr       error
 }
 
+func (x *testBulkOperation) Close(ctx context.Context) error {
+	return nil
+}
+
 func (t *testBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
 	return nil
 }
 
-func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkExecuteResultFn, error) {
+func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 	if t.executeErr != nil {
 		return nil, nil, t.executeErr
 	}
 
-	walkCh := make(chan *filesystem.StreamPathResult)
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() *SchedulingResult {
 		if t.executeResult != nil {
@@ -39,29 +42,29 @@ func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.Str
 	}, nil
 }
 
-func (t *testBulkOperation) Resume(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
+func (t *testBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
 	if t.resumeErr != nil {
 		return nil, nil, t.resumeErr
 	}
 
-	walkCh := make(chan *filesystem.StreamPathResult)
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return t.waitErr }, nil
 }
 
-func (t *testBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
+func (t *testBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
 	if t.cancelErr != nil {
 		return nil, nil, t.cancelErr
 	}
 
-	walkCh := make(chan *filesystem.StreamPathResult)
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return t.waitErr }, nil
 }
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
 	}
 
 	cancelErrs := new(string)
@@ -82,7 +85,7 @@ func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t 
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
 	}
 
 	resumeErrs := new(string)
@@ -104,7 +107,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t
 
 func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 2),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 2),
 	}
 
 	manager := &jobBuilderBulkOperationsManager{
@@ -135,7 +138,7 @@ func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t 
 
 func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 2),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 2),
 	}
 
 	openErrs := new(string)
@@ -169,7 +172,7 @@ func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t 
 
 func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)
@@ -203,7 +206,7 @@ func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *t
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsErrorsWhenCancelFails(t *testing.T) {
 	controller := &requestBuildController{
-		walkMultiplexer: filesystem.NewWalkMultiplexer(context.Background(), 1),
+		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
 	}
 
 	openErrs := new(string)

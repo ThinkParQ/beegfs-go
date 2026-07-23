@@ -322,8 +322,13 @@ func (w *worker) process(work workAssignment) {
 
 	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
 	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
+	if state == flex.Work_SCHEDULED {
+		// Rescheduled work status messages will carry information aggregative status information.
+		// So, just set the running state information when the status state is scheduled.
+		status.SetMessage("attempting to carry out the work request")
+	}
 	status.SetState(flex.Work_RUNNING)
-	status.SetMessage("attempting to carry out the work request")
+
 	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
 		log.Warn("error updating journal work entry to running", zap.Error(err))
 	}
@@ -509,19 +514,14 @@ func (w *worker) sendBuilderJobRequest(work workAssignment, builder *flex.Builde
 			}
 
 			if errors.Is(err, rst.ErrJobAlreadyComplete) {
-				fmt.Println("ErrJobAlreadyComplete: ", request.Path)
 				builder.JobsAlreadyComplete++
 			} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
-				fmt.Println("ErrJobAlreadyOffloaded: ", request.Path)
 				builder.JobsAlreadyOffloaded++
 			} else if errors.Is(err, rst.ErrJobAlreadyExists) {
-				fmt.Println("ErrJobAlreadyExists: ", request.Path)
 				builder.JobsAlreadyExist++
 			} else if errors.Is(err, rst.ErrJobNotAllowed) {
-				fmt.Println("ErrJobNotAllowed: ", request.Path)
 				builder.JobsNotAllowed++
 			} else {
-				fmt.Println("Error: ", request.Path)
 				builder.Errors++
 			}
 		} else {

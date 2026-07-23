@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -28,13 +29,18 @@ type requestBuildController struct {
 	parentCtx                       context.Context
 	submissionBackpressureThreshold int
 	requestBuilder                  *jobRequestBuilder
-	walkMultiplexer                 *filesystem.WalkMultiplexer
+	sourceWalk                      <-chan *filesystem.StreamPathResult
+	bulkWalks                       *BulkStreamPathResultMultiplexer
 	getPaths                        requestPathResolverFn
 	resumeToken                     string
+	sourceWalkProcessed             chan struct{}
+	sourceWalkProcessWg             sync.WaitGroup
 }
 
+// Start begins processing the walks. Call AddSourceWalk if a source walk needs to be processed
+// before calling Start.
 func (c *requestBuildController) Start() {
-	c.group.Go(c.processWalk)
+	c.group.Go(c.processWalks)
 }
 
 func (c *requestBuildController) Wait() (resumeToken string, err error) {
@@ -44,64 +50,126 @@ func (c *requestBuildController) Wait() (resumeToken string, err error) {
 }
 
 func (c *requestBuildController) Close() {
-	c.walkMultiplexer.Close()
+	c.bulkWalks.Close()
 }
 
-func (c *requestBuildController) AddWalks(walkChs []<-chan *filesystem.StreamPathResult) func() {
-	return c.walkMultiplexer.AddWalks(walkChs)
+// AddSourceWalk adds the source walk to the controller. Only the first call has any effect;
+// subsequent calls are no-ops.
+func (c *requestBuildController) AddSourceWalk(channel <-chan *filesystem.StreamPathResult) {
+	if c.sourceWalk != nil {
+		return
+	}
+	c.sourceWalk = channel
+	c.sourceWalkProcessed = make(chan struct{})
+	c.sourceWalkProcessWg = sync.WaitGroup{}
 }
 
-func (c *requestBuildController) processWalk() error {
-	for {
-		select {
-		case <-c.ctx.Done():
-			return c.parentError()
-		case result, ok := <-c.walkMultiplexer.Output():
-			if !ok {
-				return nil
-			}
+func (c *requestBuildController) AddBulkOperationWalks(channels []<-chan *BulkStreamPathResult) func() {
+	return c.bulkWalks.AddWalks(channels)
+}
 
-			if stop, err := c.processWalkResult(result); err != nil {
-				return err
-			} else if stop {
-				return nil
-			}
+func (c *requestBuildController) WaitForSourceWalkProcessing() {
+	if c.sourceWalk == nil {
+		return
+	}
 
-			if err := c.waitForSubmissionCapacity(); err != nil {
-				return err
-			}
-		}
+	select {
+	case <-c.ctx.Done():
+		return
+	case <-c.sourceWalkProcessed:
 	}
 }
 
-func (c *requestBuildController) processWalkResult(result *filesystem.StreamPathResult) (stop bool, err error) {
+func (c *requestBuildController) processWalks() (err error) {
+	sourceWalk := c.sourceWalk
+	bulkWalks := c.bulkWalks.Output()
+
+	for sourceWalk != nil || bulkWalks != nil {
+		select {
+		case <-c.ctx.Done():
+			return c.parentError()
+		case result, ok := <-sourceWalk:
+			if !ok {
+				sourceWalk = nil
+				go func() {
+					c.sourceWalkProcessWg.Wait()
+					close(c.sourceWalkProcessed)
+				}()
+				continue
+			}
+			err = c.processSource(result)
+		case result, ok := <-bulkWalks:
+			if !ok {
+				bulkWalks = nil
+				continue
+			}
+			err = c.processBulk(result)
+		}
+
+		if err != nil {
+			return
+		}
+
+		if err = c.waitForSubmissionCapacity(); err != nil {
+			return
+		}
+	}
+
+	return nil
+}
+
+func (c *requestBuildController) processSource(result *filesystem.StreamPathResult) error {
 	var failedPrecondition error
 	if result.Err != nil {
 		if cancelErr, ok := errors.AsType[*RequestCancelError](result.Err); ok {
 			failedPrecondition = cancelErr.Reason
 		} else {
-			return false, result.Err
+			return result.Err
 		}
 	}
 
 	if result.ResumeToken != "" {
 		if c.resumeToken != "" {
-			return false, fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
+			return fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
 		}
 		c.resumeToken = result.ResumeToken
-		return true, nil
+		return nil
 	}
 
 	inMountPath, remotePath, err := c.getPaths(result.Path)
 	if err != nil {
-		return false, err
+		return err
+	}
+
+	c.sourceWalkProcessWg.Add(1)
+	c.group.Go(func() error {
+		defer c.sourceWalkProcessWg.Done()
+		return c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
+	})
+
+	return nil
+}
+
+func (c *requestBuildController) processBulk(result *BulkStreamPathResult) error {
+	var failedPrecondition error
+	if result.Err != nil {
+		if cancelErr, ok := errors.AsType[*RequestCancelError](result.Err); ok {
+			failedPrecondition = cancelErr.Reason
+		} else {
+			return result.Err
+		}
+	}
+
+	inMountPath, remotePath, err := c.getPaths(result.Path)
+	if err != nil {
+		return err
 	}
 
 	c.group.Go(func() error {
-		return c.requestBuilder.Process(c.ctx, inMountPath, remotePath, failedPrecondition)
+		return c.requestBuilder.ProcessFromBulkOperation(c.ctx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
 	})
 
-	return false, nil
+	return nil
 }
 
 // waitForSubmissionCapacity prevents the builder from overwhelming downstream job submission. If

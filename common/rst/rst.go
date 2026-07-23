@@ -193,11 +193,11 @@ type SchedulingResult struct {
 type BulkExecuteResultFn func() *SchedulingResult
 type BulkWaitFn func() error
 type clientBulkOperation interface {
-	// AddRequest adds a single request to the bulk operation state.
-	//
-	// Calls are serialized by the caller, so implementations may rely on the order of AddRequest
-	// calls matching request.BulkInfo.JobIndex. Return an error only for failures that should stop
-	// the parent builder job.
+	// AddRequest adds a single request to the bulk operation state. Calls are serialized by the
+	// caller. The implementation owns request.BulkInfo.JobIndex: it must assign a JobIndex based on
+	// its own persisted state (not on any value already set on the request) so the index stays
+	// correct across builder reschedules that reopen the same bulk operation. Return an error only
+	// for failures that should stop the parent builder job.
 	AddRequest(ctx context.Context, request *beeremote.JobRequest) error
 	// Execute starts a bulk operation for the currently accumulated requests. Any paths that are
 	// ready may be sent to walkCh immediately so their requests can be submitted. The returned
@@ -205,7 +205,7 @@ type clientBulkOperation interface {
 	// reschedule details and any errors that occurred. err should only be returned when the builder
 	// job itself should fail. All other errors should be reported on walkCh with the relevant path
 	// so the request can reflect the failure.
-	Execute(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, getResults BulkExecuteResultFn, err error)
+	Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
 	// Resume continues a bulk operation that was started by a previous builder call. It runs
 	// concurrently with the builder walk so previously started bulk work can complete before
 	// Execute is called again after the walk. Any error will be reported from the returned wait
@@ -214,7 +214,7 @@ type clientBulkOperation interface {
 	// Resume may run concurrently with AddRequest, but it must only process requests that were
 	// already part of the previously started bulk operation when Resume began. Requests appended
 	// during Resume are reserved for a later Execute.
-	Resume(ctx context.Context) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error)
+	Resume(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error)
 	// Cancel stops the bulk operation and sends any unsent paths along with reason error to walkCh.
 	// Any bulk operation specific errors should be reported from the returned wait function, which
 	// must not return until walkCh has been closed.
@@ -223,7 +223,9 @@ type clientBulkOperation interface {
 	// with normal builder job behavior. So it is the responsibility of the provider to cancel the
 	// bulk operation and handle any cleanup. If any manual cleanup is require, the user must be
 	// notified.
-	Cancel(ctx context.Context, reason error) (walkCh <-chan *filesystem.StreamPathResult, wait BulkWaitFn, err error)
+	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error)
+	// Close shuts down any resources that were opened.
+	Close(ctx context.Context) error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -533,7 +535,6 @@ func PrepareFileStateForWorkRequests(
 		}
 	}()
 
-	// Question: Does this really belong here? I need to update results.UpdateErrors counter.
 	updateRstCfg := func(sentinel error) error {
 		if cfg.GetUpdate() || cfg.HasCooldownSecs() {
 			if err := updateFileRstPattern(ctx, cfg, cfg.Path, currentRSTCfg, entryInfo, ownerNode); err != nil {
@@ -669,6 +670,188 @@ func PrepareFileStateForWorkRequests(
 	}
 
 	err = updateRstCfg(nil)
+	return
+}
+
+type undoFn func() error
+type applyFn func() (undoFn, error)
+
+// PlanFileStateForWorkRequests handles preflight checks and common tasks based on collected
+// lockedInfo. Sentinel errors are returned when the file is already in the expected synced or
+// offloaded state. Sentinel errors can be checked using IsErrJobTerminalSentinel.
+//
+// It is the responsibility of the caller to ensure lockedInfo is populated when the file exists. If
+// the file does not exist, it will be created and cfg.LockedInfo will be updated. The returned apply
+// function performs the planned changes, and its own returned undo function best-effort rolls back
+// any reversible local changes when later request generation steps fail after preparation succeeds.
+func PlanFileStateForWorkRequests(
+	ctx context.Context,
+	mountPoint filesystem.Provider,
+	currentRSTCfg msg.RemoteStorageTarget,
+	entryInfo msg.EntryInfo,
+	ownerNode beegfs.Node,
+	cfg *flex.JobRequestCfg,
+) (apply applyFn, err error) {
+	applySteps := []applyFn{}
+	addApplyStep := func(step applyFn) {
+		applySteps = append(applySteps, step)
+	}
+	apply = func() (undoFn, error) {
+		undoSteps := []undoFn{}
+		undo := func() (err error) {
+			for i := len(undoSteps) - 1; i >= 0; i-- {
+				err = errors.Join(err, undoSteps[i]())
+			}
+			return
+		}
+
+		for _, applyStep := range applySteps {
+			if undoStep, err := applyStep(); err != nil {
+				if undoErr := undo(); undoErr != nil {
+					err = errors.Join(err, fmt.Errorf("failed to undo changes: %w", undoErr))
+				}
+				return func() error { return nil }, err
+			} else {
+				undoSteps = append(undoSteps, undoStep)
+			}
+		}
+		return undo, nil
+	}
+
+	lockedInfo := cfg.LockedInfo
+	originalLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
+	alreadySynced := IsFileAlreadySynced(lockedInfo)
+	if cfg.StubLocal {
+		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
+			if err = CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
+				err = fmt.Errorf("failed to create stub file: %w", err)
+				return
+			}
+			err = entry.SetAccessFlags(ctx, cfg.Path, beegfs.LockedContentAccessFlags)
+			if err != nil {
+				return
+			}
+			lockedInfo.SetReadWriteLocked(true)
+
+			err = ErrJobAlreadyOffloaded
+			return
+		}
+
+		if IsFileOffloaded(lockedInfo) {
+			if !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
+				err = ErrOffloadFileUrlMismatch
+				return
+			}
+
+			if cfg.HasRestorePolicy() {
+				if err = entry.SetFileDataState(ctx, cfg.Path, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
+					return
+				}
+			}
+			err = ErrJobAlreadyOffloaded
+			return
+		}
+
+		if cfg.Download && !cfg.Overwrite && FileExists(lockedInfo) {
+			err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
+			return
+		}
+	} else if FileExists(lockedInfo) {
+		if alreadySynced {
+			err = GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
+			return
+		}
+
+		if cfg.Download {
+			allowOverwrite := cfg.Overwrite
+			if IsFileOffloaded(lockedInfo) {
+				if !allowOverwrite && !IsFileOffloadedUrlCorrect(cfg.RemoteStorageTarget, cfg.RemotePath, lockedInfo) {
+					err = ErrOffloadFileUrlMismatch
+					return
+				}
+				originalDataState, dataStateErr := entry.GetFileDataState(ctx, cfg.Path)
+				if dataStateErr != nil {
+					err = fmt.Errorf("unable to determine original file data state: refusing to proceed with restoring file contents %w", dataStateErr)
+					return
+				}
+
+				addApplyStep(func() (undoFn, error) {
+					if err = entry.SetFileDataState(ctx, cfg.Path, beegfs.DataStateAvailable); err != nil {
+						return func() error { return nil }, err
+					}
+					undo := func() error {
+						return entry.SetFileDataState(ctx, cfg.Path, originalDataState)
+					}
+					return undo, nil
+				})
+				allowOverwrite = true
+			}
+
+			if !allowOverwrite {
+				err = fmt.Errorf("download would overwrite existing path but the overwrite flag was not set: %w", fs.ErrExist)
+				return
+			}
+
+			// Expand the file size if needed.
+			if lockedInfo.Size < lockedInfo.RemoteSize {
+				addApplyStep(func() (undoFn, error) {
+					if err = mountPoint.CreateOrResizeFile(cfg.Path, lockedInfo.RemoteSize, allowOverwrite); err != nil {
+						err = fmt.Errorf("unable to preallocate additional space for file: %w", err)
+						return func() error { return nil }, err
+					}
+
+					undo := func() error {
+						if IsFileOffloaded(lockedInfo) {
+							// Restore the original stub file if download preparation overwrote it.
+							rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", originalLockedInfo.StubUrlRstId, originalLockedInfo.StubUrlPath)
+							return mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, true)
+						} else {
+							// Restore the original file size.
+							return mountPoint.CreateOrResizeFile(cfg.Path, originalLockedInfo.Size, true)
+						}
+					}
+					return undo, nil
+				})
+			}
+		} else if IsFileOffloaded(lockedInfo) {
+			err = fmt.Errorf("unable to upload stub file: %w", ErrUnsupportedOpForRST)
+			return
+		}
+	} else if cfg.Download {
+		addApplyStep(func() (undoFn, error) {
+			if err = mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite); err != nil {
+				err = fmt.Errorf("unable to preallocate space for file: %w", err)
+				return func() error { return nil }, err
+			}
+
+			undo := func() error {
+				if removeErr := mountPoint.Remove(cfg.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+					return fmt.Errorf("unable to remove preallocated file: %s", removeErr.Error())
+				}
+				return nil
+			}
+
+			var pathState PathState
+			if pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
+				err = fmt.Errorf("failed to collect information for new file: %w", err)
+				return undo, errors.Join(err, undo())
+			}
+			entryInfo = pathState.EntryInfo
+			ownerNode = pathState.OwnerNode
+			info := pathState.LockedInfo
+			lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
+			lockedInfo.SetExists(info.Exists)
+			lockedInfo.SetSize(info.Size)
+			lockedInfo.SetMtime(info.Mtime)
+			lockedInfo.SetMode(info.Mode)
+			return undo, nil
+		})
+
+	} else {
+		err = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
+		return
+	}
+
 	return
 }
 

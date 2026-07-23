@@ -214,8 +214,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
+		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, nil)
+		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
 		assert.True(t, canReleaseLock)
@@ -230,10 +231,14 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, nil)
+		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.Error(t, err)
 		assert.True(t, canReleaseLock)
@@ -248,10 +253,14 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, nil)
+		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
 		assert.False(t, canReleaseLock)
@@ -268,13 +277,17 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return nil }, nil
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			},
+			setFileRstConfig: func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
+				return nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, nil)
+		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
 		assert.False(t, canReleaseLock)
@@ -282,122 +295,6 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// The externalId is generated after the request is built, so it lands on cfg's
 		// LockedInfo rather than the already-built submitted request.
 		assert.Equal(t, "external-id", cfg.GetLockedInfo().GetExternalId())
-	})
-}
-
-func TestJobRequestBuilder_PrepareJobRequestForSubmission(t *testing.T) {
-	mtime := timestamppb.Now()
-
-	t.Run("already complete keeps the lock releasable and reports the mtime", func(t *testing.T) {
-		w := &jobRequestBuilder{
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return nil }, ErrJobAlreadyComplete
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.True(t, canReleaseLock)
-		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, request.GetGenerationStatus().GetState())
-		assert.Equal(t, mtime.AsTime().Format(time.RFC3339), request.GetGenerationStatus().GetMessage())
-	})
-
-	t.Run("already offloaded holds the lock", func(t *testing.T) {
-		w := &jobRequestBuilder{
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return nil }, ErrJobAlreadyOffloaded
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.False(t, canReleaseLock)
-		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED, request.GetGenerationStatus().GetState())
-	})
-
-	t.Run("generic prepare error releases the lock with failed precondition", func(t *testing.T) {
-		w := &jobRequestBuilder{
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return nil }, errors.New("prep failed")
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.True(t, canReleaseLock)
-		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
-		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "prep failed")
-	})
-
-	t.Run("external id generation failure rolls back and releases the lock", func(t *testing.T) {
-		client := &MockClient{}
-		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("external id failed"))
-		undoCalled := false
-		w := &jobRequestBuilder{
-			RstMap: map[uint32]Provider{1: client},
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { undoCalled = true; return nil }, nil
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{RemoteStorageTarget: 1}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.True(t, canReleaseLock)
-		assert.True(t, undoCalled)
-		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
-		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "external id failed")
-	})
-
-	t.Run("external id generation failure with a failed rollback holds the lock", func(t *testing.T) {
-		client := &MockClient{}
-		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("external id failed"))
-		w := &jobRequestBuilder{
-			RstMap: map[uint32]Provider{1: client},
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return errors.New("rollback failed") }, nil
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{RemoteStorageTarget: 1}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.False(t, canReleaseLock)
-		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ERROR, request.GetGenerationStatus().GetState())
-		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "external id failed")
-		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "rollback failed")
-	})
-
-	t.Run("success sets the external id on lockedInfo and releases the lock", func(t *testing.T) {
-		client := &MockClient{}
-		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("new-external-id", nil)
-		w := &jobRequestBuilder{
-			RstMap: map[uint32]Provider{1: client},
-			prepareFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-				return func() error { return nil }, nil
-			},
-		}
-		cfg := &flex.JobRequestCfg{LockedInfo: &flex.JobLockedInfo{Mtime: mtime}}
-		request := &beeremote.JobRequest{RemoteStorageTarget: 1}
-
-		canReleaseLock := w.prepareJobRequestForSubmission(context.Background(), request, cfg, PathState{})
-
-		assert.False(t, canReleaseLock)
-		assert.False(t, request.HasGenerationStatus())
-		assert.Equal(t, "new-external-id", cfg.GetLockedInfo().GetExternalId())
 	})
 }
 
@@ -434,7 +331,7 @@ func TestJobRequestBuilder_SubmitJobRequest(t *testing.T) {
 	})
 }
 
-func TestJobRequestBuilder_Process(t *testing.T) {
+func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 	newBuilder := func() *jobRequestBuilder {
 		return &jobRequestBuilder{
 			RstMap:          map[uint32]Provider{},
@@ -451,7 +348,7 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 			return nil
 		}
 
-		err := w.Process(context.Background(), "/some/dir", "", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/dir", "", nil)
 		require.NoError(t, err)
 	})
 
@@ -464,7 +361,7 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 			return nil
 		}
 
-		err := w.Process(context.Background(), "/some/path", "", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
 		require.ErrorIs(t, err, wantErr)
 	})
 
@@ -479,7 +376,7 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 			return nil
 		}
 
-		err := w.Process(context.Background(), "/some/path", "", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
 		require.NoError(t, err)
 	})
 
@@ -488,8 +385,9 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
-				LockedInfo: &flex.JobLockedInfo{Mtime: timestamppb.Now()},
-				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1}}, // No client registered -> FAILED_PRECONDITION request.
+				LockedInfo:   &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				LockAcquired: true,
+				RstCfg:       msg.RemoteStorageTarget{RSTIDs: []uint32{1}}, // No client registered -> FAILED_PRECONDITION request.
 			}, nil
 		}
 		var cleared bool
@@ -499,11 +397,39 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 			return nil
 		}
 
-		err := w.Process(context.Background(), "/some/path", "/remote/path", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
 		assert.True(t, cleared)
 		require.Len(t, w.jobSubmissionCh, 1)
+	})
+
+	t.Run("existing lock is reported as failed precondition", func(t *testing.T) {
+		client := &MockClient{}
+		jobSubmissionCh := make(chan *beeremote.JobRequest, 2)
+		w := newBuilder()
+		w.jobSubmissionCh = jobSubmissionCh
+		w.RstMap = map[uint32]Provider{1: client}
+		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo: &flex.JobLockedInfo{Exists: true, Mtime: timestamppb.Now()},
+				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1}},
+			}, nil
+		}
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			t.Fatal("clearAccessFlags should not be called for a lock this builder did not acquire")
+			return nil
+		}
+
+		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
+
+		require.NoError(t, err)
+		require.Len(t, jobSubmissionCh, 1)
+		request := <-jobSubmissionCh
+		require.NotNil(t, request.GetGenerationStatus())
+		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
+		assert.Equal(t, "file access lock is already held", request.GetGenerationStatus().GetMessage())
 	})
 
 	t.Run("lock is held when any generated request has in-flight work", func(t *testing.T) {
@@ -521,15 +447,18 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 		w.addToBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 			return false, nil
 		}
-		w.prepareFileState = func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (func() error, error) {
-			return func() error { return nil }, nil
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
+			return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+		}
+		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
+			return nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")
 			return nil
 		}
 
-		err := w.Process(context.Background(), "/some/path", "/remote/path", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
 		require.Len(t, w.jobSubmissionCh, 2)
@@ -540,8 +469,9 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
-				LockedInfo: &flex.JobLockedInfo{Mtime: timestamppb.Now()},
-				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1}},
+				LockedInfo:   &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				LockAcquired: true,
+				RstCfg:       msg.RemoteStorageTarget{RSTIDs: []uint32{1}},
 			}, nil
 		}
 		wantErr := errors.New("clear failed")
@@ -549,7 +479,7 @@ func TestJobRequestBuilder_Process(t *testing.T) {
 			return wantErr
 		}
 
-		err := w.Process(context.Background(), "/some/path", "/remote/path", nil)
+		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.ErrorIs(t, err, wantErr)
 	})

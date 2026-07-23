@@ -159,18 +159,22 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (result *SchedulingResult) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
 	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	if bulkErr != nil {
-		return &SchedulingResult{Err: MarkBuilderFailed(bulkErr)}
+		result = &SchedulingResult{Err: MarkBuilderFailed(bulkErr)}
+		return
 	}
+	defer func() {
+		if closeErr := bulkOperationsManager.Close(ctx); closeErr != nil {
+			result.Err = errors.Join(result.Err, closeErr)
+		}
+	}()
 
 	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddToBulkRequest)
-	requestBuildController.Start()
-
 	abort := func(err error) *SchedulingResult {
 		err = fmt.Errorf("job builder request was aborted: %w", err)
 		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
@@ -179,52 +183,48 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		return &SchedulingResult{Err: MarkBuilderCancelled(err)}
 	}
 
-	waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController)
-	if err != nil {
-		return abort(err)
-	}
-
-	walkReschedule := false
 	if !isWalkComplete(workRequest.GetExternalId(), workRequest.JobId) {
 		walkSize := min(cap(jobSubmissionCh), maxRequests+1) // maxRequests+1 is for ResumeToken when there is more work
 		walkCh, err := c.getWalkCh(ctx, workRequest, walkSize)
 		if err != nil {
-			return abort(err)
+			result = abort(err)
+			return
 		}
-		waitForWalk := requestBuildController.AddWalks([]<-chan *filesystem.StreamPathResult{walkCh})
-		waitForWalk()
+		requestBuildController.AddSourceWalk(walkCh)
+	}
+	requestBuildController.Start()
+
+	// Resume previous bulk operation from prior builder job execution. This gives the previous
+	// operations a chance to complete before more are started. This is especially important since
+	// it's possible for bulk operations to be blocking such as xtreemstore archive bulk restore.
+	if waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController); err != nil {
+		result = abort(err)
+		return
+	} else if err = waitForBulkResume(); err != nil {
+		result = abort(err)
+		return
 	}
 
-	if err = waitForBulkResume(); err != nil {
-		return abort(err)
+	requestBuildController.WaitForSourceWalkProcessing()
+
+	result = bulkOperationsManager.Execute(ctx, requestBuildController)
+	if result.Err != nil {
+		return abort(result.Err)
 	}
 
-	bulkResult := bulkOperationsManager.Execute(ctx, requestBuildController)
-	if bulkResult.Err != nil {
-		return abort(bulkResult.Err)
-	}
-
-	// Close the request build controller and wait for the results. Be sure to update the builder
-	// counters before processing err to accurately reflect the work already done.
 	requestBuildController.Close()
 	resumeToken, err := requestBuildController.Wait()
 	if err != nil {
-		return abort(err)
-	}
-
-	if resumeToken != "" {
-		walkReschedule = true
+		result = abort(err)
+	} else if resumeToken != "" {
+		result.Reschedule = true
+		result.Delay = 0
 		workRequest.SetExternalId(resumeToken)
 	} else {
 		walkCompleteSentinel := makeWalkCompleteSentinel(workRequest.JobId)
 		workRequest.SetExternalId(walkCompleteSentinel)
 	}
 
-	result := &SchedulingResult{}
-	result.Reschedule = walkReschedule || bulkResult.Reschedule
-	if !walkReschedule && bulkResult.Delay != 0 {
-		result.Delay = bulkResult.Delay
-	}
 	return result
 }
 
@@ -296,6 +296,7 @@ func (c *JobBuilderClient) newBulkOperationsManager(ctx context.Context, builder
 	for _, bulkOperation := range *builderBulkOperations {
 		key := fmt.Sprintf("%d-%s", bulkOperation.RstId, bulkOperation.Operation)
 		client := manager.rstMap[bulkOperation.RstId]
+
 		var createErr error
 		if manager.managers[key], createErr = newBulkOperationManager(ctx, client, builderJobId, bulkOperation); createErr != nil {
 			err = errors.Join(err, createErr)
@@ -327,17 +328,18 @@ func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, builde
 	maxWorkers := min(cpuLimit, queueLimit)
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(maxWorkers + 1) // Reserve maxWorkers for path processors; processWalk uses one slot.
-
-	walkMultiplexer := filesystem.NewWalkMultiplexer(groupCtx, cap(jobSubmissionCh))
-	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addToBulkRequest)
 	submissionBackpressureThreshold := max(1, min(cap(jobSubmissionCh), int(requestBuildControllerQueueDepthPerWorker*float32(maxWorkers))))
+
+	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addToBulkRequest)
+	bulkWalks := NewBulkStreamPathResultMultiplexer(groupCtx, cap(jobSubmissionCh))
+
 	return &requestBuildController{
 		group:                           group,
 		ctx:                             groupCtx,
 		parentCtx:                       ctx,
 		requestBuilder:                  requestBuilder,
 		submissionBackpressureThreshold: submissionBackpressureThreshold,
-		walkMultiplexer:                 walkMultiplexer,
+		bulkWalks:                       bulkWalks,
 		getPaths:                        c.getPathsFn(builderCfg),
 	}
 }
@@ -349,7 +351,7 @@ func (c *JobBuilderClient) newJobRequestBuilder(builderCfg *flex.JobRequestCfg, 
 		jobSubmissionCh:  jobSubmissionCh,
 		builderCfg:       builderCfg,
 		getPathState:     GetPathState,
-		prepareFileState: PrepareFileStateForWorkRequests,
+		planFileState:    PlanFileStateForWorkRequests,
 		clearAccessFlags: entry.ClearAccessFlags,
 		addToBulkRequest: addToBulkRequest,
 	}

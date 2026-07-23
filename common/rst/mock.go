@@ -278,30 +278,34 @@ type mockBulkOperation struct {
 	requests       []*beeremote.JobRequest
 }
 
+func (x *mockBulkOperation) Close(ctx context.Context) error {
+	return nil
+}
+
 func (m *mockBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
 	m.requests = append(m.requests, proto.Clone(request).(*beeremote.JobRequest))
 	return nil
 }
 
-func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkExecuteResultFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult, len(m.requests))
+func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	walkCh := make(chan *BulkStreamPathResult, len(m.requests))
 	for _, request := range m.requests {
 		path := getMockBulkReplayPath(request)
 		m.client.markBulkPathCompleted(m.operation, path)
-		walkCh <- &filesystem.StreamPathResult{Path: path}
+		walkCh <- &BulkStreamPathResult{Path: path}
 	}
 	close(walkCh)
 	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
-func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult)
+func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil
 }
 
-func (m *mockBulkOperation) Resume(ctx context.Context) (<-chan *filesystem.StreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *filesystem.StreamPathResult)
+func (m *mockBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil
 }
