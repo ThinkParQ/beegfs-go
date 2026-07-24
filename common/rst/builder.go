@@ -295,7 +295,10 @@ func (c *JobBuilderClient) newBulkOperationsManager(ctx context.Context, builder
 	var err error
 	for _, bulkOperation := range *builderBulkOperations {
 		key := fmt.Sprintf("%d-%s", bulkOperation.RstId, bulkOperation.Operation)
-		client := manager.rstMap[bulkOperation.RstId]
+		client, ok := manager.rstMap[bulkOperation.RstId]
+		if !ok {
+			return nil, fmt.Errorf("unable to create bulk operation manager: remote storage target ID %d does not exist in the configuration", bulkOperation.RstId)
+		}
 
 		var createErr error
 		if manager.managers[key], createErr = newBulkOperationManager(ctx, client, builderJobId, bulkOperation); createErr != nil {
