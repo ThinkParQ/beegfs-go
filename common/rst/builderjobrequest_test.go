@@ -228,7 +228,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		w := &jobRequestBuilder{
 			RstMap:          map[uint32]Provider{1: client},
 			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
-			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
 			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
@@ -250,7 +250,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		w := &jobRequestBuilder{
 			RstMap:          map[uint32]Provider{1: client},
 			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
-			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
 			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
@@ -274,7 +274,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		w := &jobRequestBuilder{
 			RstMap:          map[uint32]Provider{1: client},
 			jobSubmissionCh: submissionCh,
-			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
 			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
@@ -444,7 +444,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1, 2}},
 			}, nil
 		}
-		w.addToBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+		w.addBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 			return false, nil
 		}
 		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {

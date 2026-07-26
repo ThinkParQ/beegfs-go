@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -416,35 +417,73 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry *wo
 	return
 }
 
+// builderJobSubmissionWorkerMultiplier scales GOMAXPROCS to size the pool of goroutines that drain
+// jobSubmissionCh concurrently. Submission is dominated by the SubmitJobRequest RPC round trip
+// (network/BeeRemote-side work, not CPU), so a single consumer goroutine becomes a serialization
+// bottleneck long before the job builder itself runs out of work to produce, especially for bulk
+// operations that can ready thousands of requests at once. BeeRemote locks per-path (not globally)
+// when handling SubmitJobRequest, so concurrent submissions for different paths shouldn't contend.
+const builderJobSubmissionWorkerMultiplier = 4
+
 func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
 	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
+	// submitCtx lets a fatal failure to cancel a bulk operation request (see below) cut short any
+	// remaining submissions and the builder's own walk, without needing to cancel work.ctx itself.
+	submitCtx, cancelSubmissions := context.WithCancel(work.ctx)
+	defer cancelSubmissions()
+
 	schedulingResultCh := make(chan *rst.SchedulingResult)
 	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 	go func() {
 		defer close(jobSubmissionCh)
-		schedulingResultCh <- client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh)
+		schedulingResultCh <- client.ExecuteJobBuilderRequest(submitCtx, workRequest, jobSubmissionCh)
 	}()
 
-	var schedulingResult *rst.SchedulingResult
-	for {
-		if schedulingResultCh == nil && jobSubmissionCh == nil {
-			break
-		}
+	var builderMu sync.Mutex
+	var cancelErrMu sync.Mutex
+	var cancelErr error
 
-		select {
-		case schedulingResult = <-schedulingResultCh:
-			schedulingResultCh = nil
-		case jobRequest, ok := <-jobSubmissionCh:
-			if !ok {
-				jobSubmissionCh = nil
-				continue
+	submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
+	var submitWg sync.WaitGroup
+	for range submissionWorkers {
+		submitWg.Go(func() {
+			for {
+				select {
+				case <-submitCtx.Done():
+					return
+				case jobRequest, ok := <-jobSubmissionCh:
+					if !ok {
+						return
+					}
+					if err := w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest); err != nil && jobRequest.HasBulkInfo() {
+						// Use work.ctx (not submitCtx) so this cleanup call isn't cut short by our
+						// own cancellation below.
+						if cErr := client.CancelBulkOperationRequest(work.ctx, jobRequest, err); cErr != nil {
+							cancelErrMu.Lock()
+							if cancelErr == nil {
+								cancelErr = fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: %w", jobRequest.GetPath(), cErr)
+							}
+							cancelErrMu.Unlock()
+							cancelSubmissions()
+						}
+					}
+				}
 			}
-			w.sendBuilderJobRequest(work, builder, jobRequest)
-		}
+		})
 	}
+
+	schedulingResult := <-schedulingResultCh
+	submitWg.Wait()
+
+	if cancelErr != nil {
+		w.updateBuilderJob(work, entry, &rst.SchedulingResult{Err: cancelErr})
+		cleanupEntries = true
+		return
+	}
+
 	if schedulingResult == nil {
 		schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
 	}
@@ -455,8 +494,8 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	}
 	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
 
-	return w.updateBuilderJob(work, entry, schedulingResult)
-
+	cleanupEntries = w.updateBuilderJob(work, entry, schedulingResult)
+	return
 }
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state
@@ -493,12 +532,15 @@ func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool
 	}
 }
 
-func (w *worker) sendBuilderJobRequest(work workAssignment, builder *flex.BuilderJob, request *pbr.JobRequest) {
+// sendBuilderJobRequest submits request to BeeRemote, retrying indefinitely while it's unavailable.
+// builder's counters are mutated under mu since this is called concurrently by multiple submission
+// workers sharing the same builder job.
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
 	const maxSendBuilderJobDelay = 60 * time.Second
 	delay := 1 * time.Second
 
 	for {
-		if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, request); err != nil {
+		if err := w.beeRemoteClient.SubmitJobRequest(ctx, request); err != nil {
 			if errors.Is(err, beeremote.ErrUnavailable) {
 				// Retry with an exponential backoff until remote is available again.
 				select {
@@ -507,12 +549,13 @@ func (w *worker) sendBuilderJobRequest(work workAssignment, builder *flex.Builde
 					if delay > maxSendBuilderJobDelay {
 						delay = maxSendBuilderJobDelay
 					}
-				case <-work.ctx.Done():
-					return
+				case <-ctx.Done():
+					return ctx.Err()
 				}
 				continue
 			}
 
+			mu.Lock()
 			if errors.Is(err, rst.ErrJobAlreadyComplete) {
 				builder.JobsAlreadyComplete++
 			} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
@@ -524,11 +567,14 @@ func (w *worker) sendBuilderJobRequest(work workAssignment, builder *flex.Builde
 			} else {
 				builder.Errors++
 			}
-		} else {
-			builder.Submitted++
+			mu.Unlock()
+			return err
 		}
 
-		return
+		mu.Lock()
+		builder.Submitted++
+		mu.Unlock()
+		return nil
 	}
 }
 
@@ -543,9 +589,12 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 	builderErr := getBuilderResults(builder)
 	defer func() {
 		status.SetMessage(appendMessage(status.Message, builderErr.Error()))
-		if !w.sendWorkResult(work, workResult.Work) {
-			cleanupEntries = false
+		if w.sendWorkResult(work, workResult.Work) && !result.Reschedule {
+			cleanupEntries = true
 		}
+
+		fmt.Println(status.Message)
+
 	}()
 
 	if result.Err != nil {
@@ -565,7 +614,6 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("job builder returned unclassified error: " + resultMessage)
 		}
-		cleanupEntries = true
 	} else if result.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for builder job to continue")
@@ -580,11 +628,9 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 	} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("completed with errors")
-		cleanupEntries = true
 	} else {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("completed successfully")
-		cleanupEntries = true
 	}
 
 	return

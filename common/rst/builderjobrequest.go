@@ -17,7 +17,7 @@ import (
 )
 
 type requestPathResolverFn func(walkPath string) (inMountPath string, remotePath string, err error)
-type addToBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
+type addBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
 type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error)
 type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error)
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
@@ -29,7 +29,7 @@ type jobRequestBuilder struct {
 	RstMap           map[uint32]Provider
 	jobSubmissionCh  chan<- *beeremote.JobRequest
 	builderCfg       *flex.JobRequestCfg
-	addToBulkRequest addToBulkRequestFn
+	addBulkRequest   addBulkRequestFn
 	getPathState     getPathStateFn
 	planFileState    planFileStateForWorkRequestsFn
 	clearAccessFlags clearAccessFlagsFn
@@ -161,10 +161,6 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(ctx context.Context, inMoun
 }
 
 func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMountPath string) (pathState PathState, skip bool, pathIssue error, err error) {
-	addPathIssue := func(err error) {
-		pathIssue = appendError(pathIssue, err)
-	}
-
 	var pathStateErr error
 	pathState, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
@@ -181,18 +177,18 @@ func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMo
 	// because callers can trigger jobs from configured file rstIds without specifying a target.
 	if IsValidRstId(w.builderCfg.RemoteStorageTarget) {
 		if IsFileOffloaded(pathState.LockedInfo) && w.builderCfg.RemoteStorageTarget != pathState.LockedInfo.StubUrlRstId && !w.builderCfg.GetOverwrite() {
-			addPathIssue(fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag))
+			pathIssue = fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag)
 		}
 		pathState.RstCfg.RSTIDs = []uint32{w.builderCfg.RemoteStorageTarget}
-	} else if len(pathState.RstCfg.RSTIDs) == 0 {
+	} else if len(pathState.RstCfg.RSTIDs) == 0 && pathStateErr == nil {
 		skip = true
 		return
 	}
 
 	if pathStateErr != nil {
-		addPathIssue(pathStateErr)
+		pathIssue = pathStateErr
 	} else if len(pathState.RstCfg.RSTIDs) > 1 && (w.builderCfg.Download || w.builderCfg.StubLocal) {
-		addPathIssue(ErrFileHasAmbiguousRSTs)
+		pathIssue = ErrFileHasAmbiguousRSTs
 	}
 
 	return
@@ -265,8 +261,8 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	if state == beeremote.JobRequest_GenerationStatus_UNSPECIFIED {
 		if !request.HasBulkInfo() {
 			var skipSubmission bool
-			if skipSubmission, err = w.addToBulkRequest(ctx, request); err != nil {
-				// addToBulkRequest failed and since the file access lock was newly acquired, it may
+			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil {
+				// addBulkRequest failed and since the file access lock was newly acquired, it may
 				// be released.
 				canReleaseLock = true
 				return

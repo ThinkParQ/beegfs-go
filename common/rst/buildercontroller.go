@@ -49,7 +49,11 @@ func (c *requestBuildController) Wait() (resumeToken string, err error) {
 	return
 }
 
+// Close ensures the source walk (if any) has finished processing before tearing down the bulk
+// walks. Callers may already have called WaitForSourceWalkProcessing beforehand; doing so again
+// here is a no-op once the source walk has completed.
 func (c *requestBuildController) Close() {
+	c.WaitForSourceWalkProcessing()
 	c.bulkWalks.Close()
 }
 

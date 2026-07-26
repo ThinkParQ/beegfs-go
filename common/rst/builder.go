@@ -16,9 +16,13 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const (
-	maxRequests = 10000
-)
+// TODO: Add to remote a global builder section that has a maxRequests. Also, allow per remote storage target overrides
+// in case some targets next more or less or it doesn't matter.
+//   - 0 should be as many as possible.
+//   - Add something like only-count-active-submissions-against-max-requests flag to remote-storage-target?
+//	   This would ensure that only jobs that were submitted with a non-terminal state would be counted against maxRequests.
+
+const maxRequests = 1000
 
 // JobBuilderClient is a special RST client that builders new job requests based on the information
 // provided via flex.JobRequestCfg.
@@ -74,7 +78,13 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh)
 }
 
-func (c *JobBuilderClient) IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+// CancelBulkOperationRequest is not implemented and should never be called since JobBuilderClient never
+// generates bulk operation requests (see IncludeRequestInBulkOperation).
+func (c *JobBuilderClient) CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+	return ErrUnsupportedOpForRST
+}
+
+func (c *JobBuilderClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	return false, ""
 }
 
@@ -174,7 +184,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		}
 	}()
 
-	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddToBulkRequest)
+	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
 	abort := func(err error) *SchedulingResult {
 		err = fmt.Errorf("job builder request was aborted: %w", err)
 		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
@@ -325,7 +335,12 @@ const (
 	requestBuildControllerQueueDepthPerWorker = 1.5
 )
 
-func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, builderCfg *flex.JobRequestCfg, jobSubmissionCh chan<- *beeremote.JobRequest, addToBulkRequest addToBulkRequestFn) *requestBuildController {
+func (c *JobBuilderClient) newRequestBuildController(
+	ctx context.Context,
+	builderCfg *flex.JobRequestCfg,
+	jobSubmissionCh chan<- *beeremote.JobRequest,
+	addBulkRequest addBulkRequestFn,
+) *requestBuildController {
 	cpuLimit := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
 	queueLimit := max(1, cap(jobSubmissionCh))
 	maxWorkers := min(cpuLimit, queueLimit)
@@ -333,7 +348,7 @@ func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, builde
 	group.SetLimit(maxWorkers + 1) // Reserve maxWorkers for path processors; processWalk uses one slot.
 	submissionBackpressureThreshold := max(1, min(cap(jobSubmissionCh), int(requestBuildControllerQueueDepthPerWorker*float32(maxWorkers))))
 
-	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addToBulkRequest)
+	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addBulkRequest)
 	bulkWalks := NewBulkStreamPathResultMultiplexer(groupCtx, cap(jobSubmissionCh))
 
 	return &requestBuildController{
@@ -347,7 +362,11 @@ func (c *JobBuilderClient) newRequestBuildController(ctx context.Context, builde
 	}
 }
 
-func (c *JobBuilderClient) newJobRequestBuilder(builderCfg *flex.JobRequestCfg, jobSubmissionCh chan<- *beeremote.JobRequest, addToBulkRequest addToBulkRequestFn) *jobRequestBuilder {
+func (c *JobBuilderClient) newJobRequestBuilder(
+	builderCfg *flex.JobRequestCfg,
+	jobSubmissionCh chan<- *beeremote.JobRequest,
+	addBulkRequest addBulkRequestFn,
+) *jobRequestBuilder {
 	requestBuilder := &jobRequestBuilder{
 		mountPoint:       c.mountPoint,
 		RstMap:           c.rstMap,
@@ -356,7 +375,7 @@ func (c *JobBuilderClient) newJobRequestBuilder(builderCfg *flex.JobRequestCfg, 
 		getPathState:     GetPathState,
 		planFileState:    PlanFileStateForWorkRequests,
 		clearAccessFlags: entry.ClearAccessFlags,
-		addToBulkRequest: addToBulkRequest,
+		addBulkRequest:   addBulkRequest,
 	}
 	requestBuilder.init()
 

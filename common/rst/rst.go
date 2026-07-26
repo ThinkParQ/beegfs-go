@@ -98,7 +98,7 @@ type Provider interface {
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
 	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
-	// any new requests into jobSubmissionChan. If building jobs is long running, return
+	// any new requests into jobSubmissionCh. If building jobs is long running, return
 	// rescheduled==true to reschedule the remaining work for later which allows other work time to
 	// complete.
 	//
@@ -123,7 +123,7 @@ type Provider interface {
 	//
 	// Unclassified errors are treated as failed by callers.
 	//
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) *SchedulingResult
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -166,10 +166,13 @@ type Provider interface {
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
 	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
-	// IncludeInBulkRequest indicates whether the request should be included in a provider-defined
+	// IncludeRequestInBulkOperation indicates whether the request should be included in a provider-defined
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
-	IncludeInBulkRequest(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
+	IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
+	// CancelBulkOperationRequest notifies the provider when a previously generated bulk operation
+	// request fails to be submitted.
+	CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error
 	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
 	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
 	// operation for the current builder execution.

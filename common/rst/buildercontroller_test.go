@@ -235,6 +235,50 @@ func TestRequestBuildController_WaitForSourceWalkProcessingReturnsOnContextCance
 	_, _ = controller.Wait()
 }
 
+// TestRequestBuildController_WaitBlocksUntilInFlightPathProcessingFinishes drives a slow path
+// through the source walk and asserts Wait() doesn't unblock until that path's spawned
+// ProcessFromSource goroutine actually returns, not just once the walk channel is closed.
+func TestRequestBuildController_WaitBlocksUntilInFlightPathProcessingFinishes(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	release := make(chan struct{})
+	baseGetPathState := controller.requestBuilder.getPathState
+	controller.requestBuilder.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+		<-release
+		return baseGetPathState(ctx, mountPoint, inMountPath, mode)
+	}
+
+	walkCh := make(chan *filesystem.StreamPathResult, 1)
+	walkCh <- &filesystem.StreamPathResult{Path: "/slow"}
+	close(walkCh)
+
+	controller.AddSourceWalk(walkCh)
+	controller.Start()
+
+	waitDone := make(chan struct{})
+	go func() {
+		controller.Close()
+		controller.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned before the in-flight path finished processing")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after the in-flight path finished processing")
+	}
+}
+
 // submittedPaths drains jobSubmissionCh and returns the path of every submitted request. Callers
 // must only invoke this once no further sends can occur, e.g. after requestBuildController.Wait().
 func submittedPaths(jobSubmissionCh chan *beeremote.JobRequest) []string {

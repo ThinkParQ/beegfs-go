@@ -27,6 +27,10 @@ func (t *testBulkOperation) AddRequest(ctx context.Context, request *beeremote.J
 	return nil
 }
 
+func (m *testBulkOperation) CancelRequest(ctx context.Context, jobIndex int64, reason error) error {
+	return nil
+}
+
 func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 	if t.executeErr != nil {
 		return nil, nil, t.executeErr

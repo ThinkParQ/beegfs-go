@@ -156,14 +156,14 @@ func (m *jobBuilderBulkOperationsManager) addManagerUnlocked(ctx context.Context
 	return
 }
 
-func (m *jobBuilderBulkOperationsManager) AddToBulkRequest(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error) {
+func (m *jobBuilderBulkOperationsManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error) {
 	if request.GetGenerationStatus() != nil {
 		return
 	}
 
 	rstId := request.GetRemoteStorageTarget()
 	client := m.rstMap[rstId]
-	include, operation := client.IncludeInBulkRequest(ctx, request)
+	include, operation := client.IncludeRequestInBulkOperation(ctx, request)
 	if include {
 		m.managersMu.Lock()
 		defer m.managersMu.Unlock()

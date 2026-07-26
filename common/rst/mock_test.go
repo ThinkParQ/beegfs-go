@@ -61,7 +61,7 @@ func TestMockClientBulkOperationReplaysArchivedRequestsOnce(t *testing.T) {
 	}
 
 	request := client.GetJobRequest(cfg)
-	include, operation := client.IncludeInBulkRequest(context.Background(), request)
+	include, operation := client.IncludeRequestInBulkOperation(context.Background(), request)
 	require.True(t, include)
 	assert.Equal(t, "retrieve", operation)
 
@@ -85,7 +85,7 @@ func TestMockClientBulkOperationReplaysArchivedRequestsOnce(t *testing.T) {
 	assert.Equal(t, time.Duration(0), result.Delay)
 
 	replayedRequest := client.GetJobRequest(cfg)
-	include, operation = client.IncludeInBulkRequest(context.Background(), replayedRequest)
+	include, operation = client.IncludeRequestInBulkOperation(context.Background(), replayedRequest)
 	assert.False(t, include)
 	assert.Empty(t, operation)
 }
