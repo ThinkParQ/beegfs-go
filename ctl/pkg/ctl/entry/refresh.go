@@ -35,8 +35,9 @@ func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan
 		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
-	processEntry := func(path string) (*RefreshEntryResult, error) {
-		return refreshEntryInfo(ctx, mappings, store, path)
+	processEntry := func(path string) (*RefreshEntryResult, bool, error) {
+		res, err := refreshEntryInfo(ctx, mappings, store, path)
+		return res, false, err
 	}
 	return util.ProcessPaths(ctx, paths, false, processEntry)
 }

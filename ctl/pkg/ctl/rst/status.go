@@ -126,7 +126,7 @@ func GetStatus(ctx context.Context, pm util.PathInputMethod, cfg GetStatusCfg) (
 	paths := make(chan string, numWorkers*4)
 	pathGroup.Go(func() error {
 		defer close(paths)
-		return util.StreamPaths(pathGroupCtx, pm, paths, util.RecurseLexicographically(true), util.FilterExpr(cfg.FilterExpr))
+		return util.StreamPaths(pathGroupCtx, pm, paths, util.RecurseLexicographically(true))
 	})
 
 	// First path is required for setting up statusInfos walk and workers to initiate database
@@ -346,6 +346,13 @@ func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, sta
 		return fmt.Errorf("unable to acquire BeeGFS client: %w", err)
 	}
 
+	// The --filter-files expression is evaluated per path in the worker, reusing the entry info the
+	// db-mode status check already fetches. nil when no filter was provided.
+	filter, err := entry.NewEntryFilter(cfg.FilterExpr, mappings)
+	if err != nil {
+		return err
+	}
+
 	var rstMap map[uint32]rst.Provider
 	if cfg.VerifyRemote {
 		rstMap, err = rst.GetRstMap(ctx, mountPoint, mappings.RstIdToConfig)
@@ -357,7 +364,7 @@ func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, sta
 	g, gCtx := errgroup.WithContext(ctx)
 	for range numWorkers {
 		g.Go(func() error {
-			return worker(gCtx, cfg, mountPoint, rstMap, statusInfos, results)
+			return worker(gCtx, cfg, mappings, filter, mountPoint, rstMap, statusInfos, results)
 		})
 	}
 	return g.Wait()
@@ -367,6 +374,8 @@ func runWorkers(ctx context.Context, cfg GetStatusCfg, initialFsPath string, sta
 func worker(
 	ctx context.Context,
 	cfg GetStatusCfg,
+	mappings *util.Mappings,
+	filter *entry.EntryFilter,
 	mountPoint filesystem.Provider,
 	rstMap map[uint32]rst.Provider,
 	statusInfos <-chan statusInfo,
@@ -382,11 +391,34 @@ func worker(
 			if !ok {
 				return nil
 			}
+			var prefetched *entry.GetEntryCombinedInfo
+			if filter != nil {
+				e, skip, ferr := filter.GetEntryFiltered(ctx, mappings, entry.GetEntriesCfg{}, statusInfo.fsPath)
+				if errors.Is(ferr, entry.ErrFilterDetailsUnavailable) {
+					result = &GetStatusResult{
+						Path:       statusInfo.fsPath,
+						SyncStatus: Unknown,
+						SyncReason: fmt.Sprintf("Entry details unavailable (%s); cannot evaluate --filter-files (the inode may be locked, e.g. during rebalancing).", e.Entry.EntryInfoPopulated),
+						Warning:    true,
+					}
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case results <- result:
+					}
+					continue
+				} else if ferr != nil {
+					return ferr
+				} else if skip {
+					continue
+				}
+				prefetched = e
+			}
 
 			if cfg.VerifyRemote {
 				result, err = getPathStatusFromTarget(ctx, cfg, mountPoint, rstMap, statusInfo.fsPath)
 			} else {
-				result, err = getPathStatusFromDatabase(ctx, cfg, mountPoint, statusInfo.fsPath, statusInfo.jobsResponse)
+				result, err = getPathStatusFromDatabase(ctx, cfg, mountPoint, statusInfo.fsPath, statusInfo.jobsResponse, prefetched)
 			}
 			if err != nil {
 				return err
@@ -527,6 +559,7 @@ func getPathStatusFromDatabase(
 	mountPoint filesystem.Provider,
 	fsPath string,
 	dbPath *GetJobsResponse,
+	prefetched *entry.GetEntryCombinedInfo,
 ) (*GetStatusResult, error) {
 	lStat, err := mountPoint.Lstat(fsPath)
 	if err != nil {
@@ -558,25 +591,28 @@ func getPathStatusFromDatabase(
 			remoteTargets[t] = nil
 		}
 	} else {
-		entry, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, fsPath)
-		if err != nil {
-			return nil, err
+		entryInfo := prefetched
+		if entryInfo == nil {
+			entryInfo, err = entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, fsPath)
+			if err != nil {
+				return nil, err
+			}
 		}
-		if entry.Entry.Details == nil {
+		if entryInfo.Entry.Details == nil {
 			return &GetStatusResult{
 				Path:       fsPath,
 				SyncStatus: Unknown,
-				SyncReason: fmt.Sprintf("Entry details unavailable (%s); check if the inode is locked by another process such as background rebalancing.", entry.Entry.EntryInfoPopulated),
+				SyncReason: fmt.Sprintf("Entry details unavailable (%s); check if the inode is locked by another process such as background rebalancing.", entryInfo.Entry.EntryInfoPopulated),
 				Warning:    true,
 			}, nil
 		}
-		if len(entry.Entry.Details.Remote.RSTIDs) != 0 {
-			for _, tgt := range entry.Entry.Details.Remote.RSTIDs {
+		if len(entryInfo.Entry.Details.Remote.RSTIDs) != 0 {
+			for _, tgt := range entryInfo.Entry.Details.Remote.RSTIDs {
 				remoteTargets[tgt] = nil
 			}
 		} else {
 			syncReason := "No remote targets were specified or configured on this entry."
-			if beegfs.IsDataStateOffloaded(entry.Entry.Details.FileState.GetDataState()) {
+			if beegfs.IsDataStateOffloaded(entryInfo.Entry.Details.FileState.GetDataState()) {
 				syncReason = "No remote targets were specified or configured on this entry. The contents are offloaded."
 			}
 			return &GetStatusResult{

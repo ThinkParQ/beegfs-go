@@ -34,6 +34,7 @@ type Mappings struct {
 	TargetToNode                Mapper[beegfs.EntityIdSet]
 	TargetToEntityIdSet         Mapper[beegfs.EntityIdSet]
 	StorageBuddyToEntityIdSet   Mapper[beegfs.EntityIdSet]
+	StorageBuddyGroupToTargets  Mapper[[]beegfs.EntityIdSet]
 	StoragePoolToConfig         Mapper[pool.GetStoragePools_Result]
 	MetaBuddyGroupToPrimaryNode Mapper[beegfs.EntityIdSet]
 	StorageTargetsToBuddyGroup  Mapper[beegfs.EntityIdSet]
@@ -169,6 +170,7 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 		return mappings, fmt.Errorf("unable to get buddy groups from management: %w", err)
 	}
 	mappings.StorageBuddyToEntityIdSet = MapStorageBuddyToEntityIdSet(buddyMirrors)
+	mappings.StorageBuddyGroupToTargets = MapStorageBuddyGroupToTargets(buddyMirrors)
 	mappings.MetaBuddyGroupToPrimaryNode, err = MapMetaBuddyGroupToPrimaryNode(buddyMirrors, store)
 	if err != nil {
 		return mappings, err
@@ -477,6 +479,23 @@ func MapMirroredTargetToPrimary(buddyMirrors []buddygroup.GetBuddyGroups_Result)
 		buddyMapper.byUID[m.SecondaryTarget.Uid] = primary
 		buddyMapper.byAlias[m.SecondaryTarget.Alias] = primary
 		buddyMapper.byLegacyID[m.SecondaryTarget.LegacyId] = primary
+	}
+	return buddyMapper
+}
+
+func MapStorageBuddyGroupToTargets(buddyMirrors []buddygroup.GetBuddyGroups_Result) Mapper[[]beegfs.EntityIdSet] {
+	var buddyMapper = Mapper[[]beegfs.EntityIdSet]{}
+	buddyMapper.byUID = make(map[beegfs.Uid][]beegfs.EntityIdSet)
+	buddyMapper.byAlias = make(map[beegfs.Alias][]beegfs.EntityIdSet)
+	buddyMapper.byLegacyID = make(map[beegfs.LegacyId][]beegfs.EntityIdSet)
+	for _, m := range buddyMirrors {
+		if m.NodeType != beegfs.Storage {
+			continue
+		}
+		targets := []beegfs.EntityIdSet{m.PrimaryTarget, m.SecondaryTarget}
+		buddyMapper.byUID[m.BuddyGroup.Uid] = targets
+		buddyMapper.byAlias[m.BuddyGroup.Alias] = targets
+		buddyMapper.byLegacyID[m.BuddyGroup.LegacyId] = targets
 	}
 	return buddyMapper
 }

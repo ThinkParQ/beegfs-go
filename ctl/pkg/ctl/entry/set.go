@@ -104,23 +104,48 @@ func SetEntries(ctx context.Context, pm util.PathInputMethod, cfg SetEntryCfg) (
 		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
-	processEntry := func(path string) (SetEntryResult, error) {
-		return setEntry(ctx, mappings, cfg, path)
+	filter, err := NewEntryFilter(cfg.FilterExpr, mappings)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return util.ProcessPaths(ctx, pm, false, processEntry, util.FilterExpr(cfg.FilterExpr))
+	processEntry := func(path string) (SetEntryResult, bool, error) {
+		if filter == nil {
+			res, err := setEntry(ctx, mappings, cfg, path, nil)
+			return res, false, err
+		}
+		entry, skip, err := filter.GetEntryFiltered(ctx, mappings, GetEntriesCfg{IncludeOrigMsg: true}, path)
+		if errors.Is(err, ErrFilterDetailsUnavailable) {
+			log.Warn("entry details unavailable, cannot apply filter; skipping entry",
+				zap.String("path", path), zap.Any("reason", entry.Entry.EntryInfoPopulated))
+			return SetEntryResult{}, true, nil
+		}
+		if err != nil {
+			return SetEntryResult{}, false, err
+		}
+		if skip {
+			return SetEntryResult{}, true, nil
+		}
+		res, err := setEntry(ctx, mappings, cfg, path, entry)
+		return res, false, err
+	}
+
+	return util.ProcessPaths(ctx, pm, false, processEntry)
 }
 
 // setEntry applies the SetEntryRequest to the specified searchPath. WARNING: This function is meant
 // to be called through SetEntries() and is not safe to call directly as it relies on SetEntries()
 // for some config validation to avoid duplicate checking of the request for each entry.
-func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, path string) (SetEntryResult, error) {
-	entry, err := GetEntry(ctx, mappings, GetEntriesCfg{
-		Verbose:        false,
-		IncludeOrigMsg: true,
-	}, path)
-	if err != nil {
-		return SetEntryResult{}, err
+func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, path string, entry *GetEntryCombinedInfo) (SetEntryResult, error) {
+	if entry == nil {
+		var err error
+		entry, err = GetEntry(ctx, mappings, GetEntriesCfg{
+			Verbose:        false,
+			IncludeOrigMsg: true,
+		}, path)
+		if err != nil {
+			return SetEntryResult{}, err
+		}
 	}
 
 	store, err := config.NodeStore(ctx)

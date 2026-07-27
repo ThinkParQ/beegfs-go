@@ -320,18 +320,44 @@ func MigrateEntries(ctx context.Context, pm util.PathInputMethod, cfg MigrateCfg
 		zap.Any("dstTargets", migration.dstTargets),
 		zap.Any("dstGroups", migration.dstGroups),
 	)
-	processEntry := func(path string) (MigrateResult, error) {
-		return migrateEntry(ctx, mappings, migration, path)
+	filter, err := NewEntryFilter(cfg.FilterExpr, mappings)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return util.ProcessPaths(ctx, pm, false, processEntry, util.FilterExpr(cfg.FilterExpr))
+	processEntry := func(path string) (MigrateResult, bool, error) {
+		if filter == nil {
+			res, err := migrateEntry(ctx, mappings, migration, path, nil)
+			return res, false, err
+		}
+		entry, skip, err := filter.GetEntryFiltered(ctx, mappings, GetEntriesCfg{
+			Verbose:        true,
+			IncludeOrigMsg: true,
+			NoIoctl:        true,
+		}, path)
+		if errors.Is(err, ErrFilterDetailsUnavailable) {
+			log.Warn("entry details unavailable, cannot apply filter; skipping entry",
+				zap.String("path", path), zap.Any("reason", entry.Entry.EntryInfoPopulated))
+			return MigrateResult{}, true, nil
+		}
+		if err != nil {
+			return MigrateResult{}, false, err
+		}
+		if skip {
+			return MigrateResult{}, true, nil
+		}
+		res, err := migrateEntry(ctx, mappings, migration, path, entry)
+		return res, false, err
+	}
+
+	return util.ProcessPaths(ctx, pm, false, processEntry)
 }
 
 // migrateEntry determines if an entry has any chunks on targets or mirror groups that need to be
 // migrated away from. It only returns fatal error occurs that likely affect migration of all
 // entries. Otherwise it returns errors for individual entries in their results, for example if a
 // user deletes/moves/modifies files while they are being migrated (which is discouraged).
-func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migration, path string) (MigrateResult, error) {
+func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migration, path string, entry *GetEntryCombinedInfo) (MigrateResult, error) {
 
 	result := MigrateResult{
 		Path:           path,
@@ -349,16 +375,17 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 		return result, nil
 	}
 
-	entry, err := GetEntry(ctx, mappings, GetEntriesCfg{
-		// Verbose is required to include the parent details.
-		Verbose:        true,
-		IncludeOrigMsg: true,
-		NoIoctl:        true,
-	}, path)
-
-	if err != nil {
-		result.Status = MigrateError
-		return result, err
+	if entry == nil {
+		var err error
+		entry, err = GetEntry(ctx, mappings, GetEntriesCfg{
+			Verbose:        true,
+			IncludeOrigMsg: true,
+			NoIoctl:        true,
+		}, path)
+		if err != nil {
+			result.Status = MigrateError
+			return result, err
+		}
 	}
 	result.EntryID = entry.Entry.EntryID
 
@@ -370,7 +397,7 @@ func migrateEntry(ctx context.Context, mappings *util.Mappings, migration migrat
 				return result, nil
 			}
 			// The setDir request is validated once in MigrateEntries()
-			setResult, err := setEntry(ctx, mappings, *migration.setDir, path)
+			setResult, err := setEntry(ctx, mappings, *migration.setDir, path, nil)
 			if err != nil {
 				return result, fmt.Errorf("error updating storage pool for directory %q: %w", path, err)
 			}

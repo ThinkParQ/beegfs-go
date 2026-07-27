@@ -286,11 +286,29 @@ func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg)
 		log.Debug("remote storage mappings are not available (ignoring)", zap.Any("error", err))
 	}
 
-	processEntry := func(path string) (*GetEntryCombinedInfo, error) {
-		return GetEntry(ctx, mappings, cfg, path)
+	filter, err := NewEntryFilter(cfg.FilterExpr, mappings)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return util.ProcessPaths(ctx, pm, !cfg.Parallel, processEntry, util.FilterExpr(cfg.FilterExpr))
+	processEntry := func(path string) (*GetEntryCombinedInfo, bool, error) {
+		if filter == nil {
+			entry, err := GetEntry(ctx, mappings, cfg, path)
+			return entry, false, err
+		}
+		entry, skip, err := filter.GetEntryFiltered(ctx, mappings, cfg, path)
+		if errors.Is(err, ErrFilterDetailsUnavailable) {
+			log.Warn("entry details unavailable, cannot apply filter; including entry in output",
+				zap.String("path", path), zap.Any("reason", entry.Entry.EntryInfoPopulated))
+			return entry, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		return entry, skip, nil
+	}
+
+	return util.ProcessPaths(ctx, pm, !cfg.Parallel, processEntry)
 }
 
 // GetEntry retrieves GetEntryCombinedInfo based on the provided information. If mappings is nil

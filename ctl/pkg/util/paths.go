@@ -95,7 +95,6 @@ func DeterminePathInputMethod(paths []string, recurse bool, stdinDelimiter strin
 // ProcessPathOpts contains any settings that should always be determined by the backend.
 type ProcessPathOpts struct {
 	RecurseLexicographically bool
-	FilterExpr               string
 }
 
 type ProcessPathOpt func(*ProcessPathOpts)
@@ -103,12 +102,6 @@ type ProcessPathOpt func(*ProcessPathOpts)
 func RecurseLexicographically(l bool) ProcessPathOpt {
 	return func(args *ProcessPathOpts) {
 		args.RecurseLexicographically = l
-	}
-}
-
-func FilterExpr(f string) ProcessPathOpt {
-	return func(args *ProcessPathOpts) {
-		args.FilterExpr = f
 	}
 }
 
@@ -129,7 +122,7 @@ func ProcessPaths[ResultT any](
 	ctx context.Context,
 	method PathInputMethod,
 	singleWorker bool,
-	processEntry func(path string) (ResultT, error),
+	processEntry func(path string) (ResultT, bool, error),
 	opts ...ProcessPathOpt,
 ) (<-chan ResultT, func() error, error) {
 
@@ -162,37 +155,27 @@ func ProcessPaths[ResultT any](
 }
 
 // StreamPaths reads file paths from the given PathInputMethod—either stdin, directory,
-// or an explicit list—applies an optional filter expression, and streams each matching path to out.
-// It closes the out channel when done, respects ctx cancellation, and returns an error if any
-// step fails.
+// or an explicit list—and streams each path to out. It closes
+// the out channel when done, respects ctx cancellation, and returns an error if any step fails.
 func StreamPaths(ctx context.Context, method PathInputMethod, out chan<- string, opts ...ProcessPathOpt) error {
 	args := &ProcessPathOpts{}
 	for _, opt := range opts {
 		opt(args)
 	}
 
-	var err error
-	var filter filesystem.FileInfoFilter
-	if args.FilterExpr != "" {
-		filter, err = filesystem.CompileFilter(args.FilterExpr)
-		if err != nil {
-			return fmt.Errorf("invalid filter %q: %w", args.FilterExpr, err)
-		}
-	}
-
 	if method.pathsViaStdin {
-		return walkStdin(ctx, method.stdinDelimiter, out, filter)
+		return walkStdin(ctx, method.stdinDelimiter, out)
 	} else if method.pathsViaRecursion != "" {
-		return walkDir(ctx, method.pathsViaRecursion, out, filter, args.RecurseLexicographically)
+		return walkDir(ctx, method.pathsViaRecursion, out, args.RecurseLexicographically)
 	}
-	return walkList(ctx, method.pathsViaList, out, filter)
+	return walkList(ctx, method.pathsViaList, out)
 }
 
 func startProcessing[ResultT any](
 	ctx context.Context,
 	paths <-chan string,
 	results chan<- ResultT,
-	processEntry func(path string) (ResultT, error),
+	processEntry func(path string) (ResultT, bool, error),
 	numWorkers int,
 ) error {
 
@@ -207,9 +190,12 @@ func startProcessing[ResultT any](
 					if !ok {
 						return nil
 					}
-					result, err := processEntry(path)
+					result, skip, err := processEntry(path)
 					if err != nil {
 						return err
+					}
+					if skip {
+						continue
 					}
 
 					select {
@@ -225,13 +211,13 @@ func startProcessing[ResultT any](
 	return g.Wait()
 }
 
-func walkStdin(ctx context.Context, delimiter byte, paths chan<- string, filter filesystem.FileInfoFilter) error {
+func walkStdin(ctx context.Context, delimiter byte, paths chan<- string) error {
 	scanner := GetWalkStdinScanner(delimiter)
 	var err error
 	var beegfsClient filesystem.Provider
 	for scanner.Scan() {
 		path := scanner.Text()
-		if beegfsClient, err = pushFilterInMountPath(ctx, path, filter, beegfsClient, paths); err != nil {
+		if beegfsClient, err = pushInMountPath(ctx, path, beegfsClient, paths); err != nil {
 			return err
 		}
 	}
@@ -239,11 +225,11 @@ func walkStdin(ctx context.Context, delimiter byte, paths chan<- string, filter 
 	return scanner.Err()
 }
 
-func walkList(ctx context.Context, pathList []string, paths chan<- string, filter filesystem.FileInfoFilter) error {
+func walkList(ctx context.Context, pathList []string, paths chan<- string) error {
 	var err error
 	var beegfsClient filesystem.Provider
 	for _, path := range pathList {
-		if beegfsClient, err = pushFilterInMountPath(ctx, path, filter, beegfsClient, paths); err != nil {
+		if beegfsClient, err = pushInMountPath(ctx, path, beegfsClient, paths); err != nil {
 			return err
 		}
 	}
@@ -251,7 +237,7 @@ func walkList(ctx context.Context, pathList []string, paths chan<- string, filte
 	return nil
 }
 
-func walkDir(ctx context.Context, startPath string, paths chan<- string, filter filesystem.FileInfoFilter, lexicographically bool) error {
+func walkDir(ctx context.Context, startPath string, paths chan<- string, lexicographically bool) error {
 	beegfsClient, err := config.BeeGFSClient(startPath)
 	if err != nil {
 		return fmt.Errorf("unable to recursively walk directory: %w", err)
@@ -265,7 +251,7 @@ func walkDir(ctx context.Context, startPath string, paths chan<- string, filter 
 		if err != nil {
 			return fmt.Errorf("unable to recursively walk directory: %w", err)
 		}
-		if _, err := pushFilterInMountPath(ctx, path, filter, beegfsClient, paths); err != nil {
+		if _, err := pushInMountPath(ctx, path, beegfsClient, paths); err != nil {
 			return fmt.Errorf("unable to recursively walk directory: %w", err)
 		}
 		return nil
@@ -278,7 +264,7 @@ func walkDir(ctx context.Context, startPath string, paths chan<- string, filter 
 	return nil
 }
 
-func pushFilterInMountPath(ctx context.Context, path string, filter filesystem.FileInfoFilter, client filesystem.Provider, paths chan<- string) (filesystem.Provider, error) {
+func pushInMountPath(ctx context.Context, path string, client filesystem.Provider, paths chan<- string) (filesystem.Provider, error) {
 	if client == nil {
 		var err error
 		if client, err = config.BeeGFSClient(path); err != nil {
@@ -291,12 +277,6 @@ func pushFilterInMountPath(ctx context.Context, path string, filter filesystem.F
 	inMountPath, err := client.GetRelativePathWithinMount(path)
 	if err != nil {
 		return client, err
-	}
-
-	if keep, err := filesystem.ApplyFilter(inMountPath, filter, client); err != nil {
-		return client, err
-	} else if !keep {
-		return client, nil
 	}
 
 	select {
