@@ -147,13 +147,16 @@ func TestCompileFilter_TimeAndSizeUnits(t *testing.T) {
 }
 
 func TestPreprocessDSL_Rewrites(t *testing.T) {
+	// preprocessDSL rewrites only the un-lexable sugar (octal/duration/size literals). Field
+	// identifiers are intentionally left as the user typed them (lowercase) — expr resolves
+	// them through FileInfo's struct tags, so there is no field-name capitalization step.
 	cases := []struct {
 		input    string
 		contains string
 	}{
-		{`perm == 0755`, `Perm == 493`},
-		{`mtime > 1d`, `Mtime < ago("1d")`},
-		{`size >= 2MiB`, `Size >= bytes("2MiB")`},
+		{`perm == 0755`, `perm == 493`},
+		{`mtime > 1d`, `mtime < ago("1d")`},
+		{`size >= 2MiB`, `size >= bytes("2MiB")`},
 	}
 
 	for _, tt := range cases {
