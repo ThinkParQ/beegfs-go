@@ -306,8 +306,8 @@ func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan<- *
 			},
 		}, nil
 	}
-	controller.requestBuilder.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
-		return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+	controller.requestBuilder.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+		return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 	}
 	controller.requestBuilder.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 		return nil

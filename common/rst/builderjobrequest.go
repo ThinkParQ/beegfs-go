@@ -19,10 +19,10 @@ import (
 type requestPathResolverFn func(walkPath string) (inMountPath string, remotePath string, err error)
 type addBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
 type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error)
-type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error)
+type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error)
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
-type setFileRstConfigFn func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error
+type setFileRstConfigFn func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error
 
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
@@ -38,15 +38,15 @@ type jobRequestBuilder struct {
 }
 
 func (w *jobRequestBuilder) init() {
-	w.initSetDirRstConfig()
+	w.initSetRstConfig()
 }
 
-func (w *jobRequestBuilder) initSetDirRstConfig() {
+func (w *jobRequestBuilder) initSetRstConfig() {
 	if !(w.builderCfg.GetUpdate() || w.builderCfg.HasCooldownSecs()) {
 		// When neither builder config Update nor CooldownSec are set then directories are not
 		// included in the walk and we can safely ignore directory configuration updates.
 		w.setDirRstConfig = func(context.Context, string) (bool, error) { return false, nil }
-		w.setFileRstConfig = func(context.Context, *flex.JobRequestCfg, string, msg.RemoteStorageTarget, msg.EntryInfo, beegfs.Node) error {
+		w.setFileRstConfig = func(context.Context, *flex.JobRequestCfg, string, msg.RemoteStorageTarget, *msg.EntryInfo, beegfs.Node) error {
 			return nil
 		}
 		return
@@ -74,7 +74,7 @@ func (w *jobRequestBuilder) initSetDirRstConfig() {
 
 		return stat.IsDir(), entry.SetDirRstPattern(ctx, inMountPath, rstIds, cooldownSecs)
 	}
-	w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, rstCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node) error {
+	w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, rstCfg msg.RemoteStorageTarget, entryInfo *msg.EntryInfo, ownerNode beegfs.Node) error {
 		return updateFileRstPattern(ctx, cfg, path, rstCfg, entryInfo, ownerNode)
 	}
 }
@@ -227,34 +227,38 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	lockedInfo := cfg.GetLockedInfo()
 	state := beeremote.JobRequest_GenerationStatus_UNSPECIFIED
 
-	var applyPlan applyFn
-	if request.HasGenerationStatus() {
-		canReleaseLock = true
-		state = request.GenerationStatus.State
-	} else {
-		var stateErr error
-		applyPlan, stateErr = w.planFileState(ctx, w.mountPoint, pathState.RstCfg, pathState.EntryInfo, pathState.OwnerNode, cfg)
-		if errors.Is(stateErr, ErrJobAlreadyComplete) {
+	setGenerationStatus := func(err error) {
+		if errors.Is(err, ErrJobAlreadyComplete) {
 			canReleaseLock = true
 			state = beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE
 			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
 				State:   state,
 				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
 			}
-		} else if errors.Is(stateErr, ErrJobAlreadyOffloaded) {
+		} else if errors.Is(err, ErrJobAlreadyOffloaded) {
 			canReleaseLock = false
 			state = beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED
 			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
 				State: state,
 			}
-
-		} else if stateErr != nil {
+		} else {
 			canReleaseLock = true
 			state = beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   state,
-				Message: fmt.Sprintf("failed to prepare file state: %s", stateErr.Error()),
+				Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
 			})
+		}
+	}
+
+	var applyPlan applyFn
+	if request.HasGenerationStatus() {
+		canReleaseLock = true
+		state = request.GenerationStatus.State
+	} else {
+		var planErr error
+		if applyPlan, planErr = w.planFileState(ctx, w.mountPoint, cfg); planErr != nil {
+			setGenerationStatus(planErr)
 		}
 	}
 
@@ -271,14 +275,9 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 			}
 		}
 
-		applyUndo, applyErr := applyPlan()
+		applyUndo, applyErr := applyPlan(&pathState)
 		if applyErr != nil {
-			state = beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION
-			status := &beeremote.JobRequest_GenerationStatus{
-				State:   state,
-				Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
-			}
-			request.SetGenerationStatus(status)
+			setGenerationStatus(applyErr)
 		} else {
 			// Generating the externalId must be the last possible error to avoid situations where, once the
 			// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
@@ -309,12 +308,12 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 
 	switch state {
 	case beeremote.JobRequest_GenerationStatus_UNSPECIFIED, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
-		if err = w.setFileRstConfig(ctx, cfg, request.Path, pathState.RstCfg, pathState.EntryInfo, pathState.OwnerNode); err != nil {
+		entryInfo := pathState.EntryInfo.GetOrigEntryInfo()
+		if err = w.setFileRstConfig(ctx, cfg, request.Path, pathState.RstCfg, entryInfo, pathState.OwnerNode); err != nil {
 			// Abort the builder job since the beegfs was unable to set the file's rst configuration.
 			// The issue is likely systemic.
 			return
 		}
-
 	}
 
 	w.submitJobRequest(ctx, request)

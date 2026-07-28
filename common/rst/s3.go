@@ -24,7 +24,6 @@ import (
 	"github.com/aws/smithy-go"
 	doublestar "github.com/bmatcuk/doublestar/v4"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 
@@ -366,31 +365,76 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}
 
-	var writeLockSet bool
-	var undoPrepare func() error
+	undoAppliedPlan := func() error { return nil }
+	lockAcquired := true
 	defer func() {
-		if err == nil || errors.Is(err, ErrJobAlreadyOffloaded) {
+		if err == nil {
 			return
 		}
 
-		if writeLockSet {
+		if !IsErrJobTerminalSentinel(err) {
+			if undoErr := undoAppliedPlan(); undoErr != nil {
+				err = errors.Join(err, undoErr)
+			}
+		}
+
+		if lockAcquired && !errors.Is(err, ErrJobAlreadyOffloaded) {
 			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
 	}()
 
-	if writeLockSet, undoPrepare, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err == nil || IsErrJobTerminalSentinel(err) {
+	if !IsFileLocked(sync.LockedInfo) {
+		// The file access lock was not previously acquired which means the file state information
+		// has not been determine and none of work request preparations have been done.
+		cfg := r.getJobRequestCfg(request)
+
+		var pathState *PathState
+		pathState, err = r.getLockedInfo(ctx, cfg)
+		lockAcquired = pathState != nil && IsFileLocked(pathState.LockedInfo) && pathState.LockAcquired
+		if err != nil {
 			return
 		}
-		if undoErr := undoPrepare(); undoErr != nil {
-			err = errors.Join(err, undoErr)
+		sync.SetLockedInfo(pathState.LockedInfo)
+		cfg.SetLockedInfo(pathState.LockedInfo)
+
+		if !FileExists(pathState.LockedInfo) {
+			err = os.ErrNotExist
+			return
 		}
-	}()
+		if !IsFileLocked(pathState.LockedInfo) || !pathState.LockAcquired {
+			err = fmt.Errorf("failed to acquire the write lock")
+			return
+		}
+
+		var applyPlan applyFn
+		if applyPlan, err = PlanFileStateForWorkRequests(ctx, r.mountPoint, cfg); err != nil {
+			return
+		}
+
+		if undoAppliedPlan, err = applyPlan(pathState); err != nil {
+			return
+		}
+
+		// Update RST configuration if requested
+		if cfg.GetUpdate() || cfg.HasCooldownSecs() {
+			entryInfo := pathState.EntryInfo
+			origEntryInfo := entryInfo.GetOrigEntryInfo()
+			currentRSTCfg := entryInfo.Entry.Details.Remote.RemoteStorageTarget
+			ownerNode := pathState.OwnerNode
+			if err = updateFileRstPattern(ctx, cfg, cfg.Path, currentRSTCfg, origEntryInfo, ownerNode); err != nil {
+				return
+			}
+		}
+
+		var externalId string
+		if externalId, err = r.GenerateExternalId(ctx, cfg); err != nil {
+			return
+		}
+		sync.LockedInfo.SetExternalId(externalId)
+	}
+
 	job.SetExternalId(sync.LockedInfo.ExternalId)
 
 	switch sync.Operation {
@@ -944,86 +988,26 @@ func isWorkStarted(workResults []*flex.Work) bool {
 	return false
 }
 
-// prepareJobRequest ensures that sync.LockedInfo is full populated.
-func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, sync *flex.SyncJob) (writeLockSet bool, undo func() error, err error) {
-	undo = func() error { return nil }
-
-	lockedInfo := sync.LockedInfo
-	if IsFileLocked(lockedInfo) && HasRemotePathInfo(lockedInfo) {
-		return
+func (r *S3Client) getLockedInfo(ctx context.Context, cfg *flex.JobRequestCfg) (*PathState, error) {
+	pathState, err := GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock)
+	if err != nil {
+		return &pathState, fmt.Errorf("failed to get path state information: %w", err)
 	}
 
-	var entryInfoMsg msg.EntryInfo
-	var currentRSTCfg msg.RemoteStorageTarget
-	var ownerNode beegfs.Node
-	var lockAcquired bool
-
-	if !IsFileLocked(lockedInfo) {
-		var pathState PathState
-		if pathState, err = GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock); err != nil {
-			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to acquire lock: %s", err.Error()))
-			return
-		}
-		lockedInfo = pathState.LockedInfo
-		writeLockSet = pathState.LockAcquired
-		entryInfoMsg = pathState.EntryInfo
-		currentRSTCfg = pathState.RstCfg
-		ownerNode = pathState.OwnerNode
-
-		lockAcquired = true
-		cfg.SetLockedInfo(lockedInfo)
-		sync.SetLockedInfo(lockedInfo)
+	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := r.GetRemotePathInfo(ctx, cfg)
+	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
+		return &pathState, fmt.Errorf("unable to retrieve remote path information: %w", err)
+	}
+	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
+		return &pathState, fmt.Errorf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag)
 	}
 
-	if !cfg.GetOverwrite() && IsFileOffloaded(lockedInfo) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-		err = fmt.Errorf("%w: supplied --%s does not match stub file", ErrJobFailedPrecondition, RemoteTargetFlag)
-		return
+	if !errors.Is(err, os.ErrNotExist) {
+		pathState.LockedInfo.SetRemoteSize(remoteSize)
+		pathState.LockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+		pathState.LockedInfo.SetIsArchived(isArchived)
 	}
-
-	if !HasRemotePathInfo(lockedInfo) {
-		request := BuildJobRequest(ctx, r, cfg)
-		status := request.GetGenerationStatus()
-		if status != nil {
-			err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, status.Message)
-			return
-		}
-
-		// Same logic as GetLockedInfo just without getting the lock.
-		if !lockAcquired {
-			var entryInfo *entry.GetEntryCombinedInfo
-			if entryInfo, err = entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
-				Verbose:        false,
-				IncludeOrigMsg: true,
-			}, cfg.Path); err != nil {
-				err = fmt.Errorf("failed to get entry info: %w", err)
-				return
-			}
-			origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
-			if origEntryInfoPtr != nil {
-				entryInfoMsg = *origEntryInfoPtr
-			} else {
-				entryInfoMsg = msg.EntryInfo{}
-			}
-			if entryInfo.Entry.Details == nil {
-				err = fmt.Errorf("unable to determine remote targets, full entry details unavailable for %s: %s", cfg.Path, entryInfo.Entry.EntryInfoPopulated)
-				return
-			}
-			currentRSTCfg = entryInfo.Entry.Details.Remote.RemoteStorageTarget
-			ownerNode = entryInfo.Entry.MetaOwnerNode
-		}
-
-		if undo, err = PrepareFileStateForWorkRequests(ctx, r.mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, cfg); err != nil {
-			if !errors.Is(err, ErrJobAlreadyComplete) && !errors.Is(err, ErrJobAlreadyOffloaded) {
-				err = fmt.Errorf("%w: %s", ErrJobFailedPrecondition, fmt.Sprintf("failed to prepare file state: %s", err.Error()))
-			}
-			return
-		}
-		sync.SetRemotePath(cfg.RemotePath)
-		sync.SetFlatten(cfg.Flatten)
-		sync.SetOverwrite(cfg.Overwrite)
-	}
-
-	return
+	return &pathState, nil
 }
 
 type s3ArchiveInfo struct {

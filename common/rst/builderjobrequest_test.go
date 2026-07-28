@@ -20,7 +20,7 @@ import (
 
 func TestJobRequestBuilder_InitSetDirRstConfigNoopWhenDirsNotWalked(t *testing.T) {
 	w := &jobRequestBuilder{builderCfg: &flex.JobRequestCfg{}}
-	w.initSetDirRstConfig()
+	w.initSetRstConfig()
 
 	// mountPoint is intentionally left nil; if the no-op short circuit didn't take effect this
 	// would panic when the real implementation tries to Lstat.
@@ -231,8 +231,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
-				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -253,8 +253,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
-				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -277,10 +277,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
-				return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 			},
-			setFileRstConfig: func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
+			setFileRstConfig: func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
 				return nil
 			},
 		}
@@ -447,10 +447,10 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.addBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 			return false, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, currentRSTCfg msg.RemoteStorageTarget, entryInfo msg.EntryInfo, ownerNode beegfs.Node, cfg *flex.JobRequestCfg) (applyFn, error) {
-			return func() (undoFn, error) { return func() error { return nil }, nil }, nil
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+			return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 		}
-		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node) error {
+		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
 			return nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
