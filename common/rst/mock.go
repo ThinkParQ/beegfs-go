@@ -142,8 +142,8 @@ func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	}
 }
 
-func (m *MockClient) CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error {
-	if !m.hasExpectedCall("CancelBulkOperationRequest") {
+func (m *MockClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+	if !m.hasExpectedCall("ExcludeRequestFromBulkOperation") {
 		return nil
 	}
 
@@ -308,12 +308,6 @@ func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPath
 }
 
 func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *BulkStreamPathResult)
-	close(walkCh)
-	return walkCh, func() error { return nil }, nil
-}
-
-func (m *mockBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
 	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil

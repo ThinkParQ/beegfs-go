@@ -453,7 +453,7 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 }
 
-func (r *S3Client) CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+func (r *S3Client) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
 	return ErrUnsupportedOpForRST
 }
 

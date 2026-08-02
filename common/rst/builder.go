@@ -78,9 +78,9 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh)
 }
 
-// CancelBulkOperationRequest is not implemented and should never be called since JobBuilderClient never
+// ExcludeRequestFromBulkOperation is not implemented and should never be called since JobBuilderClient never
 // generates bulk operation requests (see IncludeRequestInBulkOperation).
-func (c *JobBuilderClient) CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+func (c *JobBuilderClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
 	return ErrUnsupportedOpForRST
 }
 
@@ -185,6 +185,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	}()
 
 	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
+	requestBuildController.Start()
 	abort := func(err error) *SchedulingResult {
 		err = fmt.Errorf("job builder request was aborted: %w", err)
 		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
@@ -201,21 +202,8 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 			return
 		}
 		requestBuildController.AddSourceWalk(walkCh)
+		requestBuildController.WaitForSourceWalkProcessing()
 	}
-	requestBuildController.Start()
-
-	// Resume previous bulk operation from prior builder job execution. This gives the previous
-	// operations a chance to complete before more are started. This is especially important since
-	// it's possible for bulk operations to be blocking such as xtreemstore archive bulk restore.
-	if waitForBulkResume, err := bulkOperationsManager.Resume(ctx, requestBuildController); err != nil {
-		result = abort(err)
-		return
-	} else if err = waitForBulkResume(); err != nil {
-		result = abort(err)
-		return
-	}
-
-	requestBuildController.WaitForSourceWalkProcessing()
 
 	result = bulkOperationsManager.Execute(ctx, requestBuildController)
 	if result.Err != nil {

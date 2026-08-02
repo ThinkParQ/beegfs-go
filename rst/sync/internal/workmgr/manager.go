@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -289,6 +291,8 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 		m.mgrWG.Done()
 	}()
 
+	workerSaturation := m.startUpdateWorkerSaturation(time.Second, 5*time.Second, 15*time.Second)
+
 	// completedWork is how workers signal when they are no longer working on a request. It may have
 	// been completed successfully or cancelled, but either way it should be removed from the active
 	// work map and new request(s) can be pulled to the active work queue and map.
@@ -305,6 +309,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
 			rescheduleWork:       m.scheduler.AddRescheduleWorkToken,
+			workerSaturation:     workerSaturation,
 			metrics:              m.metrics,
 		}
 		m.workerWG.Add(1)
@@ -381,6 +386,75 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			m.activeWorkMu.Unlock()
 		}
 	}
+}
+
+// startUpdateWorkerSaturation starts a go routine that every second recomputes decayed worker
+// saturation averages for the given windows (e.g. 1s, 60s) from the activeWork map's occupancy
+// relative to NumWorkers, so workers can read current saturation through the returned pointers
+// without needing direct access to the manager. Saturation is expressed as a percentage of
+// NumWorkers: 100 means as many work items are in flight as there are workers (roughly "every
+// worker has work"), and it is intentionally allowed to exceed 100 when a backlog builds up beyond
+// worker capacity. Note activeWorkQueue's occupancy is not used here: workers pull off it almost
+// immediately, so its length stays near zero regardless of how busy the workers actually are,
+// against a capacity (ActiveWorkQueueSize) sized in the tens of thousands. activeWork instead
+// counts every work item that is queued or actively being processed, which is a meaningful
+// fraction of NumWorkers. Only one goroutine may ever drive a given set of returned pointers this
+// way.
+
+// startUpdateWorkerSaturation returns a list of getter functions for worker saturation over each
+// window duration. The worker saturation is the moving average of active-work per workers expressed
+// as a percentage. where samples are updated every second. 100% means there is a job for every
+// worker.
+func (m *Manager) startUpdateWorkerSaturation(windows ...time.Duration) []func() float64 {
+	tick := time.Second
+	tickSeconds := tick.Seconds()
+	decay := make([]float64, len(windows))
+	for i, window := range windows {
+		decay[i] = math.Exp(-tickSeconds / window.Seconds())
+	}
+
+	saturation := make([]atomic.Uint64, len(windows))
+	statFns := make([]func() float64, len(windows))
+	for i := range saturation {
+		statFns[i] = func() float64 {
+			return math.Float64frombits(saturation[i].Load())
+		}
+	}
+
+	m.mgrWG.Go(func() {
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-m.mgrCtx.Done():
+				return
+			case <-ticker.C:
+				numWorkers := m.config.NumWorkers
+				if numWorkers <= 0 {
+					for i := range windows {
+						saturation[i].Store(0)
+					}
+					continue
+				}
+
+				current := float64(m.activeWorkLen()) / float64(numWorkers) * 100
+				for i := range windows {
+					average := math.Float64frombits(saturation[i].Load())*decay[i] + current*(1-decay[i])
+					saturation[i].Store(math.Float64bits(average))
+				}
+			}
+		}
+	})
+
+	return statFns
+}
+
+// activeWorkLen returns the current number of in-flight work items (queued or being processed).
+func (m *Manager) activeWorkLen() int {
+	m.activeWorkMu.RLock()
+	defer m.activeWorkMu.RUnlock()
+	return len(m.activeWork)
 }
 
 // pullInWork moves ready work from the priority range to the activeWork map.

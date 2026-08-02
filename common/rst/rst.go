@@ -170,9 +170,9 @@ type Provider interface {
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
 	IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
-	// CancelBulkOperationRequest notifies the provider when a previously generated bulk operation
-	// request fails to be submitted.
-	CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error
+	// ExcludeRequestFromBulkOperation notifies the provider when a previously generated bulk operation
+	// request fails to be submitted. request w
+	ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error
 	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
 	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
 	// operation for the current builder execution.
@@ -202,22 +202,16 @@ type clientBulkOperation interface {
 	// correct across builder reschedules that reopen the same bulk operation. Return an error only
 	// for failures that should stop the parent builder job.
 	AddRequest(ctx context.Context, request *beeremote.JobRequest) error
-	// Execute starts a bulk operation for the currently accumulated requests. Any paths that are
-	// ready may be sent to walkCh immediately so their requests can be submitted. The returned
+	// Execute starts a bulk operation for the currently accumulated requests. The returned
 	// getResults function must not return until walkCh has been closed, and it returns the
 	// reschedule details and any errors that occurred. err should only be returned when the builder
 	// job itself should fail. All other errors should be reported on walkCh with the relevant path
 	// so the request can reflect the failure.
-	Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
-	// Resume continues a bulk operation that was started by a previous builder call. It runs
-	// concurrently with the builder walk so previously started bulk work can complete before
-	// Execute is called again after the walk. Any error will be reported from the returned wait
-	// function, which must not return until walkCh has been closed.
 	//
-	// Resume may run concurrently with AddRequest, but it must only process requests that were
-	// already part of the previously started bulk operation when Resume began. Requests appended
-	// during Resume are reserved for a later Execute.
-	Resume(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error)
+	//
+	// Any paths that are ready may be sent to walkCh immediately so their requests can be
+	// submitted.
+	Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
 	// Cancel stops the bulk operation and sends any unsent paths along with reason error to walkCh.
 	// Any bulk operation specific errors should be reported from the returned wait function, which
 	// must not return until walkCh has been closed.

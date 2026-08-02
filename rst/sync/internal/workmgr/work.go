@@ -12,11 +12,13 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
@@ -133,7 +135,8 @@ type worker struct {
 	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
+	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
+	workerSaturation     []func() float64
 	metrics              managerMetrics
 }
 
@@ -430,72 +433,93 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
-	// submitCtx lets a fatal failure to cancel a bulk operation request (see below) cut short any
-	// remaining submissions and the builder's own walk, without needing to cancel work.ctx itself.
-	submitCtx, cancelSubmissions := context.WithCancel(work.ctx)
-	defer cancelSubmissions()
+	for {
+		jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
+		g, gCtx := errgroup.WithContext(work.ctx)
 
-	schedulingResultCh := make(chan *rst.SchedulingResult)
-	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
-	go func() {
-		defer close(jobSubmissionCh)
-		schedulingResultCh <- client.ExecuteJobBuilderRequest(submitCtx, workRequest, jobSubmissionCh)
-	}()
+		var schedulingResult *rst.SchedulingResult
+		g.Go(func() error {
+			defer close(jobSubmissionCh)
+			schedulingResult = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh)
+			return nil
+		})
 
-	var builderMu sync.Mutex
-	var cancelErrMu sync.Mutex
-	var cancelErr error
+		var builderMu sync.Mutex
 
-	submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
-	var submitWg sync.WaitGroup
-	for range submissionWorkers {
-		submitWg.Go(func() {
-			for {
-				select {
-				case <-submitCtx.Done():
-					return
-				case jobRequest, ok := <-jobSubmissionCh:
-					if !ok {
-						return
-					}
-					if err := w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest); err != nil && jobRequest.HasBulkInfo() {
-						// Use work.ctx (not submitCtx) so this cleanup call isn't cut short by our
-						// own cancellation below.
-						if cErr := client.CancelBulkOperationRequest(work.ctx, jobRequest, err); cErr != nil {
-							cancelErrMu.Lock()
-							if cancelErr == nil {
-								cancelErr = fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: %w", jobRequest.GetPath(), cErr)
+		submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
+		for range submissionWorkers {
+			g.Go(func() error {
+				// Always drain jobSubmissionCh until it is closed, even after cancellation. The
+				// builder job may still have sent ready-requests from client bulk operation(s)
+				// that need ExcludeRequestFromBulkOperation called for them.
+				for jobRequest := range jobSubmissionCh {
+					if gCtx.Err() != nil {
+						if jobRequest.HasBulkInfo() {
+							if jobRequestClient, ok := w.remoteStorageTargets.Get(jobRequest.RemoteStorageTarget); ok {
+								_ = jobRequestClient.ExcludeRequestFromBulkOperation(work.ctx, jobRequest, context.Cause(gCtx))
 							}
-							cancelErrMu.Unlock()
-							cancelSubmissions()
+						}
+						continue
+					}
+					if err := w.sendBuilderJobRequest(gCtx, &builderMu, builder, jobRequest); err != nil && jobRequest.HasBulkInfo() {
+						// Use work.ctx instead of gCtx so this cleanup call is not stopped by the
+						// cancellation below.
+						if jobRequestClient, ok := w.remoteStorageTargets.Get(jobRequest.RemoteStorageTarget); ok {
+							if cErr := jobRequestClient.ExcludeRequestFromBulkOperation(work.ctx, jobRequest, err); cErr != nil {
+								return fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: %w", jobRequest.GetPath(), cErr)
+							}
+						} else {
+							return fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: remote storage target %d does not exist", jobRequest.GetPath(), jobRequest.RemoteStorageTarget)
 						}
 					}
 				}
+				return nil
+			})
+		}
+
+		if err := g.Wait(); err != nil {
+			w.updateBuilderJob(work, entry, &rst.SchedulingResult{Err: err})
+			cleanupEntries = true
+			return
+		}
+
+		if schedulingResult == nil {
+			schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
+		}
+
+		bulkOperations := builder.GetBulkOperations()
+		if bulkOperations == nil {
+			bulkOperations = []*flex.BulkOperation{}
+		}
+		workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
+
+		// While the queue has spare capacity, keep building/submitting immediately instead of
+		// paying the cost of persisting reschedule state and waiting for the manager to poll us
+		// back in. The builder carries its own resume cursor, so it's safe to just loop. Bounded to
+		// workDelayMinimum (not a true tight spin) so this doesn't hammer the RST backend -- e.g. a
+		// bulk-retrieve builder whose session/batch isn't ready yet would otherwise re-invoke
+		// execute() as fast as the CPU allows, ignoring the backend's own reschedule delay -- and
+		// select on work.ctx.Done() so shutdown isn't blocked waiting on this loop to notice
+		// cancellation.
+		if schedulingResult.Reschedule && len(w.workerSaturation) > 0 {
+			v := make([]float64, len(w.workerSaturation))
+			for i, saturation := range w.workerSaturation {
+				v[i] = saturation()
 			}
-		})
-	}
+			fmt.Println("worker saturation:", v)
 
-	schedulingResult := <-schedulingResultCh
-	submitWg.Wait()
+			if w.workerSaturation[0]() < 100 {
+				select {
+				case <-time.After(workDelayMinimum):
+					continue
+				case <-work.ctx.Done():
+				}
+			}
+		}
 
-	if cancelErr != nil {
-		w.updateBuilderJob(work, entry, &rst.SchedulingResult{Err: cancelErr})
-		cleanupEntries = true
+		cleanupEntries = w.updateBuilderJob(work, entry, schedulingResult)
 		return
 	}
-
-	if schedulingResult == nil {
-		schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
-	}
-
-	bulkOperations := builder.GetBulkOperations()
-	if bulkOperations == nil {
-		bulkOperations = []*flex.BulkOperation{}
-	}
-	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
-
-	cleanupEntries = w.updateBuilderJob(work, entry, schedulingResult)
-	return
 }
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state

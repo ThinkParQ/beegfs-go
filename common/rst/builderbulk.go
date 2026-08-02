@@ -229,43 +229,6 @@ func (m *jobBuilderBulkOperationsManager) Execute(ctx context.Context, controlle
 }
 
 // Resume continues processing any existing bulk operations started in a previous builder job execution.
-func (m *jobBuilderBulkOperationsManager) Resume(ctx context.Context, controller *requestBuildController) (wait BulkWaitFn, err error) {
-	wait = func() error { return nil }
-	managers := m.getManagersSnapshot()
-	if len(managers) == 0 {
-		return
-	}
-
-	handles := bulkWaitHandles{}
-	for managerKey, manager := range managers {
-		walkCh, getResult, resumeErr := manager.Resume(ctx)
-		if resumeErr != nil {
-			manager.AppendError(resumeErr)
-			err = errors.Join(err, manager.GetErrors())
-			continue
-		}
-		handles.add(managerKey, walkCh, getResult)
-	}
-
-	waitForWalks := controller.AddBulkOperationWalks(handles.getWalkChs())
-	wait = func() (err error) {
-		waitForWalks()
-		results := handles.getMergedResults()
-		for key, resumeErr := range results {
-			if manager := m.getManager(key); manager != nil {
-				manager.AppendError(resumeErr)
-				err = errors.Join(err, manager.GetErrors())
-			} else {
-				err = errors.Join(resumeErr, fmt.Errorf("bulk operation %s failed to resume: %w", key, resumeErr))
-			}
-		}
-		return err
-	}
-
-	return
-}
-
-// Resume continues processing any existing bulk operations started in a previous builder job execution.
 func (m *jobBuilderBulkOperationsManager) Close(ctx context.Context) (err error) {
 	for managerKey, manager := range m.getManagersSnapshot() {
 		if closeErr := manager.Close(ctx); closeErr != nil {
@@ -364,10 +327,6 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 
 func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
 	return m.clientBulkOperation.Execute(ctx)
-}
-
-func (m *bulkOperationManager) Resume(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {
-	return m.clientBulkOperation.Resume(ctx)
 }
 
 func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 )
@@ -301,6 +302,7 @@ func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan<- *
 		return PathState{
 			LockedInfo:   &flex.JobLockedInfo{},
 			LockAcquired: true,
+			EntryInfo:    &entry.GetEntryCombinedInfo{},
 			RstCfg: msg.RemoteStorageTarget{
 				RSTIDs: []uint32{1},
 			},

@@ -13,6 +13,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -287,7 +288,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
+		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
 		assert.False(t, canReleaseLock)
@@ -441,6 +442,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
 				LockedInfo: &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				EntryInfo:  &entry.GetEntryCombinedInfo{},
 				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1, 2}},
 			}, nil
 		}

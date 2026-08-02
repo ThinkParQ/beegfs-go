@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -65,16 +66,6 @@ func parseBulkOperation(operation string) xtreemstoreS3BulkOperation {
 	}
 }
 
-type xtreemstoreS3BulkRequestStatus byte
-
-const (
-	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
-	xtreemstoreS3BulkRequestSent
-	xtreemstoreS3BulkRequestComplete
-)
-
-func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte { return []byte{byte(s)} }
-
 var (
 	ErrActiveRetrieveSessionAlreadyExists = errors.New("active retrieve-session already exists")
 )
@@ -101,10 +92,9 @@ type xtreemstoreS3BulkRetrieveSessionInfo struct {
 }
 
 type xtreemstoreS3BulkRetrieveManagerState struct {
-	ActiveRetrieveId    string `json:"active-retrieve-id"`
-	ActiveJobStart      int64  `json:"active-job-start"`
-	ActiveJobEnd        int64  `json:"active-job-end"`
-	JobStatusCheckStart int64  `json:"job-status-check-start"`
+	SessionRetrieveId string `json:"active-retrieve-id"`
+	SessionJobStart   int64  `json:"active-job-start"`
+	SessionJobEnd     int64  `json:"active-job-end"`
 }
 
 type xtreemstoreS3BulkRetrieveBatchInfo struct {
@@ -116,6 +106,19 @@ type xtreemstoreS3BulkRetrieveBatchInfo struct {
 type xtreemstoreS3BulkRetrieveRequest struct {
 	Ids            []string `json:"ids,omitempty"`
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
+}
+
+type xtreemstoreS3BulkRequestStatus byte
+
+const (
+	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
+	xtreemstoreS3BulkRequestSent
+	xtreemstoreS3BulkRequestComplete
+	xtreemstoreS3BulkRequestCompleteAck
+)
+
+func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
+	return []byte{byte(s)}
 }
 
 type xtreemstoreS3BulkStatuses struct {
@@ -259,8 +262,8 @@ func (x *xtreemstoreS3Provider) xtreemstoreS3BulkMarkRequestComplete(bulkInfo *f
 	return manager.MarkComplete(bulkInfo.JobIndex)
 }
 
-// CancelBulkOperationRequest marks a bulk operation request as complete.
-func (x *xtreemstoreS3Provider) CancelBulkOperationRequest(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+// ExcludeRequestFromBulkOperation marks a bulk operation request as complete.
+func (x *xtreemstoreS3Provider) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
 	if !request.HasBulkInfo() {
 		return fmt.Errorf("cannot cancel request for path %q: request has no bulk operation info", request.GetPath())
 	}
@@ -370,8 +373,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 		defer close(executeWalkCh)
-		// reschedule, delay, err := m.execute(ctx, executeWalkCh)
-		reschedule, delay, executeErr = m.executeTest(ctx, executeWalkCh)
+		reschedule, delay, executeErr = m.execute(ctx, executeWalkCh)
 	})
 
 	getResults = func() *SchedulingResult {
@@ -383,17 +385,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 		}
 	}
 	return executeWalkCh, getResults, nil
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) Resume(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {
-	resumeWalkCh := make(chan *BulkStreamPathResult, 128)
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		defer close(resumeWalkCh)
-		return m.resume(ctx, resumeWalkCh)
-	})
-
-	return resumeWalkCh, g.Wait, nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error) {
@@ -415,6 +406,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 				case xtreemstoreS3BulkRequestInitialized:
 				case xtreemstoreS3BulkRequestSent:
 				case xtreemstoreS3BulkRequestComplete:
+				case xtreemstoreS3BulkRequestCompleteAck:
 				default:
 				}
 			}
@@ -425,7 +417,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 			return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
 		}
 
-		if !sessionInfo.Active || sessionInfo.RetrieveId != m.state.ActiveRetrieveId {
+		if !sessionInfo.Active || sessionInfo.RetrieveId != m.state.SessionRetrieveId {
 			if err := m.deleteState(); err != nil {
 				return fmt.Errorf("failed to remove retrieve-session state file: %w", err)
 			}
@@ -469,24 +461,41 @@ func (m *xtreemstoreS3BulkRetrieveManager) CancelRequests(ctx context.Context, r
 	}
 
 	cancelErr := &RequestCancelError{Reason: reason}
-	for jobIndex, record := range records {
-		activeJobIndex := m.state.ActiveJobStart + int64(jobIndex)
-		if status, err := statuses.Get(activeJobIndex); err != nil {
-			return fmt.Errorf("unable to send failed job request: %w", err)
+	for index, record := range records {
+		jobIndex := m.state.SessionJobStart + int64(index)
+		if status, err := statuses.Get(jobIndex); err != nil {
+			return fmt.Errorf("unable to send failed job request. Record: %s, Status: %v: %w", record, status, err)
 		} else {
 			switch status {
 			case xtreemstoreS3BulkRequestInitialized:
 				walkCh <- &BulkStreamPathResult{
-					Path: record,
-					Err:  cancelErr,
+					Path:  record,
+					RstId: m.rstId,
+					Err:   cancelErr,
+					BulkInfo: &flex.BulkJobRequestInfo{
+						StateMountPath: m.stateMountPath,
+						Operation:      m.operation,
+						JobIndex:       jobIndex,
+					},
 				}
-				if err := m.MarkSent(activeJobIndex); err != nil {
-					return fmt.Errorf("failed to mark bulk job request as sent: %w", err)
+				if err := m.MarkComplete(jobIndex); err != nil {
+					return fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", record, status, err)
 				}
-			case xtreemstoreS3BulkRequestSent:
-			case xtreemstoreS3BulkRequestComplete:
+			case xtreemstoreS3BulkRequestSent, xtreemstoreS3BulkRequestComplete, xtreemstoreS3BulkRequestCompleteAck:
 			default:
-				return fmt.Errorf("unknown record status. Record: %s, Status: %v", record, status)
+				walkCh <- &BulkStreamPathResult{
+					Path:  record,
+					RstId: m.rstId,
+					Err:   fmt.Errorf("unknown record status: %w", cancelErr),
+					BulkInfo: &flex.BulkJobRequestInfo{
+						StateMountPath: m.stateMountPath,
+						Operation:      m.operation,
+						JobIndex:       jobIndex,
+					},
+				}
+				if err := m.MarkComplete(jobIndex); err != nil {
+					return fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", record, status, err)
+				}
 			}
 		}
 	}
@@ -512,149 +521,36 @@ func removeIfExists(path string) error {
 	return nil
 }
 
+const (
+	reschedulePoolingDelay = 1 * time.Minute // This should be configurable
+	rescheduleMaxDelay     = 5 * time.Minute // This should be configurable
+)
+
 func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
-	rescheduleOperation := func() (bool, time.Duration, error) {
-		rescheduleDelay := 5 * time.Second // TODO: This should be based on config...
-		return true, rescheduleDelay, nil
-	}
-
-	if ready, err := m.ensureSessionActive(ctx); err != nil {
-		return false, 0, err
-	} else if !ready {
-		return rescheduleOperation()
-	}
-
-	if allBatchesComplete, err := m.processSessionBatches(ctx, walkCh); err != nil {
-		return false, 0, err
-	} else if !allBatchesComplete {
-		return rescheduleOperation()
-	}
-
-	if err = m.destroyRetrieveSession(ctx); err != nil {
-		err = fmt.Errorf("retrieve-session completed successfully, but the active session could not be destroyed and manual intervention is required: %w", err)
-	}
-
-	// TODO: Should all the state be destroyed here?
-	//  - Batches are complete and active session is destroyed
-	return
-}
-
-// executeTest is a temporary manual test helper that exercises the local record/status bookkeeping
-// (getRecords, getStatuses, MarkSent, JobStatusCheckStart) and the walkCh/BulkStreamPathResult
-// handoff to the caller. It does NOT test any actual xtreemstore interaction: it never starts,
-// resumes, or destroys a retrieve-session, never fetches or deletes session batches from S3, and
-// never calls isObjectReadyForDownload — every xtreemstoreS3BulkRequestInitialized record is treated
-// as ready and sent immediately instead of waiting on a real tape-restore check.
-func (m *xtreemstoreS3BulkRetrieveManager) executeTest(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
-	// records, err := m.getRecords(0, -1)
-	records, err := m.getRecords(m.state.JobStatusCheckStart, -1)
-	if err != nil {
-		err = fmt.Errorf("failed to load bulk request records: %w", err)
-		return
-	}
-
-	// statuses, err := m.getAllStatuses()
-	statuses, err := m.getStatuses(m.state.JobStatusCheckStart, -1)
-	if err != nil {
-		err = fmt.Errorf("failed to load bulk request statuses: %w", err)
-		return
-	}
-
-	i := 0
-	s := 0
-	c := 0
-	d := 0
-	defer func() {
-		fmt.Println("Initialized:", i, " Sent:", s, " Complete:", c, " unknown", d)
-	}()
-
-	updateJobStatusCheckStart := true
-	previousCheckStart := m.state.JobStatusCheckStart
-	jobIndex := m.state.JobStatusCheckStart
-	for _, record := range records {
-		// If there were more to parse from record, it would be done here.
-		jobPath := record
-
-		status, statusErr := statuses.Get(jobIndex)
-		if statusErr != nil {
-			err = fmt.Errorf("failed to determine status for key %q: %w", jobPath, statusErr)
-			return
+	for {
+		if ready, err := m.ensureSessionActive(ctx); err != nil {
+			return false, 0, err
+		} else if !ready {
+			return true, rescheduleMaxDelay, nil
 		}
 
-		switch status {
-		case xtreemstoreS3BulkRequestInitialized:
-			i++
-			select {
-			case <-ctx.Done():
-				err = ctx.Err()
-				return
-			case walkCh <- &BulkStreamPathResult{
-				Path: jobPath,
-				BulkInfo: &flex.BulkJobRequestInfo{
-					StateMountPath: m.stateMountPath,
-					Operation:      m.operation,
-					JobIndex:       jobIndex,
-				},
-				RstId: m.rstId}:
-			}
-
-			if markSentErr := m.MarkSent(jobIndex); markSentErr != nil {
-				err = fmt.Errorf("failed to mark bulk job request as sent: %w", markSentErr)
-				return
-			}
-		case xtreemstoreS3BulkRequestSent:
-			s++
-		case xtreemstoreS3BulkRequestComplete:
-			c++
-		default:
-			d++
-			err = fmt.Errorf("unknown record status. Record: %s, Status: %v", jobPath, status)
-			return
+		if batchesComplete, err := m.processSessionBatches(ctx, walkCh); err != nil {
+			return false, 0, err
+		} else if !batchesComplete {
+			return true, reschedulePoolingDelay, nil
 		}
 
-		if status != xtreemstoreS3BulkRequestComplete {
-			updateJobStatusCheckStart = false
-			reschedule = true
-		} else if updateJobStatusCheckStart {
-			m.state.JobStatusCheckStart = jobIndex + 1
+		if err = m.destroyRetrieveSession(ctx); err != nil {
+			return false, 0, fmt.Errorf("retrieve-session completed successfully, but the active session could not be destroyed and manual intervention is required: %w", err)
 		}
 
-		jobIndex++
-	}
-	if m.state.JobStatusCheckStart != previousCheckStart {
-		if saveErr := m.saveManagerState(); saveErr != nil {
-			err = fmt.Errorf("failed to persist bulk request status check start: %w", saveErr)
-			return
+		if m.includedJobs == m.state.SessionJobEnd {
+			// no more requests were add
+			break
 		}
 	}
 
-	if reschedule {
-		delay = 30 * time.Second
-	}
-
-	return
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) resume(ctx context.Context, walkCh chan<- *BulkStreamPathResult) error {
-	sessionInfo, err := m.getSessionInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
-
-	}
-	if !(sessionInfo.Active && sessionInfo.RetrieveId == m.state.ActiveRetrieveId) {
-		return nil
-	}
-
-	if allBatchesComplete, err := m.processSessionBatches(ctx, walkCh); err != nil {
-		return err
-	} else if !allBatchesComplete {
-		return nil
-	}
-
-	if err := m.destroyRetrieveSession(ctx); err != nil {
-		return fmt.Errorf("retrieve-session completed successfully, but the active session could not be destroyed and manual intervention is required: %w", err)
-	}
-	return nil
+	return false, 0, nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Context) (ready bool, err error) {
@@ -665,7 +561,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Conte
 	}
 
 	if sessionInfo.Active {
-		ready = sessionInfo.RetrieveId == m.state.ActiveRetrieveId
+		ready = sessionInfo.RetrieveId == m.state.SessionRetrieveId
 	} else if startSessionErr := m.startSession(ctx); startSessionErr != nil {
 		if !errors.Is(startSessionErr, ErrActiveRetrieveSessionAlreadyExists) {
 			err = fmt.Errorf("failed to start retrieve-session: %w", startSessionErr)
@@ -676,116 +572,103 @@ func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Conte
 	return
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatches(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (complete bool, err error) {
-	var activeRecordMap map[string]int64
-	var activeStatuses *xtreemstoreS3BulkStatuses
-	var batchInfos []xtreemstoreS3BulkRetrieveBatchInfo
-	if activeRecordMap, err = m.getActiveRecordsMap(); err != nil {
-		return false, fmt.Errorf("failed to get record mappings for the active retrieve-session: %w", err)
-	}
-	if activeStatuses, err = m.getActiveSessionStatuses(); err != nil {
-		return false, fmt.Errorf("failed to get request statuses for active retrieve-session: %w", err)
-	}
-	if batchInfos, err = m.getSessionBatchInfo(ctx); err != nil {
+func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatches(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (success bool, err error) {
+	batchInfos, err := m.getSessionBatchInfo(ctx)
+	if err != nil {
 		return false, fmt.Errorf("failed to load retrieve-session batch info: %w", err)
 	}
 
+	defer func() {
+		m.saveManagerState()
+	}()
+
 	for _, batchInfo := range batchInfos {
-		if complete, err = m.processSessionBatch(ctx, walkCh, activeRecordMap, activeStatuses, batchInfo); err != nil {
+		if batchComplete, err := m.processSessionBatch(ctx, walkCh, batchInfo); err != nil || !batchComplete {
 			return false, err
-		} else if !complete {
-			return false, nil
 		}
 	}
-
 	return true, nil
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatch(
-	ctx context.Context,
-	walkCh chan<- *BulkStreamPathResult,
-	activeRecordMap map[string]int64,
-	activeStatuses *xtreemstoreS3BulkStatuses,
-	batchInfo xtreemstoreS3BulkRetrieveBatchInfo,
-) (bool, error) {
-	keys, err := m.getSessionBatchKeys(ctx, batchInfo)
+// processSessionBatch processes the retrieve-session batch and returns whether it completed.
+func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatch(ctx context.Context, walkCh chan<- *BulkStreamPathResult, batchInfo xtreemstoreS3BulkRetrieveBatchInfo) (success bool, err error) {
+	activeRecordMap, err := m.getActiveRecordsMap()
 	if err != nil {
+		return false, fmt.Errorf("failed to get record mappings for the active retrieve-session: %w", err)
+	}
+
+	var activeStatuses *xtreemstoreS3BulkStatuses
+	if activeStatuses, err = m.getActiveSessionStatuses(); err != nil {
+		return false, fmt.Errorf("failed to get request statuses for active retrieve-session: %w", err)
+	}
+
+	var keys []string
+	if keys, err = m.getSessionBatchKeys(ctx, batchInfo); err != nil {
 		return false, fmt.Errorf("failed to retrieve batch keys: %w", err)
 	}
 
-	batchComplete := true
 	for _, key := range keys {
-		if complete, err := m.processSessionBatchKey(ctx, walkCh, activeRecordMap, activeStatuses, key); err != nil {
-			return false, err
-		} else if !complete {
-			batchComplete = false
+		jobIndex, ok := activeRecordMap[key]
+		if !ok {
+			return false, fmt.Errorf("unable to determine status for key: %s", key)
 		}
-	}
 
-	if !batchComplete {
-		return false, nil
+		var status xtreemstoreS3BulkRequestStatus
+		if status, err = activeStatuses.Get(jobIndex); err != nil {
+			return false, fmt.Errorf("unable to determine status: %w", err)
+		}
+
+		result := &BulkStreamPathResult{
+			Path:  key,
+			RstId: m.rstId,
+			BulkInfo: &flex.BulkJobRequestInfo{
+				StateMountPath: m.stateMountPath,
+				Operation:      m.operation,
+				JobIndex:       jobIndex,
+			},
+		}
+
+		switch status {
+		case xtreemstoreS3BulkRequestInitialized:
+			if ready, err := m.isObjectReadyForDownload(ctx, key); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					result.Err = &RequestCancelError{Reason: fmt.Errorf("object no longer exists")}
+					walkCh <- result
+					if markErr := m.MarkCompleteAck(jobIndex); markErr != nil {
+						return false, fmt.Errorf("remote object no longer exists but failed to mark bulk job request as complete. Record: %s, Status: %v", key, status)
+					}
+					continue
+				} else {
+					return false, fmt.Errorf("failed to determine restore state. Record: %s, Status: %v: %w", key, status, err)
+				}
+			} else if !ready {
+				return false, nil
+			}
+
+			walkCh <- result
+			if err = m.MarkSent(jobIndex); err != nil {
+				return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
+			}
+		case xtreemstoreS3BulkRequestSent:
+		case xtreemstoreS3BulkRequestComplete:
+			if err = m.MarkCompleteAck(jobIndex); err != nil {
+				return false, fmt.Errorf("failed to mark bul job request as complete and acknowledged. Record: %s, Status: %v", key, status)
+			}
+		case xtreemstoreS3BulkRequestCompleteAck:
+		default:
+			result.Err = fmt.Errorf("unexpected record status. Record: %s, Status: %v", key, status)
+			walkCh <- result
+			if err = m.MarkCompleteAck(jobIndex); err != nil {
+				return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
+			}
+		}
 	}
 
 	if err = m.deleteSessionBatch(ctx, batchInfo); err != nil {
 		return false, fmt.Errorf("failed to delete retrieve-session batch: %w", err)
 	}
+
 	return true, nil
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
-	ctx context.Context,
-	walkCh chan<- *BulkStreamPathResult,
-	activeRecordMap map[string]int64,
-	activeStatuses *xtreemstoreS3BulkStatuses,
-	key string,
-) (bool, error) {
-	jobIndex, ok := activeRecordMap[key]
-	if !ok {
-		return false, fmt.Errorf("unable to determine status for key: %s", key)
-	}
-
-	jobStatus, err := activeStatuses.Get(jobIndex)
-	if err != nil {
-		return false, fmt.Errorf("unable to determine status: %w", err)
-	}
-
-	switch jobStatus {
-	case xtreemstoreS3BulkRequestInitialized:
-		if ready, err := m.isObjectReadyForDownload(ctx, key); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				walkCh <- &BulkStreamPathResult{
-					Path: key,
-					Err:  fmt.Errorf("object no longer exists"),
-				}
-				if err := m.MarkComplete(jobIndex); err != nil {
-					return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
-				}
-				return true, nil
-			}
-			return false, fmt.Errorf("failed to determine restore state: %w", err)
-		} else if ready {
-			walkCh <- &BulkStreamPathResult{
-				Path: key,
-			}
-			if err := m.MarkSent(jobIndex); err != nil {
-				return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
-			}
-		}
-		return false, nil
-	case xtreemstoreS3BulkRequestSent:
-		return false, nil
-	case xtreemstoreS3BulkRequestComplete:
-		return true, nil
-	default:
-		walkCh <- &BulkStreamPathResult{
-			Path: key,
-			Err:  fmt.Errorf("unknown job request status"),
-		}
-		if err := m.MarkComplete(jobIndex); err != nil {
-			return false, fmt.Errorf("failed to mark bulk job request as complete: %w", err)
-		}
-		return true, nil
-	}
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
@@ -861,6 +744,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 		err = errors.Join(err, m.recordHandle.Close())
 	}
 	return
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestCompleteAck, jobIndex)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) MarkComplete(jobIndex int64) error {
@@ -994,11 +881,15 @@ func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.
 		return false, fmt.Errorf("head object for key %q: %w", key, err)
 	}
 
-	if resp.Restore == nil {
+	switch resp.StorageClass {
+	case types.StorageClassStandard:
 		return true, nil
+	case types.StorageClassGlacier:
+		return resp.Restore != nil && strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
+	default:
+		return false, fmt.Errorf("unexpected storage class, %s", resp.StorageClass)
 	}
 
-	return strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (err error) {
@@ -1015,7 +906,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 		return reason
 	}
 
-	activeJobStart := m.state.ActiveJobEnd
+	activeJobStart := m.state.SessionJobEnd
 	activeJobEnd := m.includedJobs
 	keys, err := m.getRecords(activeJobStart, activeJobEnd)
 	if err != nil {
@@ -1048,9 +939,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 		return cleanupCreatedSession(fmt.Errorf("failed to recover retrieve-session ownership state after creation: %w", err))
 	}
 
-	m.state.ActiveJobStart = activeJobStart
-	m.state.ActiveJobEnd = activeJobEnd
-	m.state.ActiveRetrieveId = sessionInfo.RetrieveId
+	m.state.SessionJobStart = activeJobStart
+	m.state.SessionJobEnd = activeJobEnd
+	m.state.SessionRetrieveId = sessionInfo.RetrieveId
 
 	if err = m.saveManagerState(); err != nil {
 		return cleanupCreatedSession(fmt.Errorf("failed to store retrieve-session ownership state after creation: %w", err))
@@ -1078,7 +969,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) destroyRetrieveSession(ctx context.Co
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int64, error) {
-	return m.getRecordsMap(m.state.ActiveJobStart, m.state.ActiveJobEnd)
+	return m.getRecordsMap(m.state.SessionJobStart, m.state.SessionJobEnd)
 }
 
 // func (m *xtreemstoreS3BulkRetrieveManager) getRecordsMapFromActiveStart() (map[string]int64, error) {
@@ -1086,15 +977,15 @@ func (m *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int
 // }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getRecordsFromActiveStart() ([]string, error) {
-	return m.getRecords(m.state.ActiveJobStart, -1)
+	return m.getRecords(m.state.SessionJobStart, -1)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getActiveSessionStatuses() (*xtreemstoreS3BulkStatuses, error) {
-	return m.getStatuses(m.state.ActiveJobStart, m.state.ActiveJobEnd)
+	return m.getStatuses(m.state.SessionJobStart, m.state.SessionJobEnd)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getStatusesFromActiveStart() (*xtreemstoreS3BulkStatuses, error) {
-	return m.getStatuses(m.state.ActiveJobStart, -1)
+	return m.getStatuses(m.state.SessionJobStart, -1)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getAllStatuses() (*xtreemstoreS3BulkStatuses, error) {

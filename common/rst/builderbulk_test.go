@@ -87,28 +87,6 @@ func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t 
 	assert.Empty(t, *cancelErrs)
 }
 
-func TestJobBuilderBulkOperations_ManagerResumeReturnsNilAfterSuccessfulResume(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
-	}
-
-	resumeErrs := new(string)
-	manager := &jobBuilderBulkOperationsManager{
-		managers: map[string]*bulkOperationManager{
-			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{},
-				Operation:           "retrieve",
-				errors:              resumeErrs,
-			},
-		},
-	}
-
-	wait, err := manager.Resume(context.Background(), controller)
-	assert.NoError(t, err)
-	require.NoError(t, wait())
-	assert.Empty(t, *resumeErrs)
-}
-
 func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t *testing.T) {
 	controller := &requestBuildController{
 		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 2),
@@ -172,40 +150,6 @@ func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t 
 	}
 	assert.Equal(t, "failed to open execute state", *openErrs)
 	assert.Equal(t, "failed waiting for execute completion", *waitErrs)
-}
-
-func TestJobBuilderBulkOperations_ManagerResumeReturnsErrorsWhenResumeFails(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
-	}
-
-	openErrs := new(string)
-	waitErrs := new(string)
-	manager := &jobBuilderBulkOperationsManager{
-		managers: map[string]*bulkOperationManager{
-			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{resumeErr: fmt.Errorf("failed to open resume state")},
-				Operation:           "retrieve",
-				errors:              openErrs,
-			},
-			"1-archive": {
-				clientBulkOperation: &testBulkOperation{waitErr: fmt.Errorf("failed waiting for resume completion")},
-				Operation:           "archive",
-				errors:              waitErrs,
-			},
-		},
-	}
-
-	wait, err := manager.Resume(context.Background(), controller)
-	if assert.Error(t, err) {
-		assert.True(t, strings.Contains(err.Error(), "bulk operation retrieve: (failed to open resume state)"))
-	}
-	waitErr := wait()
-	if assert.Error(t, waitErr) {
-		assert.True(t, strings.Contains(waitErr.Error(), "bulk operation archive: (failed waiting for resume completion)"))
-	}
-	assert.Equal(t, "failed to open resume state", *openErrs)
-	assert.Equal(t, "failed waiting for resume completion", *waitErrs)
 }
 
 func TestJobBuilderBulkOperations_ManagerAbortReturnsErrorsWhenCancelFails(t *testing.T) {

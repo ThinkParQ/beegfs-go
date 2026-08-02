@@ -122,15 +122,22 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 	return
 }
 
-func (w *jobRequestBuilder) ProcessFromBulkOperation(ctx context.Context, inMountPath string, remotePath string, rstId uint32, BulkInfo *flex.BulkJobRequestInfo, failedPrecondition error) (err error) {
-
-	var pathState PathState
-	var skip bool
-	var pathIssue error
-	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(ctx, inMountPath); err != nil || skip {
+func (w *jobRequestBuilder) ProcessFromBulkOperation(
+	ctx context.Context,
+	inMountPath string,
+	remotePath string,
+	rstId uint32,
+	BulkInfo *flex.BulkJobRequestInfo,
+	failedPrecondition error,
+) (err error) {
+	pathState, pathStateErr := w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
+	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
+		// Returning err from this function aborts the entire builder job, so only fatal path
+		// state errors are returned here. Non-fatal path state errors are attached to the
+		// generated request when an rstId is available, allowing the builder job to continue.
+		err = pathStateErr
 		return
 	}
-	failedPrecondition = appendError(failedPrecondition, pathIssue)
 
 	// The file access lock must be acquired by this builder job before adding it to a bulk
 	// operation so releasing it is acceptable.
@@ -143,18 +150,17 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(ctx context.Context, inMoun
 		}
 	}()
 
-	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
-		request := w.buildJobRequest(ctx, cfg, failedPrecondition)
-		request.SetRemoteStorageTarget(rstId)
-		request.SetBulkInfo(BulkInfo)
-		canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
-		if !canReleaseLock {
-			keepLock = true
-		}
-		if processErr != nil {
-			err = processErr
-			return
-		}
+	cfg := w.buildJobRequestCfg(inMountPath, remotePath, rstId, pathState.LockedInfo, w.builderCfg)
+	request := w.buildJobRequest(ctx, cfg, failedPrecondition)
+	request.SetRemoteStorageTarget(rstId)
+	request.SetBulkInfo(BulkInfo)
+	canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
+	if !canReleaseLock {
+		keepLock = true
+	}
+	if processErr != nil {
+		err = processErr
+		return
 	}
 
 	return
@@ -194,8 +200,8 @@ func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMo
 	return
 }
 
-// buildJobRequestCfgs returns a list of jobRequestCfgs for each rstId. Each cfg is a clone of the
-// original cfg updated with the provided information.
+// buildJobRequestCfgs returns a jobRequestCfg list for each rstId. Each jobRequestCfg is a clone of
+// cfg updated with the provided information.
 func (w *jobRequestBuilder) buildJobRequestCfgs(
 	inMountPath string,
 	remotePath string,
@@ -205,14 +211,27 @@ func (w *jobRequestBuilder) buildJobRequestCfgs(
 ) []*flex.JobRequestCfg {
 	var requests []*flex.JobRequestCfg
 	for _, rstId := range rstIds {
-		request := proto.Clone(cfg).(*flex.JobRequestCfg)
-		request.SetPath(inMountPath)
-		request.SetRemotePath(remotePath)
-		request.SetRemoteStorageTarget(rstId)
-		request.SetLockedInfo(proto.Clone(lockedInfo).(*flex.JobLockedInfo))
+		request := w.buildJobRequestCfg(inMountPath, remotePath, rstId, lockedInfo, cfg)
 		requests = append(requests, request)
 	}
 	return requests
+}
+
+// buildJobRequestCfgs returns a jobRequestCfg for each rstId. jobRequestCfg is a clone of cfg
+// updated with the provided information.
+func (w *jobRequestBuilder) buildJobRequestCfg(
+	inMountPath string,
+	remotePath string,
+	rstId uint32,
+	lockedInfo *flex.JobLockedInfo,
+	cfg *flex.JobRequestCfg,
+) *flex.JobRequestCfg {
+	request := proto.Clone(cfg).(*flex.JobRequestCfg)
+	request.SetPath(inMountPath)
+	request.SetRemotePath(remotePath)
+	request.SetRemoteStorageTarget(rstId)
+	request.SetLockedInfo(proto.Clone(lockedInfo).(*flex.JobLockedInfo))
+	return request
 }
 
 // processJobRequestCfg builds, prepares, and submits the job request for cfg. canReleaseLock is
