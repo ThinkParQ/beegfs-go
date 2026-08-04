@@ -817,26 +817,6 @@ func parseRstUrl(url []byte) (uint32, string, error) {
 	return uint32(num), s3Key, nil
 }
 
-func CheckEntry(e entry.Entry, ignoreReaders bool, ignoreWriters bool) error {
-	if e.Details == nil {
-		return fmt.Errorf("entry details unavailable (%s)", e.EntryInfoPopulated)
-	}
-	var err error
-	if !ignoreWriters && e.Details.NumSessionsWrite > 0 {
-		err = ErrFileOpenForWriting
-	}
-	if !ignoreReaders && e.Details.NumSessionsRead > 0 {
-		// Not using errors.Join because it adds a newline when printing each error which looks
-		// awkward in the CTL output.
-		if err != nil {
-			err = ErrFileOpenForReadingAndWriting
-		} else {
-			err = ErrFileOpenForReading
-		}
-	}
-	return err
-}
-
 func IsValidRstId(rstId uint32) bool {
 	return rstId != 0
 }
