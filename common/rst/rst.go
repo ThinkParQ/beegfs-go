@@ -223,7 +223,7 @@ type clientBulkOperation interface {
 	// bulk operation and handle any cleanup. If any manual cleanup is require, the user must be
 	// notified.
 	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error)
-	// Close shuts down any resources that were opened.
+	// Close releases any resources that were opened.
 	Close(ctx context.Context) error
 }
 

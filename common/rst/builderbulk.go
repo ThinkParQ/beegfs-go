@@ -35,19 +35,6 @@ func (m *bulkOperationRegistry) GetManagersSnapshot() map[string]*bulkOperationM
 	return snapshot
 }
 
-func (m *bulkOperationRegistry) addManagerUnlocked(ctx context.Context, client Provider, rstId uint32, operation string) (key string, manager *bulkOperationManager, err error) {
-	key = m.bulkOperationKey(rstId, operation)
-	bulkOperation := &flex.BulkOperation{RstId: rstId, Operation: operation}
-	manager, err = newBulkOperationManager(ctx, client, m.builderJobId, bulkOperation)
-	if err != nil {
-		return
-	}
-
-	*m.builderBulkOperations = append(*m.builderBulkOperations, bulkOperation)
-	m.managers[key] = manager
-	return
-}
-
 func (m *bulkOperationRegistry) AddRequest(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error) {
 	if request.GetGenerationStatus() != nil {
 		return
@@ -75,11 +62,24 @@ func (m *bulkOperationRegistry) AddRequest(ctx context.Context, request *beeremo
 	return
 }
 
+func (m *bulkOperationRegistry) addManagerUnlocked(ctx context.Context, client Provider, rstId uint32, operation string) (key string, manager *bulkOperationManager, err error) {
+	key = m.bulkOperationKey(rstId, operation)
+	bulkOperation := &flex.BulkOperation{RstId: rstId, Operation: operation}
+	manager, err = newBulkOperationManager(ctx, client, m.builderJobId, bulkOperation)
+	if err != nil {
+		return
+	}
+
+	*m.builderBulkOperations = append(*m.builderBulkOperations, bulkOperation)
+	m.managers[key] = manager
+	return
+}
+
 func (m *bulkOperationRegistry) bulkOperationKey(rstId uint32, operation string) string {
 	return fmt.Sprintf("%d-%s", rstId, operation)
 }
 
-// Close shuts down every bulk operation manager, aggregating any errors encountered.
+// Close closes all bulk operation managers and returns any errors encountered.
 func (m *bulkOperationRegistry) Close(ctx context.Context) (err error) {
 	for managerKey, manager := range m.GetManagersSnapshot() {
 		if closeErr := manager.Close(ctx); closeErr != nil {
@@ -147,6 +147,10 @@ func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *Bulk
 
 func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
 	return m.clientBulkOperation.Cancel(ctx, reason)
+}
+
+func (m *bulkOperationManager) Close(ctx context.Context) error {
+	return m.clientBulkOperation.Close(ctx)
 }
 
 func (m *bulkOperationManager) AppendError(err error) {
