@@ -13,7 +13,6 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
-	"golang.org/x/sync/errgroup"
 )
 
 // TODO: Add to remote a global builder section that has a maxRequests. Also, allow per remote storage target overrides
@@ -105,13 +104,13 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 	if abort {
 		bulkOperations := getBulkOperations(workResults)
 		if len(bulkOperations) > 0 {
-			bulkOperationsManager, err := c.newBulkOperationsManager(ctx, job.GetId(), &bulkOperations)
+			registry, err := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
 			if err != nil {
 				return err
 			}
 
-			waits := []BulkWaitFn{}
-			for _, manager := range bulkOperationsManager.getManagersSnapshot() {
+			waits := []BulkCancelResultFn{}
+			for _, manager := range registry.GetManagersSnapshot() {
 				walkCh, wait, err := manager.Cancel(ctx, nil)
 				if err != nil {
 					return err
@@ -173,25 +172,27 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
-	bulkOperationsManager, bulkErr := c.newBulkOperationsManager(ctx, workRequest.GetJobId(), &builder.BulkOperations)
+	registry, bulkErr := c.newBulkOperationRegistry(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	if bulkErr != nil {
 		result = &SchedulingResult{Err: MarkBuilderFailed(bulkErr)}
 		return
 	}
 	defer func() {
-		if closeErr := bulkOperationsManager.Close(ctx); closeErr != nil {
+		if closeErr := registry.Close(ctx); closeErr != nil {
 			result.Err = errors.Join(result.Err, closeErr)
 		}
 	}()
 
-	requestBuildController := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, bulkOperationsManager.AddRequest)
-	requestBuildController.Start()
-	abort := func(err error) *SchedulingResult {
-		err = fmt.Errorf("job builder request was aborted: %w", err)
-		if bulkErr := bulkOperationsManager.Abort(ctx, requestBuildController, err); bulkErr != nil {
-			return &SchedulingResult{Err: MarkBuilderFailed(errors.Join(err, bulkErr))}
+	controller := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, registry.AddRequest)
+	abort := func(reason error) *SchedulingResult {
+		reason = fmt.Errorf("job builder request was aborted: %w", reason)
+		for managerKey, manager := range registry.GetManagersSnapshot() {
+			controller.CancelBulkOperation(reason, managerKey, manager.Cancel)
 		}
-		return &SchedulingResult{Err: MarkBuilderCancelled(err)}
+		if _, _, cancelErr := controller.WaitForResult(); cancelErr != nil {
+			return &SchedulingResult{Err: MarkBuilderFailed(errors.Join(reason, cancelErr))}
+		}
+		return &SchedulingResult{Err: MarkBuilderCancelled(reason)}
 	}
 
 	if !isWalkComplete(workRequest.GetExternalId(), workRequest.JobId) {
@@ -201,26 +202,28 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 			result = abort(err)
 			return
 		}
-		requestBuildController.AddSourceWalk(walkCh)
-		requestBuildController.WaitForSourceWalkProcessing()
+
+		controller.AddSource(walkCh)
+		if err = controller.WaitForWalkSources(); err != nil {
+			result = abort(err)
+			return
+		}
 	}
 
-	result = bulkOperationsManager.Execute(ctx, requestBuildController)
-	if result.Err != nil {
-		return abort(result.Err)
+	for managerKey, manager := range registry.GetManagersSnapshot() {
+		controller.ExecuteBulkOperation(managerKey, manager.Execute)
 	}
 
-	requestBuildController.Close()
-	resumeToken, err := requestBuildController.Wait()
+	result, resumeToken, err := controller.WaitForResult()
 	if err != nil {
 		result = abort(err)
-	} else if resumeToken != "" {
-		result.Reschedule = true
-		result.Delay = 0
+		return
+	}
+
+	if resumeToken != "" {
 		workRequest.SetExternalId(resumeToken)
 	} else {
-		walkCompleteSentinel := makeWalkCompleteSentinel(workRequest.JobId)
-		workRequest.SetExternalId(walkCompleteSentinel)
+		workRequest.SetExternalId(makeWalkCompleteSentinel(workRequest.JobId))
 	}
 
 	return result
@@ -281,8 +284,8 @@ func (c *JobBuilderClient) getWalkCh(ctx context.Context, workRequest *flex.Work
 	return
 }
 
-func (c *JobBuilderClient) newBulkOperationsManager(ctx context.Context, builderJobId string, builderBulkOperations *[]*flex.BulkOperation) (*jobBuilderBulkOperationsManager, error) {
-	manager := &jobBuilderBulkOperationsManager{
+func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string, builderBulkOperations *[]*flex.BulkOperation) (*bulkOperationRegistry, error) {
+	manager := &bulkOperationRegistry{
 		managers:              make(map[string]*bulkOperationManager),
 		managersMu:            sync.Mutex{},
 		rstMap:                c.rstMap,
@@ -332,21 +335,14 @@ func (c *JobBuilderClient) newRequestBuildController(
 	cpuLimit := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
 	queueLimit := max(1, cap(jobSubmissionCh))
 	maxWorkers := min(cpuLimit, queueLimit)
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(maxWorkers + 1) // Reserve maxWorkers for path processors; processWalk uses one slot.
 	submissionBackpressureThreshold := max(1, min(cap(jobSubmissionCh), int(requestBuildControllerQueueDepthPerWorker*float32(maxWorkers))))
-
 	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addBulkRequest)
-	bulkWalks := NewBulkStreamPathResultMultiplexer(groupCtx, cap(jobSubmissionCh))
-
 	return &requestBuildController{
-		group:                           group,
-		ctx:                             groupCtx,
-		parentCtx:                       ctx,
+		ctx:                             ctx,
 		requestBuilder:                  requestBuilder,
 		submissionBackpressureThreshold: submissionBackpressureThreshold,
-		bulkWalks:                       bulkWalks,
 		getPaths:                        c.getPathsFn(builderCfg),
+		maxWorkersCh:                    make(chan struct{}, maxWorkers),
 	}
 }
 

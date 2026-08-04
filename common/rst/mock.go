@@ -307,7 +307,7 @@ func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPath
 	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
-func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil

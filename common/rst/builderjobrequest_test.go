@@ -486,3 +486,122 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		require.ErrorIs(t, err, wantErr)
 	})
 }
+
+func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
+	newBuilder := func() *jobRequestBuilder {
+		return &jobRequestBuilder{
+			RstMap:          map[uint32]Provider{},
+			jobSubmissionCh: make(chan *beeremote.JobRequest, 2),
+			builderCfg:      &flex.JobRequestCfg{},
+		}
+	}
+	bulkInfo := &flex.BulkJobRequestInfo{Operation: "retrieve"}
+
+	t.Run("fatal path state error is returned as err without clearing the lock", func(t *testing.T) {
+		w := newBuilder()
+		wantErr := fmt.Errorf("%w: %w", ErrGetPathStateFatal, errors.New("boom"))
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{}, wantErr
+		}
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			t.Fatal("clearAccessFlags should not be called on a fatal path state error")
+			return nil
+		}
+
+		err := w.ProcessFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		require.ErrorIs(t, err, ErrGetPathStateFatal)
+	})
+
+	t.Run("non-fatal path state error does not block building the request or clearing the lock", func(t *testing.T) {
+		// Unlike ProcessFromSource, the rstId for a bulk operation is supplied directly by the
+		// caller rather than discovered from path state, so a non-fatal path state error has
+		// nothing to attach to and is dropped.
+		w := newBuilder()
+		submissionCh := make(chan *beeremote.JobRequest, 2)
+		w.jobSubmissionCh = submissionCh
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{}, errors.New("non-fatal issue")
+		}
+		var cleared bool
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			cleared = true
+			return nil
+		}
+
+		err := w.ProcessFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		require.Len(t, submissionCh, 1)
+		request := <-submissionCh
+		assert.NotContains(t, request.GetGenerationStatus().GetMessage(), "non-fatal issue")
+	})
+
+	t.Run("lock is cleared once processing completes without in-flight work", func(t *testing.T) {
+		w := newBuilder()
+		submissionCh := make(chan *beeremote.JobRequest, 2)
+		w.jobSubmissionCh = submissionCh
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{}, nil // No client registered for rstId 1 -> FAILED_PRECONDITION request.
+		}
+		var cleared bool
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			cleared = true
+			assert.Equal(t, beegfs.LockedContentAccessFlags, flags)
+			return nil
+		}
+
+		err := w.ProcessFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		require.NoError(t, err)
+		assert.True(t, cleared)
+		require.Len(t, submissionCh, 1)
+		request := <-submissionCh
+		assert.Equal(t, uint32(1), request.GetRemoteStorageTarget())
+		assert.Equal(t, bulkInfo, request.GetBulkInfo())
+	})
+
+	t.Run("lock is held when processing produces in-flight work", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		w := newBuilder()
+		w.RstMap = map[uint32]Provider{1: client}
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo: &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				EntryInfo:  &entry.GetEntryCombinedInfo{},
+			}, nil
+		}
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+			return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
+		}
+		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
+			return nil
+		}
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			t.Fatal("clearAccessFlags should not be called while work is in flight")
+			return nil
+		}
+
+		err := w.ProcessFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		require.NoError(t, err)
+		require.Len(t, w.jobSubmissionCh, 1)
+	})
+
+	t.Run("clearAccessFlags error is joined into the returned error", func(t *testing.T) {
+		w := newBuilder()
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{}, nil // No client registered for rstId 1 -> FAILED_PRECONDITION request.
+		}
+		wantErr := errors.New("clear failed")
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			return wantErr
+		}
+
+		err := w.ProcessFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		require.ErrorIs(t, err, wantErr)
+	})
+}

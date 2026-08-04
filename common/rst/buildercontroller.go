@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -24,102 +23,185 @@ import (
 // Benchmarks showed goroutine spawn overhead (~1-2us) is negligible compared with BeeGFS metadata
 // operations. The throughput matched a fixed pool across the measured I/O delay ranges.
 type requestBuildController struct {
-	group                           *errgroup.Group
 	ctx                             context.Context
-	parentCtx                       context.Context
-	submissionBackpressureThreshold int
-	requestBuilder                  *jobRequestBuilder
-	sourceWalk                      <-chan *filesystem.StreamPathResult
-	bulkWalks                       *BulkStreamPathResultMultiplexer
+	maxWorkersCh                    chan struct{}
 	getPaths                        requestPathResolverFn
+	requestBuilder                  *jobRequestBuilder
+	sourceWalkGroup                 *errgroup.Group
+	sourceWalkGroupCtx              context.Context
+	bulkWalkGroup                   *errgroup.Group
+	bulkWalkGroupCtx                context.Context
+	bulkExecuteResults              map[string]BulkExecuteResultFn
+	bulkCancelResults               map[string]BulkCancelResultFn
+	submissionBackpressureThreshold int
+	result                          *SchedulingResult
 	resumeToken                     string
-	sourceWalkProcessed             chan struct{}
-	sourceWalkProcessWg             sync.WaitGroup
 }
 
-// Start begins processing the walks. Call AddSourceWalk if a source walk needs to be processed
-// before calling Start.
-func (c *requestBuildController) Start() {
-	c.group.Go(c.processWalks)
-}
-
-func (c *requestBuildController) Wait() (resumeToken string, err error) {
-	err = c.group.Wait()
-	resumeToken = c.resumeToken
-	return
-}
-
-// Close ensures the source walk (if any) has finished processing before tearing down the bulk
-// walks. Callers may already have called WaitForSourceWalkProcessing beforehand; doing so again
-// here is a no-op once the source walk has completed.
-func (c *requestBuildController) Close() {
-	c.WaitForSourceWalkProcessing()
-	c.bulkWalks.Close()
-}
-
-// AddSourceWalk adds the source walk to the controller. Only the first call has any effect;
-// subsequent calls are no-ops.
-func (c *requestBuildController) AddSourceWalk(channel <-chan *filesystem.StreamPathResult) {
-	if c.sourceWalk != nil {
-		return
-	}
-	c.sourceWalk = channel
-	c.sourceWalkProcessed = make(chan struct{})
-	c.sourceWalkProcessWg = sync.WaitGroup{}
-}
-
-func (c *requestBuildController) AddBulkOperationWalks(channels []<-chan *BulkStreamPathResult) func() {
-	return c.bulkWalks.AddWalks(channels)
-}
-
-func (c *requestBuildController) WaitForSourceWalkProcessing() {
-	if c.sourceWalk == nil {
-		return
+func (c *requestBuildController) AddSource(walkCh <-chan *filesystem.StreamPathResult) {
+	if c.sourceWalkGroup == nil {
+		c.sourceWalkGroup, c.sourceWalkGroupCtx = errgroup.WithContext(c.ctx)
 	}
 
-	select {
-	case <-c.ctx.Done():
-		return
-	case <-c.sourceWalkProcessed:
-	}
-}
-
-func (c *requestBuildController) processWalks() (err error) {
-	sourceWalk := c.sourceWalk
-	bulkWalks := c.bulkWalks.Output()
-
-	for sourceWalk != nil || bulkWalks != nil {
-		select {
-		case <-c.ctx.Done():
-			return c.parentError()
-		case result, ok := <-sourceWalk:
-			if !ok {
-				sourceWalk = nil
-				go func() {
-					c.sourceWalkProcessWg.Wait()
-					close(c.sourceWalkProcessed)
-				}()
-				continue
+	c.sourceWalkGroup.Go(func() error {
+		for {
+			select {
+			case <-c.sourceWalkGroupCtx.Done():
+				return c.sourceWalkGroupCtx.Err()
+			case result, ok := <-walkCh:
+				if !ok {
+					return nil
+				}
+				if err := c.processSource(result); err != nil {
+					return err
+				}
 			}
-			err = c.processSource(result)
-		case result, ok := <-bulkWalks:
-			if !ok {
-				bulkWalks = nil
-				continue
+
+			if err := c.waitForSubmissionCapacity(); err != nil {
+				return err
 			}
-			err = c.processBulk(result)
 		}
+	})
+}
 
-		if err != nil {
-			return
-		}
-
-		if err = c.waitForSubmissionCapacity(); err != nil {
-			return
+func (c *requestBuildController) ExecuteBulkOperation(managerKey string, executeFn BulkExecuteFn) {
+	if c.bulkExecuteResults == nil {
+		c.bulkExecuteResults = make(map[string]BulkExecuteResultFn)
+		if c.bulkWalkGroup == nil {
+			c.bulkWalkGroup, c.bulkWalkGroupCtx = errgroup.WithContext(c.ctx)
 		}
 	}
 
+	walkCh, getResult, err := executeFn(c.bulkWalkGroupCtx)
+	if err != nil {
+		c.bulkExecuteResults[managerKey] = func() *SchedulingResult { return &SchedulingResult{Err: err} }
+		return
+	}
+	c.bulkExecuteResults[managerKey] = getResult
+
+	c.bulkWalkGroup.Go(func() error {
+		for {
+			select {
+			case <-c.bulkWalkGroupCtx.Done():
+				return c.bulkWalkGroupCtx.Err()
+			case result, ok := <-walkCh:
+				if !ok {
+					return nil
+				}
+				if err := c.processBulk(result); err != nil {
+					return err
+				}
+			}
+
+			if err := c.waitForSubmissionCapacity(); err != nil {
+				return err
+			}
+		}
+	})
+}
+
+func (c *requestBuildController) CancelBulkOperation(reason error, managerKey string, cancelFn BulkCancelFn) {
+	if c.bulkCancelResults == nil {
+		c.bulkCancelResults = make(map[string]BulkCancelResultFn)
+		if c.bulkWalkGroup == nil {
+			c.bulkWalkGroup, c.bulkWalkGroupCtx = errgroup.WithContext(c.ctx)
+		}
+	}
+
+	walkCh, getResult, err := cancelFn(c.bulkWalkGroupCtx, reason)
+	if err != nil {
+		c.bulkCancelResults[managerKey] = func() error { return err }
+		return
+	}
+	c.bulkCancelResults[managerKey] = getResult
+
+	c.bulkWalkGroup.Go(func() error {
+		for {
+			select {
+			case <-c.bulkWalkGroupCtx.Done():
+				return c.bulkWalkGroupCtx.Err()
+			case result, ok := <-walkCh:
+				if !ok {
+					return nil
+				}
+				if err := c.processBulk(result); err != nil {
+					return err
+				}
+			}
+
+			if err := c.waitForSubmissionCapacity(); err != nil {
+				return err
+			}
+		}
+	})
+}
+
+func (c *requestBuildController) WaitForWalkSources() error {
+	if c.sourceWalkGroup == nil {
+		return nil
+	}
+
+	err := c.sourceWalkGroup.Wait()
+	c.sourceWalkGroup = nil
+
+	if err != nil {
+		return fmt.Errorf("error walking source paths: %w", err)
+	}
 	return nil
+}
+
+func (c *requestBuildController) WaitForBulkOperations() error {
+	if c.bulkWalkGroup == nil {
+		return nil
+	}
+	err := c.bulkWalkGroup.Wait()
+	c.bulkWalkGroup = nil
+
+	var executeErrs error
+	for managerKey, getResult := range c.bulkExecuteResults {
+		result := getResult()
+		if result.Reschedule && (c.result == nil || !c.result.Reschedule || result.Delay < c.result.Delay) {
+			c.result = result
+		}
+
+		if result.Err != nil {
+			executeErrs = errors.Join(executeErrs, fmt.Errorf("manager %s: %w", managerKey, result.Err))
+		}
+	}
+	c.bulkExecuteResults = nil
+	if executeErrs != nil {
+		executeErrs = fmt.Errorf("failed to execute bulk operation(s): %w", executeErrs)
+	}
+
+	var cancelErrs error
+	for managerKey, getResult := range c.bulkCancelResults {
+		if cancelErr := getResult(); cancelErr != nil {
+			cancelErrs = errors.Join(cancelErrs, fmt.Errorf("manager %s: %w", managerKey, cancelErr))
+		}
+	}
+	c.bulkCancelResults = nil
+	if cancelErrs != nil {
+		cancelErrs = fmt.Errorf("failed to cancel bulk operation(s): %w", cancelErrs)
+	}
+
+	return errors.Join(err, executeErrs, cancelErrs)
+}
+
+// WaitForResult blocks until all outstanding source and bulk walks finish, then returns the merged
+// scheduling result, resume token, and any error. It is safe to call more than once but will only
+// return the results for the walks added since requestBuildController's instantiation or the
+// previous WaitForResult call.
+func (c *requestBuildController) WaitForResult() (result *SchedulingResult, resumeToken string, err error) {
+	err = errors.Join(c.WaitForWalkSources(), c.WaitForBulkOperations())
+	resumeToken = c.resumeToken
+	result = &SchedulingResult{}
+	if c.result != nil {
+		result.Reschedule = c.result.Reschedule
+		result.Delay = c.result.Delay
+		result.Err = c.result.Err
+	}
+	c.result = nil
+	return
 }
 
 func (c *requestBuildController) processSource(result *filesystem.StreamPathResult) error {
@@ -137,6 +219,7 @@ func (c *requestBuildController) processSource(result *filesystem.StreamPathResu
 			return fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
 		}
 		c.resumeToken = result.ResumeToken
+		c.result = &SchedulingResult{Reschedule: true}
 		return nil
 	}
 
@@ -145,9 +228,9 @@ func (c *requestBuildController) processSource(result *filesystem.StreamPathResu
 		return err
 	}
 
-	c.sourceWalkProcessWg.Add(1)
-	c.group.Go(func() error {
-		defer c.sourceWalkProcessWg.Done()
+	c.addWorker()
+	c.sourceWalkGroup.Go(func() error {
+		defer c.releaseWorker()
 		return c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
 	})
 
@@ -169,7 +252,9 @@ func (c *requestBuildController) processBulk(result *BulkStreamPathResult) error
 		return err
 	}
 
-	c.group.Go(func() error {
+	c.addWorker()
+	c.bulkWalkGroup.Go(func() error {
+		defer c.releaseWorker()
 		return c.requestBuilder.ProcessFromBulkOperation(c.ctx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
 	})
 
@@ -190,16 +275,17 @@ func (c *requestBuildController) waitForSubmissionCapacity() error {
 	for len(c.requestBuilder.jobSubmissionCh) >= c.submissionBackpressureThreshold {
 		select {
 		case <-c.ctx.Done():
-			return c.parentError()
+			return c.ctx.Err()
 		case <-ticker.C:
 		}
 	}
 	return nil
 }
 
-func (c *requestBuildController) parentError() error {
-	if c.parentCtx.Err() != nil {
-		return c.parentCtx.Err()
-	}
-	return nil
+func (c *requestBuildController) addWorker() {
+	c.maxWorkersCh <- struct{}{}
+}
+
+func (c *requestBuildController) releaseWorker() {
+	<-c.maxWorkersCh
 }

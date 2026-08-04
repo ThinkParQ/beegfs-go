@@ -194,7 +194,9 @@ type SchedulingResult struct {
 }
 
 type BulkExecuteResultFn func() *SchedulingResult
-type BulkWaitFn func() error
+type BulkExecuteFn func(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
+type BulkCancelResultFn func() error
+type BulkCancelFn func(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, getResults BulkCancelResultFn, err error)
 type clientBulkOperation interface {
 	// AddRequest adds a single request to the bulk operation state. Calls are serialized by the
 	// caller. The implementation owns request.BulkInfo.JobIndex: it must assign a JobIndex based on
@@ -220,7 +222,7 @@ type clientBulkOperation interface {
 	// with normal builder job behavior. So it is the responsibility of the provider to cancel the
 	// bulk operation and handle any cleanup. If any manual cleanup is require, the user must be
 	// notified.
-	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkWaitFn, err error)
+	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error)
 	// Close shuts down any resources that were opened.
 	Close(ctx context.Context) error
 }

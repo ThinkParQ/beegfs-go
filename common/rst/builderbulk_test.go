@@ -3,182 +3,143 @@ package rst
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
 )
 
-type testBulkOperation struct {
-	executeErr    error
-	executeResult *SchedulingResult
-	resumeErr     error
-	cancelErr     error
-	waitErr       error
+// fakeBulkOperation is a minimal clientBulkOperation stand-in for exercising bulkOperationRegistry
+// and bulkOperationManager in isolation, without going through a real provider.
+type fakeBulkOperation struct {
+	addRequestErr error
+	closeErr      error
 }
 
-func (x *testBulkOperation) Close(ctx context.Context) error {
-	return nil
+func (f *fakeBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	return f.addRequestErr
 }
 
-func (t *testBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
-	return nil
+func (f *fakeBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	return nil, nil, fmt.Errorf("fakeBulkOperation.Execute not implemented")
 }
 
-func (m *testBulkOperation) CancelRequest(ctx context.Context, jobIndex int64, reason error) error {
-	return nil
+func (f *fakeBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	return nil, nil, fmt.Errorf("fakeBulkOperation.Cancel not implemented")
 }
 
-func (t *testBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
-	if t.executeErr != nil {
-		return nil, nil, t.executeErr
+func (f *fakeBulkOperation) Close(ctx context.Context) error {
+	return f.closeErr
+}
+
+// newTestBulkOperationRegistry builds a bulkOperationRegistry backed by a single rstId (1) mapped to
+// client, mirroring what JobBuilderClient.newBulkOperationRegistry produces but without requiring a
+// pre-populated builderBulkOperations slice.
+func newTestBulkOperationRegistry(client Provider) *bulkOperationRegistry {
+	bulkOperations := []*flex.BulkOperation{}
+	return &bulkOperationRegistry{
+		managers:              make(map[string]*bulkOperationManager),
+		rstMap:                map[uint32]Provider{1: client},
+		builderBulkOperations: &bulkOperations,
+		builderJobId:          "job-1",
+	}
+}
+
+func TestBulkOperationRegistry_AddRequestSkipsRequestsWithGenerationStatus(t *testing.T) {
+	registry := newTestBulkOperationRegistry(&MockClient{})
+	request := &beeremote.JobRequest{}
+	request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{})
+
+	skipSubmit, err := registry.AddRequest(context.Background(), request)
+	require.NoError(t, err)
+	assert.False(t, skipSubmit)
+	assert.Empty(t, registry.managers)
+}
+
+func TestBulkOperationRegistry_AddRequestNotIncludedDoesNotCreateManager(t *testing.T) {
+	client := &MockClient{}
+	client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(false, "")
+	registry := newTestBulkOperationRegistry(client)
+
+	request := &beeremote.JobRequest{}
+	request.SetRemoteStorageTarget(1)
+
+	skipSubmit, err := registry.AddRequest(context.Background(), request)
+	require.NoError(t, err)
+	assert.False(t, skipSubmit)
+	assert.Empty(t, registry.managers)
+}
+
+// TestBulkOperationRegistry_AddRequestCreatesManagerOnDemandAndReusesIt asserts that the first
+// request for a given rstId+operation lazily creates its manager (recording it on
+// builderBulkOperations), and that subsequent requests for the same key reuse it rather than
+// creating a second manager.
+func TestBulkOperationRegistry_AddRequestCreatesManagerOnDemandAndReusesIt(t *testing.T) {
+	client := &MockClient{}
+	client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
+	registry := newTestBulkOperationRegistry(client)
+
+	for i := 0; i < 2; i++ {
+		request := &beeremote.JobRequest{}
+		request.SetRemoteStorageTarget(1)
+
+		skipSubmit, err := registry.AddRequest(context.Background(), request)
+		require.NoError(t, err)
+		assert.True(t, skipSubmit)
 	}
 
-	walkCh := make(chan *BulkStreamPathResult)
-	close(walkCh)
-	return walkCh, func() *SchedulingResult {
-		if t.executeResult != nil {
-			return t.executeResult
-		}
-		return &SchedulingResult{}
-	}, nil
+	assert.Len(t, registry.managers, 1)
+	assert.Len(t, *registry.builderBulkOperations, 1)
+
+	manager := registry.managers["1-retrieve"]
+	require.NotNil(t, manager)
+	assert.Equal(t, "retrieve", manager.Operation)
 }
 
-func (t *testBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
-	if t.resumeErr != nil {
-		return nil, nil, t.resumeErr
-	}
+func TestBulkOperationRegistry_AddRequestPropagatesManagerAddRequestError(t *testing.T) {
+	addErr := fmt.Errorf("disk full")
+	client := &MockClient{}
+	client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
+	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{addRequestErr: addErr}, nil)
+	registry := newTestBulkOperationRegistry(client)
 
-	walkCh := make(chan *BulkStreamPathResult)
-	close(walkCh)
-	return walkCh, func() error { return t.waitErr }, nil
+	request := &beeremote.JobRequest{}
+	request.SetRemoteStorageTarget(1)
+
+	_, err := registry.AddRequest(context.Background(), request)
+	require.ErrorIs(t, err, addErr)
 }
 
-func (t *testBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
-	if t.cancelErr != nil {
-		return nil, nil, t.cancelErr
-	}
-
-	walkCh := make(chan *BulkStreamPathResult)
-	close(walkCh)
-	return walkCh, func() error { return t.waitErr }, nil
-}
-
-func TestJobBuilderBulkOperations_ManagerAbortReturnsNilAfterSuccessfulCancel(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
-	}
-
-	cancelErrs := new(string)
-	manager := &jobBuilderBulkOperationsManager{
+func TestBulkOperationRegistry_CloseAggregatesManagerCloseErrors(t *testing.T) {
+	closeErr := fmt.Errorf("failed to unmount")
+	registry := &bulkOperationRegistry{
 		managers: map[string]*bulkOperationManager{
 			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{},
+				clientBulkOperation: &fakeBulkOperation{closeErr: closeErr},
 				Operation:           "retrieve",
-				errors:              cancelErrs,
+				errors:              new(string),
 			},
 		},
 	}
 
-	err := manager.Abort(context.Background(), controller, fmt.Errorf("abort requested"))
-	assert.NoError(t, err)
-	assert.Empty(t, *cancelErrs)
+	err := registry.Close(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, closeErr)
+	assert.Contains(t, err.Error(), "1-retrieve")
 }
 
-func TestJobBuilderBulkOperations_ManagerExecuteReturnsMergedSchedulingResult(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 2),
-	}
+func TestBulkOperationManager_AppendErrorAccumulatesAndGetErrorsFormats(t *testing.T) {
+	manager := &bulkOperationManager{Operation: "archive", errors: new(string)}
+	assert.NoError(t, manager.GetErrors())
 
-	manager := &jobBuilderBulkOperationsManager{
-		managers: map[string]*bulkOperationManager{
-			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{
-					executeResult: &SchedulingResult{Reschedule: true, Delay: 5},
-				},
-				Operation: "retrieve",
-				errors:    new(string),
-			},
-			"1-archive": {
-				clientBulkOperation: &testBulkOperation{
-					executeResult: &SchedulingResult{Reschedule: true, Delay: 3},
-				},
-				Operation: "archive",
-				errors:    new(string),
-			},
-		},
-	}
+	manager.AppendError(fmt.Errorf("first"))
+	manager.AppendError(fmt.Errorf("second"))
+	manager.AppendError(nil)
 
-	result := manager.Execute(context.Background(), controller)
-	require.NotNil(t, result)
-	require.NoError(t, result.Err)
-	assert.True(t, result.Reschedule)
-	assert.Equal(t, 3, int(result.Delay))
-}
-
-func TestJobBuilderBulkOperations_ManagerExecuteReturnsErrorsWhenExecuteFails(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 2),
-	}
-
-	openErrs := new(string)
-	waitErrs := new(string)
-	manager := &jobBuilderBulkOperationsManager{
-		managers: map[string]*bulkOperationManager{
-			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{executeErr: fmt.Errorf("failed to open execute state")},
-				Operation:           "retrieve",
-				errors:              openErrs,
-			},
-			"1-archive": {
-				clientBulkOperation: &testBulkOperation{
-					executeResult: &SchedulingResult{Err: fmt.Errorf("failed waiting for execute completion")},
-				},
-				Operation: "archive",
-				errors:    waitErrs,
-			},
-		},
-	}
-
-	result := manager.Execute(context.Background(), controller)
-	require.NotNil(t, result)
-	if assert.Error(t, result.Err) {
-		assert.True(t, strings.Contains(result.Err.Error(), "bulk operation retrieve: (failed to open execute state)"))
-		assert.True(t, strings.Contains(result.Err.Error(), "bulk operation archive: (failed waiting for execute completion)"))
-	}
-	assert.Equal(t, "failed to open execute state", *openErrs)
-	assert.Equal(t, "failed waiting for execute completion", *waitErrs)
-}
-
-func TestJobBuilderBulkOperations_ManagerAbortReturnsErrorsWhenCancelFails(t *testing.T) {
-	controller := &requestBuildController{
-		bulkWalks: NewBulkStreamPathResultMultiplexer(context.Background(), 1),
-	}
-
-	openErrs := new(string)
-	waitErrs := new(string)
-	manager := &jobBuilderBulkOperationsManager{
-		managers: map[string]*bulkOperationManager{
-			"1-retrieve": {
-				clientBulkOperation: &testBulkOperation{cancelErr: fmt.Errorf("failed to open cancel state")},
-				Operation:           "retrieve",
-				errors:              openErrs,
-			},
-			"1-archive": {
-				clientBulkOperation: &testBulkOperation{waitErr: fmt.Errorf("failed waiting for cancel completion")},
-				Operation:           "archive",
-				errors:              waitErrs,
-			},
-		},
-	}
-
-	err := manager.Abort(context.Background(), controller, fmt.Errorf("abort requested"))
-	if assert.Error(t, err) {
-		assert.True(t, strings.Contains(err.Error(), "bulk operation retrieve: (failed to open cancel state)"))
-		assert.True(t, strings.Contains(err.Error(), "bulk operation archive: (failed waiting for cancel completion)"))
-	}
-	assert.Equal(t, "failed to open cancel state", *openErrs)
-	assert.Equal(t, "failed waiting for cancel completion", *waitErrs)
+	err := manager.GetErrors()
+	require.Error(t, err)
+	assert.Equal(t, "bulk operation archive: (first. second)", err.Error())
 }

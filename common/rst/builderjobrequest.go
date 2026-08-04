@@ -91,8 +91,9 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 	var pathIssue error
 	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(ctx, inMountPath); err != nil || skip {
 		return
+	} else if pathIssue != nil {
+		failedPrecondition = appendError(failedPrecondition, pathIssue)
 	}
-	failedPrecondition = appendError(failedPrecondition, pathIssue)
 
 	var keepLock bool
 	if !pathState.LockAcquired && FileExists(pathState.LockedInfo) && !IsFileOffloaded(pathState.LockedInfo) {

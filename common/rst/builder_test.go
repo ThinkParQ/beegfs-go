@@ -12,6 +12,9 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
+// trackingBulkOperation is a clientBulkOperation stand-in that records whether Cancel was invoked
+// and waited on, so tests can assert CompleteWorkRequests' abort path drives cancellation through
+// to completion.
 type trackingBulkOperation struct {
 	cancelCalled bool
 	cancelReason error
@@ -28,13 +31,7 @@ func (t *trackingBulkOperation) Execute(ctx context.Context) (<-chan *BulkStream
 	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 }
 
-func (t *trackingBulkOperation) Resume(ctx context.Context) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
-	walkCh := make(chan *BulkStreamPathResult)
-	close(walkCh)
-	return walkCh, func() error { return nil }, nil
-}
-
-func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkWaitFn, error) {
+func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 	walkCh := make(chan *BulkStreamPathResult)
 	return walkCh, func() error {
 		t.cancelCalled = true
