@@ -446,12 +446,6 @@ func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
 }
 
-// IsFileSizeMatched returns whether the lockedInfo local and remote file sizes match. It is the
-// responsibility of the caller to ensure lockedInfo is already populated and locked.
-func IsFileSizeMatched(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo.Size == lockedInfo.RemoteSize
-}
-
 // IsFileOffloaded returns whether the file is offloaded. It is the responsibility of the caller to
 // ensure lockedInfo is already populated and locked.
 func IsFileOffloaded(lockedInfo *flex.JobLockedInfo) bool {
@@ -463,11 +457,6 @@ func IsFileOffloaded(lockedInfo *flex.JobLockedInfo) bool {
 // populated and locked.
 func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex.JobLockedInfo) bool {
 	return rstId == lockedInfo.StubUrlRstId && remotePath == lockedInfo.StubUrlPath
-}
-
-// RemoteObjectExists indicates whether lockedInfo has been updated and the remote mtime is non-nil.
-func RemoteObjectExists(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo != nil && lockedInfo.RemoteMtime != nil
 }
 
 func updateFileRstPattern(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {

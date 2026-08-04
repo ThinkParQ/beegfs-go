@@ -35,14 +35,6 @@ func (m *bulkOperationRegistry) GetManagersSnapshot() map[string]*bulkOperationM
 	return snapshot
 }
 
-// getManager returns the bulkOperationManager for the key. If the key does not exist then nil will
-// be returned.
-func (m *bulkOperationRegistry) getManager(key string) *bulkOperationManager {
-	m.managersMu.Lock()
-	defer m.managersMu.Unlock()
-	return m.managers[key]
-}
-
 func (m *bulkOperationRegistry) addManagerUnlocked(ctx context.Context, client Provider, rstId uint32, operation string) (key string, manager *bulkOperationManager, err error) {
 	key = m.bulkOperationKey(rstId, operation)
 	bulkOperation := &flex.BulkOperation{RstId: rstId, Operation: operation}
