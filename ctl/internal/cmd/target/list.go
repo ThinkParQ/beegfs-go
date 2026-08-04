@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -126,57 +125,13 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 			lastContact = fmt.Sprintf("%ds ago", *t.LastContactS)
 		}
 
-		spaceTotal := "-"
-		if t.TotalSpaceBytes != nil {
-			if viper.GetBool(config.RawKey) {
-				spaceTotal = fmt.Sprintf("%d", *t.TotalSpaceBytes)
-			} else {
-				spaceTotal = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes), unitconv.IEC, 1))
-			}
-		}
-		spaceUsed := "-"
-		if t.FreeSpaceBytes != nil && t.TotalSpaceBytes != nil {
-			if viper.GetBool(config.RawKey) {
-				spaceUsed = fmt.Sprintf("%d", *t.TotalSpaceBytes-*t.FreeSpaceBytes)
-			} else {
-				spaceUsed = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.TotalSpaceBytes)-float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
-			}
-			spaceUsed += fmt.Sprintf(" (%.2f%%)", 100-(float64(*t.FreeSpaceBytes)/float64(*t.TotalSpaceBytes))*100)
-		}
-		spaceFree := "-"
-		if t.FreeSpaceBytes != nil {
-			if viper.GetBool(config.RawKey) {
-				spaceFree = fmt.Sprintf("%d", *t.FreeSpaceBytes)
-			} else {
-				spaceFree = fmt.Sprintf("%sB", unitconv.FormatPrefix(float64(*t.FreeSpaceBytes), unitconv.IEC, 1))
-			}
-		}
+		spaceTotal := cmdfmt.FormatSpace(t.TotalSpaceBytes)
+		spaceUsed := cmdfmt.FormatSpaceUsed(t.TotalSpaceBytes, t.FreeSpaceBytes)
+		spaceFree := cmdfmt.FormatSpace(t.FreeSpaceBytes)
 
-		inodesTotal := "-"
-		if t.TotalInodes != nil {
-			if viper.GetBool(config.RawKey) {
-				inodesTotal = fmt.Sprintf("%d", *t.TotalInodes)
-			} else {
-				inodesTotal = unitconv.FormatPrefix(float64(*t.TotalInodes), unitconv.SI, 1)
-			}
-		}
-		inodesUsed := "-"
-		if t.FreeInodes != nil && t.TotalInodes != nil {
-			if viper.GetBool(config.RawKey) {
-				inodesUsed = fmt.Sprintf("%d", *t.TotalInodes-*t.FreeInodes)
-			} else {
-				inodesUsed = unitconv.FormatPrefix(float64(*t.TotalInodes)-float64(*t.FreeInodes), unitconv.SI, 1)
-			}
-			inodesUsed += fmt.Sprintf(" (%.2f%%)", 100-(float64(*t.FreeInodes)/float64(*t.TotalInodes))*100)
-		}
-		inodesFree := "-"
-		if t.FreeInodes != nil {
-			if viper.GetBool(config.RawKey) {
-				inodesFree = fmt.Sprintf("%d", *t.FreeInodes)
-			} else {
-				inodesFree = unitconv.FormatPrefix(float64(*t.FreeInodes), unitconv.SI, 1)
-			}
-		}
+		inodesTotal := cmdfmt.FormatInodes(t.TotalInodes)
+		inodesUsed := cmdfmt.FormatInodesUsed(t.TotalInodes, t.FreeInodes)
+		inodesFree := cmdfmt.FormatInodes(t.FreeInodes)
 
 		// Include the actual resync state if the consistency state is not good. Otherwise the
 		// consistency may be needs-resync while a resync is already underway which would be
