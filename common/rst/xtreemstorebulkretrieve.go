@@ -30,6 +30,9 @@ const (
 	XTS_SYSTEM_RETRIEVE_SESSION    = XTS_SYSTEM + "/retrieve-session.json"
 	XTS_SYSTEM_RETRIEVE_BATCH_LIST = XTS_SYSTEM + "/retrieve-batch-list.json"
 	XTS_SYSTEM_RETRIEVE_BATCH_FMT  = XTS_SYSTEM + "/retrieve-batch-%d.json"
+
+	reschedulePoolingDelay = 1 * time.Minute // This should be configurable
+	rescheduleMaxDelay     = 5 * time.Minute // This should be configurable
 )
 
 var (
@@ -51,16 +54,16 @@ type xtreemstoreS3BulkRetrieveManager struct {
 
 var _ clientBulkOperation = &xtreemstoreS3BulkRetrieveManager{}
 
-type xtreemstoreS3BulkRetrieveSessionInfo struct {
-	Active     bool      `json:"active"`
-	RetrieveId string    `json:"retrieve-id"`
-	Started    time.Time `json:"started"`
-}
-
 type xtreemstoreS3BulkRetrieveManagerState struct {
 	SessionRetrieveId string `json:"active-retrieve-id"`
 	SessionJobStart   int64  `json:"active-job-start"`
 	SessionJobEnd     int64  `json:"active-job-end"`
+}
+
+type xtreemstoreS3BulkRetrieveSessionInfo struct {
+	Active     bool      `json:"active"`
+	RetrieveId string    `json:"retrieve-id"`
+	Started    time.Time `json:"started"`
 }
 
 type xtreemstoreS3BulkRetrieveBatchInfo struct {
@@ -74,8 +77,78 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) Close(ctx context.Context) error {
-	return m.closeState()
+type xtreemstoreS3BulkRequestStatus byte
+
+const (
+	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
+	xtreemstoreS3BulkRequestSent
+	xtreemstoreS3BulkRequestComplete
+	xtreemstoreS3BulkRequestCompleteAck
+)
+
+func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
+	return []byte{byte(s)}
+}
+
+type xtreemstoreS3BulkStatuses struct {
+	jobStatuses []byte
+	jobCount    int64
+	offset      int64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
+}
+
+func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3BulkRequestStatus, err error) {
+	if jobIndex < s.offset {
+		err = fmt.Errorf("invalid index for active session")
+		return
+	}
+
+	statusesJobIndex := jobIndex - s.offset
+	if statusesJobIndex >= int64(len(s.jobStatuses)) {
+		err = fmt.Errorf("invalid index for active session")
+		return
+	}
+	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
+}
+
+func (s *xtreemstoreS3BulkStatuses) All() []xtreemstoreS3BulkRequestStatus {
+	statuses := make([]xtreemstoreS3BulkRequestStatus, s.jobCount)
+	for jobIndex := range s.jobCount {
+		// Ignore status error since the jobIndex is valid.
+		status, _ := s.Get(jobIndex)
+		statuses[jobIndex] = status
+	}
+
+	return statuses
+}
+
+// xtreemstoreS3BulkRetrieveMarkComplete marks a request sent by a bulk operation as complete.
+func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+	manager := &xtreemstoreS3BulkRetrieveManager{
+		rstId:          rstId,
+		mountPath:      mountPath,
+		stateMountPath: bulkInfo.StateMountPath,
+		operation:      bulkInfo.Operation,
+	}
+	return manager.MarkComplete(bulkInfo.JobIndex)
+}
+
+// xtreemstoreS3BulkRetrieveError retrieves any bulk operation errors. If no errors were found then
+// nil will be returned.
+func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+	m := &xtreemstoreS3BulkRetrieveManager{
+		rstId:          rstId,
+		mountPath:      mountPath,
+		stateMountPath: bulkInfo.StateMountPath,
+		operation:      bulkInfo.Operation,
+	}
+	message, err := os.ReadFile(m.getErrorsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) (err error) {
@@ -246,6 +319,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) CancelRequests(ctx context.Context, r
 	return nil
 }
 
+func (m *xtreemstoreS3BulkRetrieveManager) Close(ctx context.Context) error {
+	return m.closeState()
+}
+
 func (m *xtreemstoreS3BulkRetrieveManager) deleteState() error {
 	var errs []error
 	errs = append(errs, removeIfExists(m.getStatusPath()))
@@ -263,11 +340,6 @@ func removeIfExists(path string) error {
 	}
 	return nil
 }
-
-const (
-	reschedulePoolingDelay = 1 * time.Minute // This should be configurable
-	rescheduleMaxDelay     = 5 * time.Minute // This should be configurable
-)
 
 func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
 	for {
@@ -436,6 +508,31 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 		}
 		return true, nil
 	}
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.Context, key string) (bool, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(m.bucket),
+		Key:    aws.String(key),
+	}
+	resp, err := m.s3ApiClient.HeadObject(ctx, input)
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+			return false, os.ErrNotExist
+		}
+		return false, fmt.Errorf("head object for key %q: %w", key, err)
+	}
+
+	switch resp.StorageClass {
+	case types.StorageClassStandard:
+		return true, nil
+	case types.StorageClassGlacier:
+		return resp.Restore != nil && strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
+	default:
+		return false, fmt.Errorf("unexpected storage class, %s", resp.StorageClass)
+	}
+
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
@@ -632,31 +729,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) deleteSessionBatch(ctx context.Contex
 	}
 
 	return nil
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.Context, key string) (bool, error) {
-	input := &s3.HeadObjectInput{
-		Bucket: aws.String(m.bucket),
-		Key:    aws.String(key),
-	}
-	resp, err := m.s3ApiClient.HeadObject(ctx, input)
-	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
-			return false, os.ErrNotExist
-		}
-		return false, fmt.Errorf("head object for key %q: %w", key, err)
-	}
-
-	switch resp.StorageClass {
-	case types.StorageClassStandard:
-		return true, nil
-	case types.StorageClassGlacier:
-		return resp.Restore != nil && strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
-	default:
-		return false, fmt.Errorf("unexpected storage class, %s", resp.StorageClass)
-	}
-
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (err error) {

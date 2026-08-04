@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -45,50 +44,6 @@ func parseBulkOperation(operation string) xtreemstoreS3BulkOperation {
 	default:
 		return xtreemstoreS3BulkOperationUnknown
 	}
-}
-
-type xtreemstoreS3BulkRequestStatus byte
-
-const (
-	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
-	xtreemstoreS3BulkRequestSent
-	xtreemstoreS3BulkRequestComplete
-	xtreemstoreS3BulkRequestCompleteAck
-)
-
-func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
-	return []byte{byte(s)}
-}
-
-type xtreemstoreS3BulkStatuses struct {
-	jobStatuses []byte
-	jobCount    int64
-	offset      int64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
-}
-
-func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3BulkRequestStatus, err error) {
-	if jobIndex < s.offset {
-		err = fmt.Errorf("invalid index for active session")
-		return
-	}
-
-	statusesJobIndex := jobIndex - s.offset
-	if statusesJobIndex >= int64(len(s.jobStatuses)) {
-		err = fmt.Errorf("invalid index for active session")
-		return
-	}
-	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
-}
-
-func (s *xtreemstoreS3BulkStatuses) All() []xtreemstoreS3BulkRequestStatus {
-	statuses := make([]xtreemstoreS3BulkRequestStatus, s.jobCount)
-	for jobIndex := range s.jobCount {
-		// Ignore status error since the jobIndex is valid.
-		status, _ := s.Get(jobIndex)
-		statuses[jobIndex] = status
-	}
-
-	return statuses
 }
 
 // newXtreemstore initializes an xtreemstore provider by reusing the S3 client implementation.
@@ -132,13 +87,18 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 
 	if request.HasBulkInfo() {
 		bulkInfo := request.GetBulkInfo()
-		if bulkErr := x.xtreemstoreS3BulkError(bulkInfo); bulkErr != nil {
-			// Bulk operation requests must be ready before they are sent, so either an error occurred
-			// or the bulk request was aborted. For a bulk retrieve operation, the resource was
-			// retrieved but removed from the tape buffer before the download.
-			err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
-		} else {
-			ready = true
+		switch parseBulkOperation(bulkInfo.Operation) {
+		case xtreemstoreS3BulkOperationRetrieve:
+			if bulkErr := xtreemstoreS3BulkRetrieveError(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
+				// Bulk operation requests must be ready before they are sent, so either an error occurred
+				// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+				// retrieved but removed from the tape buffer before the download.
+				err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
+			} else {
+				ready = true
+			}
+		default:
+			err = fmt.Errorf("failed to determine bulk request readiness for operation %q: %w", bulkInfo.Operation, ErrUnsupportedOpForRST)
 		}
 		return
 	}
@@ -169,72 +129,18 @@ func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *b
 	var bulkErr error
 	if request.HasBulkInfo() {
 		bulkInfo := request.GetBulkInfo()
-		if err := x.xtreemstoreS3BulkMarkRequestComplete(bulkInfo); err != nil {
-			bulkErr = fmt.Errorf("failed to mark bulk request complete: %w", err)
+		switch parseBulkOperation(bulkInfo.Operation) {
+		case xtreemstoreS3BulkOperationRetrieve:
+			if err := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); err != nil {
+				bulkErr = fmt.Errorf("failed to mark bulk request complete: %w", err)
+			}
+		default:
+			bulkErr = fmt.Errorf("failed to mark bulk request complete for operation %q: %w", bulkInfo.Operation, ErrUnsupportedOpForRST)
 		}
 	}
 
 	err := x.Provider.CompleteWorkRequests(ctx, job, workResults, abort)
 	return errors.Join(err, bulkErr)
-}
-
-func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPath string, operation string) *xtreemstoreS3BulkRetrieveManager {
-	return &xtreemstoreS3BulkRetrieveManager{
-		s3ApiClient:    x,
-		rstId:          x.GetConfig().GetId(),
-		bucket:         x.GetConfig().GetXtreemstore().S3.Bucket,
-		mountPath:      x.mountPoint.GetMountPath(),
-		stateMountPath: stateMountPath,
-		operation:      operation,
-		state:          &xtreemstoreS3BulkRetrieveManagerState{},
-	}
-}
-
-// xtreemstoreS3BulkMarkRequestComplete marks a request sent by a bulk operation as complete.
-func (x *xtreemstoreS3Provider) xtreemstoreS3BulkMarkRequestComplete(bulkInfo *flex.BulkJobRequestInfo) (err error) {
-	manager := &xtreemstoreS3BulkRetrieveManager{
-		rstId:          x.GetConfig().GetId(),
-		mountPath:      x.mountPoint.GetMountPath(),
-		stateMountPath: bulkInfo.StateMountPath,
-		operation:      bulkInfo.Operation,
-	}
-	return manager.MarkComplete(bulkInfo.JobIndex)
-}
-
-// ExcludeRequestFromBulkOperation marks a bulk operation request as complete.
-func (x *xtreemstoreS3Provider) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
-	if !request.HasBulkInfo() {
-		return fmt.Errorf("cannot cancel request for path %q: request has no bulk operation info", request.GetPath())
-	}
-	bulkInfo := request.GetBulkInfo()
-	manager := &xtreemstoreS3BulkRetrieveManager{
-		rstId:          x.GetConfig().GetId(),
-		mountPath:      x.mountPoint.GetMountPath(),
-		stateMountPath: bulkInfo.StateMountPath,
-		operation:      bulkInfo.Operation,
-	}
-
-	return manager.CancelRequest(ctx, bulkInfo.JobIndex, reason)
-}
-
-// xtreemstoreS3BulkError retrieves any bulk operation errors. If no errors were found then nil will
-// be returned.
-func (x *xtreemstoreS3Provider) xtreemstoreS3BulkError(bulkInfo *flex.BulkJobRequestInfo) error {
-	m := &xtreemstoreS3BulkRetrieveManager{
-		rstId:          x.GetConfig().GetId(),
-		mountPath:      x.mountPoint.GetMountPath(),
-		stateMountPath: bulkInfo.StateMountPath,
-		operation:      bulkInfo.Operation,
-	}
-
-	message, err := os.ReadFile(m.getErrorsPath())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
-	}
-	return fmt.Errorf("%s", message)
 }
 
 func (x *xtreemstoreS3Provider) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
@@ -255,6 +161,28 @@ func (x *xtreemstoreS3Provider) IncludeRequestInBulkOperation(ctx context.Contex
 	return
 }
 
+// ExcludeRequestFromBulkOperation marks a bulk operation request as complete.
+func (x *xtreemstoreS3Provider) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+	if !request.HasBulkInfo() {
+		return fmt.Errorf("cannot cancel request for path %q: request has no bulk operation info", request.GetPath())
+	}
+
+	bulkInfo := request.GetBulkInfo()
+	switch parseBulkOperation(bulkInfo.Operation) {
+	case xtreemstoreS3BulkOperationRetrieve:
+		manager := &xtreemstoreS3BulkRetrieveManager{
+			rstId:          x.GetConfig().GetId(),
+			mountPath:      x.mountPoint.GetMountPath(),
+			stateMountPath: bulkInfo.StateMountPath,
+			operation:      bulkInfo.Operation,
+		}
+
+		return manager.CancelRequest(ctx, bulkInfo.JobIndex, reason)
+	default:
+		return fmt.Errorf("failed to cancel bulk request for operation %q: %w", bulkInfo.Operation, ErrUnsupportedOpForRST)
+	}
+}
+
 func (x *xtreemstoreS3Provider) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
 	switch parseBulkOperation(operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
@@ -267,5 +195,17 @@ func (x *xtreemstoreS3Provider) OpenBulkOperation(ctx context.Context, stateMoun
 		return manager, nil
 	default:
 		return nil, ErrUnsupportedOpForRST
+	}
+}
+
+func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPath string, operation string) *xtreemstoreS3BulkRetrieveManager {
+	return &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient:    x,
+		rstId:          x.GetConfig().GetId(),
+		bucket:         x.GetConfig().GetXtreemstore().S3.Bucket,
+		mountPath:      x.mountPoint.GetMountPath(),
+		stateMountPath: stateMountPath,
+		operation:      operation,
+		state:          &xtreemstoreS3BulkRetrieveManagerState{},
 	}
 }
