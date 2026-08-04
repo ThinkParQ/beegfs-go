@@ -77,97 +77,6 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workReq
 	return c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh)
 }
 
-// ExcludeRequestFromBulkOperation is not implemented and should never be called since JobBuilderClient never
-// generates bulk operation requests (see IncludeRequestInBulkOperation).
-func (c *JobBuilderClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
-	return ErrUnsupportedOpForRST
-}
-
-func (c *JobBuilderClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
-	return false, ""
-}
-
-func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
-	return nil, ErrUnsupportedOpForRST
-}
-
-func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, workRequest *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
-	return true, 0, nil
-}
-
-// ExecuteWorkRequestPart is not implemented and should never be called.
-func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workRequest *flex.WorkRequest, part *flex.Work_Part) error {
-	return ErrUnsupportedOpForRST
-}
-
-func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
-	if abort {
-		bulkOperations := getBulkOperations(workResults)
-		if len(bulkOperations) > 0 {
-			registry, err := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
-			if err != nil {
-				return err
-			}
-
-			waits := []BulkCancelResultFn{}
-			for _, manager := range registry.GetManagersSnapshot() {
-				walkCh, wait, err := manager.Cancel(ctx, nil)
-				if err != nil {
-					return err
-				}
-				waits = append(waits, wait)
-				go func() {
-					// Discard any walk paths
-					for range walkCh {
-					}
-				}()
-			}
-
-			for _, wait := range waits {
-				err = errors.Join(err, wait())
-			}
-			return err
-		}
-	}
-
-	return nil
-}
-
-func getBulkOperations(workResults []*flex.Work) []*flex.BulkOperation {
-	jobBuilderOperations := []*flex.BulkOperation{}
-	for _, workResult := range workResults {
-		if workResult.HasJobBuilderInfo() {
-			jobBuilderOperations = append(jobBuilderOperations, workResult.JobBuilderInfo.BulkOperations...)
-		}
-	}
-	return jobBuilderOperations
-}
-
-// GetConfig is not implemented and should never be called.
-func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
-	return nil
-}
-
-// GetWalk is not implemented and should never be called.
-func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
-	return nil, ErrUnsupportedOpForRST
-}
-
-// SanitizeRemotePath should never be called.
-func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
-	return remotePath
-}
-
-// GetRemotePathInfo is not implemented and should never be called.
-func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
-	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
-}
-
-// GenerateExternalId is not implemented and should never be called.
-func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
-	return "", ErrUnsupportedOpForRST
-}
-
 func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) (result *SchedulingResult) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
@@ -282,6 +191,95 @@ func (c *JobBuilderClient) getWalkCh(ctx context.Context, workRequest *flex.Work
 	}
 
 	return
+}
+
+// ExecuteWorkRequestPart is not implemented and should never be called.
+func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workRequest *flex.WorkRequest, part *flex.Work_Part) error {
+	return ErrUnsupportedOpForRST
+}
+
+func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if abort {
+		bulkOperations := getBulkOperations(workResults)
+		if len(bulkOperations) > 0 {
+			registry, err := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
+			if err != nil {
+				return err
+			}
+
+			waits := []BulkCancelResultFn{}
+			for _, manager := range registry.GetManagersSnapshot() {
+				walkCh, wait, err := manager.Cancel(ctx, nil)
+				if err != nil {
+					return err
+				}
+				waits = append(waits, wait)
+				go func() {
+					// Discard any walk paths
+					for range walkCh {
+					}
+				}()
+			}
+
+			for _, wait := range waits {
+				err = errors.Join(err, wait())
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func getBulkOperations(workResults []*flex.Work) []*flex.BulkOperation {
+	jobBuilderOperations := []*flex.BulkOperation{}
+	for _, workResult := range workResults {
+		if workResult.HasJobBuilderInfo() {
+			jobBuilderOperations = append(jobBuilderOperations, workResult.JobBuilderInfo.BulkOperations...)
+		}
+	}
+	return jobBuilderOperations
+}
+
+// GetConfig is not implemented and should never be called.
+func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
+	return nil
+}
+
+// GetWalk is not implemented and should never be called.
+func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
+	return nil, ErrUnsupportedOpForRST
+}
+
+// SanitizeRemotePath should never be called.
+func (c *JobBuilderClient) SanitizeRemotePath(remotePath string) string {
+	return remotePath
+}
+
+// GetRemotePathInfo is not implemented and should never be called.
+func (c *JobBuilderClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
+}
+
+// GenerateExternalId is not implemented and should never be called.
+func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+	return "", ErrUnsupportedOpForRST
+}
+
+func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, workRequest *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
+	return true, 0, nil
+}
+
+func (c *JobBuilderClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	return false, ""
+}
+
+func (c *JobBuilderClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+	return ErrUnsupportedOpForRST
+}
+
+func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	return nil, ErrUnsupportedOpForRST
 }
 
 func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string, builderBulkOperations *[]*flex.BulkOperation) (*bulkOperationRegistry, error) {
