@@ -152,7 +152,6 @@ nfpms:
         type: "symlink"
       - src: rst/sync/build/beegfs-sync.service
         dst: /usr/lib/systemd/system/beegfs-sync.service
-        type: config
       - src: rst/sync/build/beegfs-sync.toml
         dst: /etc/beegfs/beegfs-sync.toml
         type: "config|noreplace"
