@@ -365,7 +365,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 	}
 
-	undoAppliedPlan := func() error { return nil }
+	undoAppliedPlan := noopUndo
 	lockAcquired := true
 	defer func() {
 		if err == nil {
@@ -374,7 +374,9 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 
 		if !IsErrJobTerminalSentinel(err) {
 			if undoErr := undoAppliedPlan(); undoErr != nil {
-				err = errors.Join(err, undoErr)
+				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
+			} else {
+				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
 			}
 		}
 
@@ -387,52 +389,10 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 
 	if !IsFileLocked(sync.LockedInfo) {
 		// The file access lock was not previously acquired which means the file state information
-		// has not been determine and none of work request preparations have been done.
-		cfg := r.getJobRequestCfg(request)
-
-		var pathState *PathState
-		pathState, err = r.getLockedInfo(ctx, cfg)
-		lockAcquired = pathState != nil && IsFileLocked(pathState.LockedInfo) && pathState.LockAcquired
-		if err != nil {
+		// has not been determine and by extension, work request in unprepared.
+		if undoAppliedPlan, lockAcquired, err = r.prepareJobRequest(ctx, request, sync); err != nil {
 			return
 		}
-		sync.SetLockedInfo(pathState.LockedInfo)
-		cfg.SetLockedInfo(pathState.LockedInfo)
-
-		if !FileExists(pathState.LockedInfo) {
-			err = os.ErrNotExist
-			return
-		}
-		if !IsFileLocked(pathState.LockedInfo) || !pathState.LockAcquired {
-			err = fmt.Errorf("failed to acquire the write lock")
-			return
-		}
-
-		var applyPlan applyFn
-		if applyPlan, err = PlanFileStateForWorkRequests(ctx, r.mountPoint, cfg); err != nil {
-			return
-		}
-
-		if undoAppliedPlan, err = applyPlan(pathState); err != nil {
-			return
-		}
-
-		// Update RST configuration if requested
-		if cfg.GetUpdate() || cfg.HasCooldownSecs() {
-			entryInfo := pathState.EntryInfo
-			origEntryInfo := entryInfo.GetOrigEntryInfo()
-			currentRSTCfg := entryInfo.Entry.Details.Remote.RemoteStorageTarget
-			ownerNode := pathState.OwnerNode
-			if err = updateFileRstPattern(ctx, cfg, cfg.Path, currentRSTCfg, origEntryInfo, ownerNode); err != nil {
-				return
-			}
-		}
-
-		var externalId string
-		if externalId, err = r.GenerateExternalId(ctx, cfg); err != nil {
-			return
-		}
-		sync.LockedInfo.SetExternalId(externalId)
 	}
 
 	job.SetExternalId(sync.LockedInfo.ExternalId)
@@ -448,8 +408,55 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	return
 }
 
+// prepareJobRequest acquires the file access lock (if it isn't already held), plans and applies
+// any local file state changes needed for the sync operation, updates the file's RST
+// configuration if requested, and generates an external ID for the job. It is only called the
+// first time GenerateWorkRequests runs for a given job; callers should skip it once
+// sync.LockedInfo indicates the lock was already acquired by an earlier call.
+func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (undoAppliedPlan undoFn, lockAcquired bool, err error) {
+	undoAppliedPlan = noopUndo
+	cfg := r.getJobRequestCfg(request)
+
+	var pathState *PathState
+	pathState, err = r.getLockedInfo(ctx, cfg)
+	lockAcquired = pathState != nil && IsFileLocked(pathState.LockedInfo) && pathState.LockAcquired
+	if err != nil {
+		return
+	}
+	sync.SetLockedInfo(pathState.LockedInfo)
+	cfg.SetLockedInfo(pathState.LockedInfo)
+
+	if !FileExists(pathState.LockedInfo) {
+		err = os.ErrNotExist
+		return
+	}
+
+	if !IsFileLocked(pathState.LockedInfo) || (!pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)) {
+		err = fmt.Errorf("failed to acquire the write lock")
+		return
+	}
+
+	var applyPlan applyPlanFn
+
+	if applyPlan, err = PlanFileStateForWorkRequests(ctx, r.mountPoint, cfg); err != nil {
+		return
+	}
+
+	undoAppliedPlan, err = applyPlan(pathState)
+	if err != nil {
+		return
+	}
+
+	var externalId string
+	if externalId, err = r.GenerateExternalId(ctx, cfg); err != nil {
+		return
+	}
+	sync.LockedInfo.SetExternalId(externalId)
+	return
+}
+
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) *SchedulingResult {
 	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 }
 
@@ -952,11 +959,6 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 			start.Format(time.RFC3339), stop.Format(time.RFC3339))
 	}
 
-	// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
-	if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
-		return fmt.Errorf("failed to update download's mtime: %w", err)
-	}
-
 	if !request.StubLocal {
 		// Clear offloaded data state when contents for a stub file were downloaded successfully.
 		if IsFileOffloaded(sync.LockedInfo) {
@@ -966,10 +968,18 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 		}
 
 		// Reduce the file size if it's larger than the remote object. This situation means the original
-		// file size was larger than needed so no additional space was preallocated.
+		// file size was larger than needed so no additional space was preallocated. This must happen
+		// before Chtimes below since resizing the file updates its mtime.
 		if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
-			r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true)
+			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true); err != nil {
+				return fmt.Errorf("failed to reduce downloaded file to the remote object's size: %w", err)
+			}
 		}
+	}
+
+	// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
+	if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+		return fmt.Errorf("failed to update download's mtime: %w", err)
 	}
 
 	return nil

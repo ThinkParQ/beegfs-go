@@ -207,6 +207,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 	cancelWalkCh := make(chan *BulkStreamPathResult, 128)
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
+		defer close(cancelWalkCh)
 		if reason != nil {
 			if err := m.CancelRequests(ctx, reason, cancelWalkCh); err != nil {
 				return fmt.Errorf("failed to cancel all bulk operation job requests: %w", err)

@@ -291,7 +291,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 		m.mgrWG.Done()
 	}()
 
-	workerSaturation := m.startUpdateWorkerSaturation(time.Second, 5*time.Second, 15*time.Second)
+	workerSaturation := m.startUpdateWorkerSaturation(time.Second, 60*time.Second)
 
 	// completedWork is how workers signal when they are no longer working on a request. It may have
 	// been completed successfully or cancelled, but either way it should be removed from the active

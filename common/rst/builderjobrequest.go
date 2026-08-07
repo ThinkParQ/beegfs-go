@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
-	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -19,10 +18,9 @@ import (
 type requestPathResolverFn func(walkPath string) (inMountPath string, remotePath string, err error)
 type addBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
 type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error)
-type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error)
+type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error)
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
-type setFileRstConfigFn func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error
 
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
@@ -34,7 +32,6 @@ type jobRequestBuilder struct {
 	planFileState    planFileStateForWorkRequestsFn
 	clearAccessFlags clearAccessFlagsFn
 	setDirRstConfig  setDirRstConfigFn
-	setFileRstConfig setFileRstConfigFn
 }
 
 func (w *jobRequestBuilder) init() {
@@ -46,9 +43,6 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 		// When neither builder config Update nor CooldownSec are set then directories are not
 		// included in the walk and we can safely ignore directory configuration updates.
 		w.setDirRstConfig = func(context.Context, string) (bool, error) { return false, nil }
-		w.setFileRstConfig = func(context.Context, *flex.JobRequestCfg, string, msg.RemoteStorageTarget, *msg.EntryInfo, beegfs.Node) error {
-			return nil
-		}
 		return
 	}
 
@@ -73,9 +67,6 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 		}
 
 		return stat.IsDir(), entry.SetDirRstPattern(ctx, inMountPath, rstIds, cooldownSecs)
-	}
-	w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, rstCfg msg.RemoteStorageTarget, entryInfo *msg.EntryInfo, ownerNode beegfs.Node) error {
-		return updateFileRstPattern(ctx, cfg, path, rstCfg, entryInfo, ownerNode)
 	}
 }
 
@@ -245,44 +236,21 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	request *beeremote.JobRequest,
 ) (canReleaseLock bool, err error) {
 	lockedInfo := cfg.GetLockedInfo()
-	state := beeremote.JobRequest_GenerationStatus_UNSPECIFIED
-
-	setGenerationStatus := func(err error) {
-		if errors.Is(err, ErrJobAlreadyComplete) {
+	var applyPlan applyPlanFn
+	if request.HasGenerationStatus() {
+		canReleaseLock = true
+	} else {
+		var planErr error
+		if applyPlan, planErr = w.planFileState(ctx, w.mountPoint, cfg); planErr != nil {
 			canReleaseLock = true
-			state = beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE
-			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-				State:   state,
-				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-			}
-		} else if errors.Is(err, ErrJobAlreadyOffloaded) {
-			canReleaseLock = false
-			state = beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED
-			request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-				State: state,
-			}
-		} else {
-			canReleaseLock = true
-			state = beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-				State:   state,
-				Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: fmt.Sprintf("failed to prepare file state: %s", planErr.Error()),
 			})
 		}
 	}
 
-	var applyPlan applyFn
-	if request.HasGenerationStatus() {
-		canReleaseLock = true
-		state = request.GenerationStatus.State
-	} else {
-		var planErr error
-		if applyPlan, planErr = w.planFileState(ctx, w.mountPoint, cfg); planErr != nil {
-			setGenerationStatus(planErr)
-		}
-	}
-
-	if state == beeremote.JobRequest_GenerationStatus_UNSPECIFIED {
+	if !request.HasGenerationStatus() {
 		if !request.HasBulkInfo() {
 			var skipSubmission bool
 			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil {
@@ -292,12 +260,38 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 				return
 			} else if skipSubmission {
 				return
+			} else if request.HasGenerationStatus() {
+				// addBulkRequest may reject inclusion outright (e.g. the target bulk operation
+				// previously failed permanently) by attaching a GenerationStatus rather than
+				// deferring to the bulk operation's own walk. Honor it the same way as if it had
+				// been set from the start, so the request is submitted as-is instead of being
+				// planned and applied as though nothing happened.
+				canReleaseLock = true
 			}
 		}
+	}
 
+	if !request.HasGenerationStatus() {
 		applyUndo, applyErr := applyPlan(&pathState)
 		if applyErr != nil {
-			setGenerationStatus(applyErr)
+			if errors.Is(applyErr, ErrJobAlreadyComplete) {
+				canReleaseLock = true
+				request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+					State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+					Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
+				}
+			} else if errors.Is(applyErr, ErrJobAlreadyOffloaded) {
+				canReleaseLock = false
+				request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+					State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
+				}
+			} else {
+				canReleaseLock = true
+				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+					State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+					Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
+				})
+			}
 		} else {
 			// Generating the externalId must be the last possible error to avoid situations where, once the
 			// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
@@ -306,16 +300,14 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 			if externalIdErr != nil {
 				if undoErr := applyUndo(); undoErr != nil {
 					canReleaseLock = false
-					state = beeremote.JobRequest_GenerationStatus_ERROR
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-						State:   state,
+						State:   beeremote.JobRequest_GenerationStatus_ERROR,
 						Message: fmt.Sprintf("failed to generate external id: %s; rollback also failed: %s", externalIdErr.Error(), undoErr.Error()),
 					})
 				} else {
 					canReleaseLock = true
-					state = beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-						State:   state,
+						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 						Message: fmt.Sprintf("failed to generate external id: %s", externalIdErr.Error()),
 					})
 				}
@@ -323,16 +315,6 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 				lockedInfo.SetExternalId(externalId)
 				canReleaseLock = false
 			}
-		}
-	}
-
-	switch state {
-	case beeremote.JobRequest_GenerationStatus_UNSPECIFIED, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
-		entryInfo := pathState.EntryInfo.GetOrigEntryInfo()
-		if err = w.setFileRstConfig(ctx, cfg, request.Path, pathState.RstCfg, entryInfo, pathState.OwnerNode); err != nil {
-			// Abort the builder job since the beegfs was unable to set the file's rst configuration.
-			// The issue is likely systemic.
-			return
 		}
 	}
 

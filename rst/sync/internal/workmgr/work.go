@@ -440,7 +440,7 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 		var schedulingResult *rst.SchedulingResult
 		g.Go(func() error {
 			defer close(jobSubmissionCh)
-			schedulingResult = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh)
+			schedulingResult = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh, w.workerSaturation)
 			return nil
 		})
 
@@ -622,21 +622,20 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 	}()
 
 	if result.Err != nil {
-		// Builder-level termination is driven by the classification of result.Err. Individual
-		// request errors should already have been reported on the submitted requests via
+		// Builder-level termination is driven by the classification of result.Err and builderErr.
+		// Individual request errors should already have been reported on the submitted requests via
 		// GenerationStatus and accounted for in the builder counters rather than forcing builder
 		// termination here.
-		resultErr := result.Err
-		resultMessage := resultErr.Error()
-		if errors.Is(resultErr, rst.ErrBuilderCancelled) {
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("job builder failed to complete: " + resultMessage)
-		} else if errors.Is(resultErr, rst.ErrBuilderFailed) {
+		message := result.Err.Error()
+		if errors.Is(builderErr, rst.ErrBuilderFailed) {
 			status.SetState(flex.Work_FAILED)
-			status.SetMessage("job builder failed to complete: " + resultMessage)
+			status.SetMessage("job builder failed to complete: " + message)
+		} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
+			status.SetState(flex.Work_CANCELLED)
+			status.SetMessage("job builder failed to complete: " + message)
 		} else {
 			status.SetState(flex.Work_FAILED)
-			status.SetMessage("job builder returned unclassified error: " + resultMessage)
+			status.SetMessage("job builder returned unclassified error: " + message)
 		}
 	} else if result.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
@@ -649,6 +648,9 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 				attrPriority.Int(normalizedPriority(request.GetPriority())),
 			),
 		)
+	} else if errors.Is(builderErr, rst.ErrBuilderFailed) {
+		status.SetState(flex.Work_FAILED)
+		status.SetMessage("completed with errors")
 	} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("completed with errors")
@@ -672,6 +674,13 @@ func getBuilderResults(builder *flex.BuilderJob) (err error) {
 
 	var parts []string
 	markCancelled := false
+	markedFailed := false
+
+	for _, bulkOperation := range builder.BulkOperations {
+		if bulkOperation.Failed {
+			markedFailed = true
+		}
+	}
 
 	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist
 	failures := jobsErrors + jobsNotAllowed
@@ -710,7 +719,9 @@ func getBuilderResults(builder *flex.BuilderJob) (err error) {
 	}
 
 	err = fmt.Errorf("%s", strings.Join(parts, "; "))
-	if markCancelled {
+	if markedFailed {
+		err = rst.MarkBuilderFailed(err)
+	} else if markCancelled {
 		err = rst.MarkBuilderCancelled(err)
 	}
 	return

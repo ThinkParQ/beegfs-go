@@ -232,7 +232,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 			},
 		}
@@ -254,7 +254,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
 			},
 		}
@@ -278,11 +278,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 				return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
-			},
-			setFileRstConfig: func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
-				return nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -449,11 +446,8 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.addBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 			return false, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 			return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
-		}
-		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
-			return nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")
@@ -573,11 +567,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 				EntryInfo:  &entry.GetEntryCombinedInfo{},
 			}, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyFn, error) {
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 			return func(*PathState) (undoFn, error) { return func() error { return nil }, nil }, nil
-		}
-		w.setFileRstConfig = func(ctx context.Context, cfg *flex.JobRequestCfg, path string, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg *msg.EntryInfo, ownerNode beegfs.Node) error {
-			return nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")

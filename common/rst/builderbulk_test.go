@@ -96,7 +96,7 @@ func TestBulkOperationRegistry_AddRequestCreatesManagerOnDemandAndReusesIt(t *te
 
 	manager := registry.managers["1-retrieve"]
 	require.NotNil(t, manager)
-	assert.Equal(t, "retrieve", manager.Operation)
+	assert.Equal(t, "retrieve", manager.operation)
 }
 
 func TestBulkOperationRegistry_AddRequestPropagatesManagerAddRequestError(t *testing.T) {
@@ -119,8 +119,9 @@ func TestBulkOperationRegistry_CloseAggregatesManagerCloseErrors(t *testing.T) {
 		managers: map[string]*bulkOperationManager{
 			"1-retrieve": {
 				clientBulkOperation: &fakeBulkOperation{closeErr: closeErr},
-				Operation:           "retrieve",
+				operation:           "retrieve",
 				errors:              new(string),
+				failed:              new(bool),
 			},
 		},
 	}
@@ -132,7 +133,7 @@ func TestBulkOperationRegistry_CloseAggregatesManagerCloseErrors(t *testing.T) {
 }
 
 func TestBulkOperationManager_AppendErrorAccumulatesAndGetErrorsFormats(t *testing.T) {
-	manager := &bulkOperationManager{Operation: "archive", errors: new(string)}
+	manager := &bulkOperationManager{operation: "archive", errors: new(string), failed: new(bool)}
 	assert.NoError(t, manager.GetErrors())
 
 	manager.AppendError(fmt.Errorf("first"))

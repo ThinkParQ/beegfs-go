@@ -128,7 +128,7 @@ func (m *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.W
 	return err
 }
 
-func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest) *SchedulingResult {
+func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) *SchedulingResult {
 	if !m.hasExpectedCall("ExecuteJobBuilderRequest") {
 		return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 	}
