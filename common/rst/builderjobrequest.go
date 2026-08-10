@@ -265,7 +265,7 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 			} else if skipSubmission {
 				return
 			} else if request.HasGenerationStatus() {
-				// addBulkRequest may reject inclusion outright (e.g. the target bulk operation
+				// addBulkRequest may reject inclusion outright (eg the target bulk operation
 				// previously failed permanently) by attaching a GenerationStatus rather than
 				// deferring to the bulk operation's own walk. Honor it the same way as if it had
 				// been set from the start, so the request is submitted as-is instead of being
@@ -289,11 +289,17 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 				request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
 					State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
 				}
-			} else {
+			} else if errors.Is(applyErr, ErrJobFailedPrecondition) {
 				canReleaseLock = true
 				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 					State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-					Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
+					Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
+				})
+			} else {
+				canReleaseLock = false
+				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+					State:   beeremote.JobRequest_GenerationStatus_ERROR,
+					Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
 				})
 			}
 		} else {

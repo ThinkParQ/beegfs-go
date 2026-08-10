@@ -510,12 +510,7 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 				return
 			}
 
-			if cfg.HasRestorePolicy() {
-				if failedPrecondition = entry.SetFileDataState(ctx, cfg.Path, restorePolicyToDataState(cfg.GetRestorePolicy())); failedPrecondition != nil {
-					return
-				}
-			}
-			addStep(prepareAlreadyOffloaded())
+			addStep(prepareAlreadyOffloaded(ctx, cfg))
 			return
 		}
 
@@ -536,13 +531,8 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 					failedPrecondition = ErrOffloadFileUrlMismatch
 					return
 				}
-				originalDataState, dataStateErr := entry.GetFileDataState(ctx, cfg.Path)
-				if dataStateErr != nil {
-					failedPrecondition = fmt.Errorf("unable to determine original file data state: refusing to proceed with restoring file contents %w", dataStateErr)
-					return
-				}
 
-				addStep(prepareDownloadRestoreDataState(ctx, cfg, originalDataState))
+				addStep(prepareDownloadRestoreDataState(ctx, cfg))
 				allowOverwrite = true
 			}
 
@@ -593,14 +583,14 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 		var applyErr error
 		for _, applyStep := range applySteps {
 			undoStep, applyErr = applyStep(pathState, applyErr)
-			if applyErr == nil {
-				undoSteps = append(undoSteps, undoStep)
-			}
+			undoSteps = append(undoSteps, undoStep)
 		}
 
 		if applyErr != nil && !IsErrJobTerminalSentinel(applyErr) {
 			if undoErr := undo(); undoErr != nil {
-				applyErr = errors.Join(applyErr, fmt.Errorf("failed to undo changes: %w", undoErr))
+				applyErr = fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
+			} else {
+				applyErr = fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
 			}
 			return noopUndo, applyErr
 		}
@@ -616,9 +606,34 @@ func prepareAlreadyComplete(cfg *flex.JobRequestCfg) applyFn {
 		return noopUndo, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 	}
 }
-func prepareAlreadyOffloaded() applyFn {
+
+func prepareAlreadyOffloaded(ctx context.Context, cfg *flex.JobRequestCfg) applyFn {
 	return func(pathState *PathState, appliedErr error) (undoFn, error) {
-		return noopUndo, ErrJobAlreadyOffloaded
+		undo := noopUndo
+		if cfg.HasRestorePolicy() {
+			state := restorePolicyToDataState(cfg.GetRestorePolicy())
+			ownerNode := pathState.OwnerNode
+			entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+			if entryInfoMsg == nil {
+				return undo, fmt.Errorf("original entry info unavailable")
+			}
+
+			originalDataState, dataStateErr := entry.GetFileDataStateWithEntryInfo(ctx, cfg.Path, *entryInfoMsg, ownerNode)
+			if dataStateErr != nil {
+				return undo, fmt.Errorf("unable to determine original file data state: %w", dataStateErr)
+			}
+
+			if originalDataState != state {
+				if err := entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, state, *entryInfoMsg, ownerNode); err != nil {
+					return undo, fmt.Errorf("unable to set restore policy: %w", err)
+				}
+
+				undo = func() error {
+					return entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, originalDataState, *entryInfoMsg, ownerNode)
+				}
+			}
+		}
+		return undo, ErrJobAlreadyOffloaded
 	}
 }
 
@@ -633,34 +648,100 @@ func prepareStubLocalOffload(ctx context.Context, mountPoint filesystem.Provider
 			return noopUndo, appliedErr
 		}
 
-		if err := CreateOffloadedDataFile(ctx, mountPoint, cfg.Path, cfg.RemotePath, cfg.RemoteStorageTarget, cfg.Overwrite || alreadySynced, restorePolicyToDataState(cfg.GetRestorePolicy())); err != nil {
-			return noopUndo, fmt.Errorf("failed to create stub file %q: %w", cfg.Path, err)
-		}
+		var undo func() error
+		restorePolicy := restorePolicyToDataState(cfg.GetRestorePolicy())
+		rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", cfg.RemoteStorageTarget, cfg.RemotePath)
+
 		if !FileExists(lockedInfo) {
-			if err := entry.SetAccessFlags(ctx, cfg.Path, beegfs.LockedContentAccessFlags); err != nil {
-				return func() error {
-					return fmt.Errorf("stub file %q was created but could not be locked; it may need to be removed manually", cfg.Path)
-				}, fmt.Errorf("failed to lock newly created stub file %q: %w", cfg.Path, err)
+			undo = func() error {
+				if err := mountPoint.Remove(cfg.Path); err != nil {
+					return fmt.Errorf("failed to remove stub file: %w", err)
+				}
+				return nil
+			}
+
+			// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
+			// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
+			// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
+			// future fix for the O_TRUNC window must reapply that metadata to the new inode.
+			err := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, false)
+			if err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					return noopUndo, fmt.Errorf("unable to create stub file: %w", err)
+				}
+				return undo, fmt.Errorf("unable to create stub file: %w", err)
+			}
+
+			if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
+				return undo, fmt.Errorf("failed to collect information for stub file: %w", err)
+			}
+			info := pathState.LockedInfo
+			lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
+			lockedInfo.SetExists(info.Exists)
+			lockedInfo.SetSize(info.Size)
+			lockedInfo.SetMtime(info.Mtime)
+			lockedInfo.SetMode(info.Mode)
+
+			ownerNode := pathState.OwnerNode
+			entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+			if err := entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, restorePolicy, *entryInfoMsg, ownerNode); err != nil {
+				return undo, fmt.Errorf("unable to set restore policy: %w", err)
+			}
+		} else {
+			undo = func() error {
+				if stat, statErr := mountPoint.Stat(cfg.Path); statErr == nil {
+					if stat.Size() != lockedInfo.Size || !stat.ModTime().Equal(lockedInfo.Mtime.AsTime()) {
+						return fmt.Errorf("failed to restore file")
+					}
+				}
+				return nil
+			}
+
+			overwrite := cfg.Overwrite || alreadySynced
+			ownerNode := pathState.OwnerNode
+			entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+			// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
+			// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
+			// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
+			// future fix for the O_TRUNC window must reapply that metadata to the new inode.
+			if err := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, overwrite); err != nil {
+				return undo, fmt.Errorf("failed to create stub file %q: %w", cfg.Path, err)
+			}
+
+			if err := entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, restorePolicy, *entryInfoMsg, ownerNode); err != nil {
+				return undo, fmt.Errorf("unable to set restore policy: %w", err)
 			}
 		}
-		pathState.LockedInfo.SetReadWriteLocked(true)
-		return noopUndo, ErrJobAlreadyOffloaded
+
+		return undo, ErrJobAlreadyOffloaded
 	}
 }
 
 // prepareDownloadRestoreDataState clears the offloaded data state on an existing stub file so a
 // download can overwrite its contents, restoring the original data state if a later step fails.
-func prepareDownloadRestoreDataState(ctx context.Context, cfg *flex.JobRequestCfg, originalDataState beegfs.DataState) applyFn {
+func prepareDownloadRestoreDataState(ctx context.Context, cfg *flex.JobRequestCfg) applyFn {
 	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+		ownerNode := pathState.OwnerNode
+		entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+		if entryInfoMsg == nil {
+			return noopUndo, errors.New("original entry info unavailable: refusing to proceed with restoring file contents")
+		}
+
+		originalDataState, dataStateErr := entry.GetFileDataStateWithEntryInfo(ctx, cfg.Path, *entryInfoMsg, ownerNode)
+		if dataStateErr != nil {
+			return noopUndo, fmt.Errorf("unable to determine original file data state: %w", dataStateErr)
+		}
+
 		if appliedErr != nil {
 			return noopUndo, appliedErr
 		}
 
-		if err := entry.SetFileDataState(ctx, cfg.Path, beegfs.DataStateAvailable); err != nil {
-			return noopUndo, err
+		if err := entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, beegfs.DataStateAvailable, *entryInfoMsg, ownerNode); err != nil {
+			return noopUndo, fmt.Errorf("unable to set the data state to available: %w", err)
 		}
+
 		undo := func() error {
-			return entry.SetFileDataState(ctx, cfg.Path, originalDataState)
+			return entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, originalDataState, *entryInfoMsg, ownerNode)
 		}
 		return undo, nil
 	}
@@ -685,8 +766,11 @@ func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequ
 				// Restore the original stub file if download preparation overwrote it.
 				rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", originalLockedInfo.StubUrlRstId, originalLockedInfo.StubUrlPath)
 				return mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, true)
+			} else if lockedInfo.Size < lockedInfo.RemoteSize {
+				// Restore the enlarged file to it's original size.
+				return mountPoint.CreateOrResizeFile(cfg.Path, originalLockedInfo.Size, true)
 			}
-			return mountPoint.CreateOrResizeFile(cfg.Path, originalLockedInfo.Size, true)
+			return nil
 		}
 		return undo, nil
 	}
@@ -699,23 +783,23 @@ func prepareDownloadNoFile(ctx context.Context, mountPoint filesystem.Provider, 
 		}
 
 		lockedInfo := cfg.LockedInfo
-
-		err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
-		if err != nil {
-			err = fmt.Errorf("unable to preallocate space for file: %w", err)
-			return noopUndo, err
-		}
-
 		undo := func() error {
 			if removeErr := mountPoint.Remove(cfg.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-				return fmt.Errorf("unable to remove preallocated file: %s", removeErr.Error())
+				return fmt.Errorf("unable to remove preallocated file: %w", removeErr)
 			}
 			return nil
 		}
 
+		err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return noopUndo, fmt.Errorf("unable to preallocate space for file: %w", err)
+			}
+			return undo, fmt.Errorf("unable to preallocate space for file: %w", err)
+		}
+
 		if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
-			err = fmt.Errorf("failed to collect information for new file: %w", err)
-			return undo, errors.Join(err, undo())
+			return undo, fmt.Errorf("failed to collect information for new file: %w", err)
 		}
 		info := pathState.LockedInfo
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
@@ -740,9 +824,9 @@ func prepareUpdateFileRstPattern(ctx context.Context, cfg *flex.JobRequestCfg) a
 			if err == nil {
 				err = appliedErr
 			} else if IsErrJobTerminalSentinel(appliedErr) {
-				err = fmt.Errorf("%w: %s %w", ErrJobFailedPrecondition, appliedErr.Error(), err)
-			} else {
-				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
+				// Return sentinel as a string so it's message is communicated but still report a
+				// failed precondition.
+				err = fmt.Errorf("%s: %w", appliedErr.Error(), err)
 			}
 		}()
 
@@ -826,7 +910,9 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 		}
 		return result, fmt.Errorf("%w: %w", ErrGetPathStateFatal, err)
 	}
-	if entryInfo.GetOrigEntryInfo() == nil {
+
+	entryInfoMsg := entryInfo.GetOrigEntryInfo()
+	if entryInfoMsg == nil {
 		return result, fmt.Errorf("original entry info failed to be retrieved: %w", ErrGetPathStateFatal)
 	}
 
@@ -843,7 +929,7 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 
 	isFileLocked := entryDetails.FileState.IsReadWriteLocked()
 	if !isFileLocked && mode == PathStateWithLock {
-		if err = entry.SetAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); err != nil {
+		if err = entry.SetAccessFlagsWithEntryInfo(ctx, inMountPath, beegfs.LockedContentAccessFlags, *entryInfoMsg, result.OwnerNode); err != nil {
 			return result, err
 		}
 		isFileLocked = true
