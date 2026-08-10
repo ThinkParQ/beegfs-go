@@ -70,11 +70,11 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 	}
 }
 
-func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (err error) {
+func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeJobSubmissions int64, err error) {
 	if isDir, err := w.setDirRstConfig(ctx, inMountPath); isDir || err != nil {
 		// Abort the builder job since the beegfs was unable to set the directory's rst
 		// configuration. The issue is likely systemic.
-		return err
+		return 0, err
 	}
 
 	var pathState PathState
@@ -108,6 +108,10 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 		if processErr != nil {
 			err = processErr
 			return
+		}
+
+		if !request.HasGenerationStatus() {
+			activeJobSubmissions++
 		}
 	}
 

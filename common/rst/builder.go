@@ -111,14 +111,14 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	walkComplete, walkErr := parseResumeToken(resumeToken, workRequest.JobId)
 	if !walkComplete {
 		walkSize := min(cap(jobSubmissionCh), maxRequests+1) // +1 is for ResumeToken when there is more work
-		walkCh, err := c.getWalkCh(ctx, workRequest, walkSize)
+		walkChGenerator, resumeToken, err := c.getNextWalkChGenerator(ctx, workRequest, walkSize)
 		if err != nil {
 			if len(registry.GetManagersSnapshot()) == 0 {
 				return abort(err)
 			}
 			walkErr = err
 		} else {
-			controller.WalkSource(walkCh)
+			controller.WalkSourceGenerator(walkChGenerator, resumeToken, maxRequests)
 			if err = controller.WaitForWalkSources(); err != nil {
 				if errors.Is(ctx.Err(), context.Canceled) || len(registry.GetManagersSnapshot()) == 0 {
 					return abort(err)
@@ -149,6 +149,61 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	} else if walkErr != nil {
 		result.Err = MarkBuilderCancelled(result.Err, walkErr)
 	}
+	return
+}
+
+type nextWalkChGenerator func(resumeToken string) (walkCh <-chan *filesystem.StreamPathResult, err error)
+
+func (c *JobBuilderClient) getNextWalkChGenerator(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (generator nextWalkChGenerator, resumeToken string, err error) {
+	maxFiles := maxRequests
+	builder := workRequest.GetBuilder()
+	cfg := builder.GetCfg()
+	resumeToken = workRequest.GetExternalId()
+
+	var filter filesystem.FileInfoFilter
+	filterExpr := cfg.GetFilterExpr()
+	if filterExpr != "" {
+		if filter, err = filesystem.CompileFilter(filterExpr); err != nil {
+			err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
+			return
+		}
+	}
+
+	walkPaths := filesystem.StreamPathsLexicographically
+	if cfg.GetUpdate() || cfg.HasCooldownSecs() {
+		walkPaths = filesystem.StreamPathsLexicographicallyWithDirs
+	}
+
+	if cfg.GetDownload() {
+		if filter != nil {
+			err = fmt.Errorf("filter expressions (--%s) are not supported for downloads yet", filesystem.FilterExprFlag)
+			return
+		}
+
+		if WalkLocalPathInsteadOfRemote(cfg) {
+			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
+			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
+			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
+			generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
+				return walkPaths(ctx, c.mountPoint, workRequest.GetPath(), token, maxFiles, chanSize, nil)
+			}
+		} else {
+			client, ok := c.rstMap[cfg.RemoteStorageTarget]
+			if !ok {
+				err = fmt.Errorf("failed to determine rst client")
+				return
+			}
+
+			generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
+				return client.GetWalk(ctx, client.SanitizeRemotePath(cfg.GetRemotePath()), chanSize, token, maxFiles)
+			}
+		}
+	} else {
+		generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
+			return walkPaths(ctx, c.mountPoint, workRequest.Path, token, maxFiles, chanSize, filter)
+		}
+	}
+
 	return
 }
 

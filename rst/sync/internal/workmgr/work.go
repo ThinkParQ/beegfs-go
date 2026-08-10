@@ -502,12 +502,6 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 		// select on work.ctx.Done() so shutdown isn't blocked waiting on this loop to notice
 		// cancellation.
 		if schedulingResult.Reschedule && len(w.workerSaturation) > 0 {
-			v := make([]float64, len(w.workerSaturation))
-			for i, saturation := range w.workerSaturation {
-				v[i] = saturation()
-			}
-			fmt.Println("worker saturation:", v)
-
 			if w.workerSaturation[0]() < 100 {
 				select {
 				case <-time.After(workDelayMinimum):

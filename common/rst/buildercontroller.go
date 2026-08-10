@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,6 +30,12 @@ const (
 	// submissionQueueMinDrainTime floors how far the target can shrink under heavy worker
 	// saturation, so the builder always retains some forward progress instead of stalling outright.
 	submissionQueueMinDrainTime = 50 * time.Millisecond
+	// submissionQueueRampStartSaturation is the saturation percentage below which the builder
+	// doesn't throttle at all. The goal is 100% saturation (one job per worker), not zero, so there's
+	// no reason to start shrinking the drain time target while comfortably under that; the target
+	// only ramps down from submissionQueueBaseDrainTime to submissionQueueMinDrainTime across the
+	// range from this value up to 100%.
+	submissionQueueRampStartSaturation = 50.0
 )
 
 // requestBuildController uses bounded fan-out stage instead of a worker pool where each each path
@@ -57,22 +62,98 @@ type requestBuildController struct {
 	processTimeCounter    atomic.Int64
 	lastProcessTime       time.Time
 
-	sourceGroup    *errgroup.Group
-	sourceGroupCtx context.Context
-	bulkGroup      *errgroup.Group
-	bulkGroupCtx   context.Context
-	bulkCallbacks  []func()
+	sourceGroup          *errgroup.Group
+	sourceGroupCtx       context.Context
+	sourceProducerGroup  *errgroup.Group
+	activeJobSubmissions atomic.Int64 // All non-terminal submitted requests. Requests add to a bulk operation will not counter.
+
+	bulkGroup     *errgroup.Group
+	bulkGroupCtx  context.Context
+	bulkCallbacks []func()
 
 	result      *SchedulingResult
 	resumeToken string
 }
 
-func (c *requestBuildController) WalkSource(walkCh <-chan *filesystem.StreamPathResult) {
+func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenerator, resumeToken string, activeJobSubmissionsTarget int) {
 	if c.sourceGroup == nil {
 		c.sourceGroup, c.sourceGroupCtx = errgroup.WithContext(c.ctx)
+		c.sourceProducerGroup = new(errgroup.Group)
 	}
 
-	processWalkCh(c.sourceGroupCtx, c.sourceGroup, c.sourceProcess, c.waitForSubmissionCapacity, walkCh)
+	c.sourceGroup.Go(func() error {
+		walkCh, err := nextWalkCh(resumeToken)
+		if err != nil {
+			return err
+		}
+
+		for {
+			select {
+			case <-c.sourceGroupCtx.Done():
+				return c.sourceGroupCtx.Err()
+			case result, ok := <-walkCh:
+				if !ok {
+					return nil
+				}
+
+				var failedPrecondition error
+				if result.Err != nil {
+					if cancelErr, ok := errors.AsType[*RequestCancelError](result.Err); ok {
+						failedPrecondition = cancelErr.Reason
+					} else {
+						return result.Err
+					}
+				}
+
+				if result.ResumeToken != "" {
+					// Allow any active source processors to finish so activeJobSubmissions will be
+					// correct before deciding whether to start another walk.
+					if err := c.sourceProducerGroup.Wait(); err != nil {
+						return err
+					}
+					if c.activeJobSubmissions.Load() < int64(activeJobSubmissionsTarget) {
+						if walkCh, err = nextWalkCh(result.ResumeToken); err != nil {
+							return err
+						}
+						continue
+					}
+
+					if c.resumeToken != "" {
+						return fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
+					}
+					c.resumeToken = result.ResumeToken
+					c.result = &SchedulingResult{Reschedule: true}
+					return nil
+				}
+
+				inMountPath, remotePath, err := c.getPaths(result.Path)
+				if err != nil {
+					return err
+				}
+
+				c.addWorker()
+				start := time.Now()
+				c.sourceProducerGroup.Go(func() error {
+					defer func() { c.releaseWorker(time.Since(start)) }()
+					// c.ctx, not c.sourceGroupCtx: sourceGroupCtx belongs to c.sourceGroup, whose
+					// Wait() cancels it as soon as the outer walk-driving goroutine returns
+					// (including on success) which can race ahead of sourceProducerGroup.Wait() and
+					// cancel still-in-flight workers here out from under them (WaitForWalkSources
+					// waits on sourceGroup before sourceProducerGroup). This goroutine belongs to
+					// sourceProducerGroup, so it should only stop when the controller's own context
+					// says so, not as a side effect of a sibling group's lifecycle.
+					submitted, err := c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
+					c.activeJobSubmissions.Add(submitted)
+					return err
+				})
+
+			}
+
+			if err := c.waitForSubmissionCapacity(); err != nil {
+				return err
+			}
+		}
+	})
 }
 
 func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationManager) {
@@ -179,6 +260,7 @@ func (c *requestBuildController) WaitForWalkSources() error {
 	err := c.sourceGroup.Wait()
 	c.sourceGroup = nil
 
+	err = errors.Join(err, c.sourceProducerGroup.Wait())
 	if err != nil {
 		return fmt.Errorf("error walking source paths: %w", err)
 	}
@@ -206,40 +288,6 @@ func (c *requestBuildController) WaitForBulkOperations() (err error) {
 		}
 	}
 	return err
-}
-
-func (c *requestBuildController) sourceProcess(result *filesystem.StreamPathResult) error {
-	var failedPrecondition error
-	if result.Err != nil {
-		if cancelErr, ok := errors.AsType[*RequestCancelError](result.Err); ok {
-			failedPrecondition = cancelErr.Reason
-		} else {
-			return result.Err
-		}
-	}
-
-	if result.ResumeToken != "" {
-		if c.resumeToken != "" {
-			return fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
-		}
-		c.resumeToken = result.ResumeToken
-		c.result = &SchedulingResult{Reschedule: true}
-		return nil
-	}
-
-	inMountPath, remotePath, err := c.getPaths(result.Path)
-	if err != nil {
-		return err
-	}
-
-	c.addWorker()
-	start := time.Now()
-	c.sourceGroup.Go(func() error {
-		defer func() { c.releaseWorker(time.Since(start)) }()
-		return c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
-	})
-
-	return nil
 }
 
 func (c *requestBuildController) bulkProcess(result *BulkStreamPathResult) error {
@@ -297,9 +345,12 @@ func (c *requestBuildController) submissionQueueOverCapacity() bool {
 }
 
 // submissionQueueTargetDrainTime derives the acceptable jobSubmissionCh buffered latency from
-// current worker saturation instead of a fixed constant: the busier the worker pool actually
-// executing real jobs, the less sense it makes to let the builder keep piling submissions in ahead
-// of it, so the target shrinks toward submissionQueueMinDrainTime as saturation rises.
+// current worker saturation instead of a fixed constant. The goal is 100% saturation (one job per
+// worker), not zero, so the target stays at submissionQueueBaseDrainTime (no throttling) while
+// saturation is under submissionQueueRampStartSaturation, then shrinks toward
+// submissionQueueMinDrainTime as saturation climbs the rest of the way to 100%: the busier the
+// worker pool actually executing real jobs, the less sense it makes to let the builder keep piling
+// submissions in ahead of it.
 //
 // This combines workerSaturation's windows (shortest to longest) with a max rather than just
 // reading workerSaturation[0], so the response is asymmetric: a spike on the short window tightens
@@ -318,15 +369,18 @@ func (c *requestBuildController) submissionQueueTargetDrainTime() time.Duration 
 		saturation = longWindow
 	}
 
-	factor := 1 - saturation/100
+	if saturation <= submissionQueueRampStartSaturation {
+		return submissionQueueBaseDrainTime
+	}
+
+	factor := 1 - (saturation-submissionQueueRampStartSaturation)/(100-submissionQueueRampStartSaturation)
 	if factor < 0 {
 		factor = 0
-	} else if factor > 1 {
-		factor = 1
 	}
 
 	span := submissionQueueBaseDrainTime - submissionQueueMinDrainTime
-	return submissionQueueMinDrainTime + time.Duration(factor*float64(span))
+	target := submissionQueueMinDrainTime + time.Duration(factor*float64(span))
+	return target
 }
 
 func (c *requestBuildController) addWorker() {
@@ -336,9 +390,10 @@ func (c *requestBuildController) addWorker() {
 func (c *requestBuildController) releaseWorker(processTime time.Duration) {
 	<-c.maxWorkersCh
 
+	now := time.Now()
+
 	c.processTimeMu.Lock()
 	defer c.processTimeMu.Unlock()
-	now := time.Now()
 	if c.lastProcessTime.IsZero() || now.Sub(c.lastProcessTime) > processTimeStaleWindow {
 		// There was no recent sample to average with so (re)start the average.
 		c.processTimeAvg = float64(processTime)
@@ -358,8 +413,10 @@ func (c *requestBuildController) releaseWorker(processTime time.Duration) {
 	c.lastProcessTime = now
 }
 
-// workThroughput returns the current estimated path completions-per-second, derived from the
-// rolling average per-path processing duration. Returns 0 if no path has completed yet.
+// workThroughput returns the current estimated path completions-per-second across all in-flight
+// goroutines. The number of goroutines currently processing a path is divided by the rolling
+// average per-path processing duration, since each goroutine is completing paths in parallel at
+// roughly the same average rate. Returns 0 if no path has completed yet.
 func (c *requestBuildController) workThroughput() float64 {
 	c.processTimeMu.Lock()
 	defer c.processTimeMu.Unlock()
@@ -367,5 +424,5 @@ func (c *requestBuildController) workThroughput() float64 {
 	if c.processTimeAvg <= 0 {
 		return 0
 	}
-	return float64(time.Second) / c.processTimeAvg
+	return float64(len(c.maxWorkersCh)) * float64(time.Second) / c.processTimeAvg
 }
