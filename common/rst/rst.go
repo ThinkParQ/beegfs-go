@@ -259,8 +259,9 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 
 	defer func() {
 		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
+			clearErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
+			if clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
+				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearErr))
 			}
 		}
 	}()
@@ -529,9 +530,10 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 				return
 			}
 			err = entry.SetAccessFlags(ctx, cfg.Path, beegfs.LockedContentAccessFlags)
-			if err != nil {
+			if err != nil && !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
 				return
 			}
+			err = nil
 			lockedInfo.SetReadWriteLocked(true)
 
 			return updateRstCfg(ErrJobAlreadyOffloaded)
@@ -683,9 +685,10 @@ func GetLockedInfo(
 	if !skipAccessLock {
 		if !entryInfo.Entry.Details.FileState.IsReadWriteLocked() {
 			err = entry.SetAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
-			if err != nil {
+			if err != nil && !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
 				return
 			}
+			err = nil
 			writeLockSet = true
 		}
 		lockedInfo.SetReadWriteLocked(true)
