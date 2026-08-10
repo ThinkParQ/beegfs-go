@@ -1549,7 +1549,8 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 			return nil
 		}
 
-		if err := entry.ClearAccessFlags(ctx, path, beegfs.LockedContentAccessFlags); err != nil && (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR)) {
+		err := entry.ClearAccessFlags(ctx, path, beegfs.LockedContentAccessFlags)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
 			return fmt.Errorf("unable to write lock: %w", err)
 		}
 		return nil

@@ -247,8 +247,9 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
+			clearErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags)
+			if clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
+				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearErr))
 			}
 		}
 	}()
