@@ -1014,10 +1014,11 @@ func GetOffloadedUrlPartsFromFile(beegfs filesystem.Provider, path string) (uint
 	return urlRstId, urlKey, nil
 }
 
+var rstUrlRe = regexp.MustCompile(`^rst://([0-9]+):(.+)$`)
+
 func parseRstUrl(url []byte) (uint32, string, error) {
 	urlString := string(url)
-	re := regexp.MustCompile(`^rst://([0-9]+):(.+)$`)
-	matches := re.FindStringSubmatch(urlString)
+	matches := rstUrlRe.FindStringSubmatch(urlString)
 	if len(matches) != 3 {
 		return 0, "", fmt.Errorf("input does not match expected format: rst://<number>:<s3-key>")
 	}
