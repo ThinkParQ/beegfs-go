@@ -346,8 +346,9 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/dir", "", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/dir", "", nil)
 		require.NoError(t, err)
+		assert.Zero(t, activeJobSubmissions)
 	})
 
 	t.Run("setDirRstConfig error is propagated without clearing the lock", func(t *testing.T) {
@@ -359,8 +360,9 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
 		require.ErrorIs(t, err, wantErr)
+		assert.Zero(t, activeJobSubmissions)
 	})
 
 	t.Run("skip from resolvePathStateForRequest returns without clearing the lock", func(t *testing.T) {
@@ -374,8 +376,9 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "", nil)
 		require.NoError(t, err)
+		assert.Zero(t, activeJobSubmissions)
 	})
 
 	t.Run("lock is cleared once processing completes without in-flight work", func(t *testing.T) {
@@ -395,11 +398,12 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
 		assert.True(t, cleared)
 		require.Len(t, w.jobSubmissionCh, 1)
+		assert.Zero(t, activeJobSubmissions)
 	})
 
 	t.Run("existing lock is reported as failed precondition", func(t *testing.T) {
@@ -420,7 +424,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
 		require.Len(t, jobSubmissionCh, 1)
@@ -428,6 +432,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		require.NotNil(t, request.GetGenerationStatus())
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
 		assert.Equal(t, "file access lock is already held", request.GetGenerationStatus().GetMessage())
+		assert.Zero(t, activeJobSubmissions)
 	})
 
 	t.Run("lock is held when any generated request has in-flight work", func(t *testing.T) {
@@ -454,10 +459,11 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
 		require.Len(t, w.jobSubmissionCh, 2)
+		assert.EqualValues(t, 2, activeJobSubmissions)
 	})
 
 	t.Run("clearAccessFlags error is joined into the returned error", func(t *testing.T) {
@@ -475,9 +481,10 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return wantErr
 		}
 
-		err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
+		activeJobSubmissions, err := w.ProcessFromSource(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.ErrorIs(t, err, wantErr)
+		assert.Zero(t, activeJobSubmissions)
 	})
 }
 

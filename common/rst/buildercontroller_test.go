@@ -28,7 +28,7 @@ func TestRequestBuildController_WalkSourceProcessesPathsAndSubmitsRequests(t *te
 	walkCh <- &filesystem.StreamPathResult{Path: "/b"}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 	require.NoError(t, controller.WaitForWalkSources())
 
 	result, resumeToken := controller.GetResults()
@@ -46,7 +46,7 @@ func TestRequestBuildController_WalkSourceSetsResumeTokenAndReschedules(t *testi
 	walkCh <- &filesystem.StreamPathResult{ResumeToken: "resume-token"}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 	require.NoError(t, controller.WaitForWalkSources())
 
 	result, resumeToken := controller.GetResults()
@@ -64,7 +64,7 @@ func TestRequestBuildController_WalkSourceRejectsConflictingResumeTokens(t *test
 	walkCh <- &filesystem.StreamPathResult{ResumeToken: "new-token"}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 	err := controller.WaitForWalkSources()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conflicting walk resume tokens")
@@ -80,7 +80,7 @@ func TestRequestBuildController_WalkSourceReturnsWalkErrors(t *testing.T) {
 	walkCh <- &filesystem.StreamPathResult{Err: walkErr}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 	err := controller.WaitForWalkSources()
 	require.ErrorIs(t, err, walkErr)
 }
@@ -97,7 +97,7 @@ func TestRequestBuildController_WalkSourceConvertsRequestCancelErrorToFailedPrec
 	walkCh <- &filesystem.StreamPathResult{Path: "/a", Err: &RequestCancelError{Reason: errors.New("cancelled")}}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 	require.NoError(t, controller.WaitForWalkSources())
 
 	requests := drainRequests(jobSubmissionCh)
@@ -335,7 +335,7 @@ func TestRequestBuildController_PathProcessingConcurrencyIsBounded(t *testing.T)
 	walkCh <- &filesystem.StreamPathResult{Path: "/c"}
 	close(walkCh)
 
-	controller.WalkSource(walkCh)
+	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
 
 	select {
 	case <-started:
@@ -357,6 +357,15 @@ func TestRequestBuildController_PathProcessingConcurrencyIsBounded(t *testing.T)
 	defer mu.Unlock()
 	assert.Equal(t, 1, maxInFlight)
 	assert.Equal(t, 0, inFlight)
+}
+
+// testWalkChGenerator returns a nextWalkChGenerator that always hands back walkCh, for tests that
+// only need a single walk channel and never expect nextWalkCh to be called with a follow-up resume
+// token.
+func testWalkChGenerator(walkCh <-chan *filesystem.StreamPathResult) nextWalkChGenerator {
+	return func(resumeToken string) (<-chan *filesystem.StreamPathResult, error) {
+		return walkCh, nil
+	}
 }
 
 // submittedPaths closes and drains jobSubmissionCh, returning the path of every submitted request.
