@@ -35,6 +35,10 @@ func (f *fakeBulkOperation) Close(ctx context.Context) error {
 	return f.closeErr
 }
 
+func (m *fakeBulkOperation) Destroy(ctx context.Context) error {
+	return nil
+}
+
 // newTestBulkOperationRegistry builds a bulkOperationRegistry backed by a single rstId (1) mapped to
 // client, mirroring what JobBuilderClient.newBulkOperationRegistry produces but without requiring a
 // pre-populated builderBulkOperations slice.

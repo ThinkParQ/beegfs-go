@@ -142,15 +142,6 @@ func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	}
 }
 
-func (m *MockClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
-	if !m.hasExpectedCall("ExcludeRequestFromBulkOperation") {
-		return nil
-	}
-
-	args := m.Called(ctx, request, reason)
-	return args.Error(0)
-}
-
 func (m *MockClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	if m.hasExpectedCall("IncludeRequestInBulkOperation") {
 		args := m.Called(ctx, request)
@@ -311,6 +302,10 @@ func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *B
 	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
 	return walkCh, func() error { return nil }, nil
+}
+
+func (m *mockBulkOperation) Destroy(ctx context.Context) error {
+	return nil
 }
 
 func getMockRequestLockedInfo(request *beeremote.JobRequest) *flex.JobLockedInfo {

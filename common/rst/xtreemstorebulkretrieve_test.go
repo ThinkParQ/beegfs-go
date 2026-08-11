@@ -238,6 +238,26 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	assert.False(t, result2.Reschedule, "bulk operation should stop rescheduling once every record is marked complete")
 }
 
+// TestProcessSessionBatchKeyReceivedStillWaits ensures a record that has reached
+// xtreemstoreS3BulkRequestReceived (GenerateWorkRequests successfully created a Job for it) is
+// still treated as in-progress, not as an unexpected status. Falling through to the default case
+// here would force-MarkCompleteAck a record whose real download may still be running in
+// ExecuteWorkRequestPart, and report a bogus "unexpected record status" error for it.
+func TestProcessSessionBatchKeyReceivedStillWaits(t *testing.T) {
+	m := &xtreemstoreS3BulkRetrieveManager{rstId: 1}
+	walkCh := make(chan *BulkStreamPathResult, 1)
+
+	done, err := m.processSessionBatchKey(context.Background(), walkCh, "/a", 0, xtreemstoreS3BulkRequestReceived)
+	require.NoError(t, err)
+	assert.False(t, done, "a Received record is still in flight and must not be reported done")
+
+	select {
+	case r := <-walkCh:
+		t.Fatalf("expected no result to be sent for a Received record, got: %+v", r)
+	default:
+	}
+}
+
 // stubHeadObjectClient fakes only HeadObject, the sole s3ApiClient method isObjectReadyForDownload
 // calls.
 type stubHeadObjectClient struct {

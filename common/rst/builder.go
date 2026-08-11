@@ -212,36 +212,39 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 	return ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
 	if abort {
 		bulkOperations := getBulkOperations(workResults)
 		if len(bulkOperations) > 0 {
 			registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
+			reason := fmt.Errorf("builder job %q was aborted", job.GetId())
 
-			var err error
-			waits := []BulkCancelResultFn{}
+			cancelWaits := map[*bulkOperationManager]BulkCancelResultFn{}
 			for _, manager := range registry.GetManagersSnapshot() {
-				walkCh, wait, cancelErr := manager.Cancel(ctx, nil)
+				walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
 				if cancelErr != nil {
-					err = errors.Join(err, cancelErr)
+					err = appendError(err, cancelErr)
 					continue
 				}
 
-				waits = append(waits, wait)
+				cancelWaits[manager] = wait
 				go func() {
 					for range walkCh {
 					}
 				}()
 			}
 
-			for _, wait := range waits {
-				err = errors.Join(err, wait())
+			for manager, cancelWait := range cancelWaits {
+				if cancelWaitErr := cancelWait(); cancelWaitErr != nil {
+					err = appendError(err, cancelWaitErr)
+				} else {
+					err = appendError(err, manager.Destroy(ctx))
+				}
 			}
-			return err
 		}
 	}
 
-	return nil
+	return
 }
 
 func getBulkOperations(workResults []*flex.Work) []*flex.BulkOperation {
@@ -285,10 +288,6 @@ func (c *JobBuilderClient) IsWorkRequestReady(ctx context.Context, workRequest *
 
 func (c *JobBuilderClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	return false, ""
-}
-
-func (c *JobBuilderClient) ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error {
-	return ErrUnsupportedOpForRST
 }
 
 func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
@@ -423,13 +422,6 @@ func parseResumeToken(token string, jobId string) (walkComplete bool, sentinelEr
 		sentinelErr = errors.New(errMessage)
 	}
 	return
-}
-
-func appendError(accumulatedErr error, nextErr error) error {
-	if accumulatedErr == nil {
-		return nextErr
-	}
-	return fmt.Errorf("%w; %w", accumulatedErr, nextErr)
 }
 
 func WalkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {

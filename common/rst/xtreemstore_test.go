@@ -153,7 +153,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve", JobIndex: 0}
 		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
-		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestInitialized.Bytes(), 0o600))
+		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestAdded.Bytes(), 0o600))
 
 		job := &beeremote.Job{Request: &beeremote.JobRequest{
 			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}},

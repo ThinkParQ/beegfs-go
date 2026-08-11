@@ -80,9 +80,17 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 type xtreemstoreS3BulkRequestStatus byte
 
 const (
-	xtreemstoreS3BulkRequestInitialized xtreemstoreS3BulkRequestStatus = iota
+	// Request has been added to bulk operation.
+	xtreemstoreS3BulkRequestAdded xtreemstoreS3BulkRequestStatus = iota
+	// Request has been sent from the bulk operation and is waiting for GenerateWorkRequests to
+	// acknowledge by marking it xtreemstoreS3BulkRequestReceived.
 	xtreemstoreS3BulkRequestSent
+	// Request has been received by GenerateWorkRequests.
+	xtreemstoreS3BulkRequestReceived
+	// Request has been completed from the perspective of the bulk operation but has not been
+	// acknowledged by the bulk operation yet.
 	xtreemstoreS3BulkRequestComplete
+	// Request has been completed and bulk operation has acknowledge the completion.
 	xtreemstoreS3BulkRequestCompleteAck
 )
 
@@ -119,6 +127,17 @@ func (s *xtreemstoreS3BulkStatuses) All() []xtreemstoreS3BulkRequestStatus {
 	}
 
 	return statuses
+}
+
+// xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as complete.
+func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+	manager := &xtreemstoreS3BulkRetrieveManager{
+		rstId:          rstId,
+		mountPath:      mountPath,
+		stateMountPath: bulkInfo.StateMountPath,
+		operation:      bulkInfo.Operation,
+	}
+	return manager.MarkReceived(bulkInfo.JobIndex)
 }
 
 // xtreemstoreS3BulkRetrieveMarkComplete marks a request sent by a bulk operation as complete.
@@ -160,7 +179,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	}
 	request.GetBulkInfo().SetJobIndex(m.includedJobs)
 
-	if _, err = m.statusHandle.Write(xtreemstoreS3BulkRequestInitialized.Bytes()); err != nil {
+	if _, err = m.statusHandle.Write(xtreemstoreS3BulkRequestAdded.Bytes()); err != nil {
 		return
 	}
 
@@ -173,10 +192,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 
 	m.includedJobs++
 	return
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) CancelRequest(ctx context.Context, jobIndex int64, reason error) error {
-	return m.MarkComplete(jobIndex)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
@@ -203,125 +218,71 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 	return executeWalkCh, getResults, nil
 }
 
+// Cancel releases any xtreemstore-side resources reserved for this bulk operation (the active
+// retrieve-session and its batches, if any) and records reason to the errors file so any request
+// that already passed IsWorkRequestReady can see why the operation was cancelled. It deliberately
+// does not resolve individual jobIndexes or delete local state:
+//   - Requests still Added were never handed off anywhere else, so nothing downstream needs to hear
+//     about them; they're simply dropped.
+//   - Requests already Sent/Received depend on their own Job's normal lifecycle
+//     (IsWorkRequestReady, ExecuteWorkRequestPart, or CompleteWorkRequests) to resolve, and that Job
+//     may still be in flight. Deleting local state out from under it here would make its own
+//     mark-complete calls fail (or worse, collide with a future reuse of these files). Local state is
+//     only removed via Destroy, once the owning builder job itself is torn down for good.
+//   - Requests already Complete/CompleteAck are already terminal and are left as-is.
+//
+// reason is always returned (joined with any error releasing xtreemstore resources) so callers treat
+// a cancelled bulk operation as a failure rather than a clean success.
 func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
-	cancelWalkCh := make(chan *BulkStreamPathResult, 128)
+	cancelWalkCh := make(chan *BulkStreamPathResult)
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(cancelWalkCh)
-		if reason != nil {
-			if err := m.CancelRequests(ctx, reason, cancelWalkCh); err != nil {
-				return fmt.Errorf("failed to cancel all bulk operation job requests: %w", err)
-			}
-		} else {
-			statuses, err := m.getAllStatuses()
-			if err != nil {
-				return fmt.Errorf("failed to verify the bulk operation job requests: %w", err)
-			}
-			for _, status := range statuses.All() {
-				_ = status // TODO:
-				switch status {
-				case xtreemstoreS3BulkRequestInitialized:
-				case xtreemstoreS3BulkRequestSent:
-				case xtreemstoreS3BulkRequestComplete:
-				case xtreemstoreS3BulkRequestCompleteAck:
-				default:
-				}
-			}
+
+		if err := m.recordError(reason); err != nil {
+			return appendError(reason, fmt.Errorf("failed to record cancellation reason: %w", err))
 		}
 
 		sessionInfo, err := m.getSessionInfo(ctx)
 		if err != nil {
-			return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
+			return appendError(reason, fmt.Errorf("unable to determine whether retrieve-session is active: %w", err))
 		}
 
-		if !sessionInfo.Active || sessionInfo.RetrieveId != m.state.SessionRetrieveId {
-			if err := m.deleteState(); err != nil {
-				return fmt.Errorf("failed to remove retrieve-session state file: %w", err)
+		if sessionInfo.Active && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
+			batchInfos, err := m.getSessionBatchInfo(ctx)
+			if err != nil {
+				return appendError(reason, fmt.Errorf("failed to get retrieve-session batch info: %w", err))
 			}
-			return nil
-		}
 
-		batchInfos, err := m.getSessionBatchInfo(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get retrieve-session batch info: %w", err)
-		}
+			for _, batchInfo := range batchInfos {
+				if err := m.deleteSessionBatch(ctx, batchInfo); err != nil {
+					return appendError(reason, fmt.Errorf("failed to delete retrieve-session batch: %w", err))
+				}
+			}
 
-		for _, batchInfo := range batchInfos {
-			if err := m.deleteSessionBatch(ctx, batchInfo); err != nil {
-				return fmt.Errorf("failed to delete retrieve-session batch: %w", err)
+			if err := m.destroyRetrieveSession(ctx); err != nil {
+				return appendError(reason, fmt.Errorf("failed to deactivate retrieve-session: %w", err))
 			}
 		}
 
-		if err := m.destroyRetrieveSession(ctx); err != nil {
-			return fmt.Errorf("failed to deactivate retrieve-session: %w", err)
-		}
-
-		if err := m.deleteState(); err != nil {
-			return fmt.Errorf("failed to remove retrieve-session state file: %w", err)
-		}
-
-		return nil
+		return reason
 	})
 
 	return cancelWalkCh, g.Wait, nil
 }
 
-// CancelRequests sends the key for each object that has not been retrieved.
-func (m *xtreemstoreS3BulkRetrieveManager) CancelRequests(ctx context.Context, reason error, walkCh chan<- *BulkStreamPathResult) error {
-	records, err := m.getRecordsFromActiveStart()
-	if err != nil {
-		return fmt.Errorf("unable to determine records to cancel: %w", err)
-	}
-	statuses, err := m.getStatusesFromActiveStart()
-	if err != nil {
-		return fmt.Errorf("unable to determine records to cancel: %w", err)
-	}
-
-	cancelErr := &RequestCancelError{Reason: reason}
-	for index, record := range records {
-		jobIndex := m.state.SessionJobStart + int64(index)
-		if status, err := statuses.Get(jobIndex); err != nil {
-			return fmt.Errorf("unable to send failed job request. Record: %s, Status: %v: %w", record, status, err)
-		} else {
-			switch status {
-			case xtreemstoreS3BulkRequestInitialized:
-				walkCh <- &BulkStreamPathResult{
-					Path:  record,
-					RstId: m.rstId,
-					Err:   cancelErr,
-					BulkInfo: &flex.BulkJobRequestInfo{
-						StateMountPath: m.stateMountPath,
-						Operation:      m.operation,
-						JobIndex:       jobIndex,
-					},
-				}
-				if err := m.MarkComplete(jobIndex); err != nil {
-					return fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", record, status, err)
-				}
-			case xtreemstoreS3BulkRequestSent, xtreemstoreS3BulkRequestComplete, xtreemstoreS3BulkRequestCompleteAck:
-			default:
-				walkCh <- &BulkStreamPathResult{
-					Path:  record,
-					RstId: m.rstId,
-					Err:   fmt.Errorf("unknown record status: %w", cancelErr),
-					BulkInfo: &flex.BulkJobRequestInfo{
-						StateMountPath: m.stateMountPath,
-						Operation:      m.operation,
-						JobIndex:       jobIndex,
-					},
-				}
-				if err := m.MarkComplete(jobIndex); err != nil {
-					return fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", record, status, err)
-				}
-			}
-		}
-	}
-
-	return nil
+// recordError writes reason to the operation's shared errors file, overwriting any previous content.
+func (m *xtreemstoreS3BulkRetrieveManager) recordError(reason error) error {
+	return os.WriteFile(m.getErrorsPath(), []byte(reason.Error()), 0o600)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) Close(ctx context.Context) error {
 	return m.closeState()
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) Destroy(ctx context.Context) error {
+	return m.deleteState()
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) deleteState() error {
@@ -471,7 +432,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 	}
 
 	switch status {
-	case xtreemstoreS3BulkRequestInitialized:
+	// A request that is xtreemstoreS3BulkRequestSent means that remote never received the the job request as the result of a sync worker crash; otherwise,
+	// the status would already be xtreemstoreS3BulkRequestReceived.
+	case xtreemstoreS3BulkRequestAdded, xtreemstoreS3BulkRequestSent:
 		ready, err := m.isObjectReadyForDownload(ctx, key)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -492,7 +455,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 			return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
 		}
 		return false, nil
-	case xtreemstoreS3BulkRequestSent:
+	case xtreemstoreS3BulkRequestReceived:
 		return false, nil
 	case xtreemstoreS3BulkRequestComplete:
 		if err := m.MarkCompleteAck(jobIndex); err != nil {
@@ -611,17 +574,22 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 	return
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error {
-	return m.markJobStatus(xtreemstoreS3BulkRequestCompleteAck, jobIndex)
+func (m *xtreemstoreS3BulkRetrieveManager) MarkSent(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestSent, jobIndex)
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) MarkReceived(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestReceived, jobIndex)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) MarkComplete(jobIndex int64) error {
 	return m.markJobStatus(xtreemstoreS3BulkRequestComplete, jobIndex)
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) MarkSent(jobIndex int64) error {
-	return m.markJobStatus(xtreemstoreS3BulkRequestSent, jobIndex)
+func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error {
+	return m.markJobStatus(xtreemstoreS3BulkRequestCompleteAck, jobIndex)
 }
+
 func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3BulkRequestStatus, jobIndex int64) error {
 	f, err := os.OpenFile(m.getStatusPath(), os.O_WRONLY, os.FileMode(0600))
 	if err != nil {
@@ -816,20 +784,8 @@ func (m *xtreemstoreS3BulkRetrieveManager) getActiveRecordsMap() (map[string]int
 // 	return m.getRecordsMap(m.state.ActiveJobStart, -1)
 // }
 
-func (m *xtreemstoreS3BulkRetrieveManager) getRecordsFromActiveStart() ([]string, error) {
-	return m.getRecords(m.state.SessionJobStart, -1)
-}
-
 func (m *xtreemstoreS3BulkRetrieveManager) getActiveSessionStatuses() (*xtreemstoreS3BulkStatuses, error) {
 	return m.getStatuses(m.state.SessionJobStart, m.state.SessionJobEnd)
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) getStatusesFromActiveStart() (*xtreemstoreS3BulkStatuses, error) {
-	return m.getStatuses(m.state.SessionJobStart, -1)
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) getAllStatuses() (*xtreemstoreS3BulkStatuses, error) {
-	return m.getStatuses(0, -1)
 }
 
 // getRecordsMap returns a mapping of record paths to job indexes for the specified range. Set end

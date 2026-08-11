@@ -184,9 +184,6 @@ type Provider interface {
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
 	IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
-	// ExcludeRequestFromBulkOperation notifies the provider when a previously generated bulk operation
-	// request fails to be submitted. request w
-	ExcludeRequestFromBulkOperation(ctx context.Context, request *beeremote.JobRequest, reason error) error
 	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
 	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
 	// operation for the current builder execution.
@@ -239,6 +236,11 @@ type clientBulkOperation interface {
 	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error)
 	// Close releases any resources that were opened.
 	Close(ctx context.Context) error
+	// Destroy permanently removes this bulk operation's on-disk state. It must only be called once the
+	// operation will never be reopened again (e.g. when the builder job that owns it is being torn down
+	// for good), since AddRequest, Execute, and Cancel all assume these files exist for as long as the
+	// operation is live.
+	Destroy(ctx context.Context) error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
@@ -327,6 +329,10 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			RestorePolicy:       new(request.GetRestorePolicy()),
 			CooldownSecs:        new(request.GetCooldownSecs()),
 			Priority:            new(request.GetPriority()),
+		}
+
+		if request.HasBulkInfo() {
+			wr.BulkInfo = proto.Clone(request.GetBulkInfo()).(*flex.BulkJobRequestInfo)
 		}
 
 		switch request.WhichType() {

@@ -440,6 +440,10 @@ func (s *stubBulkOperation) Close(ctx context.Context) error {
 	return nil
 }
 
+func (m *stubBulkOperation) Destroy(ctx context.Context) error {
+	return nil
+}
+
 // newTestBulkManager builds a *bulkOperationManager backed by a stub clientBulkOperation, so tests
 // can inject Execute/Cancel behavior without a real RST client. executeFn/cancelFn may be nil if the
 // test never exercises that method.

@@ -449,29 +449,13 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 		submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
 		for range submissionWorkers {
 			g.Go(func() error {
-				// Always drain jobSubmissionCh until it is closed, even after cancellation. The
-				// builder job may still have sent ready-requests from client bulk operation(s)
-				// that need ExcludeRequestFromBulkOperation called for them.
+				// Always drain jobSubmissionCh until it is closed, even after cancellation, so the
+				// producer side (ExecuteJobBuilderRequest) never blocks trying to send.
 				for jobRequest := range jobSubmissionCh {
 					if gCtx.Err() != nil {
-						if jobRequest.HasBulkInfo() {
-							if jobRequestClient, ok := w.remoteStorageTargets.Get(jobRequest.RemoteStorageTarget); ok {
-								_ = jobRequestClient.ExcludeRequestFromBulkOperation(work.ctx, jobRequest, context.Cause(gCtx))
-							}
-						}
 						continue
 					}
-					if err := w.sendBuilderJobRequest(gCtx, &builderMu, builder, jobRequest); err != nil && jobRequest.HasBulkInfo() {
-						// Use work.ctx instead of gCtx so this cleanup call is not stopped by the
-						// cancellation below.
-						if jobRequestClient, ok := w.remoteStorageTargets.Get(jobRequest.RemoteStorageTarget); ok {
-							if cErr := jobRequestClient.ExcludeRequestFromBulkOperation(work.ctx, jobRequest, err); cErr != nil {
-								return fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: %w", jobRequest.GetPath(), cErr)
-							}
-						} else {
-							return fmt.Errorf("failed to cancel bulk operation request for path %q after submission failure: remote storage target %d does not exist", jobRequest.GetPath(), jobRequest.RemoteStorageTarget)
-						}
-					}
+					w.sendBuilderJobRequest(gCtx, &builderMu, builder, jobRequest)
 				}
 				return nil
 			})
@@ -553,7 +537,7 @@ func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool
 // sendBuilderJobRequest submits request to BeeRemote, retrying indefinitely while it's unavailable.
 // builder's counters are mutated under mu since this is called concurrently by multiple submission
 // workers sharing the same builder job.
-func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) {
 	const maxSendBuilderJobDelay = 60 * time.Second
 	delay := 1 * time.Second
 
@@ -568,7 +552,7 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 						delay = maxSendBuilderJobDelay
 					}
 				case <-ctx.Done():
-					return ctx.Err()
+					return
 				}
 				continue
 			}
@@ -586,13 +570,12 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 				builder.Errors++
 			}
 			mu.Unlock()
-			return err
+			return
 		}
 
 		mu.Lock()
 		builder.Submitted++
 		mu.Unlock()
-		return nil
 	}
 }
 

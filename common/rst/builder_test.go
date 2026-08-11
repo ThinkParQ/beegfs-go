@@ -16,9 +16,10 @@ import (
 // and waited on, so tests can assert CompleteWorkRequests' abort path drives cancellation through
 // to completion.
 type trackingBulkOperation struct {
-	cancelCalled bool
-	cancelReason error
-	waitCalled   bool
+	cancelCalled  bool
+	cancelReason  error
+	waitCalled    bool
+	destroyCalled bool
 }
 
 func (t *trackingBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
@@ -43,6 +44,11 @@ func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-cha
 }
 
 func (t *trackingBulkOperation) Close(ctx context.Context) error {
+	return nil
+}
+
+func (t *trackingBulkOperation) Destroy(ctx context.Context) error {
+	t.destroyCalled = true
 	return nil
 }
 
@@ -107,6 +113,7 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, tracker.cancelCalled)
 	require.True(t, tracker.waitCalled)
-	require.Nil(t, tracker.cancelReason)
+	require.ErrorContains(t, tracker.cancelReason, `builder job "builder-job" was aborted`)
+	require.True(t, tracker.destroyCalled)
 	mockRST.AssertExpectations(t)
 }
