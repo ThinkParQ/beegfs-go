@@ -207,58 +207,6 @@ func (c *JobBuilderClient) getNextWalkChGenerator(ctx context.Context, workReque
 	return
 }
 
-func (c *JobBuilderClient) getWalkCh(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (walkCh <-chan *filesystem.StreamPathResult, err error) {
-	maxFiles := maxRequests
-	builder := workRequest.GetBuilder()
-	cfg := builder.GetCfg()
-	resumeToken := workRequest.GetExternalId()
-
-	var filter filesystem.FileInfoFilter
-	filterExpr := cfg.GetFilterExpr()
-	if filterExpr != "" {
-		if filter, err = filesystem.CompileFilter(filterExpr); err != nil {
-			err = fmt.Errorf("invalid filter %q: %w", filterExpr, err)
-			return
-		}
-	}
-
-	walkPaths := filesystem.StreamPathsLexicographically
-	if cfg.GetUpdate() || cfg.HasCooldownSecs() {
-		walkPaths = filesystem.StreamPathsLexicographicallyWithDirs
-	}
-
-	if cfg.GetDownload() {
-		if filter != nil {
-			err = fmt.Errorf("filter expressions (--%s) are not supported for downloads yet", filesystem.FilterExprFlag)
-			return
-		}
-
-		if WalkLocalPathInsteadOfRemote(cfg) {
-			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
-			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
-			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			return walkPaths(ctx, c.mountPoint, workRequest.GetPath(), resumeToken, maxFiles, chanSize, nil)
-		} else {
-			client, ok := c.rstMap[cfg.RemoteStorageTarget]
-			if !ok {
-				err = fmt.Errorf("failed to determine rst client")
-				return
-			}
-
-			if walkCh, err = client.GetWalk(ctx, client.SanitizeRemotePath(cfg.GetRemotePath()), chanSize, resumeToken, maxFiles); err != nil {
-				return
-			}
-		}
-	} else {
-		walkCh, err = walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, maxFiles, chanSize, filter)
-		if err != nil {
-			return
-		}
-	}
-
-	return
-}
-
 // ExecuteWorkRequestPart is not implemented and should never be called.
 func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workRequest *flex.WorkRequest, part *flex.Work_Part) error {
 	return ErrUnsupportedOpForRST
