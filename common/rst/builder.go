@@ -213,34 +213,48 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 }
 
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
+
+	// All finished builder jobs should immediately try to complete
+	//		If they're
+
+	bulkOperations := getBulkOperations(workResults)
+	if len(bulkOperations) == 0 {
+		return
+	}
+
+	registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
+
 	if abort {
-		bulkOperations := getBulkOperations(workResults)
-		if len(bulkOperations) > 0 {
-			registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
-			reason := fmt.Errorf("builder job %q was aborted", job.GetId())
+		reason := fmt.Errorf("builder job %q was aborted", job.GetId())
 
-			cancelWaits := map[*bulkOperationManager]BulkCancelResultFn{}
-			for _, manager := range registry.GetManagersSnapshot() {
-				walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
-				if cancelErr != nil {
-					err = appendError(err, cancelErr)
-					continue
-				}
-
-				cancelWaits[manager] = wait
-				go func() {
-					for range walkCh {
-					}
-				}()
+		cancelWaits := map[*bulkOperationManager]BulkCancelResultFn{}
+		for _, manager := range registry.GetManagersSnapshot() {
+			walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
+			if cancelErr != nil {
+				err = appendError(err, fmt.Errorf("failed to cancel bulk operation %s: %w", manager.Key(), cancelErr))
+				continue
 			}
 
-			for manager, cancelWait := range cancelWaits {
-				if cancelWaitErr := cancelWait(); cancelWaitErr != nil {
-					err = appendError(err, cancelWaitErr)
-				} else {
-					err = appendError(err, manager.Destroy(ctx))
+			cancelWaits[manager] = wait
+			go func() {
+				for range walkCh {
 				}
+			}()
+		}
+
+		for manager, wait := range cancelWaits {
+			if waitErr := wait(); waitErr != nil {
+				err = appendError(err, fmt.Errorf("failed to wait for bulk operation %s to cancel: %w", manager.Key(), waitErr))
+			} else if destroyErr := manager.Destroy(ctx); destroyErr != nil {
+				err = appendError(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
 			}
+		}
+		return
+	}
+
+	for _, manager := range registry.GetManagersSnapshot() {
+		if destroyErr := manager.Destroy(ctx); destroyErr != nil {
+			err = appendError(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
 		}
 	}
 

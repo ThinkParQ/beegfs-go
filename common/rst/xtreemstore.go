@@ -80,8 +80,8 @@ func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjec
 }
 
 func (x *xtreemstoreS3Provider) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
-	request := job.GetRequest()
 	defer func() {
+		request := job.GetRequest()
 		if request.HasBulkInfo() {
 			bulkInfo := request.GetBulkInfo()
 			operation := parseBulkOperation(bulkInfo.Operation)
@@ -143,7 +143,6 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 					}
 				}
 			default:
-				// err already explains the operation is unsupported; there's nothing to mark complete.
 			}
 		}()
 
@@ -168,8 +167,8 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 }
 
 func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
-	request := job.GetRequest()
 	defer func() {
+		request := job.GetRequest()
 		if request.HasBulkInfo() {
 			bulkInfo := request.GetBulkInfo()
 			operation := parseBulkOperation(bulkInfo.Operation)
@@ -182,7 +181,6 @@ func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *b
 					}
 				}
 			default:
-				// err already explains the operation is unsupported; there's nothing to mark complete.
 			}
 		}
 	}()
@@ -214,7 +212,6 @@ func (x *xtreemstoreS3Provider) OpenBulkOperation(ctx context.Context, stateMoun
 	case xtreemstoreS3BulkOperationRetrieve:
 		manager := x.newXtreemstoreS3BulkRetrieveManager(stateMountPath, operation)
 		if err := manager.openState(); err != nil {
-			manager.closeState()
 			return nil, fmt.Errorf("failed to open bulk operation: %w", err)
 		}
 
