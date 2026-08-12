@@ -94,17 +94,13 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		reason = fmt.Errorf("request was aborted: %w", reason)
 		managers := registry.GetManagersSnapshot()
 		if len(managers) == 0 {
-			return &SchedulingResult{Err: MarkBuilderCancelled(reason)}
+			return &SchedulingResult{Err: reason}
 		}
 
 		for _, manager := range managers {
 			controller.CancelBulkOperation(manager, reason)
 		}
-		err := controller.WaitForBulkOperations()
-		if registry.IsFailedManager() {
-			return &SchedulingResult{Err: MarkBuilderFailed(reason, err)}
-		}
-		return &SchedulingResult{Err: MarkBuilderCancelled(reason, err)}
+		return &SchedulingResult{Err: appendError(reason, controller.WaitForBulkOperations())}
 	}
 
 	resumeToken := workRequest.GetExternalId()
@@ -139,16 +135,12 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	if resumeToken == "" || walkErr != nil {
 		resumeToken = buildWalkCompleteSentinel(workRequest.JobId, walkErr)
 	}
+
 	workRequest.SetExternalId(resumeToken)
 	if result.Reschedule {
 		return
 	}
-
-	if registry.IsFailedManager() {
-		result.Err = MarkBuilderFailed(result.Err)
-	} else if walkErr != nil {
-		result.Err = MarkBuilderCancelled(result.Err, walkErr)
-	}
+	result.Err = appendError(result.Err, walkErr)
 	return
 }
 

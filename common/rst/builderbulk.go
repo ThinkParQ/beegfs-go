@@ -203,6 +203,13 @@ func (m *bulkOperationManager) Close(ctx context.Context) error {
 	return m.clientBulkOperation.Close(ctx)
 }
 
+func (m *bulkOperationManager) Destroy(ctx context.Context) error {
+	if m.clientBulkOperation == nil {
+		return nil
+	}
+	return m.clientBulkOperation.Destroy(ctx)
+}
+
 func (m *bulkOperationManager) AppendError(err error) {
 	if err == nil {
 		return

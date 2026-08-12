@@ -41,45 +41,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var (
-	// ErrBuilderFailed marks a builder-level termination that must leave the work request in the
-	// FAILED state. Use it when the builder can no longer continue and the builder/provider state
-	// may require cleanup or manual attention.
-	ErrBuilderFailed = errors.New("builder failed")
-	// ErrBuilderCancelled marks a builder-level termination that must leave the work request in
-	// the CANCELLED state. Use it when the builder can no longer continue, but it has not entered
-	// a failed/invalid state that requires failed-job cleanup semantics.
-	ErrBuilderCancelled = errors.New("builder cancelled")
-)
-
-func MarkBuilderFailed(errs ...error) error {
-	return markBuilderWithSentinel(ErrBuilderFailed, errs...)
-}
-
-func MarkBuilderCancelled(errs ...error) error {
-	return markBuilderWithSentinel(ErrBuilderCancelled, errs...)
-}
-
-func markBuilderWithSentinel(sentinel error, errs ...error) (err error) {
-	for _, nextErr := range errs {
-		if nextErr == nil {
-			continue
-		}
-		if err == nil {
-			err = nextErr
-		} else {
-			err = fmt.Errorf("%w; %w", err, nextErr)
-		}
-	}
-
-	if err == nil {
-		return sentinel
-	} else if errors.Is(err, sentinel) {
-		return err
-	}
-	return fmt.Errorf("%w: %w", sentinel, err)
-}
-
 // SupportedRSTTypes is used with SetRSTTypeHook in the config package to allows configuring with
 // multiple RST types without writing repetitive code. The map contains the all lowercase string
 // identifier of the prefix key of the TOML table used to indicate the configuration options for a

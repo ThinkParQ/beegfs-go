@@ -553,9 +553,9 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 	mockBeeRemote.AssertExpectations(t)
 }
 
-// Verifies that if a builder execution submits one or more bulk child jobs and then reports a
-// ErrBuilderFailed, the worker still forwards the already-emitted child jobs, marks the builder work as
-// failed because the bulk operation did not finish, and cleans up the local work state.
+// Verifies that if a builder execution submits one or more bulk child jobs and then reports an
+// error, the worker still forwards the already-emitted child jobs, marks the builder work as
+// cancelled because the bulk operation did not finish, and cleans up the local work state.
 func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t *testing.T) {
 	mgr, deferredFuncs, err := getTestManager(t)
 	defer func() {
@@ -631,12 +631,12 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 				},
 			}
 		}).
-		Return(false, time.Duration(0), rst.MarkBuilderFailed(fmt.Errorf("bulk restore session failed"))).Once()
+		Return(false, time.Duration(0), fmt.Errorf("bulk restore session failed")).Once()
 
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-bulkerr-job", "0", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("submitJob", matchSubmittedJobRequest("/bulk/source/first", "retrieve", 0)).Return(nil).Times(1)
 	mockBeeRemote.On("submitJob", matchSubmittedJobRequest("/bulk/source/second", "retrieve", 1)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderBulkOperations("bulk-builder-bulkerr-job", "0", flex.Work_FAILED, []*flex.BulkOperation{
+	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderBulkOperations("bulk-builder-bulkerr-job", "0", flex.Work_CANCELLED, []*flex.BulkOperation{
 		flex.BulkOperation_builder{
 			StateMountPath: ".beegfs-rst/job/bulk-builder-bulkerr-job/1",
 			RstId:          1,
@@ -653,7 +653,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 	select {
 	case <-failedSent:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for builder failure after ErrBuilderFailed")
+		t.Fatal("timed out waiting for builder cancellation after builder error")
 	}
 
 	require.Eventually(t, func() bool {
@@ -667,8 +667,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 	mockBeeRemote.AssertExpectations(t)
 }
 
-// Verifies that if a builder reports ErrBuilderFailed before any bulk operations were actually created,
-// the worker still reports the builder as failed and includes an empty JobBuilderInfo so the
+// Verifies that if a builder reports an error before any bulk operations were actually created,
+// the worker still reports the builder as cancelled and includes an empty JobBuilderInfo so the
 // provider can decide whether any cleanup is needed.
 func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithEmptyBuilderInfo(t *testing.T) {
 	mgr, deferredFuncs, err := getTestManager(t)
@@ -704,10 +704,10 @@ func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithEmptyBu
 
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-no-bulkops-job", "0")).Return(true, time.Duration(0), nil).Times(1)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-no-bulkops-job", "0"), mock.Anything).
-		Return(false, time.Duration(0), rst.MarkBuilderFailed(fmt.Errorf("bulk restore session failed before session creation"))).Once()
+		Return(false, time.Duration(0), fmt.Errorf("bulk restore session failed before session creation")).Once()
 
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-no-bulkops-job", "0", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderInfo("bulk-builder-no-bulkops-job", "0", flex.Work_FAILED, []*flex.BulkOperation{})).
+	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderInfo("bulk-builder-no-bulkops-job", "0", flex.Work_CANCELLED, []*flex.BulkOperation{})).
 		Run(func(args mock.Arguments) {
 			actual := args.Get(0).(*flex.Work)
 			require.Contains(t, actual.GetStatus().GetMessage(), "bulk restore session failed before session creation")
@@ -722,7 +722,7 @@ func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithEmptyBu
 	select {
 	case <-failedSent:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for builder failure after ErrBuilderFailed without bulk operations")
+		t.Fatal("timed out waiting for builder cancellation after builder error without bulk operations")
 	}
 
 	require.Eventually(t, func() bool {

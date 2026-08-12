@@ -468,7 +468,7 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 		}
 
 		if schedulingResult == nil {
-			schedulingResult = &rst.SchedulingResult{Err: rst.MarkBuilderFailed(fmt.Errorf("job builder returned unexpected scheduling result"))}
+			schedulingResult = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
 		}
 
 		bulkOperations := builder.GetBulkOperations()
@@ -588,33 +588,18 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 	builder := workRequest.GetBuilder()
 	status := workResult.GetStatus()
 
-	builderErr := getBuilderResults(builder)
+	builderMessage, builderHasErrors := getBuilderResults(builder)
 	defer func() {
-		status.SetMessage(appendMessage(status.Message, builderErr.Error()))
+		status.SetMessage(appendMessage(status.Message, builderMessage))
 		if w.sendWorkResult(work, workResult.Work) && !result.Reschedule {
 			cleanupEntries = true
 		}
-
-		fmt.Println(status.Message)
-
 	}()
 
 	if result.Err != nil {
-		// Builder-level termination is driven by the classification of result.Err and builderErr.
-		// Individual request errors should already have been reported on the submitted requests via
-		// GenerationStatus and accounted for in the builder counters rather than forcing builder
-		// termination here.
 		message := result.Err.Error()
-		if errors.Is(builderErr, rst.ErrBuilderFailed) {
-			status.SetState(flex.Work_FAILED)
-			status.SetMessage("job builder failed to complete: " + message)
-		} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("job builder failed to complete: " + message)
-		} else {
-			status.SetState(flex.Work_FAILED)
-			status.SetMessage("job builder returned unclassified error: " + message)
-		}
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("job builder failed to complete: " + message)
 	} else if result.Reschedule {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for builder job to continue")
@@ -626,10 +611,7 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 				attrPriority.Int(normalizedPriority(request.GetPriority())),
 			),
 		)
-	} else if errors.Is(builderErr, rst.ErrBuilderFailed) {
-		status.SetState(flex.Work_FAILED)
-		status.SetMessage("completed with errors")
-	} else if errors.Is(builderErr, rst.ErrBuilderCancelled) {
+	} else if builderHasErrors {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("completed with errors")
 	} else {
@@ -640,8 +622,9 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 	return
 }
 
-// getBuilderResults generates a status message based on the builder submission counters.
-func getBuilderResults(builder *flex.BuilderJob) (err error) {
+// getBuilderResults generates a status message based on the builder submission counters and
+// reports whether any of those counters (or a bulk operation) indicate a failure.
+func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool) {
 	cfg := builder.GetCfg()
 	jobsSubmitted := builder.GetSubmitted()
 	jobsErrors := builder.GetErrors()
@@ -650,19 +633,16 @@ func getBuilderResults(builder *flex.BuilderJob) (err error) {
 	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
 	jobsAlreadyExist := builder.GetJobsAlreadyExist()
 
-	var parts []string
-	markCancelled := false
-	markedFailed := false
-
 	for _, bulkOperation := range builder.BulkOperations {
 		if bulkOperation.Failed {
-			markedFailed = true
+			hasErrors = true
 		}
 	}
 
+	var parts []string
 	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist
-	failures := jobsErrors + jobsNotAllowed
 	if jobsProcessed == 0 {
+		hasErrors = true
 		if cfg.Download {
 			if rst.WalkLocalPathInsteadOfRemote(cfg) {
 				parts = append(parts, fmt.Sprintf("walked local path since --%s was not provided; No matches found in path: %s", rst.RemotePathFlag, cfg.Path))
@@ -672,9 +652,6 @@ func getBuilderResults(builder *flex.BuilderJob) (err error) {
 		} else {
 			parts = append(parts, fmt.Sprintf("no matches found in local path: %s", cfg.Path))
 		}
-		markCancelled = true
-	} else if failures > 0 {
-		markCancelled = true
 	}
 
 	if jobsSubmitted > 0 {
@@ -691,16 +668,12 @@ func getBuilderResults(builder *flex.BuilderJob) (err error) {
 	}
 	if jobsNotAllowed > 0 {
 		parts = append(parts, fmt.Sprintf("%d not allowed", jobsNotAllowed))
+		hasErrors = true
 	}
 	if jobsErrors > 0 {
 		parts = append(parts, fmt.Sprintf("%d submitted with errors", jobsErrors))
+		hasErrors = true
 	}
 
-	err = fmt.Errorf("%s", strings.Join(parts, "; "))
-	if markedFailed {
-		err = rst.MarkBuilderFailed(err)
-	} else if markCancelled {
-		err = rst.MarkBuilderCancelled(err)
-	}
-	return
+	return strings.Join(parts, "; "), hasErrors
 }
