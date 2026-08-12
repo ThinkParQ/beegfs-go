@@ -9,14 +9,17 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsConfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -163,6 +166,17 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 	}
 }
 
+const s3ClientMinMaxIdleConns = 200
+
+// s3ClientMaxIdleConns overrides the AWS SDK's default MaxIdleConns/MaxIdleConnsPerHost. A single
+// RST config only ever talks to one host, so per-host reuse shouldn't be capped well below the
+// total. It scales with GOMAXPROCS, using the same multiplier the request build controller uses for
+// its own concurrency, so it stays proportional to the actual concurrency source instead of
+// drifting out of sync with it as a second, unrelated constant.
+func s3ClientMaxIdleConns() int {
+	return max(s3ClientMinMaxIdleConns, 2*int(requestBuildControllerWorkerMultiplier)*runtime.GOMAXPROCS(0))
+}
+
 // newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
 // created, so shared wrapper state can rely on apiClient already being populated.
 func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (Provider, error) {
@@ -177,10 +191,17 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 		}
 	}
 
+	maxIdleConns := s3ClientMaxIdleConns()
+	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		tr.MaxIdleConns = maxIdleConns
+		tr.MaxIdleConnsPerHost = maxIdleConns
+	})
+
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
 		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
 		awsConfig.WithRegion(s3Config.GetRegion()),
+		awsConfig.WithHTTPClient(httpClient),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
 				s3Config.GetAccessKey(),
