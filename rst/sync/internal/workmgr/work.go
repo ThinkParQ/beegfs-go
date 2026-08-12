@@ -576,6 +576,7 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 		mu.Lock()
 		builder.Submitted++
 		mu.Unlock()
+		return
 	}
 }
 

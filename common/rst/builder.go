@@ -213,10 +213,6 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 }
 
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
-
-	// All finished builder jobs should immediately try to complete
-	//		If they're
-
 	bulkOperations := getBulkOperations(workResults)
 	if len(bulkOperations) == 0 {
 		return
