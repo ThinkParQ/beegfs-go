@@ -81,24 +81,7 @@ func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjec
 
 func (x *xtreemstoreS3Provider) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	defer func() {
-		request := job.GetRequest()
-		if request.HasBulkInfo() {
-			bulkInfo := request.GetBulkInfo()
-			operation := parseBulkOperation(bulkInfo.Operation)
-
-			switch operation {
-			case xtreemstoreS3BulkOperationRetrieve:
-				if err != nil {
-					if bulkErr := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-						err = fmt.Errorf("%w: failed to mark bulk request complete: %w", err, bulkErr)
-					}
-				} else if bulkErr := xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-					err = fmt.Errorf("%w: failed to mark bulk request received: %w", err, bulkErr)
-				}
-			default:
-				err = fmt.Errorf("%w: unknown xtreemstore bulk operation %q, unable to mark request complete: %w", err, bulkInfo.Operation, ErrUnsupportedOpForRST)
-			}
-		}
+		err = x.resolveBulkRequest(job.GetRequest().GetBulkInfo(), xtreemstoreS3BulkRequestReceived, err)
 	}()
 
 	requests, err = x.Provider.GenerateWorkRequests(ctx, lastJob, job, availableWorkers)
@@ -107,22 +90,7 @@ func (x *xtreemstoreS3Provider) GenerateWorkRequests(ctx context.Context, lastJo
 
 func (x *xtreemstoreS3Provider) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) (err error) {
 	defer func() {
-		if request.HasBulkInfo() {
-			bulkInfo := request.GetBulkInfo()
-			operation := parseBulkOperation(bulkInfo.Operation)
-
-			switch operation {
-			case xtreemstoreS3BulkOperationRetrieve:
-				if err != nil {
-					// It's safe to mark the same request as complete for multiple work requests.
-					if bulkErr := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-						err = fmt.Errorf("%w: failed to mark bulk request complete: %w", err, bulkErr)
-					}
-				}
-			default:
-				err = fmt.Errorf("%w: unknown xtreemstore bulk operation %q, unable to mark request complete: %w", err, bulkInfo.Operation, ErrUnsupportedOpForRST)
-			}
-		}
+		err = x.resolveBulkRequest(request.GetBulkInfo(), xtreemstoreS3BulkRequestUnchanged, err)
 	}()
 
 	err = x.Provider.ExecuteWorkRequestPart(ctx, request, part)
@@ -134,37 +102,27 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 		return false, 0, ErrReqAndRSTTypeMismatch
 	}
 
-	if request.HasBulkInfo() {
-		bulkInfo := request.GetBulkInfo()
-		operation := parseBulkOperation(bulkInfo.Operation)
-		defer func() {
-			switch operation {
-			case xtreemstoreS3BulkOperationRetrieve:
-				if err != nil {
-					// It's safe to mark the same request as complete for multiple work requests.
-					if bulkErr := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-						err = fmt.Errorf("%w: failed to mark bulk request complete: %w", err, bulkErr)
-					}
-				}
-			default:
-			}
-		}()
+	bulkInfo := request.GetBulkInfo()
+	if bulkInfo == nil {
+		return x.Provider.IsWorkRequestReady(ctx, request)
+	}
 
-		switch operation {
-		case xtreemstoreS3BulkOperationRetrieve:
-			if bulkErr := xtreemstoreS3BulkRetrieveError(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-				// Bulk operation requests must be ready before they are sent, so either an error occurred
-				// or the bulk request was aborted. For a bulk retrieve operation, the resource was
-				// retrieved but removed from the tape buffer before the download.
-				err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
-			} else {
-				ready = true
-			}
-		default:
-			err = fmt.Errorf("failed to determine bulk request readiness for operation %q: %w", bulkInfo.Operation, ErrUnsupportedOpForRST)
+	defer func() {
+		err = x.resolveBulkRequest(bulkInfo, xtreemstoreS3BulkRequestUnchanged, err)
+	}()
+
+	switch parseBulkOperation(bulkInfo.Operation) {
+	case xtreemstoreS3BulkOperationRetrieve:
+		if bulkErr := xtreemstoreS3BulkRetrieveError(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
+			// Bulk operation requests must be ready before they are sent, so either an error occurred
+			// or the bulk request was aborted. For a bulk retrieve operation, the resource was
+			// retrieved but removed from the tape buffer before the download.
+			err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
+		} else {
+			ready = true
 		}
-	} else {
-		ready, delay, err = x.Provider.IsWorkRequestReady(ctx, request)
+	default:
+		err = fmt.Errorf("failed to determine bulk request readiness for operation %q: %w", bulkInfo.Operation, ErrUnsupportedOpForRST)
 	}
 
 	return
@@ -177,23 +135,7 @@ func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *b
 	}
 
 	defer func() {
-		request := job.GetRequest()
-		if request.HasBulkInfo() {
-			bulkInfo := request.GetBulkInfo()
-			operation := parseBulkOperation(bulkInfo.Operation)
-
-			switch operation {
-			case xtreemstoreS3BulkOperationRetrieve:
-				if bulkErr := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-					if err != nil {
-						err = fmt.Errorf("%w; failed to mark bulk request complete: %w", err, bulkErr)
-					} else {
-						err = fmt.Errorf("failed to mark bulk request complete: %w", bulkErr)
-					}
-				}
-			default:
-			}
-		}
+		err = x.resolveBulkRequest(job.GetRequest().GetBulkInfo(), xtreemstoreS3BulkRequestComplete, err)
 	}()
 
 	err = x.Provider.CompleteWorkRequests(ctx, job, workResults, abort)
@@ -242,4 +184,102 @@ func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPa
 		operation:      operation,
 		state:          &xtreemstoreS3BulkRetrieveManagerState{},
 	}
+}
+
+type xtreemstoreS3BulkRequestStatus byte
+
+const (
+	// Request has been added to bulk operation.
+	xtreemstoreS3BulkRequestAdded xtreemstoreS3BulkRequestStatus = iota
+	// Request has been sent from the bulk operation and is waiting for GenerateWorkRequests to
+	// acknowledge by marking it xtreemstoreS3BulkRequestReceived.
+	xtreemstoreS3BulkRequestSent
+	// Request has been received by GenerateWorkRequests.
+	xtreemstoreS3BulkRequestReceived
+	// Request has been completed from the perspective of the bulk operation but has not been
+	// acknowledged by the bulk operation yet.
+	xtreemstoreS3BulkRequestComplete
+	// Request has been completed and bulk operation has acknowledge the completion.
+	xtreemstoreS3BulkRequestCompleteAcked
+	// xtreemstoreS3BulkRequestUnchanged is not a real status and is never persisted. It is only used
+	// as a resolveBulkRequest on-success argument, to say the request is still in flight and a later
+	// stage is responsible for resolving it.
+	xtreemstoreS3BulkRequestUnchanged = 255
+)
+
+func (s xtreemstoreS3BulkRequestStatus) String() string {
+	switch s {
+	case xtreemstoreS3BulkRequestAdded:
+		return "added"
+	case xtreemstoreS3BulkRequestSent:
+		return "sent"
+	case xtreemstoreS3BulkRequestReceived:
+		return "received"
+	case xtreemstoreS3BulkRequestComplete:
+		return "complete"
+	case xtreemstoreS3BulkRequestCompleteAcked:
+		return "complete-acked"
+	case xtreemstoreS3BulkRequestUnchanged:
+		return "unchanged"
+	default:
+		return "unknown"
+	}
+}
+
+func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
+	return []byte{byte(s)}
+}
+
+type xtreemstoreS3BulkStatuses struct {
+	jobStatuses []byte
+	jobCount    int64
+	offset      int64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
+}
+
+func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3BulkRequestStatus, err error) {
+	if jobIndex < s.offset {
+		err = fmt.Errorf("invalid index for active session")
+		return
+	}
+
+	statusesJobIndex := jobIndex - s.offset
+	if statusesJobIndex >= int64(len(s.jobStatuses)) {
+		err = fmt.Errorf("invalid index for active session")
+		return
+	}
+	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
+}
+
+func (x *xtreemstoreS3Provider) resolveBulkRequest(bulkInfo *flex.BulkJobRequestInfo, onSuccess xtreemstoreS3BulkRequestStatus, opErr error) error {
+	if bulkInfo == nil {
+		return opErr
+	}
+
+	switch parseBulkOperation(bulkInfo.Operation) {
+	case xtreemstoreS3BulkOperationRetrieve:
+	default:
+		return appendError(opErr, fmt.Errorf("unknown xtreemstore bulk operation %q, unable to resolve request: %w", bulkInfo.Operation, ErrUnsupportedOpForRST))
+	}
+
+	outcome := onSuccess
+	if opErr != nil {
+		outcome = xtreemstoreS3BulkRequestComplete
+	}
+
+	var bulkErr error
+	switch outcome {
+	case xtreemstoreS3BulkRequestUnchanged:
+	case xtreemstoreS3BulkRequestReceived:
+		bulkErr = xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath())
+	case xtreemstoreS3BulkRequestComplete:
+		// It's safe to mark the same request complete more than once.
+		bulkErr = xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath())
+	default:
+		bulkErr = fmt.Errorf("unexpected on-success bulk request status %q for bulk operation %q (this is probably a bug)", outcome, bulkInfo.Operation)
+	}
+	if bulkErr != nil {
+		return appendError(opErr, fmt.Errorf("failed to mark bulk request %s: %w", outcome, bulkErr))
+	}
+
+	return opErr
 }

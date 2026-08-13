@@ -85,47 +85,6 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
 }
 
-type xtreemstoreS3BulkRequestStatus byte
-
-const (
-	// Request has been added to bulk operation.
-	xtreemstoreS3BulkRequestAdded xtreemstoreS3BulkRequestStatus = iota
-	// Request has been sent from the bulk operation and is waiting for GenerateWorkRequests to
-	// acknowledge by marking it xtreemstoreS3BulkRequestReceived.
-	xtreemstoreS3BulkRequestSent
-	// Request has been received by GenerateWorkRequests.
-	xtreemstoreS3BulkRequestReceived
-	// Request has been completed from the perspective of the bulk operation but has not been
-	// acknowledged by the bulk operation yet.
-	xtreemstoreS3BulkRequestComplete
-	// Request has been completed and bulk operation has acknowledge the completion.
-	xtreemstoreS3BulkRequestCompleteAck
-)
-
-func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
-	return []byte{byte(s)}
-}
-
-type xtreemstoreS3BulkStatuses struct {
-	jobStatuses []byte
-	jobCount    int64
-	offset      int64 // this will correspond the xtreemstoreS3BulkRetrieveManager.state.ActiveJobStart at the time retrieved
-}
-
-func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3BulkRequestStatus, err error) {
-	if jobIndex < s.offset {
-		err = fmt.Errorf("invalid index for active session")
-		return
-	}
-
-	statusesJobIndex := jobIndex - s.offset
-	if statusesJobIndex >= int64(len(s.jobStatuses)) {
-		err = fmt.Errorf("invalid index for active session")
-		return
-	}
-	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
-}
-
 // xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as complete.
 func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
@@ -487,7 +446,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 			return false, fmt.Errorf("failed to mark bulk job request as complete and acknowledged. Record: %s, Status: %v", key, status)
 		}
 		terminal = true
-	case xtreemstoreS3BulkRequestCompleteAck:
+	case xtreemstoreS3BulkRequestCompleteAcked:
 		terminal = true
 	default:
 		result := &BulkStreamPathResult{
@@ -648,7 +607,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) MarkComplete(jobIndex int64) error {
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error {
-	return m.markJobStatus(xtreemstoreS3BulkRequestCompleteAck, jobIndex)
+	return m.markJobStatus(xtreemstoreS3BulkRequestCompleteAcked, jobIndex)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3BulkRequestStatus, jobIndex int64) (err error) {
