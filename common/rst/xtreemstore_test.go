@@ -133,6 +133,17 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 	})
 }
 
+// completedWorkResults returns a minimal terminal-success work result. CompleteWorkRequests only
+// resolves a job whose work results reached a terminal success state unless the caller explicitly
+// aborts, so tests exercising the non-abort path must supply one.
+func completedWorkResults() []*flex.Work {
+	return []*flex.Work{
+		flex.Work_builder{
+			Status: flex.Work_Status_builder{State: flex.Work_COMPLETED}.Build(),
+		}.Build(),
+	}
+}
+
 func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 	t.Run("non-sync request is rejected", func(t *testing.T) {
 		x := &xtreemstoreS3Provider{}
@@ -161,7 +172,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		}}
 		mockProvider.On("CompleteWorkRequests", job, mock.Anything, false).Return(nil)
 
-		err := x.CompleteWorkRequests(context.Background(), job, nil, false)
+		err := x.CompleteWorkRequests(context.Background(), job, completedWorkResults(), false)
 		require.NoError(t, err)
 		mockProvider.AssertExpectations(t)
 
@@ -187,7 +198,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		}}
 		mockProvider.On("CompleteWorkRequests", job, mock.Anything, false).Return(assert.AnError)
 
-		err := x.CompleteWorkRequests(context.Background(), job, nil, false)
+		err := x.CompleteWorkRequests(context.Background(), job, completedWorkResults(), false)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "failed to mark bulk request complete")
 		assert.ErrorIs(t, err, assert.AnError)

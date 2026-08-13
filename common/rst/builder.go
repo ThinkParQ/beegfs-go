@@ -205,6 +205,14 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 }
 
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
+
 	bulkOperations := getBulkOperations(workResults)
 	if len(bulkOperations) == 0 {
 		return

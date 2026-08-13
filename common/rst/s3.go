@@ -862,6 +862,14 @@ func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*f
 }
 
 func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
+
 	request := job.GetRequest()
 	sync := request.GetSync()
 
@@ -924,6 +932,14 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 }
 
 func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
+
 	request := job.GetRequest()
 	sync := request.GetSync()
 

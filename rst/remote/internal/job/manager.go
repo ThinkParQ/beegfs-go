@@ -1428,15 +1428,6 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 	}()
 
-	// This might happen if WRs could complete on some nodes, but not on other nodes. This could be
-	// due to some worker nodes having an issue uploading their segments to the RST, or a user
-	// cancelling the job partway through while some WRs are complete and others are still running.
-	if !allSameState {
-		status.SetState(beeremote.Job_UNKNOWN)
-		status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
-		return nil
-	}
-
 	rst, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
 	if !ok {
 		// We shouldn't return an error here. The caller (a worker node) can't do anything about
@@ -1444,6 +1435,21 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		// nothing we can do unless they were to add it back.
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage(fmt.Sprintf("unable to complete job because the RST no longer exists: %d (add it back or manually cleanup any artifacts from this job)", job.Request.GetRemoteStorageTarget()))
+		return nil
+	}
+
+	// This might happen if WRs could complete on some nodes, but not on other nodes. This could be
+	// due to some worker nodes having an issue uploading their segments to the RST, or a user
+	// cancelling the job partway through while some WRs are complete and others are still running.
+	if !allSameState {
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			status.SetState(beeremote.Job_UNKNOWN)
+			status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 		return nil
 	}
 
@@ -1479,17 +1485,29 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			attemptToClearLock = true
 		}
 	case flex.Work_FAILED:
-		// Something that went wrong that requires user intervention. We don't know what so don't
-		// try to complete or abort the request as it may make it more difficult to recover.
-		status.SetState(beeremote.Job_FAILED)
-		status.SetMessage("job cannot continue without user intervention (see work results for details)")
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			// Something that went wrong that requires user intervention. We don't know what so don't
+			// try to complete or abort the request as it may make it more difficult to recover.
+			status.SetState(beeremote.Job_FAILED)
+			status.SetMessage("job cannot continue without user intervention (see work results for details): " + err.Error())
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 	default:
-		status.SetState(beeremote.Job_UNKNOWN)
-		status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
-		// We return an error here because this is an internal problem that shouldn't happen and
-		// hopefully a test will catch it. Most likely some new terminal states were added and this
-		// function needs to be updated.
-		return fmt.Errorf("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior): %s", entryToUpdate.Status().GetState())
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			status.SetState(beeremote.Job_UNKNOWN)
+			status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
+			// We return an error here because this is an internal problem that shouldn't happen and
+			// hopefully a test will catch it. Most likely some new terminal states were added and this
+			// function needs to be updated.
+			return fmt.Errorf("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior): %s", entryToUpdate.Status().GetState())
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 	}
 	m.log.Debug("job result", zap.Any("job", job))
 	return nil

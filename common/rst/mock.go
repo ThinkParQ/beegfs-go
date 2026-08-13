@@ -178,6 +178,13 @@ func (m *MockClient) OpenBulkOperation(ctx context.Context, stateMountPath strin
 }
 
 func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
