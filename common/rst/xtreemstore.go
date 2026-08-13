@@ -211,7 +211,7 @@ func (x *xtreemstoreS3Provider) IncludeRequestInBulkOperation(ctx context.Contex
 		return
 	}
 
-	if lockedInfo.IsArchived {
+	if sync.Operation == flex.SyncJob_DOWNLOAD && lockedInfo.IsArchived {
 		include = true
 		operation = xtreemstoreS3BulkOperationRetrieve.String()
 	}

@@ -126,17 +126,6 @@ func (s *xtreemstoreS3BulkStatuses) Get(jobIndex int64) (status xtreemstoreS3Bul
 	return xtreemstoreS3BulkRequestStatus(s.jobStatuses[statusesJobIndex]), nil
 }
 
-func (s *xtreemstoreS3BulkStatuses) All() []xtreemstoreS3BulkRequestStatus {
-	statuses := make([]xtreemstoreS3BulkRequestStatus, s.jobCount)
-	for jobIndex := range s.jobCount {
-		// Ignore status error since the jobIndex is valid.
-		status, _ := s.Get(jobIndex)
-		statuses[jobIndex] = status
-	}
-
-	return statuses
-}
-
 // xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as complete.
 func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
@@ -433,10 +422,21 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatch(
 	return
 }
 
+// sendBulkResult delivers result on walkCh, giving up if ctx is cancelled. The ctx case is required:
+// the consumer in buildercontroller stops draining as soon as its context is cancelled, so an
+// unconditional send would strand this producer forever once the channel buffer fills, and the
+// manager's own getResults() (which waits on that producer) would deadlock the whole builder job.
+func sendBulkResult(ctx context.Context, walkCh chan<- *BulkStreamPathResult, result *BulkStreamPathResult) error {
+	select {
+	case walkCh <- result:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // processSessionBatchKey advances one key's bulk-retrieve state machine a step and reports whether
-// it has reached a terminal (Complete/CompleteAck) state. Reporting per-key rather than mutating a
-// shared flag from inside the switch means a batch can never be marked complete just because
-// whichever key happened to be checked last was already done.
+// it has reached a terminal (Complete/CompleteAck) state.
 func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 	ctx context.Context,
 	walkCh chan<- *BulkStreamPathResult,
@@ -460,7 +460,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 				BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
 				Err:      &RequestCancelError{Reason: fmt.Errorf("object no longer exists")},
 			}
-			walkCh <- result
+			if err = sendBulkResult(ctx, walkCh, result); err != nil {
+				return
+			}
 			if err := m.MarkCompleteAck(jobIndex); err != nil {
 				return false, fmt.Errorf("remote object no longer exists but failed to mark bulk job request as complete. Record: %s, Status: %v", key, status)
 			}
@@ -472,7 +474,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 				RstId:    m.rstId,
 				BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
 			}
-			walkCh <- result
+			if err = sendBulkResult(ctx, walkCh, result); err != nil {
+				return
+			}
 			if err := m.MarkSent(jobIndex); err != nil {
 				return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
 			}
@@ -492,7 +496,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 			BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
 			Err:      fmt.Errorf("unexpected record status. Record: %s, Status: %v", key, status),
 		}
-		walkCh <- result
+		if err = sendBulkResult(ctx, walkCh, result); err != nil {
+			return
+		}
 		if err := m.MarkCompleteAck(jobIndex); err != nil {
 			return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
 		}

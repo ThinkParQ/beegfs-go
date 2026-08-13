@@ -47,13 +47,29 @@ func TestIncludeRequestInBulkOperation(t *testing.T) {
 			wantInclude: false,
 		},
 		{
-			name:        "sync request that is not archived is not included",
-			request:     &beeremote.JobRequest{Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{LockedInfo: &flex.JobLockedInfo{IsArchived: false}}}},
+			name: "download that is not archived is not included",
+			request: &beeremote.JobRequest{Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+				Operation:  flex.SyncJob_DOWNLOAD,
+				LockedInfo: &flex.JobLockedInfo{IsArchived: false},
+			}}},
 			wantInclude: false,
 		},
 		{
-			name:          "archived sync request is included in the bulk-retrieve operation",
-			request:       &beeremote.JobRequest{Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{LockedInfo: &flex.JobLockedInfo{IsArchived: true}}}},
+			// bulk-retrieve exists to restore archived objects for download. An upload to an
+			// already-archived key must not be queued behind a tape restore of data it overwrites.
+			name: "archived upload is not included",
+			request: &beeremote.JobRequest{Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+				Operation:  flex.SyncJob_UPLOAD,
+				LockedInfo: &flex.JobLockedInfo{IsArchived: true},
+			}}},
+			wantInclude: false,
+		},
+		{
+			name: "archived download is included in the bulk-retrieve operation",
+			request: &beeremote.JobRequest{Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+				Operation:  flex.SyncJob_DOWNLOAD,
+				LockedInfo: &flex.JobLockedInfo{IsArchived: true},
+			}}},
 			wantInclude:   true,
 			wantOperation: "bulk-retrieve",
 		},
