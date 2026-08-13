@@ -62,10 +62,10 @@ type requestBuildController struct {
 	processTimeCounter    atomic.Int64
 	lastProcessTime       time.Time
 
-	sourceGroup          *errgroup.Group
-	sourceGroupCtx       context.Context
-	sourceProducerGroup  *errgroup.Group
-	activeJobSubmissions atomic.Int64 // All non-terminal submitted requests. Requests add to a bulk operation will not counter.
+	sourceGroup             *errgroup.Group
+	sourceGroupCtx          context.Context
+	sourceProducerGroup     *errgroup.Group
+	activeSourceSubmissions atomic.Int64 // All non-terminal submitted requests. Requests add to a bulk operation will not counter.
 
 	bulkGroup     *errgroup.Group
 	bulkGroupCtx  context.Context
@@ -111,7 +111,7 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 					if err := c.sourceProducerGroup.Wait(); err != nil {
 						return err
 					}
-					if c.activeJobSubmissions.Load() < int64(activeJobSubmissionsTarget) {
+					if c.activeSourceSubmissions.Load() < int64(activeJobSubmissionsTarget) {
 						if walkCh, err = nextWalkCh(result.ResumeToken); err != nil {
 							return err
 						}
@@ -143,7 +143,7 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 					// sourceProducerGroup, so it should only stop when the controller's own context
 					// says so, not as a side effect of a sibling group's lifecycle.
 					submitted, err := c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
-					c.activeJobSubmissions.Add(submitted)
+					c.activeSourceSubmissions.Add(submitted)
 					return err
 				})
 

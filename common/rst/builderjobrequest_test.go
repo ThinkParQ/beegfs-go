@@ -217,10 +217,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
 		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
+		canReleaseLock, submitted, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
 		assert.True(t, canReleaseLock)
+		assert.True(t, submitted)
 		require.Len(t, w.jobSubmissionCh, 1)
 	})
 
@@ -239,10 +240,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
+		canReleaseLock, submitted, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.Error(t, err)
 		assert.True(t, canReleaseLock)
+		assert.False(t, submitted)
 		assert.Empty(t, w.jobSubmissionCh)
 	})
 
@@ -261,10 +263,13 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
+		canReleaseLock, submitted, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
 		assert.False(t, canReleaseLock)
+		// A bulk-absorbed request was never submitted, so it must not count against the walk's
+		// submission budget -- the bulk operation resubmits it later through its own walk.
+		assert.False(t, submitted)
 		assert.Empty(t, w.jobSubmissionCh)
 	})
 
@@ -285,10 +290,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildJobRequest(context.Background(), cfg, nil)
 
-		canReleaseLock, err := w.processJobRequestCfg(context.Background(), cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+		canReleaseLock, submitted, err := w.processJobRequestCfg(context.Background(), cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
 		assert.False(t, canReleaseLock)
+		assert.True(t, submitted)
 		require.Len(t, submissionCh, 1)
 		// The externalId is generated after the request is built, so it lands on cfg's
 		// LockedInfo rather than the already-built submitted request.

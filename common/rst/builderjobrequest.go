@@ -70,7 +70,7 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 	}
 }
 
-func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeJobSubmissions int64, err error) {
+func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeSourceSubmissions int64, err error) {
 	if isDir, err := w.setDirRstConfig(ctx, inMountPath); isDir || err != nil {
 		// Abort the builder job since the beegfs was unable to set the directory's rst
 		// configuration. The issue is likely systemic.
@@ -101,7 +101,7 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
 		request := w.buildJobRequest(ctx, cfg, failedPrecondition)
-		canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
+		canReleaseLock, submitted, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
 		if !canReleaseLock {
 			keepLock = true
 		}
@@ -110,8 +110,11 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 			return
 		}
 
-		if !request.HasGenerationStatus() {
-			activeJobSubmissions++
+		// Only count requests that were actually submitted and are still active. A request absorbed
+		// into a bulk operation was not submitted at all, and one carrying a GenerationStatus is
+		// already terminal on arrival, so neither occupies submission capacity.
+		if submitted && !request.HasGenerationStatus() {
+			activeSourceSubmissions++
 		}
 	}
 
@@ -150,7 +153,9 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(
 	request := w.buildJobRequest(ctx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(rstId)
 	request.SetBulkInfo(BulkInfo)
-	canReleaseLock, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
+	// A request coming back out of a bulk operation already carries BulkInfo, so it is always
+	// submitted here; this path has no submission budget of its own to track.
+	canReleaseLock, _, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
 	if !canReleaseLock {
 		keepLock = true
 	}
@@ -233,12 +238,16 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 // processJobRequestCfg builds, prepares, and submits the job request for cfg. canReleaseLock is
 // returned true only when this path produced no in-flight work that still depends on the lock; once
 // the request is routed, prepared, or submitted for real work, the lock must remain held.
+//
+// submitted reports whether the request actually reached submitJobRequest. It is false when the
+// request was absorbed into a bulk operation, which resubmits it later through its own walk. Callers
+// must not count an unsubmitted request against their submission budget.
 func (w *jobRequestBuilder) processJobRequestCfg(
 	ctx context.Context,
 	cfg *flex.JobRequestCfg,
 	pathState PathState,
 	request *beeremote.JobRequest,
-) (canReleaseLock bool, err error) {
+) (canReleaseLock bool, submitted bool, err error) {
 	lockedInfo := cfg.GetLockedInfo()
 	var applyPlan applyPlanFn
 	if request.HasGenerationStatus() {
@@ -329,6 +338,7 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	}
 
 	w.submitJobRequest(ctx, request)
+	submitted = true
 	return
 }
 
