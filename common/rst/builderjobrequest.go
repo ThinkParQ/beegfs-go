@@ -87,7 +87,7 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 	}
 
 	var keepLock bool
-	if !pathState.LockAcquired && FileExists(pathState.LockedInfo) && !IsFileOffloaded(pathState.LockedInfo) {
+	if FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo) {
 		keepLock = true
 		failedPrecondition = appendError(failedPrecondition, fmt.Errorf("file access lock is already held"))
 	}
@@ -131,16 +131,11 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(
 ) (err error) {
 	pathState, pathStateErr := w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
-		// Returning err from this function aborts the entire builder job, so only fatal path
-		// state errors are returned here. Non-fatal path state errors are attached to the
-		// generated request when an rstId is available, allowing the builder job to continue.
 		err = pathStateErr
 		return
 	}
 
-	// The file access lock must be acquired by this builder job before adding it to a bulk
-	// operation so releasing it is acceptable.
-	var keepLock bool
+	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
 		if !keepLock {
 			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil {
@@ -153,8 +148,7 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(
 	request := w.buildJobRequest(ctx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(rstId)
 	request.SetBulkInfo(BulkInfo)
-	// A request coming back out of a bulk operation already carries BulkInfo, so it is always
-	// submitted here; this path has no submission budget of its own to track.
+
 	canReleaseLock, _, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
 	if !canReleaseLock {
 		keepLock = true
@@ -266,12 +260,15 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	if !request.HasGenerationStatus() {
 		if !request.HasBulkInfo() {
 			var skipSubmission bool
-			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil {
-				// addBulkRequest failed and since the file access lock was newly acquired, it may
-				// be released.
+			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil || skipSubmission {
+				// Whether there was an error while adding the bulk request or it was added and
+				// we're skipping the submission, the lock must be allowed to be released. The
+				// reason for this is there's currently no way to distinguish between who acquired a
+				// lock except when acquiring the lock. So, when a bulk operation accepts
+				// responsibility for a path, the lock must be released when possible. Then when the
+				// bulk operation sends the path, it will know whether it's safe to release the file
+				// access lock based on the locks acquisition.
 				canReleaseLock = true
-				return
-			} else if skipSubmission {
 				return
 			} else if request.HasGenerationStatus() {
 				// addBulkRequest may reject inclusion outright (eg the target bulk operation

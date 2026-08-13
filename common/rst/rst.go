@@ -441,18 +441,17 @@ func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
 
 // FileExists returns whether the file exists.
 func FileExists(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo.Exists
+	return lockedInfo != nil && lockedInfo.Exists
 }
 
 // IsFileAlreadySynced returns whether the file is already synced with remote storage target
 func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
+	return lockedInfo != nil && lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
 }
 
-// IsFileOffloaded returns whether the file is offloaded. It is the responsibility of the caller to
-// ensure lockedInfo is already populated and locked.
+// IsFileOffloaded returns whether the file exists and is offloaded.
 func IsFileOffloaded(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo.StubUrlRstId > 0
+	return FileExists(lockedInfo) && lockedInfo.StubUrlRstId > 0
 }
 
 // IsFileOffloadedUrlCorrect returns whether the offloaded file's rst url is matches the provided

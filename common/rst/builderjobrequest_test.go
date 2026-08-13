@@ -68,7 +68,7 @@ func TestJobRequestBuilder_ResolvePathStateForRequest(t *testing.T) {
 			name:       "explicit rstId mismatching offloaded stub without overwrite records a path issue",
 			builderCfg: &flex.JobRequestCfg{RemoteStorageTarget: 5, Overwrite: false},
 			pathState: PathState{
-				LockedInfo: &flex.JobLockedInfo{Mtime: fixedMtime, StubUrlRstId: 9},
+				LockedInfo: &flex.JobLockedInfo{Exists: true, Mtime: fixedMtime, StubUrlRstId: 9},
 				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{9}},
 			},
 			wantPathIssue: true,
@@ -78,7 +78,7 @@ func TestJobRequestBuilder_ResolvePathStateForRequest(t *testing.T) {
 			name:       "explicit rstId mismatching offloaded stub with overwrite records no issue",
 			builderCfg: &flex.JobRequestCfg{RemoteStorageTarget: 5, Overwrite: true},
 			pathState: PathState{
-				LockedInfo: &flex.JobLockedInfo{Mtime: fixedMtime, StubUrlRstId: 9},
+				LockedInfo: &flex.JobLockedInfo{Exists: true, Mtime: fixedMtime, StubUrlRstId: 9},
 				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{9}},
 			},
 			wantRstIds: []uint32{5},
@@ -248,7 +248,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.Empty(t, w.jobSubmissionCh)
 	})
 
-	t.Run("bulk request skip keeps the lock and does not submit", func(t *testing.T) {
+	t.Run("bulk request skip releases the lock and does not submit", func(t *testing.T) {
 		client := &MockClient{}
 		w := &jobRequestBuilder{
 			RstMap:          map[uint32]Provider{1: client},
@@ -266,7 +266,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		canReleaseLock, submitted, err := w.processJobRequestCfg(context.Background(), cfg, PathState{}, request)
 
 		require.NoError(t, err)
-		assert.False(t, canReleaseLock)
+		// Lock ownership cannot be queried, only learned at acquisition time, so a bulk operation
+		// taking responsibility for a path must let the lock go. ProcessFromBulkOperation reacquires
+		// it on resubmit and learns from that whether it may release it again. Holding it here would
+		// strand the lock for any entry the bulk operation later drops.
+		assert.True(t, canReleaseLock)
 		// A bulk-absorbed request was never submitted, so it must not count against the walk's
 		// submission budget -- the bulk operation resubmits it later through its own walk.
 		assert.False(t, submitted)
@@ -528,7 +532,9 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		submissionCh := make(chan *beeremote.JobRequest, 2)
 		w.jobSubmissionCh = submissionCh
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{}, errors.New("non-fatal issue")
+			// GetPathState always populates LockedInfo, even on its error paths, so mirror that here
+			// rather than returning a bare PathState -- the lock bookkeeping dereferences it.
+			return PathState{LockedInfo: &flex.JobLockedInfo{}}, errors.New("non-fatal issue")
 		}
 		var cleared bool
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
@@ -550,7 +556,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		submissionCh := make(chan *beeremote.JobRequest, 2)
 		w.jobSubmissionCh = submissionCh
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{}, nil // No client registered for rstId 1 -> FAILED_PRECONDITION request.
+			// No client registered for rstId 1 -> FAILED_PRECONDITION request.
+			return PathState{LockedInfo: &flex.JobLockedInfo{}}, nil
 		}
 		var cleared bool
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
@@ -597,7 +604,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 	t.Run("clearAccessFlags error is joined into the returned error", func(t *testing.T) {
 		w := newBuilder()
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{}, nil // No client registered for rstId 1 -> FAILED_PRECONDITION request.
+			// No client registered for rstId 1 -> FAILED_PRECONDITION request.
+			return PathState{LockedInfo: &flex.JobLockedInfo{}}, nil
 		}
 		wantErr := errors.New("clear failed")
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
