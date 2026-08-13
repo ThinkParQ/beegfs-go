@@ -11,7 +11,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -240,8 +239,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 //     only removed via Destroy, once the owning builder job itself is torn down for good.
 //   - Requests already Complete/CompleteAck are already terminal and are left as-is.
 //
-// reason is always returned (joined with any error releasing xtreemstore resources) so callers treat
-// a cancelled bulk operation as a failure rather than a clean success.
+// wait returns nil once reason has been recorded and any active retrieve-session has been released;
+// it only returns an error if one of those steps itself fails, so a clean cancel (including one where
+// the session had already completed and self-destroyed) is not reported as a failure.
 func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
 	cancelWalkCh := make(chan *BulkStreamPathResult)
 
@@ -250,32 +250,32 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 		defer close(cancelWalkCh)
 
 		if err := m.recordError(reason); err != nil {
-			return appendError(reason, fmt.Errorf("failed to record cancellation reason: %w", err))
+			return fmt.Errorf("failed to record cancellation reason: %w", err)
 		}
 
 		sessionInfo, err := m.getSessionInfo(ctx)
-		if err != nil || sessionInfo == nil {
-			return appendError(reason, fmt.Errorf("unable to determine whether retrieve-session is active: %w", err))
+		if err != nil {
+			return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
 		}
 
-		if sessionInfo.Active && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
+		if sessionInfo != nil && sessionInfo.Active && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
 			batchInfos, err := m.getSessionBatchInfo(ctx)
 			if err != nil {
-				return appendError(reason, fmt.Errorf("failed to get retrieve-session batch info: %w", err))
+				return fmt.Errorf("failed to get retrieve-session batch info: %w", err)
 			}
 
 			for _, batchInfo := range batchInfos {
 				if err := m.deleteSessionBatch(ctx, batchInfo); err != nil {
-					return appendError(reason, fmt.Errorf("failed to delete retrieve-session batch: %w", err))
+					return fmt.Errorf("failed to delete retrieve-session batch: %w", err)
 				}
 			}
 
 			if err := m.destroyRetrieveSession(ctx); err != nil {
-				return appendError(reason, fmt.Errorf("failed to deactivate retrieve-session: %w", err))
+				return fmt.Errorf("failed to deactivate retrieve-session: %w", err)
 			}
 		}
 
-		return reason
+		return nil
 	})
 
 	return cancelWalkCh, g.Wait, nil
@@ -376,10 +376,12 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatches(ctx context.Con
 	}
 
 	for _, batchInfo := range batchInfos {
-		if batchComplete, err := m.processSessionBatch(ctx, walkCh, batchInfo); err != nil || !batchComplete {
-			return false, err
-		} else if err = m.deleteSessionBatch(ctx, batchInfo); err != nil {
-			err = fmt.Errorf("failed to delete retrieve-session batch: %w", err)
+		batchComplete, batchErr := m.processSessionBatch(ctx, walkCh, batchInfo)
+		if batchErr != nil || !batchComplete {
+			return false, batchErr
+		}
+		if deleteErr := m.deleteSessionBatch(ctx, batchInfo); deleteErr != nil {
+			return false, fmt.Errorf("failed to delete retrieve-session batch: %w", deleteErr)
 		}
 	}
 	return true, nil
@@ -441,15 +443,16 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 	key string,
 	jobIndex int64,
 	status xtreemstoreS3BulkRequestStatus,
-) (done bool, err error) {
+) (terminal bool, err error) {
 	switch status {
 	case xtreemstoreS3BulkRequestAdded, xtreemstoreS3BulkRequestSent:
-		// A request that is xtreemstoreS3BulkRequestSent means that remote never received the the job request as the result of a sync worker crash; otherwise,
-		// the status would already be xtreemstoreS3BulkRequestReceived.
-		ready, err := m.isObjectReadyForDownload(ctx, key)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return false, fmt.Errorf("failed to determine restore state. Record: %s, Status: %v: %w", key, status, err)
+		// A request that is xtreemstoreS3BulkRequestSent means that remote never received the the
+		// job request as the result of a sync worker crash; otherwise, the status would already be
+		// xtreemstoreS3BulkRequestReceived.
+		if ready, readyErr := m.isObjectReadyForDownload(ctx, key); readyErr != nil {
+			if !errors.Is(readyErr, os.ErrNotExist) {
+				err = fmt.Errorf("failed to determine restore state. Record: %s, Status: %v: %w", key, status, readyErr)
+				return
 			}
 			result := &BulkStreamPathResult{
 				Path:     key,
@@ -461,31 +464,27 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 			if err := m.MarkCompleteAck(jobIndex); err != nil {
 				return false, fmt.Errorf("remote object no longer exists but failed to mark bulk job request as complete. Record: %s, Status: %v", key, status)
 			}
-			return true, nil
-		}
-		if !ready {
-			return false, nil
-		}
 
-		result := &BulkStreamPathResult{
-			Path:     key,
-			RstId:    m.rstId,
-			BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
+			terminal = true
+		} else if ready {
+			result := &BulkStreamPathResult{
+				Path:     key,
+				RstId:    m.rstId,
+				BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
+			}
+			walkCh <- result
+			if err := m.MarkSent(jobIndex); err != nil {
+				return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
+			}
 		}
-		walkCh <- result
-		if err := m.MarkSent(jobIndex); err != nil {
-			return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
-		}
-		return false, nil
 	case xtreemstoreS3BulkRequestReceived:
-		return true, nil
 	case xtreemstoreS3BulkRequestComplete:
 		if err := m.MarkCompleteAck(jobIndex); err != nil {
 			return false, fmt.Errorf("failed to mark bulk job request as complete and acknowledged. Record: %s, Status: %v", key, status)
 		}
-		return true, nil
+		terminal = true
 	case xtreemstoreS3BulkRequestCompleteAck:
-		return true, nil
+		terminal = true
 	default:
 		result := &BulkStreamPathResult{
 			Path:     key,
@@ -497,8 +496,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 		if err := m.MarkCompleteAck(jobIndex); err != nil {
 			return false, fmt.Errorf("failed to mark bulk job request as complete. Record: %s, Status: %v: %w", key, status, err)
 		}
-		return true, nil
+		terminal = true
 	}
+
+	return
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.Context, key string) (bool, error) {
@@ -519,7 +520,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.
 	case types.StorageClassStandard:
 		return true, nil
 	case types.StorageClassGlacier:
-		return resp.Restore != nil && strings.Contains(*resp.Restore, `ongoing-request="false"`), nil
+		// xtreemstore retrieve process is not complete for the object since it has not be
+		// converted into standard storage class and is therefore not available yet.
+		return false, nil
 	default:
 		return false, fmt.Errorf("unexpected storage class, %s", resp.StorageClass)
 	}
@@ -648,6 +651,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3Bul
 		if f, err = m.openStatusUpdateFile(); err != nil {
 			return
 		}
+		defer f.Close()
 	}
 
 	_, err = f.WriteAt(status.Bytes(), jobIndex)

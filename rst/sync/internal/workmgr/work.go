@@ -437,10 +437,10 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 		jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
 		g, gCtx := errgroup.WithContext(work.ctx)
 
-		var schedulingResult *rst.SchedulingResult
+		var result *rst.SchedulingResult
 		g.Go(func() error {
 			defer close(jobSubmissionCh)
-			schedulingResult = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh, w.workerSaturation)
+			result = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh, w.workerSaturation)
 			return nil
 		})
 
@@ -467,8 +467,8 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 			return
 		}
 
-		if schedulingResult == nil {
-			schedulingResult = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
+		if result == nil {
+			result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
 		}
 
 		bulkOperations := builder.GetBulkOperations()
@@ -479,23 +479,22 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 
 		// While the queue has spare capacity, keep building/submitting immediately instead of
 		// paying the cost of persisting reschedule state and waiting for the manager to poll us
-		// back in. The builder carries its own resume cursor, so it's safe to just loop. Bounded to
-		// workDelayMinimum (not a true tight spin) so this doesn't hammer the RST backend -- e.g. a
-		// bulk-retrieve builder whose session/batch isn't ready yet would otherwise re-invoke
-		// execute() as fast as the CPU allows, ignoring the backend's own reschedule delay -- and
-		// select on work.ctx.Done() so shutdown isn't blocked waiting on this loop to notice
-		// cancellation.
-		if schedulingResult.Reschedule && len(w.workerSaturation) > 0 {
+		// back in. The builder carries its own resume cursor, so it's safe to just loop.
+		if result.Reschedule && result.Delay < workDelayMinimum && len(w.workerSaturation) > 0 {
 			if w.workerSaturation[0]() < 100 {
+				if result.Delay == 0 {
+					continue
+				}
+
 				select {
-				case <-time.After(workDelayMinimum):
+				case <-time.After(result.Delay):
 					continue
 				case <-work.ctx.Done():
 				}
 			}
 		}
 
-		cleanupEntries = w.updateBuilderJob(work, entry, schedulingResult)
+		cleanupEntries = w.updateBuilderJob(work, entry, result)
 		return
 	}
 }

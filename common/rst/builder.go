@@ -231,8 +231,8 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 		}
 
 		for manager, wait := range cancelWaits {
-			if waitErr := wait(); waitErr != nil {
-				err = appendError(err, fmt.Errorf("failed to wait for bulk operation %s to cancel: %w", manager.Key(), waitErr))
+			if cancelErr := wait(); cancelErr != nil {
+				err = appendError(err, fmt.Errorf("failed to wait for bulk operation %s to cancel: %w", manager.Key(), cancelErr))
 			} else if destroyErr := manager.Destroy(ctx); destroyErr != nil {
 				err = appendError(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
 			}

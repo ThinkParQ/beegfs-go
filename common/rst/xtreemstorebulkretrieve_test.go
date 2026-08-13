@@ -288,9 +288,12 @@ func TestIsObjectReadyForDownload(t *testing.T) {
 			wantReady: true,
 		},
 		{
-			name:      "glacier object with completed restore is ready",
+			// Unlike plain S3, xtreemstore signals a finished retrieve by flipping the storage class
+			// to STANDARD (see XTS_S3_Headers_and_Efficient_Retrieve), so a still-GLACIER object is
+			// not ready even when it carries a completed-restore marker.
+			name:      "glacier object with completed restore marker is still not ready",
 			output:    &s3.HeadObjectOutput{StorageClass: types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false", expiry-date="Fri, 01 Jan 2027 00:00:00 GMT"`)},
-			wantReady: true,
+			wantReady: false,
 		},
 		{
 			name:      "glacier object with restore in progress is not ready",

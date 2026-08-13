@@ -470,9 +470,15 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 				},
 			}
 		}).
-		Return(true, 500*time.Millisecond, nil, nil).Once()
+		// The delay has to be at least workDelayMinimum. Anything shorter is absorbed in-process by
+		// processBuilder's fast path, which loops without persisting the reschedule, so the
+		// Work_RESCHEDULED update these tests wait on would never be sent.
+		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
-		Return(true, 500*time.Millisecond, nil, nil).Once()
+		// The delay has to be at least workDelayMinimum. Anything shorter is absorbed in-process by
+		// processBuilder's fast path, which loops without persisting the reschedule, so the
+		// Work_RESCHEDULED update these tests wait on would never be sent.
+		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
 			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
@@ -810,7 +816,10 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 				},
 			}
 		}).
-		Return(true, 500*time.Millisecond, nil, nil).Once()
+		// The delay has to be at least workDelayMinimum. Anything shorter is absorbed in-process by
+		// processBuilder's fast path, which loops without persisting the reschedule, so the
+		// Work_RESCHEDULED update these tests wait on would never be sent.
+		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-duplicate-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
 			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)

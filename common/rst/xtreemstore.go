@@ -130,6 +130,10 @@ func (x *xtreemstoreS3Provider) ExecuteWorkRequestPart(ctx context.Context, requ
 }
 
 func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
+	if !request.HasSync() {
+		return false, 0, ErrReqAndRSTTypeMismatch
+	}
+
 	if request.HasBulkInfo() {
 		bulkInfo := request.GetBulkInfo()
 		operation := parseBulkOperation(bulkInfo.Operation)
@@ -167,6 +171,11 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 }
 
 func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
+	request := job.GetRequest()
+	if !request.HasSync() {
+		return ErrReqAndRSTTypeMismatch
+	}
+
 	defer func() {
 		request := job.GetRequest()
 		if request.HasBulkInfo() {
@@ -178,6 +187,8 @@ func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *b
 				if bulkErr := xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
 					if err != nil {
 						err = fmt.Errorf("%w; failed to mark bulk request complete: %w", err, bulkErr)
+					} else {
+						err = fmt.Errorf("failed to mark bulk request complete: %w", bulkErr)
 					}
 				}
 			default:
