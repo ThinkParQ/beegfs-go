@@ -43,7 +43,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 		return fmt.Errorf("no mirrors configured")
 	}
 
-	defaultColumns := []string{"alias", "id", "type", "primary_target", "primary_consistency", "secondary_target", "secondary_consistency"}
+	defaultColumns := []string{"alias", "id", "type", "primary_target", "primary_consistency", "secondary_target", "secondary_consistency", "quota_accounting"}
 	allColumns := append([]string{"uid"}, defaultColumns...)
 
 	if viper.GetBool(config.DebugKey) {
@@ -74,6 +74,7 @@ func runListCmd(cmd *cobra.Command, cfg list_Config) error {
 			t.PrimaryConsistencyState,
 			secondaryTarget,
 			t.SecondaryConsistencyState,
+			t.QuotaAccounting,
 		)
 	}
 	return nil
