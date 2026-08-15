@@ -22,6 +22,11 @@ type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesys
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
 
+// fileStateRollbackTimeout bounds how long rolling back an applied file state plan may take once the
+// request context is gone. Rollbacks run detached from that context so they can still reach BeeGFS
+// after cancellation, and this is what keeps them from stalling a shutdown that waits on them.
+const fileStateRollbackTimeout = 1 * time.Minute
+
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
 	RstMap           map[uint32]Provider
@@ -70,7 +75,7 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 	}
 }
 
-func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeSourceSubmissions int64, err error) {
+func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeSourceSubmissions int64, err error) {
 	if isDir, err := w.setDirRstConfig(ctx, inMountPath); isDir || err != nil {
 		// Abort the builder job since the beegfs was unable to set the directory's rst
 		// configuration. The issue is likely systemic.
@@ -100,8 +105,8 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 	}()
 
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
-		request := w.buildJobRequest(ctx, cfg, failedPrecondition)
-		canReleaseLock, submitted, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
+		request := w.buildRequest(ctx, cfg, failedPrecondition)
+		canReleaseLock, submitted, processErr := w.processRequest(ctx, cfg, pathState, request)
 		if !canReleaseLock {
 			keepLock = true
 		}
@@ -121,7 +126,7 @@ func (w *jobRequestBuilder) ProcessFromSource(ctx context.Context, inMountPath s
 	return
 }
 
-func (w *jobRequestBuilder) ProcessFromBulkOperation(
+func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	ctx context.Context,
 	inMountPath string,
 	remotePath string,
@@ -145,11 +150,11 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(
 	}()
 
 	cfg := w.buildJobRequestCfg(inMountPath, remotePath, rstId, pathState.LockedInfo, w.builderCfg)
-	request := w.buildJobRequest(ctx, cfg, failedPrecondition)
+	request := w.buildRequest(ctx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(rstId)
 	request.SetBulkInfo(BulkInfo)
 
-	canReleaseLock, _, processErr := w.processJobRequestCfg(ctx, cfg, pathState, request)
+	canReleaseLock, _, processErr := w.processRequest(ctx, cfg, pathState, request)
 	if !canReleaseLock {
 		keepLock = true
 	}
@@ -161,6 +166,12 @@ func (w *jobRequestBuilder) ProcessFromBulkOperation(
 	return
 }
 
+// resolvePathStateForRequest retrieves the current path's state information and then update's it
+// rstIds list before returning. If the builder job did not provide an rstId then the file's own rst
+// configuration with be used; and if the configured rstIds list is empty, skip will be true.
+//
+// pathIssue will return any non-fatal errors returned while retrieving path state information or
+// conflicts. All fatal errors will be reported via err.
 func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMountPath string) (pathState PathState, skip bool, pathIssue error, err error) {
 	var pathStateErr error
 	pathState, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
@@ -195,8 +206,8 @@ func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMo
 	return
 }
 
-// buildJobRequestCfgs returns a jobRequestCfg list for each rstId. Each jobRequestCfg is a clone of
-// cfg updated with the provided information.
+// buildJobRequestCfgs returns a list of job request configurations for each rstId. Each
+// configurations is a clone of cfg updated with the provided information.
 func (w *jobRequestBuilder) buildJobRequestCfgs(
 	inMountPath string,
 	remotePath string,
@@ -212,8 +223,8 @@ func (w *jobRequestBuilder) buildJobRequestCfgs(
 	return requests
 }
 
-// buildJobRequestCfgs returns a jobRequestCfg for each rstId. jobRequestCfg is a clone of cfg
-// updated with the provided information.
+// buildJobRequestCfgs returns a job request configuration for the rstId. The configuration is a
+// clone of cfg updated with the provided information.
 func (w *jobRequestBuilder) buildJobRequestCfg(
 	inMountPath string,
 	remotePath string,
@@ -229,14 +240,13 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 	return request
 }
 
-// processJobRequestCfg builds, prepares, and submits the job request for cfg. canReleaseLock is
+// processRequest builds, prepares, and submits the job request for cfg. canReleaseLock is
 // returned true only when this path produced no in-flight work that still depends on the lock; once
 // the request is routed, prepared, or submitted for real work, the lock must remain held.
 //
 // submitted reports whether the request actually reached submitJobRequest. It is false when the
-// request was absorbed into a bulk operation, which resubmits it later through its own walk. Callers
-// must not count an unsubmitted request against their submission budget.
-func (w *jobRequestBuilder) processJobRequestCfg(
+// request was absorbed into a bulk operation, which resubmits it later through its own walk.
+func (w *jobRequestBuilder) processRequest(
 	ctx context.Context,
 	cfg *flex.JobRequestCfg,
 	pathState PathState,
@@ -258,6 +268,9 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 	}
 
 	if !request.HasGenerationStatus() {
+		// request.HasBulkInfo()==true means that the request has already been added to a bulk
+		// operation and is now ready to be submitted; otherwise, see if this request needs to be
+		// processed as a bulk request.
 		if !request.HasBulkInfo() {
 			var skipSubmission bool
 			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil || skipSubmission {
@@ -281,8 +294,24 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 		}
 	}
 
+	// applyUndo rolls back the file state mutations made by applyPlan, and planApplied records
+	// whether the file currently carries those mutations. It is false when no plan was applied at
+	// all (applyUndo is noopUndo, so running it would prove nothing yet still force canReleaseLock
+	// true), and false again once applyUndo has run and successfully unapplied the plan.
+	applyUndo := noopUndo
+	planApplied := false
+
+	// undoAppliedPlan rolls back on a context detached from ctx, because the rollback that matters
+	// most runs precisely when ctx has been cancelled and the undo steps that talk to BeeGFS over
+	// BeeMsg would otherwise fail before doing anything. The timeout keeps a wedged rollback from
+	// holding up shutdown, which waits on the workers that call this.
+	undoAppliedPlan := func() error {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), fileStateRollbackTimeout)
+		defer cancelCleanup()
+		return applyUndo(cleanupCtx)
+	}
 	if !request.HasGenerationStatus() {
-		applyUndo, applyErr := applyPlan(&pathState)
+		undo, applyErr := applyPlan(&pathState)
 		if applyErr != nil {
 			if errors.Is(applyErr, ErrJobAlreadyComplete) {
 				canReleaseLock = true
@@ -309,18 +338,25 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 				})
 			}
 		} else {
+			applyUndo = undo
+			planApplied = true
+
 			// Generating the externalId must be the last possible error to avoid situations where, once the
 			// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
 			client := w.RstMap[request.GetRemoteStorageTarget()]
 			externalId, externalIdErr := client.GenerateExternalId(ctx, cfg)
 			if externalIdErr != nil {
-				if undoErr := applyUndo(); undoErr != nil {
+				if undoErr := undoAppliedPlan(); undoErr != nil {
+					// The rollback failed, so the file may still carry the plan's mutations and
+					// planApplied stays true. If this request never reaches a submission worker the
+					// cancellation path below gets one more attempt at restoring the file.
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ERROR,
 						Message: fmt.Sprintf("failed to generate external id: %s; rollback also failed: %s", externalIdErr.Error(), undoErr.Error()),
 					})
 				} else {
+					planApplied = false
 					canReleaseLock = true
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
@@ -334,12 +370,30 @@ func (w *jobRequestBuilder) processJobRequestCfg(
 		}
 	}
 
-	w.submitJobRequest(ctx, request)
-	submitted = true
+	// Check for cancellation before continuing so that it has priority over submitting the job
+	// request: an already cancelled context must never race the send when jobSubmissionCh still has
+	// spare capacity. The remaining race inside the select (cancelled concurrently with a successful
+	// send) is safe either way, because a request that reaches a submission worker is still given a
+	// grace period to be submitted after cancellation.
+	if ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case w.jobSubmissionCh <- request:
+			submitted = true
+		}
+	}
+
+	if !submitted && planApplied {
+		// The request never reached a submission worker, so nothing downstream will ever complete
+		// it. Roll back the applied plan so the file is not left mutated by a job that will never
+		// run. The lock can only be released once that rollback actually succeeds; if it fails the
+		// file is still mutated and must stay locked for recovery to find.
+		canReleaseLock = undoAppliedPlan() == nil
+	}
 	return
 }
 
-func (w *jobRequestBuilder) buildJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
+func (w *jobRequestBuilder) buildRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
 	rstId := cfg.GetRemoteStorageTarget()
 	client, ok := w.RstMap[rstId]
 	if !ok {
@@ -361,12 +415,4 @@ func (w *jobRequestBuilder) buildJobRequest(ctx context.Context, cfg *flex.JobRe
 		return BuildJobRequestWithFailedPrecondition(client, cfg, failedPrecondition.Error())
 	}
 	return BuildJobRequest(ctx, client, cfg)
-}
-
-func (w *jobRequestBuilder) submitJobRequest(ctx context.Context, request *beeremote.JobRequest) {
-	select {
-	case <-ctx.Done():
-		return
-	case w.jobSubmissionCh <- request:
-	}
 }

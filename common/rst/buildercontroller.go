@@ -142,7 +142,7 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 					// waits on sourceGroup before sourceProducerGroup). This goroutine belongs to
 					// sourceProducerGroup, so it should only stop when the controller's own context
 					// says so, not as a side effect of a sibling group's lifecycle.
-					submitted, err := c.requestBuilder.ProcessFromSource(c.ctx, inMountPath, remotePath, failedPrecondition)
+					submitted, err := c.requestBuilder.ProcessPathFromOriginalWalk(c.ctx, inMountPath, remotePath, failedPrecondition)
 					c.activeSourceSubmissions.Add(submitted)
 					return err
 				})
@@ -309,7 +309,7 @@ func (c *requestBuildController) bulkProcess(result *BulkStreamPathResult) error
 	start := time.Now()
 	c.bulkGroup.Go(func() error {
 		defer func() { c.releaseWorker(time.Since(start)) }()
-		return c.requestBuilder.ProcessFromBulkOperation(c.ctx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
+		return c.requestBuilder.ProcessPathFromBulkOperation(c.ctx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
 	})
 
 	return nil

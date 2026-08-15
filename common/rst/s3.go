@@ -394,7 +394,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if !IsErrJobTerminalSentinel(err) {
-			if undoErr := undoAppliedPlan(); undoErr != nil {
+			if undoErr := undoAppliedPlan(ctx); undoErr != nil {
 				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
 			} else {
 				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)

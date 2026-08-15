@@ -428,6 +428,14 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry *wo
 // when handling SubmitJobRequest, so concurrent submissions for different paths shouldn't contend.
 const builderJobSubmissionWorkerMultiplier = 4
 
+// builderJobSubmissionGrace bounds how long submission workers keep trying to hand off job requests
+// to BeeRemote after their context is cancelled. Once a request reaches jobSubmissionCh the builder
+// has already applied its file state plan (stub created, data state changed, space preallocated) and
+// deliberately kept the file access lock held, so abandoning it leaves the file in a state only
+// crash recovery can resolve. Submissions therefore run on a context detached from cancellation, and
+// this grace period is what still guarantees shutdown terminates when BeeRemote is genuinely gone.
+const builderJobSubmissionGrace = 10 * time.Minute
+
 func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
 	workResult := entry.WorkResult
@@ -446,22 +454,35 @@ func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry 
 
 		var builderMu sync.Mutex
 
+		// Submissions run on a context detached from gCtx that only starts winding down
+		// builderJobSubmissionGrace after gCtx is cancelled. While gCtx is live this is equivalent
+		// to gCtx, preserving the retry-until-BeeRemote-is-available behavior below; on shutdown it
+		// buys already-planned requests a bounded window to reach BeeRemote instead of being
+		// silently dropped.
+		submitCtx, cancelSubmit := context.WithCancel(context.WithoutCancel(gCtx))
+		stopGrace := context.AfterFunc(gCtx, func() {
+			time.AfterFunc(builderJobSubmissionGrace, cancelSubmit)
+		})
+
 		submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
 		for range submissionWorkers {
 			g.Go(func() error {
 				// Always drain jobSubmissionCh until it is closed, even after cancellation, so the
 				// producer side (ExecuteJobBuilderRequest) never blocks trying to send.
 				for jobRequest := range jobSubmissionCh {
-					if gCtx.Err() != nil {
-						continue
-					}
-					w.sendBuilderJobRequest(gCtx, &builderMu, builder, jobRequest)
+					w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest)
 				}
 				return nil
 			})
 		}
 
-		if err := g.Wait(); err != nil {
+		err := g.Wait()
+		// All submission workers have returned, so the grace window is no longer needed. Both calls
+		// are idempotent and safe even if the grace timer already fired.
+		stopGrace()
+		cancelSubmit()
+
+		if err != nil {
 			w.updateBuilderJob(work, entry, &rst.SchedulingResult{Err: err})
 			cleanupEntries = true
 			return

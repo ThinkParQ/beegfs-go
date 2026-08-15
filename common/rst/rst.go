@@ -480,7 +480,7 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 // Be aware that the apply function takes a *PathState argument so it can be updated when the file
 // is created.
 func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (apply applyPlanFn, failedPrecondition error) {
-	addStep, apply := newApplyPlan()
+	addStep, apply := newApplyPlan(ctx)
 	defer addStep(prepareUpdateFileRstPattern(ctx, cfg))
 
 	lockedInfo := cfg.LockedInfo
@@ -547,22 +547,30 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 	return
 }
 
-type undoFn func() error
+// undoFn rolls back the mutations made by an applyFn. It takes its own context rather than reusing
+// the one the plan was applied with: rollbacks routinely run because that context was cancelled,
+// and the undo steps that talk to BeeGFS over BeeMsg would fail immediately if handed a context
+// that is already done. Callers that roll back on cancellation must pass a context detached from
+// it (see context.WithoutCancel), bounded by a timeout so cleanup cannot hang shutdown.
+type undoFn func(ctx context.Context) error
 type applyPlanFn func(*PathState) (undoFn, error)
 type applyFn func(pathState *PathState, appliedErr error) (undoFn, error)
 
-var noopUndo = func() error { return nil }
+var noopUndo = func(context.Context) error { return nil }
 
-func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
+// newApplyPlan builds a plan whose steps are applied with applyCtx. Note applyCtx is only used for
+// the rollback that happens inline when a step fails mid-apply; the undoFn handed back to the caller
+// takes its own context, since a later rollback may well be running because applyCtx was cancelled.
+func newApplyPlan(applyCtx context.Context) (add func(applyFn), apply applyPlanFn) {
 	applySteps := []applyFn{}
 	add = func(step applyFn) {
 		applySteps = append(applySteps, step)
 	}
 	apply = func(pathState *PathState) (undoFn, error) {
 		undoSteps := []undoFn{}
-		undo := func() (undoErr error) {
+		undo := func(ctx context.Context) (undoErr error) {
 			for i := len(undoSteps) - 1; i >= 0; i-- {
-				undoErr = errors.Join(undoErr, undoSteps[i]())
+				undoErr = errors.Join(undoErr, undoSteps[i](ctx))
 			}
 			return
 		}
@@ -575,7 +583,7 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 		}
 
 		if applyErr != nil && !IsErrJobTerminalSentinel(applyErr) {
-			if undoErr := undo(); undoErr != nil {
+			if undoErr := undo(applyCtx); undoErr != nil {
 				applyErr = fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
 			} else {
 				applyErr = fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
@@ -616,7 +624,7 @@ func prepareAlreadyOffloaded(ctx context.Context, cfg *flex.JobRequestCfg) apply
 					return undo, fmt.Errorf("unable to set restore policy: %w", err)
 				}
 
-				undo = func() error {
+				undo = func(ctx context.Context) error {
 					return entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, originalDataState, *entryInfoMsg, ownerNode)
 				}
 			}
@@ -636,12 +644,12 @@ func prepareStubLocalOffload(ctx context.Context, mountPoint filesystem.Provider
 			return noopUndo, appliedErr
 		}
 
-		var undo func() error
+		var undo undoFn
 		restorePolicy := restorePolicyToDataState(cfg.GetRestorePolicy())
 		rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", cfg.RemoteStorageTarget, cfg.RemotePath)
 
 		if !FileExists(lockedInfo) {
-			undo = func() error {
+			undo = func(context.Context) error {
 				if err := mountPoint.Remove(cfg.Path); err != nil {
 					return fmt.Errorf("failed to remove stub file: %w", err)
 				}
@@ -676,7 +684,7 @@ func prepareStubLocalOffload(ctx context.Context, mountPoint filesystem.Provider
 				return undo, fmt.Errorf("unable to set restore policy: %w", err)
 			}
 		} else {
-			undo = func() error {
+			undo = func(context.Context) error {
 				if stat, statErr := mountPoint.Stat(cfg.Path); statErr == nil {
 					if stat.Size() != lockedInfo.Size || !stat.ModTime().Equal(lockedInfo.Mtime.AsTime()) {
 						return fmt.Errorf("failed to restore file")
@@ -728,7 +736,7 @@ func prepareDownloadRestoreDataState(ctx context.Context, cfg *flex.JobRequestCf
 			return noopUndo, fmt.Errorf("unable to set the data state to available: %w", err)
 		}
 
-		undo := func() error {
+		undo := func(ctx context.Context) error {
 			return entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, originalDataState, *entryInfoMsg, ownerNode)
 		}
 		return undo, nil
@@ -749,7 +757,7 @@ func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequ
 			return noopUndo, fmt.Errorf("unable to preallocate additional space for file: %w", err)
 		}
 
-		undo := func() error {
+		undo := func(context.Context) error {
 			if IsFileOffloaded(lockedInfo) {
 				// Restore the original stub file if download preparation overwrote it.
 				rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", originalLockedInfo.StubUrlRstId, originalLockedInfo.StubUrlPath)
@@ -771,7 +779,7 @@ func prepareDownloadNoFile(ctx context.Context, mountPoint filesystem.Provider, 
 		}
 
 		lockedInfo := cfg.LockedInfo
-		undo := func() error {
+		undo := func(context.Context) error {
 			if removeErr := mountPoint.Remove(cfg.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
 				return fmt.Errorf("unable to remove preallocated file: %w", removeErr)
 			}
@@ -854,7 +862,7 @@ func prepareUpdateFileRstPattern(ctx context.Context, cfg *flex.JobRequestCfg) a
 			return
 		}
 
-		undo = func() (undoErr error) {
+		undo = func(ctx context.Context) (undoErr error) {
 			if undoErr = entry.SetFileRstPattern(ctx, path, revertRstIds, revertCooldownSecs, newRSTCfg, *entryInfoMsg, ownerNode); undoErr != nil {
 				undoErr = fmt.Errorf("failed to revert RST configuration: %w", undoErr)
 			}
