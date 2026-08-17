@@ -824,6 +824,18 @@ func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestC
 	return "", nil
 }
 
+// ReleaseExternalId aborts the multipart upload GenerateExternalId created. Anything else (a single
+// segment upload or a download) never reserved remote state, in which case the externalId is empty
+// and there is nothing to release.
+func (r *S3Client) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
+	if externalId == "" {
+		return nil
+	}
+	// S3 AbortMultipartUpload is idempotent: aborting an upload id that is already gone is not an
+	// error, so a repeated release is safe.
+	return r.abortUpload(ctx, externalId, cfg.GetRemotePath())
+}
+
 func (r *S3Client) SanitizeRemotePath(remotePath string) string {
 	// Valid s3 prefixes do not start with a '/' (e.g. myfolder/*/subdir?[a-z])
 	return strings.TrimLeft(remotePath, "/")

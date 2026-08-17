@@ -137,6 +137,15 @@ type Provider interface {
 	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
+	// ReleaseExternalId discards an externalId returned by GenerateExternalId, freeing any remote
+	// resources it reserved (for example aborting a multipart upload). It must be called when the
+	// job request the id was generated for is abandoned before reaching remote, since no job is
+	// ever created for it and CompleteWorkRequests will therefore never run to abort it.
+	//
+	// Implementations must tolerate an empty externalId and must be safe to call more than once for
+	// the same id because it usually runs while the request context is being cancelled. Callers
+	// should pass a context detached from that cancellation.
+	ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.

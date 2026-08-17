@@ -22,10 +22,11 @@ type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesys
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
 
-// fileStateRollbackTimeout bounds how long rolling back an applied file state plan may take once the
-// request context is gone. Rollbacks run detached from that context so they can still reach BeeGFS
-// after cancellation, and this is what keeps them from stalling a shutdown that waits on them.
-const fileStateRollbackTimeout = 1 * time.Minute
+// requestCleanupTimeout bounds how long cleaning up after an abandoned job request may take once the
+// request context is gone. Cleanup (rolling back the applied file state plan, releasing the
+// externalId) runs detached from that context so it can still reach BeeGFS and the remote target
+// after cancellation, and this is what keeps it from stalling a shutdown that waits on it.
+const requestCleanupTimeout = 1 * time.Minute
 
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
@@ -300,15 +301,34 @@ func (w *jobRequestBuilder) processRequest(
 	// true), and false again once applyUndo has run and successfully unapplied the plan.
 	applyUndo := noopUndo
 	planApplied := false
+	// generatedExternalId is only set once GenerateExternalId hands back an id that reserved remote
+	// resources, so it names exactly what this request is on the hook for releasing.
+	generatedExternalId := ""
 
-	// undoAppliedPlan rolls back on a context detached from ctx, because the rollback that matters
-	// most runs precisely when ctx has been cancelled and the undo steps that talk to BeeGFS over
-	// BeeMsg would otherwise fail before doing anything. The timeout keeps a wedged rollback from
-	// holding up shutdown, which waits on the workers that call this.
+	// Both cleanup paths run on a context detached from ctx, because the cleanup that matters most
+	// runs precisely when ctx has been cancelled: the undo steps that talk to BeeGFS over BeeMsg and
+	// the externalId release that talks to the remote target would otherwise fail before doing
+	// anything. The timeout keeps wedged cleanup from holding up shutdown, which waits on the
+	// workers that call this.
+	newCleanupCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), requestCleanupTimeout)
+	}
 	undoAppliedPlan := func() error {
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), fileStateRollbackTimeout)
+		cleanupCtx, cancelCleanup := newCleanupCtx()
 		defer cancelCleanup()
 		return applyUndo(cleanupCtx)
+	}
+	releaseExternalId := func() error {
+		if generatedExternalId == "" {
+			return nil
+		}
+		client, ok := w.RstMap[request.GetRemoteStorageTarget()]
+		if !ok {
+			return fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget())
+		}
+		cleanupCtx, cancelCleanup := newCleanupCtx()
+		defer cancelCleanup()
+		return client.ReleaseExternalId(cleanupCtx, cfg, generatedExternalId)
 	}
 	if !request.HasGenerationStatus() {
 		undo, applyErr := applyPlan(&pathState)
@@ -364,6 +384,7 @@ func (w *jobRequestBuilder) processRequest(
 					})
 				}
 			} else {
+				generatedExternalId = externalId
 				lockedInfo.SetExternalId(externalId)
 				canReleaseLock = false
 			}
@@ -383,12 +404,23 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	if !submitted && planApplied {
-		// The request never reached a submission worker, so nothing downstream will ever complete
-		// it. Roll back the applied plan so the file is not left mutated by a job that will never
-		// run. The lock can only be released once that rollback actually succeeds; if it fails the
-		// file is still mutated and must stay locked for recovery to find.
-		canReleaseLock = undoAppliedPlan() == nil
+	// The request never reached a submission worker, so nothing downstream will ever complete it and
+	// everything it reserved has to be given back here.
+	if !submitted {
+		// No job is ever created for an unsubmitted request, so CompleteWorkRequests will never run
+		// to abort what the externalId reserved. Release it here or it leaks: for S3 that is an
+		// orphaned multipart upload, billed until a bucket lifecycle rule reaps it. A failure is
+		// reported through err because nothing else will surface it once the request is discarded.
+		if releaseErr := releaseExternalId(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
+		}
+
+		// Roll back the applied plan so the file is not left mutated by a job that will never run.
+		// The lock can only be released once that rollback actually succeeds; if it fails the file
+		// is still mutated and must stay locked for recovery to find.
+		if planApplied {
+			canReleaseLock = undoAppliedPlan() == nil
+		}
 	}
 	return
 }

@@ -489,6 +489,99 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.True(t, canReleaseLock)
 	})
 
+	// Nothing downstream ever aborts an externalId belonging to a request that never reached
+	// BeeRemote, so an abandoned request has to hand it back itself or the remote resource it
+	// reserved (for S3, a multipart upload) is orphaned.
+	t.Run("cancellation releases a generated external id", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
+		var releaseCtxErr error
+		var releaseHadDeadline bool
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").
+			Run(func(args mock.Arguments) {
+				releaseCtx := args.Get(0).(context.Context)
+				releaseCtxErr = releaseCtx.Err()
+				_, releaseHadDeadline = releaseCtx.Deadline()
+			}).Return(nil)
+		w := &jobRequestBuilder{
+			RstMap:          map[uint32]Provider{1: client},
+			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+				return false, nil
+			},
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			},
+		}
+		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildRequest(context.Background(), cfg, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+
+		require.NoError(t, err)
+		assert.False(t, submitted)
+		client.AssertCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, "upload-id")
+		// Like the rollback, the release has to outlive the cancelled request but stay bounded.
+		assert.NoError(t, releaseCtxErr, "release must not inherit the request context's cancellation")
+		assert.True(t, releaseHadDeadline, "release context must be bounded by a deadline")
+	})
+
+	t.Run("a failed external id release is reported", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").Return(errors.New("abort failed"))
+		w := &jobRequestBuilder{
+			RstMap:          map[uint32]Provider{1: client},
+			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+				return false, nil
+			},
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			},
+		}
+		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildRequest(context.Background(), cfg, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, _, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+
+		// Nothing else surfaces an orphaned upload, so the error has to come back here.
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "upload-id")
+		assert.Contains(t, err.Error(), "abort failed")
+	})
+
+	t.Run("a submitted request keeps its external id", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		w := &jobRequestBuilder{
+			RstMap:          map[uint32]Provider{1: client},
+			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+				return false, nil
+			},
+			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			},
+		}
+		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		request := w.buildRequest(context.Background(), cfg, nil)
+
+		_, submitted, err := w.processRequest(context.Background(), cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+
+		require.NoError(t, err)
+		require.True(t, submitted)
+		// The job will carry this id through to completion, so releasing it here would abort a live
+		// upload.
+		client.AssertNotCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything)
+		assert.Equal(t, "upload-id", cfg.GetLockedInfo().GetExternalId())
+	})
+
 	// An offloaded file keeps its lock even though applyPlan never mutated anything, so the
 	// cancellation path must leave canReleaseLock alone rather than let a no-op rollback "succeed"
 	// into releasing it.

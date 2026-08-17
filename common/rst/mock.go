@@ -229,6 +229,14 @@ func (m *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequest
 	return lockedInfo.GetRemoteSize(), remoteMtime, lockedInfo.GetIsArchived(), true, nil
 }
 
+func (m *MockClient) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
+	if m.hasExpectedCall("ReleaseExternalId") {
+		args := m.Called(ctx, cfg, externalId)
+		return args.Error(0)
+	}
+	return nil
+}
+
 func (m *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if m.hasExpectedCall("GenerateExternalId") {
 		args := m.Called(ctx, cfg)
