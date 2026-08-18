@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"time"
 
@@ -98,8 +99,8 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inM
 		failedPrecondition = appendError(failedPrecondition, fmt.Errorf("file access lock is already held"))
 	}
 	defer func() {
-		if !keepLock {
-			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil {
+		if FileExists(pathState.LockedInfo) && !keepLock {
+			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
@@ -143,8 +144,8 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 
 	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
-		if !keepLock {
-			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil {
+		if FileExists(pathState.LockedInfo) && !keepLock {
+			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}

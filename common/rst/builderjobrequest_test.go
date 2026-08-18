@@ -691,7 +691,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
-				LockedInfo:   &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, Mtime: timestamppb.Now()},
 				LockAcquired: true,
 				RstCfg:       msg.RemoteStorageTarget{RSTIDs: []uint32{1}}, // No client registered -> FAILED_PRECONDITION request.
 			}, nil
@@ -776,7 +776,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
-				LockedInfo:   &flex.JobLockedInfo{Mtime: timestamppb.Now()},
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, Mtime: timestamppb.Now()},
 				LockAcquired: true,
 				RstCfg:       msg.RemoteStorageTarget{RSTIDs: []uint32{1}},
 			}, nil
@@ -829,7 +829,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// GetPathState always populates LockedInfo, even on its error paths, so mirror that here
 			// rather than returning a bare PathState -- the lock bookkeeping dereferences it.
-			return PathState{LockedInfo: &flex.JobLockedInfo{}}, errors.New("non-fatal issue")
+			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, errors.New("non-fatal issue")
 		}
 		var cleared bool
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
@@ -852,7 +852,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		w.jobSubmissionCh = submissionCh
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// No client registered for rstId 1 -> FAILED_PRECONDITION request.
-			return PathState{LockedInfo: &flex.JobLockedInfo{}}, nil
+			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
 		}
 		var cleared bool
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
@@ -900,7 +900,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		w := newBuilder()
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// No client registered for rstId 1 -> FAILED_PRECONDITION request.
-			return PathState{LockedInfo: &flex.JobLockedInfo{}}, nil
+			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
 		}
 		wantErr := errors.New("clear failed")
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
