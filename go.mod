@@ -1,6 +1,6 @@
 module github.com/thinkparq/beegfs-go
 
-go 1.26.4
+go 1.26.6
 
 tool (
 	github.com/google/go-licenses/v2
@@ -43,7 +43,7 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
-	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
