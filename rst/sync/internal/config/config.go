@@ -60,6 +60,12 @@ func (c *AppConfig) ValidateConfig() error {
 	if c.WorkMgr.ActiveWorkQueueSize <= 0 {
 		return fmt.Errorf("the active work queue size must at least be one (specified size: %d)", c.WorkMgr.ActiveWorkQueueSize)
 	}
+	if c.WorkMgr.WorkJournalBlockCache < 0 {
+		return fmt.Errorf("manager.journal-db-block-cache cannot be negative (provided value: %d)", c.WorkMgr.WorkJournalBlockCache)
+	}
+	if c.WorkMgr.JobStoreBlockCache < 0 {
+		return fmt.Errorf("manager.job-db-block-cache cannot be negative (provided value: %d)", c.WorkMgr.JobStoreBlockCache)
+	}
 	if err := c.Telemetry.ValidateConfig(); err != nil {
 		return err
 	}
