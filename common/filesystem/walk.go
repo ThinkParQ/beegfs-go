@@ -108,34 +108,56 @@ type StreamPathResult struct {
 	Err         error
 }
 
-type PathStreamFunc func(
+// StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths
+// in a lexicographically increasing order. If startAfter != "" then only files lexically greater
+// than will be considered. chanSize is the buffer size for the returned *StreamPathResult channel.
+//
+// Each result carries a ResumeToken naming the last file sent before it, so passing that token back
+// as startAfter resumes the walk from that result. Call stopWalk to end the walk early; it never
+// blocks and is safe to call more than once, but the caller must keep draining the channel until it
+// is closed so the walk can observe the stop and finish. The channel is also closed without further
+// results once ctx is cancelled.
+func StreamPathsLexicographically(
 	ctx context.Context,
 	mountPoint Provider,
 	pattern string,
 	startAfter string,
-	maxFiles int,
 	chanSize int,
 	filter FileInfoFilter,
-) (<-chan *StreamPathResult, error)
-
-// StreamPathsLexicographically returns a *StreamPathResult channel that returns the pattern's paths
-// in a lexicographically increasing order. If startAfter != "" then only files lexically greater
-// than will be considered. maxFiles limits the number of files returned and can be set to -1 for
-// all files. chanSize is the buffer size for the returned *StreamPathResult channel.
-func StreamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
-	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxFiles, chanSize, filter, false)
+) (walk <-chan *StreamPathResult, stopWalk func(), err error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, chanSize, filter, false)
 }
 
-// StreamPathsLexicographicallyWithDirs behaves like StreamPathsLexicographically but also emit
-// directories. Emitted directories are not counted against maxFiles. Also, the ResumeToken returned
-// will only be file paths.
-func StreamPathsLexicographicallyWithDirs(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter) (<-chan *StreamPathResult, error) {
-	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, maxFiles, chanSize, filter, true)
+// StreamPathsLexicographicallyWithDirs behaves like StreamPathsLexicographically but also emits
+// directories. Emitted directories do not advance the ResumeToken, which only ever names a file
+// path. Resuming still re-emits every directory that follows that file, because directories are
+// compared using the same sortName ordering the walk emits in rather than their bare path.
+func StreamPathsLexicographicallyWithDirs(
+	ctx context.Context,
+	mountPoint Provider,
+	pattern string,
+	startAfter string,
+	chanSize int,
+	filter FileInfoFilter,
+) (walk <-chan *StreamPathResult, stopWalk func(), err error) {
+	return streamPathsLexicographically(ctx, mountPoint, pattern, startAfter, chanSize, filter, true)
 }
 
-func streamPathsLexicographically(ctx context.Context, mountPoint Provider, pattern string, startAfter string, maxFiles int, chanSize int, filter FileInfoFilter, includeDirs bool) (<-chan *StreamPathResult, error) {
-	if maxFiles != -1 && maxFiles <= 0 {
-		return nil, fmt.Errorf("maxFiles must be greater than zero or -1")
+func streamPathsLexicographically(
+	ctx context.Context,
+	mountPoint Provider,
+	pattern string,
+	startAfter string,
+	chanSize int,
+	filter FileInfoFilter,
+	includeDirs bool,
+) (walk <-chan *StreamPathResult, stopWalk func(), err error) {
+	stopWalkCh := make(chan struct{}, 1)
+	stopWalk = func() {
+		select {
+		case stopWalkCh <- struct{}{}:
+		default:
+		}
 	}
 
 	preparePath := func(path string) string {
@@ -150,7 +172,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	isGlob := IsGlobPattern(pattern)
 	if !isGlob {
 		if stat, err := mountPoint.Lstat(pattern); err != nil {
-			return nil, fmt.Errorf("unable walk path: %w", err)
+			return nil, func() {}, fmt.Errorf("unable walk path: %w", err)
 		} else if !stat.IsDir() {
 
 			// prefix is a file path so only stream it back if it's a match.
@@ -163,19 +185,24 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 
 				inMountPath := "/" + pattern
 				statT, ok := stat.Sys().(*syscall.Stat_t)
+				var result *StreamPathResult
 				if !ok {
-					walkChan <- &StreamPathResult{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
+					result = &StreamPathResult{Err: fmt.Errorf("unable to retrieve stat information: unsupported platform")}
 				} else if keep, err := ApplyFilterByStatT(inMountPath, statT, filter); err != nil {
-					walkChan <- &StreamPathResult{Err: err}
+					result = &StreamPathResult{Err: err}
 				} else if keep {
+					result = &StreamPathResult{Path: inMountPath}
+				}
+
+				if result != nil && ctx.Err() == nil {
 					select {
 					case <-ctx.Done():
-						walkChan <- &StreamPathResult{Err: ctx.Err()}
-					case walkChan <- &StreamPathResult{Path: inMountPath}:
+					case <-stopWalkCh:
+					case walkChan <- result:
 					}
 				}
 			}()
-			return walkChan, nil
+			return walkChan, stopWalk, nil
 		}
 	}
 
@@ -185,7 +212,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 		for {
 			if _, err := mountPoint.Lstat(root); err != nil {
 				if !errors.Is(err, fs.ErrNotExist) {
-					return nil, fmt.Errorf("unable walk path: %w", err)
+					return nil, func() {}, fmt.Errorf("unable walk path: %w", err)
 				}
 			} else {
 				break
@@ -201,51 +228,32 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 	walkChan := make(chan *StreamPathResult, chanSize)
 	go func() {
 		defer close(walkChan)
+
+		lastFileSent := startAfter
 		send := func(result *StreamPathResult) bool {
-			select {
-			case <-ctx.Done():
+			result.ResumeToken = lastFileSent
+			if ctx.Err() == nil {
 				select {
-				case walkChan <- &StreamPathResult{Err: ctx.Err()}:
-				default:
+				case <-ctx.Done():
+					return false
+				case <-stopWalkCh:
+					return false
+				case walkChan <- result:
+					return true
 				}
-				return false
-			case walkChan <- result:
-				return true
-			}
-		}
-
-		// Only files count against maxFiles or anchor the resume token: a directory never produces
-		// a job request on its own (see jobRequestBuilder.Process), and reapplying its RST config on
-		// a later pass is a no-op, so it's always sent immediately regardless of the remaining
-		// budget.
-		var lastSent string
-		emitFile := func(path string) bool {
-			if maxFiles == 0 {
-				send(&StreamPathResult{ResumeToken: lastSent})
+			} else {
 				return false
 			}
-			if !send(&StreamPathResult{Path: path}) {
-				return false
-			}
-			lastSent = path
-			if maxFiles > 0 {
-				maxFiles--
-			}
-			return true
-		}
-
-		emitDir := func(path string) bool {
-			return send(&StreamPathResult{Path: path})
 		}
 
 		var walkDir func(string) bool
 		walkDir = func(directory string) bool {
-			if err := ctx.Err(); err != nil {
-				select {
-				case walkChan <- &StreamPathResult{Err: err}:
-				default:
-				}
+			select {
+			case <-ctx.Done():
 				return false
+			case <-stopWalkCh:
+				return false
+			default:
 			}
 
 			entries, err := readDir(mountPath, directory, startAfter)
@@ -260,18 +268,24 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 
 				if entry.IsDir() {
 					if includeDirs {
+						// Compare using the directory's sortName (see readDir), not its bare path.
+						// startAfter is always a file path, and the walk emits in sortName order, so
+						// the bare path disagrees with the emission order exactly when the directory
+						// is a strict prefix of the anchor file - a directory "b" sitting next to a
+						// sibling file "b.txt". Without the trailing '/', "b" <= "b.txt" and the
+						// directory is skipped on resume even though it is emitted after that file.
 						shouldEmitDir := false
 						if !isGlob {
-							shouldEmitDir = path > startAfter
+							shouldEmitDir = path+"/" > startAfter
 						} else if match := doublestar.MatchUnvalidated(pattern, path); match {
-							shouldEmitDir = path > startAfter
+							shouldEmitDir = path+"/" > startAfter
 						}
 
 						if shouldEmitDir {
 							if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
 								send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 								return false
-							} else if keep && !emitDir(inMountPath) {
+							} else if keep && !send(&StreamPathResult{Path: inMountPath}) {
 								return false
 							}
 						}
@@ -298,23 +312,25 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 					continue
 				}
 
-				if !emitFile(inMountPath) {
+				if !send(&StreamPathResult{Path: inMountPath}) {
 					return false
 				}
+				lastFileSent = path
 			}
 
 			return true
 		}
 
 		if includeDirs && !isGlob && root != "" {
-			emitRoot := root > startAfter
+			// Same sortName comparison as the directory entries above.
+			emitRoot := root+"/" > startAfter
 			if emitRoot {
 				inMountPath := "/" + root
 				if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
 					send(&StreamPathResult{Err: fmt.Errorf("unable to filter files: %w", err)})
 					return
 				} else if keep {
-					if !emitDir(inMountPath) {
+					if !send(&StreamPathResult{Path: inMountPath}) {
 						return
 					}
 				}
@@ -324,7 +340,7 @@ func streamPathsLexicographically(ctx context.Context, mountPoint Provider, patt
 		walkDir(root)
 	}()
 
-	return walkChan, nil
+	return walkChan, stopWalk, nil
 }
 
 // readDir returns a lexically sorted directory list of files that come after startAfter. It should

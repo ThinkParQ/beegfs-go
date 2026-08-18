@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,87 +19,145 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
-func TestRequestBuildController_WalkSourceProcessesPathsAndSubmitsRequests(t *testing.T) {
+// testMaxRequests is high enough that the walk is never stopped for reaching it, so tests that only
+// care about path processing run the walk to completion.
+const testMaxRequests = 1000
+
+func TestRequestBuildController_AddWalkProcessesPathsAndSubmitsRequests(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	walkCh := make(chan *filesystem.StreamPathResult, 2)
-	walkCh <- &filesystem.StreamPathResult{Path: "/a"}
-	walkCh <- &filesystem.StreamPathResult{Path: "/b"}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(
+		&filesystem.StreamPathResult{Path: "/a"},
+		&filesystem.StreamPathResult{Path: "/b"},
+	)
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
-	require.NoError(t, controller.WaitForWalkSources())
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, testMaxRequests))
+	require.NoError(t, controller.WaitForWalk())
 
 	result, resumeToken := controller.GetResults()
-	assert.Empty(t, resumeToken)
+	assert.Empty(t, resumeToken, "a walk that ran to completion has nothing left to resume from")
 	assert.False(t, result.Reschedule)
 	assert.ElementsMatch(t, []string{"/a", "/b"}, submittedPaths(jobSubmissionCh))
 }
 
-func TestRequestBuildController_WalkSourceSetsResumeTokenAndReschedules(t *testing.T) {
+// TestRequestBuildController_AddWalkStopsAtMaxRequests asserts that once the walk has submitted
+// maxRequests and the workers are saturated, the controller stops the walk, records the resume token
+// carried by the result it stopped on, and asks to be rescheduled. The result it stops on must not
+// be submitted: the resume token names the path before it, so a resumed walk re-emits it.
+func TestRequestBuildController_AddWalkStopsAtMaxRequests(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+	saturated := func() float64 { return walkContinuationWorkerSaturationThreshold }
+	controller.workerSaturation = []func() float64{saturated, saturated}
+	controller.activeSourceSubmissions.Store(1)
 
-	walkCh := make(chan *filesystem.StreamPathResult, 1)
-	walkCh <- &filesystem.StreamPathResult{ResumeToken: "resume-token"}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(
+		&filesystem.StreamPathResult{Path: "/a", ResumeToken: "resume-token"},
+	)
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
-	require.NoError(t, controller.WaitForWalkSources())
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, 1))
+	require.NoError(t, controller.WaitForWalk())
 
 	result, resumeToken := controller.GetResults()
 	assert.Equal(t, "resume-token", resumeToken)
 	assert.True(t, result.Reschedule)
+	assert.Empty(t, submittedPaths(jobSubmissionCh), "the path the walk stopped on must not be submitted")
 }
 
-func TestRequestBuildController_WalkSourceRejectsConflictingResumeTokens(t *testing.T) {
+// TestRequestBuildController_AddWalkExtendsMaxRequestsWhileWorkersHaveCapacity asserts the opposite
+// of the case above: reaching maxRequests while the workers still have capacity raises the ceiling
+// and keeps walking rather than paying for a reschedule.
+func TestRequestBuildController_AddWalkExtendsMaxRequestsWhileWorkersHaveCapacity(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
-	controller.resumeToken = "existing-token"
+	idle := func() float64 { return 0 }
+	controller.workerSaturation = []func() float64{idle, idle}
+	controller.activeSourceSubmissions.Store(1)
 
-	walkCh := make(chan *filesystem.StreamPathResult, 1)
-	walkCh <- &filesystem.StreamPathResult{ResumeToken: "new-token"}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(
+		&filesystem.StreamPathResult{Path: "/a"},
+		&filesystem.StreamPathResult{Path: "/b"},
+	)
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
-	err := controller.WaitForWalkSources()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "conflicting walk resume tokens")
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, 1))
+	require.NoError(t, controller.WaitForWalk())
+
+	result, resumeToken := controller.GetResults()
+	assert.Empty(t, resumeToken)
+	assert.False(t, result.Reschedule)
+	assert.ElementsMatch(t, []string{"/a", "/b"}, submittedPaths(jobSubmissionCh),
+		"both paths should be submitted, showing the ceiling was raised instead of the walk stopping")
 }
 
-func TestRequestBuildController_WalkSourceReturnsWalkErrors(t *testing.T) {
+// TestRequestBuildController_AddWalkRejectsSecondWalk asserts the single-walk guard: the controller
+// accumulates one resume token and one scheduling result, so a second walk added before the first is
+// retired is rejected and released rather than left to race with it.
+func TestRequestBuildController_AddWalkRejectsSecondWalk(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	firstCh, firstStop, _ := newTestWalk(&filesystem.StreamPathResult{Path: "/a"})
+	require.NoError(t, controller.AddWalk(firstCh, firstStop, testMaxRequests))
+
+	secondCh, secondStop, secondStopped := newTestWalk(&filesystem.StreamPathResult{Path: "/b"})
+	err := controller.AddWalk(secondCh, secondStop, testMaxRequests)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "another walk is already in progress")
+	assert.True(t, secondStopped.Load(), "the rejected walk should be released so its producer isn't stranded")
+
+	require.NoError(t, controller.WaitForWalk())
+	assert.Equal(t, []string{"/a"}, submittedPaths(jobSubmissionCh))
+}
+
+// TestRequestBuildController_WaitForWalkRetiresTheWalk asserts WaitForWalk resets the controller so
+// the next walk is accepted, which is what lets a builder job run more than one round.
+func TestRequestBuildController_WaitForWalkRetiresTheWalk(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	firstCh, firstStop, _ := newTestWalk(&filesystem.StreamPathResult{Path: "/a"})
+	require.NoError(t, controller.AddWalk(firstCh, firstStop, testMaxRequests))
+	require.NoError(t, controller.WaitForWalk())
+
+	secondCh, secondStop, _ := newTestWalk(&filesystem.StreamPathResult{Path: "/b"})
+	require.NoError(t, controller.AddWalk(secondCh, secondStop, testMaxRequests))
+	require.NoError(t, controller.WaitForWalk())
+
+	assert.ElementsMatch(t, []string{"/a", "/b"}, submittedPaths(jobSubmissionCh))
+}
+
+func TestRequestBuildController_AddWalkReturnsWalkErrors(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
 	walkErr := fmt.Errorf("walk failed")
-	walkCh := make(chan *filesystem.StreamPathResult, 1)
-	walkCh <- &filesystem.StreamPathResult{Err: walkErr}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(&filesystem.StreamPathResult{Err: walkErr})
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
-	err := controller.WaitForWalkSources()
-	require.ErrorIs(t, err, walkErr)
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, testMaxRequests))
+	require.ErrorIs(t, controller.WaitForWalk(), walkErr)
 }
 
-// TestRequestBuildController_WalkSourceConvertsRequestCancelErrorToFailedPrecondition asserts that a
+// TestRequestBuildController_AddWalkConvertsRequestCancelErrorToFailedPrecondition asserts that a
 // RequestCancelError on the walk result does not fail the builder job. Instead it is submitted as a
 // FAILED_PRECONDITION request carrying the cancellation reason.
-func TestRequestBuildController_WalkSourceConvertsRequestCancelErrorToFailedPrecondition(t *testing.T) {
+func TestRequestBuildController_AddWalkConvertsRequestCancelErrorToFailedPrecondition(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	walkCh := make(chan *filesystem.StreamPathResult, 1)
-	walkCh <- &filesystem.StreamPathResult{Path: "/a", Err: &RequestCancelError{Reason: errors.New("cancelled")}}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(
+		&filesystem.StreamPathResult{Path: "/a", Err: &RequestCancelError{Reason: errors.New("cancelled")}},
+	)
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
-	require.NoError(t, controller.WaitForWalkSources())
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, testMaxRequests))
+	require.NoError(t, controller.WaitForWalk())
 
 	requests := drainRequests(jobSubmissionCh)
 	require.Len(t, requests, 1)
@@ -287,9 +346,9 @@ func TestRequestBuildController_CancelBulkOperationSetsManagerFailedOnWaitError(
 	assert.Contains(t, manager.GetErrors().Error(), waitErr.Error())
 }
 
-func TestRequestBuildController_WaitForWalkSourcesReturnsImmediatelyWhenNoSourceWalk(t *testing.T) {
+func TestRequestBuildController_WaitForWalkReturnsImmediatelyWhenNoWalk(t *testing.T) {
 	controller := &requestBuildController{}
-	require.NoError(t, controller.WaitForWalkSources())
+	require.NoError(t, controller.WaitForWalk())
 }
 
 func TestRequestBuildController_WaitForBulkOperationsReturnsImmediatelyWhenNoBulkWalk(t *testing.T) {
@@ -329,13 +388,13 @@ func TestRequestBuildController_PathProcessingConcurrencyIsBounded(t *testing.T)
 		return baseGetPathState(ctx, mountPoint, inMountPath, mode)
 	}
 
-	walkCh := make(chan *filesystem.StreamPathResult, 3)
-	walkCh <- &filesystem.StreamPathResult{Path: "/a"}
-	walkCh <- &filesystem.StreamPathResult{Path: "/b"}
-	walkCh <- &filesystem.StreamPathResult{Path: "/c"}
-	close(walkCh)
+	walkCh, stopWalk, _ := newTestWalk(
+		&filesystem.StreamPathResult{Path: "/a"},
+		&filesystem.StreamPathResult{Path: "/b"},
+		&filesystem.StreamPathResult{Path: "/c"},
+	)
 
-	controller.WalkSourceGenerator(testWalkChGenerator(walkCh), "", 0)
+	require.NoError(t, controller.AddWalk(walkCh, stopWalk, testMaxRequests))
 
 	select {
 	case <-started:
@@ -351,7 +410,7 @@ func TestRequestBuildController_PathProcessingConcurrencyIsBounded(t *testing.T)
 
 	close(release)
 
-	require.NoError(t, controller.WaitForWalkSources())
+	require.NoError(t, controller.WaitForWalk())
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -359,18 +418,28 @@ func TestRequestBuildController_PathProcessingConcurrencyIsBounded(t *testing.T)
 	assert.Equal(t, 0, inFlight)
 }
 
-// testWalkChGenerator returns a nextWalkChGenerator that always hands back walkCh, for tests that
-// only need a single walk channel and never expect nextWalkCh to be called with a follow-up resume
-// token.
-func testWalkChGenerator(walkCh <-chan *filesystem.StreamPathResult) nextWalkChGenerator {
-	return func(resumeToken string) (<-chan *filesystem.StreamPathResult, error) {
-		return walkCh, nil
+// newTestWalk returns a closed walk channel pre-loaded with results, a stopWalk that records that it
+// was called, and the flag it records into. Because the channel is already closed, a controller that
+// consumes every result observes a completed walk, while one that stops early simply leaves the
+// remainder buffered.
+//
+// The stopped flag only distinguishes a walk AddWalk rejected outright from one it accepted: an
+// accepted walk is always released on the way out, so the flag is set whether it finished or was cut
+// short. Tests that care about that distinction assert on the resume token and submitted paths.
+func newTestWalk(results ...*filesystem.StreamPathResult) (walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), stopped *atomic.Bool) {
+	ch := make(chan *filesystem.StreamPathResult, len(results))
+	for _, result := range results {
+		ch <- result
 	}
+	close(ch)
+
+	stopped = &atomic.Bool{}
+	return ch, func() { stopped.Store(true) }, stopped
 }
 
 // submittedPaths closes and drains jobSubmissionCh, returning the path of every submitted request.
 // Callers must only invoke this once no further sends can occur, e.g. after
-// requestBuildController.WaitForWalkSources()/WaitForBulkOperations().
+// requestBuildController.WaitForWalk()/WaitForBulkOperations().
 func submittedPaths(jobSubmissionCh chan *beeremote.JobRequest) []string {
 	var paths []string
 	for _, req := range drainRequests(jobSubmissionCh) {

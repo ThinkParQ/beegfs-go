@@ -100,7 +100,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inM
 	defer func() {
 		if !keepLock {
 			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", clearErr))
+				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
@@ -145,7 +145,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	defer func() {
 		if !keepLock {
 			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", clearErr))
+				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
@@ -295,16 +295,6 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// applyUndo rolls back the file state mutations made by applyPlan, and planApplied records
-	// whether the file currently carries those mutations. It is false when no plan was applied at
-	// all (applyUndo is noopUndo, so running it would prove nothing yet still force canReleaseLock
-	// true), and false again once applyUndo has run and successfully unapplied the plan.
-	applyUndo := noopUndo
-	planApplied := false
-	// generatedExternalId is only set once GenerateExternalId hands back an id that reserved remote
-	// resources, so it names exactly what this request is on the hook for releasing.
-	generatedExternalId := ""
-
 	// Both cleanup paths run on a context detached from ctx, because the cleanup that matters most
 	// runs precisely when ctx has been cancelled: the undo steps that talk to BeeGFS over BeeMsg and
 	// the externalId release that talks to the remote target would otherwise fail before doing
@@ -313,11 +303,16 @@ func (w *jobRequestBuilder) processRequest(
 	newCleanupCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.WithoutCancel(ctx), requestCleanupTimeout)
 	}
+
+	planApplied := false
+	applyUndo := noopUndo
 	undoAppliedPlan := func() error {
 		cleanupCtx, cancelCleanup := newCleanupCtx()
 		defer cancelCleanup()
 		return applyUndo(cleanupCtx)
 	}
+
+	var generatedExternalId string
 	releaseExternalId := func() error {
 		if generatedExternalId == "" {
 			return nil
@@ -330,6 +325,7 @@ func (w *jobRequestBuilder) processRequest(
 		defer cancelCleanup()
 		return client.ReleaseExternalId(cleanupCtx, cfg, generatedExternalId)
 	}
+
 	if !request.HasGenerationStatus() {
 		undo, applyErr := applyPlan(&pathState)
 		if applyErr != nil {
@@ -361,15 +357,10 @@ func (w *jobRequestBuilder) processRequest(
 			applyUndo = undo
 			planApplied = true
 
-			// Generating the externalId must be the last possible error to avoid situations where, once the
-			// externalId is generated, it would be lost as a result of a subsequent preconditional failure.
 			client := w.RstMap[request.GetRemoteStorageTarget()]
 			externalId, externalIdErr := client.GenerateExternalId(ctx, cfg)
 			if externalIdErr != nil {
 				if undoErr := undoAppliedPlan(); undoErr != nil {
-					// The rollback failed, so the file may still carry the plan's mutations and
-					// planApplied stays true. If this request never reaches a submission worker the
-					// cancellation path below gets one more attempt at restoring the file.
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ERROR,
@@ -391,11 +382,7 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// Check for cancellation before continuing so that it has priority over submitting the job
-	// request: an already cancelled context must never race the send when jobSubmissionCh still has
-	// spare capacity. The remaining race inside the select (cancelled concurrently with a successful
-	// send) is safe either way, because a request that reaches a submission worker is still given a
-	// grace period to be submitted after cancellation.
+	// Check for cancellation error first so it has priority over submitting the job request.
 	if ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
@@ -404,20 +391,10 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// The request never reached a submission worker, so nothing downstream will ever complete it and
-	// everything it reserved has to be given back here.
 	if !submitted {
-		// No job is ever created for an unsubmitted request, so CompleteWorkRequests will never run
-		// to abort what the externalId reserved. Release it here or it leaks: for S3 that is an
-		// orphaned multipart upload, billed until a bucket lifecycle rule reaps it. A failure is
-		// reported through err because nothing else will surface it once the request is discarded.
 		if releaseErr := releaseExternalId(); releaseErr != nil {
-			err = errors.Join(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
+			err = appendError(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
 		}
-
-		// Roll back the applied plan so the file is not left mutated by a job that will never run.
-		// The lock can only be released once that rollback actually succeeds; if it fails the file
-		// is still mutated and must stay locked for recovery to find.
 		if planApplied {
 			canReleaseLock = undoAppliedPlan() == nil
 		}

@@ -18,7 +18,6 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
@@ -148,12 +147,16 @@ func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case work := <-w.workQueue:
-			w.process(work)
+			w.process(ctx, work)
 		}
 	}
 }
 
-func (w *worker) process(work workAssignment) {
+// process carries out a single work assignment. The shutdownCtx is the worker pool's context and is
+// the parent of every work.ctx. Both being cancelled means BeeSync is stopping and the request
+// should be left resumable, whereas only work.ctx being cancelled means this particular request was
+// cancelled (for example by `beegfs remote job cancel`) and must not resume.
+func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 
 	// Regardless if the work request was processed successfully, tell WorkMgr when we stop
 	// processing this work item so it can pull more work into the queue.
@@ -341,13 +344,16 @@ func (w *worker) process(work workAssignment) {
 	}
 
 	if request.HasBuilder() {
-		cleanupEntries = w.processBuilder(work, client, entry)
+		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry)
 	} else {
-		cleanupEntries = w.processWork(work, client, entry, func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }, log)
+		// processWork can run for a long time without returning, so it checkpoints the entry after
+		// each completed part instead of relying on the commit in the deferred function above.
+		commitWorkPart := func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }
+		cleanupEntries = w.processWork(shutdownCtx, work, client, entry, commitWorkPart, log)
 	}
 }
 
-func (w *worker) processWork(work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
+func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -401,11 +407,21 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry *wo
 		status.SetMessage("all parts of this work request are completed")
 	} else {
 		if work.ctx.Err() != nil {
+			if shutdownCtx.Err() != nil {
+				// BeeSync is shutting down. Nothing is wrong with the request so leave it
+				// rescheduled rather than cancelled, otherwise process() would refuse to start it
+				// again after the restart. Parts already marked completed are skipped when it
+				// resumes.
+				status.SetState(flex.Work_RESCHEDULED)
+				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+				entry.ExecuteAfter = time.Time{}
+				return
+			}
 			status.SetState(flex.Work_CANCELLED)
 			status.SetMessage("the work context was cancelled before all parts can be synced")
-			// Don't send the work result and don't try to cleanup entries. We don't know why we
-			// were asked to be done early so we'll let the caller handle either sending the result
-			// or retrying the request later.
+			// Don't send the work result and don't try to cleanup entries. This request was
+			// cancelled specifically (not shut down), so whoever cancelled it owns sending the
+			// result and removing the journal entry.
 			return
 		}
 		// This shouldn't happen so we set the state to failed to avoid making things worse and
@@ -436,88 +452,73 @@ const builderJobSubmissionWorkerMultiplier = 4
 // this grace period is what still guarantees shutdown terminates when BeeRemote is genuinely gone.
 const builderJobSubmissionGrace = 10 * time.Minute
 
-func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
+func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
 	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
-	for {
-		jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
-		g, gCtx := errgroup.WithContext(work.ctx)
+	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
+	var wg sync.WaitGroup
 
-		var result *rst.SchedulingResult
-		g.Go(func() error {
-			defer close(jobSubmissionCh)
-			result = client.ExecuteJobBuilderRequest(gCtx, workRequest, jobSubmissionCh, w.workerSaturation)
-			return nil
-		})
+	var result *rst.SchedulingResult
+	wg.Go(func() {
+		defer close(jobSubmissionCh)
+		result = client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh, w.workerSaturation)
+	})
 
-		var builderMu sync.Mutex
+	var builderMu sync.Mutex
 
-		// Submissions run on a context detached from gCtx that only starts winding down
-		// builderJobSubmissionGrace after gCtx is cancelled. While gCtx is live this is equivalent
-		// to gCtx, preserving the retry-until-BeeRemote-is-available behavior below; on shutdown it
-		// buys already-planned requests a bounded window to reach BeeRemote instead of being
-		// silently dropped.
-		submitCtx, cancelSubmit := context.WithCancel(context.WithoutCancel(gCtx))
-		stopGrace := context.AfterFunc(gCtx, func() {
-			time.AfterFunc(builderJobSubmissionGrace, cancelSubmit)
-		})
+	// Submissions run on a context detached from work.ctx that only starts winding down
+	// builderJobSubmissionGrace after work.ctx is cancelled. While work.ctx is live this is
+	// equivalent to work.ctx, preserving the retry-until-BeeRemote-is-available behavior below; on
+	// shutdown it buys already-planned requests a bounded window to reach BeeRemote instead of
+	// being silently dropped.
+	submitCtx, cancelSubmit := context.WithCancel(context.WithoutCancel(work.ctx))
+	stopGrace := context.AfterFunc(work.ctx, func() {
+		time.AfterFunc(builderJobSubmissionGrace, cancelSubmit)
+	})
 
-		submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
-		for range submissionWorkers {
-			g.Go(func() error {
-				// Always drain jobSubmissionCh until it is closed, even after cancellation, so the
-				// producer side (ExecuteJobBuilderRequest) never blocks trying to send.
-				for jobRequest := range jobSubmissionCh {
-					w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest)
-				}
-				return nil
-			})
-		}
-
-		err := g.Wait()
-		// All submission workers have returned, so the grace window is no longer needed. Both calls
-		// are idempotent and safe even if the grace timer already fired.
-		stopGrace()
-		cancelSubmit()
-
-		if err != nil {
-			w.updateBuilderJob(work, entry, &rst.SchedulingResult{Err: err})
-			cleanupEntries = true
-			return
-		}
-
-		if result == nil {
-			result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
-		}
-
-		bulkOperations := builder.GetBulkOperations()
-		if bulkOperations == nil {
-			bulkOperations = []*flex.BulkOperation{}
-		}
-		workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
-
-		// While the queue has spare capacity, keep building/submitting immediately instead of
-		// paying the cost of persisting reschedule state and waiting for the manager to poll us
-		// back in. The builder carries its own resume cursor, so it's safe to just loop.
-		if result.Reschedule && result.Delay < workDelayMinimum && len(w.workerSaturation) > 0 {
-			if w.workerSaturation[0]() < 100 {
-				if result.Delay == 0 {
-					continue
-				}
-
-				select {
-				case <-time.After(result.Delay):
-					continue
-				case <-work.ctx.Done():
-				}
+	submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
+	for range submissionWorkers {
+		wg.Go(func() {
+			// Always drain jobSubmissionCh until it is closed, even after cancellation, so the
+			// producer side (ExecuteJobBuilderRequest) never blocks trying to send.
+			for jobRequest := range jobSubmissionCh {
+				w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest)
 			}
-		}
-
-		cleanupEntries = w.updateBuilderJob(work, entry, result)
-		return
+		})
 	}
+
+	wg.Wait()
+
+	// All submission workers have returned, so the grace window is no longer needed. Both calls
+	// are idempotent and safe even if the grace timer already fired.
+	stopGrace()
+	cancelSubmit()
+
+	bulkOperations := builder.GetBulkOperations()
+	if bulkOperations == nil {
+		bulkOperations = []*flex.BulkOperation{}
+	}
+	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
+
+	if shutdownCtx.Err() != nil {
+		// BeeSync is shutting down. Cancelling work.ctx is how we ask the builder to stop, so
+		// ExecuteJobBuilderRequest reports an aborted request, but the builder job itself is fine
+		// and must not be cancelled. Leave the entry rescheduled without sending a result to
+		// BeeRemote so it is picked back up after the restart. process() commits the entry on the
+		// way out, which is what persists the state set here.
+		status := workResult.GetStatus()
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before the builder job completed because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		return false
+	}
+
+	if result == nil {
+		result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
+	}
+	return w.updateBuilderJob(work, entry, result)
 }
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state

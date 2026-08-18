@@ -105,21 +105,22 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	resumeToken := workRequest.GetExternalId()
 	walkComplete, walkErr := parseResumeToken(resumeToken, workRequest.JobId)
 	if !walkComplete {
-		walkSize := min(cap(jobSubmissionCh), maxRequests+1) // +1 is for ResumeToken when there is more work
-		walkChGenerator, resumeToken, err := c.getNextWalkChGenerator(ctx, workRequest, walkSize)
+		walk, stopWalk, err := c.getWalk(ctx, workRequest, walkBufferSize)
 		if err != nil {
 			if len(registry.GetManagersSnapshot()) == 0 {
 				return abort(err)
 			}
 			walkErr = err
-		} else {
-			controller.WalkSourceGenerator(walkChGenerator, resumeToken, maxRequests)
-			if err = controller.WaitForWalkSources(); err != nil {
-				if errors.Is(ctx.Err(), context.Canceled) || len(registry.GetManagersSnapshot()) == 0 {
-					return abort(err)
-				}
-				walkErr = err
+		} else if err = controller.AddWalk(walk, stopWalk, maxRequests); err != nil {
+			if len(registry.GetManagersSnapshot()) == 0 {
+				return abort(err)
 			}
+			walkErr = err
+		} else if err = controller.WaitForWalk(); err != nil {
+			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) || len(registry.GetManagersSnapshot()) == 0 {
+				return abort(err)
+			}
+			walkErr = err
 		}
 	}
 
@@ -143,13 +144,21 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	return
 }
 
-type nextWalkChGenerator func(resumeToken string) (walkCh <-chan *filesystem.StreamPathResult, err error)
+// walkBufferSize is the buffer on the channel returned by getWalk. It only decouples the walk from
+// the controller consuming it, absorbing short stalls while the controller dispatches paths, so it
+// is deliberately unrelated to maxRequests (which the controller can raise mid-walk) and to the
+// downstream jobSubmissionCh (a separate stage with its own backpressure). Keeping it small bounds
+// the waste when a walk is stopped: whatever is still buffered is discarded and walked again next
+// round, and the buffer is most likely to be full exactly then, because the controller stops when
+// the workers are saturated - the same condition that has it throttling and letting the walk run
+// ahead.
+const walkBufferSize = 256
 
-func (c *JobBuilderClient) getNextWalkChGenerator(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (generator nextWalkChGenerator, resumeToken string, err error) {
-	maxFiles := maxRequests
+func (c *JobBuilderClient) getWalk(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (walk <-chan *filesystem.StreamPathResult, stopWalk func(), err error) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
-	resumeToken = workRequest.GetExternalId()
+	resumeToken := workRequest.GetExternalId()
+	stopWalk = func() {}
 
 	var filter filesystem.FileInfoFilter
 	filterExpr := cfg.GetFilterExpr()
@@ -175,27 +184,18 @@ func (c *JobBuilderClient) getNextWalkChGenerator(ctx context.Context, workReque
 			// Since neither cfg.RemoteStorageTarget nor a remote path is specified, walk the local
 			// path. Create a job for each file that has exactly one rstId or is a stub file. Ignore
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
-			generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
-				return walkPaths(ctx, c.mountPoint, workRequest.GetPath(), token, maxFiles, chanSize, nil)
-			}
+			return walkPaths(ctx, c.mountPoint, workRequest.GetPath(), resumeToken, chanSize, nil)
 		} else {
 			client, ok := c.rstMap[cfg.RemoteStorageTarget]
 			if !ok {
 				err = fmt.Errorf("failed to determine rst client")
 				return
 			}
-
-			generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
-				return client.GetWalk(ctx, client.SanitizeRemotePath(cfg.GetRemotePath()), chanSize, token, maxFiles)
-			}
+			return client.GetWalk(ctx, client.SanitizeRemotePath(cfg.GetRemotePath()), chanSize, resumeToken)
 		}
 	} else {
-		generator = func(token string) (walkCh <-chan *filesystem.StreamPathResult, err error) {
-			return walkPaths(ctx, c.mountPoint, workRequest.Path, token, maxFiles, chanSize, filter)
-		}
+		return walkPaths(ctx, c.mountPoint, workRequest.Path, resumeToken, chanSize, filter)
 	}
-
-	return
 }
 
 // ExecuteWorkRequestPart is not implemented and should never be called.
@@ -272,8 +272,8 @@ func (c *JobBuilderClient) GetConfig() *flex.RemoteStorageTarget {
 }
 
 // GetWalk is not implemented and should never be called.
-func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
-	return nil, ErrUnsupportedOpForRST
+func (c *JobBuilderClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string) (<-chan *filesystem.StreamPathResult, func(), error) {
+	return nil, func() {}, ErrUnsupportedOpForRST
 }
 
 // SanitizeRemotePath should never be called.

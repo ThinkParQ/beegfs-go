@@ -117,16 +117,16 @@ type Provider interface {
 	CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
-	// GetWalk returns a channel that streams *WalkResponse entries for matching files or objects.
-	// If the provided path includes a file glob pattern, only matching entries will be return.
-	// maxRequests should trigger a WalkStoppedWithMoreError to signal to job builder to
-	// reschedule the remaining work.
+	// GetWalk returns a channel that streams *StreamPathResult entries for matching files or
+	// objects. If the provided path includes a file glob pattern, only matching entries will be
+	// returned. Provide resumeToken to continue a previous walk; an empty string starts fresh.
 	//
-	// GetWalk must generate an externalId that can be used to resume the walk from a previous
-	// point. Pass the externalId back to job builder using WalkStoppedWithMoreError{resumeToken:
-	// externalId}; this signals job builder to schedule the job again later and allows workers to
-	// start processing any already-streamed requests.
-	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error)
+	// Each result must carry a ResumeToken that can be passed back as resumeToken to resume the
+	// walk from that result, so the job builder can stop a walk at any point and schedule the job
+	// again later while workers process what was already streamed. Call stopWalk to stop early; it
+	// must never block and must be safe to call more than once, and the caller must keep draining
+	// the channel until it is closed so the walk can observe the stop and finish.
+	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string) (walk <-chan *filesystem.StreamPathResult, stopWalk func(), err error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
 	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.

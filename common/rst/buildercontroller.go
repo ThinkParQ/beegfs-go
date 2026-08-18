@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -62,10 +63,13 @@ type requestBuildController struct {
 	processTimeCounter    atomic.Int64
 	lastProcessTime       time.Time
 
-	sourceGroup             *errgroup.Group
-	sourceGroupCtx          context.Context
-	sourceProducerGroup     *errgroup.Group
-	activeSourceSubmissions atomic.Int64 // All non-terminal submitted requests. Requests add to a bulk operation will not counter.
+	sourceGroup         *errgroup.Group
+	sourceGroupCtx      context.Context
+	sourceProducerGroup *errgroup.Group
+	// activeSourceSubmissions counts the requests this walk has submitted. It only ever increases,
+	// so it is the running total for the current walk rather than a live in-flight gauge. Paths
+	// absorbed by a bulk operation don't submit a request of their own and aren't counted.
+	activeSourceSubmissions atomic.Int64
 
 	bulkGroup     *errgroup.Group
 	bulkGroupCtx  context.Context
@@ -75,17 +79,25 @@ type requestBuildController struct {
 	resumeToken string
 }
 
-func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenerator, resumeToken string, activeJobSubmissionsTarget int) {
-	if c.sourceGroup == nil {
-		c.sourceGroup, c.sourceGroupCtx = errgroup.WithContext(c.ctx)
-		c.sourceProducerGroup = new(errgroup.Group)
-	}
+const (
+	walkContinuationWorkerSaturationThreshold     = 100
+	walkContinuationMaxRequestExtensionMultiplier = 0.5
+)
 
+// AddWalk starts draining walkCh in the background, building and submitting a request for each path
+// it yields. It returns immediately; call WaitForWalk to wait for the walk and everything it
+// dispatched to finish.
+func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), maxRequests int64) error {
+	if c.sourceGroup != nil {
+		releaseWalk(walkCh, stopWalk)
+		return fmt.Errorf("unable to add walk: another walk is already in progress")
+	}
+	c.sourceGroup, c.sourceGroupCtx = errgroup.WithContext(c.ctx)
+	c.sourceProducerGroup = new(errgroup.Group)
+
+	maxRequestsExtension := max(1, int64(float64(maxRequests)*walkContinuationMaxRequestExtensionMultiplier))
 	c.sourceGroup.Go(func() error {
-		walkCh, err := nextWalkCh(resumeToken)
-		if err != nil {
-			return err
-		}
+		defer releaseWalk(walkCh, stopWalk)
 
 		for {
 			select {
@@ -93,6 +105,11 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 				return c.sourceGroupCtx.Err()
 			case result, ok := <-walkCh:
 				if !ok {
+					if err := c.ctx.Err(); err != nil {
+						// The parent's context was cancelled not the walk itself so return the error.
+						return err
+					}
+					c.resumeToken = ""
 					return nil
 				}
 
@@ -105,25 +122,14 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 					}
 				}
 
-				if result.ResumeToken != "" {
-					// Allow any active source processors to finish so activeJobSubmissions will be
-					// correct before deciding whether to start another walk.
-					if err := c.sourceProducerGroup.Wait(); err != nil {
-						return err
+				if c.activeSourceSubmissions.Load() >= maxRequests {
+					if c.getWorkerSaturation() < walkContinuationWorkerSaturationThreshold {
+						maxRequests += maxRequestsExtension
+					} else {
+						c.resumeToken = result.ResumeToken
+						c.result = &SchedulingResult{Reschedule: true}
+						return nil
 					}
-					if c.activeSourceSubmissions.Load() < int64(activeJobSubmissionsTarget) {
-						if walkCh, err = nextWalkCh(result.ResumeToken); err != nil {
-							return err
-						}
-						continue
-					}
-
-					if c.resumeToken != "" {
-						return fmt.Errorf("conflicting walk resume tokens: [%s, %s]", c.resumeToken, result.ResumeToken)
-					}
-					c.resumeToken = result.ResumeToken
-					c.result = &SchedulingResult{Reschedule: true}
-					return nil
 				}
 
 				inMountPath, remotePath, err := c.getPaths(result.Path)
@@ -135,13 +141,7 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 				start := time.Now()
 				c.sourceProducerGroup.Go(func() error {
 					defer func() { c.releaseWorker(time.Since(start)) }()
-					// c.ctx, not c.sourceGroupCtx: sourceGroupCtx belongs to c.sourceGroup, whose
-					// Wait() cancels it as soon as the outer walk-driving goroutine returns
-					// (including on success) which can race ahead of sourceProducerGroup.Wait() and
-					// cancel still-in-flight workers here out from under them (WaitForWalkSources
-					// waits on sourceGroup before sourceProducerGroup). This goroutine belongs to
-					// sourceProducerGroup, so it should only stop when the controller's own context
-					// says so, not as a side effect of a sibling group's lifecycle.
+					// c.ctx must be used so processing always completes unless the sync is shutting down.
 					submitted, err := c.requestBuilder.ProcessPathFromOriginalWalk(c.ctx, inMountPath, remotePath, failedPrecondition)
 					c.activeSourceSubmissions.Add(submitted)
 					return err
@@ -154,6 +154,15 @@ func (c *requestBuildController) WalkSourceGenerator(nextWalkCh nextWalkChGenera
 			}
 		}
 	})
+	return nil
+}
+
+func releaseWalk(walkCh <-chan *filesystem.StreamPathResult, stopWalk func()) {
+	stopWalk()
+	go func() {
+		for range walkCh {
+		}
+	}()
 }
 
 func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationManager) {
@@ -234,7 +243,7 @@ func processWalkCh[T any](ctx context.Context, group *errgroup.Group, process fu
 }
 
 // GetResults returns the merged scheduling result and resume token accumulated so far. It does not
-// wait for outstanding source or bulk walks; callers must first call WaitForWalkSources and
+// wait for outstanding source or bulk walks; callers must first call WaitForWalk and
 // WaitForBulkOperations to ensure all in-flight work has completed. It is safe to call more than
 // once but will only return the results accumulated since requestBuildController's instantiation or
 // the previous GetResults call.
@@ -250,17 +259,20 @@ func (c *requestBuildController) GetResults() (result *SchedulingResult, resumeT
 	return
 }
 
-// WaitForBulkOperations waits for all bulk operations to finish. Any returned errors should not be
-// considered fatal so any bulk operations can finish.
-func (c *requestBuildController) WaitForWalkSources() error {
+// WaitForWalk waits for the walk added by AddWalk, and everything that walk dispatched, to finish.
+// It returns nil when no walk was added. Any returned error should not be considered fatal on its
+// own so bulk operations registered during the walk can still be finished.
+func (c *requestBuildController) WaitForWalk() error {
 	if c.sourceGroup == nil {
 		return nil
 	}
 
-	err := c.sourceGroup.Wait()
+	err := errors.Join(c.sourceGroup.Wait(), c.sourceProducerGroup.Wait())
 	c.sourceGroup = nil
+	c.sourceGroupCtx = nil
+	c.sourceProducerGroup = nil
+	c.activeSourceSubmissions.Store(0)
 
-	err = errors.Join(err, c.sourceProducerGroup.Wait())
 	if err != nil {
 		return fmt.Errorf("error walking source paths: %w", err)
 	}
@@ -344,6 +356,19 @@ func (c *requestBuildController) submissionQueueOverCapacity() bool {
 	return estimatedDrainTime > c.submissionQueueTargetDrainTime()
 }
 
+func (c *requestBuildController) getWorkerSaturation() float64 {
+	if len(c.workerSaturation) == 0 {
+		return 0
+	}
+
+	saturation := c.workerSaturation[0]()
+	if longWindow := c.workerSaturation[len(c.workerSaturation)-1](); longWindow > saturation {
+		saturation = longWindow
+	}
+
+	return saturation
+}
+
 // submissionQueueTargetDrainTime derives the acceptable jobSubmissionCh buffered latency from
 // current worker saturation instead of a fixed constant. The goal is 100% saturation (one job per
 // worker), not zero, so the target stays at submissionQueueBaseDrainTime (no throttling) while
@@ -360,15 +385,7 @@ func (c *requestBuildController) submissionQueueOverCapacity() bool {
 // congestion control, and avoids the target flapping loose again during a brief lull mid-burst only
 // to immediately re-trigger backpressure.
 func (c *requestBuildController) submissionQueueTargetDrainTime() time.Duration {
-	if len(c.workerSaturation) == 0 {
-		return submissionQueueBaseDrainTime
-	}
-
-	saturation := c.workerSaturation[0]()
-	if longWindow := c.workerSaturation[len(c.workerSaturation)-1](); longWindow > saturation {
-		saturation = longWindow
-	}
-
+	saturation := c.getWorkerSaturation()
 	if saturation <= submissionQueueRampStartSaturation {
 		return submissionQueueBaseDrainTime
 	}
