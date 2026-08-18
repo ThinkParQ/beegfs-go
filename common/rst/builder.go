@@ -91,6 +91,12 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	controller := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, registry.AddRequest, workerSaturation)
 	abort := func(reason error) *SchedulingResult {
 		reason = fmt.Errorf("request was aborted: %w", reason)
+		if ctx.Err() != nil {
+			// Sync is shutting down, not that the builder job has failed so return without
+			// cancelling the bulk operations so they can resume when the sync node restarts.
+			return &SchedulingResult{Err: reason}
+		}
+
 		managers := registry.GetManagersSnapshot()
 		if len(managers) == 0 {
 			return &SchedulingResult{Err: reason}
@@ -218,6 +224,9 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 	}
 
 	registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
+	defer func() {
+		err = appendError(err, registry.Close(ctx))
+	}()
 
 	if abort {
 		reason := fmt.Errorf("builder job %q was aborted", job.GetId())

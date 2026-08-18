@@ -182,7 +182,7 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 
 	c.bulkCallbacks = append(c.bulkCallbacks, func() {
 		result := getResult()
-		if result.Err != nil {
+		if result.Err != nil && !isTransientBulkError(result.Err) {
 			manager.AppendError(result.Err)
 			c.CancelBulkOperation(manager, result.Err)
 		}
@@ -195,7 +195,8 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 }
 
 func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManager, reason error) {
-	if manager.IsFailed() {
+	if manager.IsFailed() || c.ctx.Err() != nil {
+		// Either the manager is permanently failed or sync is shutting down.
 		return
 	}
 
@@ -205,15 +206,13 @@ func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManag
 
 	walkCh, getResult, err := manager.Cancel(c.bulkGroupCtx, reason)
 	if err != nil {
-		manager.AppendError(err)
-		manager.SetFailed()
+		failBulkOperation(manager, err)
 		return
 	}
 
 	c.bulkCallbacks = append(c.bulkCallbacks, func() {
 		if err := getResult(); err != nil {
-			manager.AppendError(err)
-			manager.SetFailed()
+			failBulkOperation(manager, err)
 		}
 	})
 

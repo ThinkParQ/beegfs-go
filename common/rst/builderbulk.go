@@ -132,20 +132,34 @@ func newBulkOperationManager(ctx context.Context, client Provider, jobId string,
 		failed:         &bulkOperation.Failed,
 	}
 
-	if !bulkOperation.Failed {
-		if client == nil {
-			err := fmt.Errorf("unable to create bulk operation manager: remote storage target ID %d does not exist in the configuration", bulkOperation.RstId)
-			manager.AppendError(err)
-			manager.SetFailed()
-		} else if clientBulkOperation, err := client.OpenBulkOperation(ctx, stateMountPath, bulkOperation.Operation); err != nil {
-			manager.AppendError(err)
-			manager.SetFailed()
-		} else {
-			manager.clientBulkOperation = clientBulkOperation
-		}
+	if client == nil {
+		// The RST was removed from the configuration, so there is no provider left to release
+		// anything through. That is permanent as far as this job is concerned.
+		manager.AppendError(fmt.Errorf("unable to create bulk operation manager: remote storage target ID %d does not exist in the configuration", bulkOperation.RstId))
+		manager.SetFailed()
+	} else if clientBulkOperation, err := client.OpenBulkOperation(ctx, stateMountPath, bulkOperation.Operation); err != nil {
+		failBulkOperation(manager, err)
+	} else {
+		manager.clientBulkOperation = clientBulkOperation
 	}
 
 	return manager
+}
+
+// isTransientBulkError reports whether the error means the operation was interrupted.
+func isTransientBulkError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// failBulkOperation records error and marks the manager permanently failed unless the operation was
+// interrupted. Bulk operations must only fail when there's an unrecoverable error.
+func failBulkOperation(manager *bulkOperationManager, err error) bool {
+	if isTransientBulkError(err) {
+		return false
+	}
+	manager.AppendError(err)
+	manager.SetFailed()
+	return true
 }
 
 func (m *bulkOperationManager) IsFailed() bool {
@@ -161,8 +175,11 @@ func (m *bulkOperationManager) SetFailed() {
 // own persisted state (e.g. the count of requests already recorded on disk) since it's the one that
 // must be able to reconstruct a correct index after a builder reschedule reopens the operation.
 func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	if m.IsFailed() {
+		return fmt.Errorf("cannot add request to bulk operation %s: it previously failed permanently", m.Key())
+	}
 	if m.clientBulkOperation == nil {
-		return fmt.Errorf("cannot add request to bulk operation %s: it previously failed permanently and has no provider handle", m.Key())
+		return fmt.Errorf("cannot add request to bulk operation %s: it could not be opened and has no provider handle", m.Key())
 	}
 
 	m.mu.Lock()
@@ -182,7 +199,7 @@ func (m *bulkOperationManager) Key() string {
 
 func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
 	if m.clientBulkOperation == nil {
-		err = fmt.Errorf("cannot execute bulk operation %s: it previously failed permanently and has no provider handle", m.Key())
+		err = fmt.Errorf("cannot execute bulk operation %s: it could not be opened and has no provider handle", m.Key())
 		return
 	}
 	return m.clientBulkOperation.Execute(ctx)
@@ -190,7 +207,7 @@ func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *Bulk
 
 func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
 	if m.clientBulkOperation == nil {
-		err = fmt.Errorf("cannot cancel bulk operation %s: it previously failed permanently and has no provider handle", m.Key())
+		err = fmt.Errorf("cannot cancel bulk operation %s: it could not be opened and has no provider handle", m.Key())
 		return
 	}
 	return m.clientBulkOperation.Cancel(ctx, reason)

@@ -346,6 +346,80 @@ func TestRequestBuildController_CancelBulkOperationSetsManagerFailedOnWaitError(
 	assert.Contains(t, manager.GetErrors().Error(), waitErr.Error())
 }
 
+// TestRequestBuildController_ExecuteBulkOperationInterruptedDoesNotFailManager covers a BeeSync
+// shutdown landing on an in-flight bulk operation. Failing a bulk operation is irreversible - the
+// flag is persisted and every later run refuses the operation outright - so an execute that only
+// stopped because its context died must leave the manager untouched and uncancelled.
+func TestRequestBuildController_ExecuteBulkOperationInterruptedDoesNotFailManager(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	manager := newTestBulkManager("mgr",
+		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+			walkCh := make(chan *BulkStreamPathResult)
+			close(walkCh)
+			return walkCh, func() *SchedulingResult {
+				return &SchedulingResult{Err: fmt.Errorf("retrieve-session poll failed: %w", context.Canceled)}
+			}, nil
+		},
+		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+			t.Fatal("an interrupted bulk operation must not be cancelled")
+			return nil, nil, nil
+		},
+	)
+
+	controller.ExecuteBulkOperation(manager)
+	require.NoError(t, controller.WaitForBulkOperations())
+
+	assert.False(t, manager.IsFailed(), "an interrupted bulk operation must stay resumable")
+	assert.NoError(t, manager.GetErrors(), "an interruption must not be recorded against the operation")
+}
+
+// TestRequestBuildController_CancelBulkOperationSkippedWhenContextCancelled asserts the controller
+// does not attempt a cancel it knows will fail. Cancel talks to the provider, so a dead context
+// guarantees an error, and that error is what permanently fails the operation.
+func TestRequestBuildController_CancelBulkOperationSkippedWhenContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+		t.Fatal("Cancel should not be attempted on a cancelled context")
+		return nil, nil, nil
+	})
+
+	controller.CancelBulkOperation(manager, fmt.Errorf("reason"))
+	require.NoError(t, controller.WaitForBulkOperations())
+
+	assert.False(t, manager.IsFailed())
+	assert.NoError(t, manager.GetErrors())
+}
+
+// TestRequestBuildController_CancelBulkOperationInterruptedDoesNotFailManager covers a cancel that
+// starts on a live context and is interrupted partway through, which is the other route to
+// permanently failing an operation that is merely paused.
+func TestRequestBuildController_CancelBulkOperationInterruptedDoesNotFailManager(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+		walkCh := make(chan *BulkStreamPathResult)
+		close(walkCh)
+		return walkCh, func() error {
+			return fmt.Errorf("unable to determine whether retrieve-session is active: %w", context.Canceled)
+		}, nil
+	})
+
+	controller.CancelBulkOperation(manager, fmt.Errorf("reason"))
+	require.NoError(t, controller.WaitForBulkOperations())
+
+	assert.False(t, manager.IsFailed(), "an interrupted cancel must leave the operation cancellable next run")
+	assert.NoError(t, manager.GetErrors())
+}
+
 func TestRequestBuildController_WaitForWalkReturnsImmediatelyWhenNoWalk(t *testing.T) {
 	controller := &requestBuildController{}
 	require.NoError(t, controller.WaitForWalk())

@@ -136,6 +136,58 @@ func TestBulkOperationRegistry_CloseAggregatesManagerCloseErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "1-retrieve")
 }
 
+// TestNewBulkOperationManager_OpensHandleForAlreadyFailedOperation asserts that reopening a
+// permanently failed operation still acquires a provider handle. Cancel, Close and Destroy all need
+// it to release what the operation reserved (for xtreemstore, the active retrieve-session) and to
+// delete its local state; without a handle a failed operation can never be torn down and leaks both.
+func TestNewBulkOperationManager_OpensHandleForAlreadyFailedOperation(t *testing.T) {
+	client := &MockClient{}
+	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
+
+	bulkOperation := &flex.BulkOperation{RstId: 1, Operation: "retrieve", Failed: true}
+	manager := newBulkOperationManager(context.Background(), client, "job-1", bulkOperation)
+
+	assert.True(t, manager.IsFailed(), "reopening must not clear the failure")
+	require.NotNil(t, manager.clientBulkOperation, "a failed operation still needs a handle to be torn down")
+	assert.NoError(t, manager.Destroy(context.Background()))
+
+	// New work must still be refused even though the handle now exists.
+	err := manager.AddRequest(context.Background(), &beeremote.JobRequest{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "previously failed permanently")
+}
+
+// TestNewBulkOperationManager_InterruptedOpenDoesNotFailOperation asserts that an open interrupted by
+// shutdown leaves the operation resumable instead of permanently failing it.
+func TestNewBulkOperationManager_InterruptedOpenDoesNotFailOperation(t *testing.T) {
+	client := &MockClient{}
+	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).
+		Return(nil, fmt.Errorf("open state: %w", context.Canceled))
+
+	bulkOperation := &flex.BulkOperation{RstId: 1, Operation: "retrieve"}
+	manager := newBulkOperationManager(context.Background(), client, "job-1", bulkOperation)
+
+	assert.False(t, manager.IsFailed(), "an interrupted open must leave the operation resumable")
+	assert.False(t, bulkOperation.Failed, "the persisted flag must stay clear")
+	assert.NoError(t, manager.GetErrors())
+}
+
+// TestNewBulkOperationManager_FailedOpenFailsOperation is the counterpart: a genuine open failure is
+// still permanent.
+func TestNewBulkOperationManager_FailedOpenFailsOperation(t *testing.T) {
+	openErr := fmt.Errorf("state file is corrupt")
+	client := &MockClient{}
+	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(nil, openErr)
+
+	bulkOperation := &flex.BulkOperation{RstId: 1, Operation: "retrieve"}
+	manager := newBulkOperationManager(context.Background(), client, "job-1", bulkOperation)
+
+	assert.True(t, manager.IsFailed())
+	assert.True(t, bulkOperation.Failed, "the failure must be persisted with the work request")
+	require.Error(t, manager.GetErrors())
+	assert.Contains(t, manager.GetErrors().Error(), openErr.Error())
+}
+
 func TestBulkOperationManager_AppendErrorAccumulatesAndGetErrorsFormats(t *testing.T) {
 	manager := &bulkOperationManager{operation: "archive", errors: new(string), failed: new(bool)}
 	assert.NoError(t, manager.GetErrors())
