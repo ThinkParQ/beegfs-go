@@ -193,13 +193,21 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 	return m.clientBulkOperation.AddRequest(ctx, request)
 }
 
+// notOpenedReason explains why the manager has no provider handle.
+func (m *bulkOperationManager) notOpenedReason() error {
+	if err := m.GetErrors(); err != nil {
+		return fmt.Errorf("it could not be opened: %w", err)
+	}
+	return errors.New("it could not be opened and has no provider handle")
+}
+
 func (m *bulkOperationManager) Key() string {
 	return bulkOperationKey(m.rstId, m.operation)
 }
 
 func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
 	if m.clientBulkOperation == nil {
-		err = fmt.Errorf("cannot execute bulk operation %s: it could not be opened and has no provider handle", m.Key())
+		err = fmt.Errorf("cannot execute bulk operation %s: %w", m.Key(), m.notOpenedReason())
 		return
 	}
 	return m.clientBulkOperation.Execute(ctx)

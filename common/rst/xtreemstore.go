@@ -114,9 +114,6 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(ctx context.Context, request 
 	switch parseBulkOperation(bulkInfo.Operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
 		if bulkErr := xtreemstoreS3BulkRetrieveError(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath()); bulkErr != nil {
-			// Bulk operation requests must be ready before they are sent, so either an error occurred
-			// or the bulk request was aborted. For a bulk retrieve operation, the resource was
-			// retrieved but removed from the tape buffer before the download.
 			err = fmt.Errorf("bulk %s operation failed: %w", bulkInfo.Operation, bulkErr)
 		} else {
 			ready = true

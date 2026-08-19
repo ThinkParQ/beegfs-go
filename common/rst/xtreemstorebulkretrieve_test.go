@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -343,4 +344,52 @@ func TestIsObjectReadyForDownload(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The errors file is the sole signal that separates a live bulk operation from a destroyed one, so
+// openState must create it and Destroy must be the only thing that takes it away.
+func TestBulkRetrieveErrorsFileTracksOperationLifetime(t *testing.T) {
+	tmpDir := t.TempDir()
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
+
+	newManager := func() *xtreemstoreS3BulkRetrieveManager {
+		return &xtreemstoreS3BulkRetrieveManager{
+			s3ApiClient:    &fakeS3ApiClient{},
+			rstId:          1,
+			mountPath:      tmpDir,
+			stateMountPath: bulkInfo.StateMountPath,
+			operation:      bulkInfo.Operation,
+			state:          &xtreemstoreS3BulkRetrieveManagerState{},
+		}
+	}
+	readinessErr := func() error {
+		return xtreemstoreS3BulkRetrieveError(bulkInfo, 1, tmpDir)
+	}
+
+	// Before the operation exists at all there is nothing staged, so requests must be refused.
+	assert.ErrorIs(t, readinessErr(), ErrBulkOperationDestroyed)
+
+	m := newManager()
+	require.NoError(t, m.openState())
+	errorsPath := m.getErrorsPath()
+
+	contents, err := os.ReadFile(errorsPath)
+	require.NoError(t, err, "openState must create the errors file")
+	assert.Empty(t, contents, "a live operation with nothing to report has an empty errors file")
+	assert.NoError(t, readinessErr(), "an empty errors file means the operation is healthy")
+
+	// Reopening must not discard a reason already recorded, since the builder reopens state on every
+	// reschedule and a cancelled operation has to stay cancelled.
+	require.NoError(t, m.recordError(errors.New("tape buffer eviction")))
+	require.NoError(t, m.closeState())
+	m = newManager()
+	require.NoError(t, m.openState())
+	assert.ErrorContains(t, readinessErr(), "tape buffer eviction")
+
+	require.NoError(t, m.closeState())
+	require.NoError(t, m.Destroy(context.Background()))
+
+	_, err = os.Stat(errorsPath)
+	assert.ErrorIs(t, err, os.ErrNotExist, "Destroy must remove the errors file")
+	assert.ErrorIs(t, readinessErr(), ErrBulkOperationDestroyed)
 }

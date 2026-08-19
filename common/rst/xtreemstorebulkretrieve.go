@@ -38,6 +38,7 @@ const (
 
 var (
 	ErrActiveRetrieveSessionAlreadyExists = errors.New("active retrieve-session already exists")
+	ErrBulkOperationDestroyed             = errors.New("the bulk operation that staged this request no longer exists (resubmit the job to retrieve the object again)")
 )
 
 type xtreemstoreS3BulkRetrieveManager struct {
@@ -49,11 +50,12 @@ type xtreemstoreS3BulkRetrieveManager struct {
 	stateMountPath string
 	state          *xtreemstoreS3BulkRetrieveManagerState
 	includedJobs   int64
-	// statusHandle is maintained when the manager is open and should only be used for persistent
-	// appending new statuses. Do not use this to update statuses; use statusUpdateHandle instead.
-	statusHandle *os.File
+	// statusAppendHandle is maintained when the manager is open and should only be used for
+	// persistent appending new statuses. Do not use this to update statuses; use statusUpdateHandle
+	// instead.
+	statusAppendHandle *os.File
 	// statusUpdateHandle is maintained when the manager is open and should only be used for
-	// persistent status updates. Do not use to append new statuses; use statusHandle instead.
+	// persistent status updates. Do not use to append new statuses; use statusAppendHandle instead.
 	statusUpdateHandle *os.File
 	// recordHandle is maintained when the manager is open and is used to append new records. It is
 	// imperative that records are only added and never changed for the bulk operation's lifecycle.
@@ -85,7 +87,7 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
 }
 
-// xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as complete.
+// xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as received.
 func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
 		rstId:          rstId,
@@ -107,8 +109,8 @@ func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rs
 	return manager.MarkComplete(bulkInfo.JobIndex)
 }
 
-// xtreemstoreS3BulkRetrieveError retrieves any bulk operation errors. If no errors were found then
-// nil will be returned.
+// xtreemstoreS3BulkRetrieveError reports why a request belonging to a bulk operation cannot proceed,
+// or nil when there is nothing to report.
 func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
 	m := &xtreemstoreS3BulkRetrieveManager{
 		rstId:          rstId,
@@ -116,14 +118,27 @@ func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uin
 		stateMountPath: bulkInfo.StateMountPath,
 		operation:      bulkInfo.Operation,
 	}
+
 	message, err := os.ReadFile(m.getErrorsPath())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	if err == nil {
+		if len(message) > 0 {
+			return fmt.Errorf("%s", message)
 		}
+		return nil
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
 	}
-	return fmt.Errorf("%s", message)
+
+	if _, err := os.Stat(m.getStatusPath()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrBulkOperationDestroyed
+		}
+		return fmt.Errorf("unable to determine whether bulk operation %q still exists: %w", bulkInfo.Operation, err)
+	}
+
+	return nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) (err error) {
@@ -135,7 +150,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	}
 	request.GetBulkInfo().SetJobIndex(m.includedJobs)
 
-	if _, err = m.statusHandle.Write(xtreemstoreS3BulkRequestAdded.Bytes()); err != nil {
+	if _, err = m.statusAppendHandle.Write(xtreemstoreS3BulkRequestAdded.Bytes()); err != nil {
 		return
 	}
 
@@ -256,6 +271,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) deleteState() (err error) {
 	err = appendError(err, removeIfExists(m.getRecordPath()))
 	err = appendError(err, removeIfExists(m.getErrorsPath()))
 	err = appendError(err, removeIfExists(m.getManagerPath()))
+	err = appendError(err, removeIfExists(persistentTmpPath(m.getManagerPath())))
 	return
 }
 
@@ -269,6 +285,10 @@ func removeIfExists(path string) error {
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
+	defer func() {
+		err = appendError(err, m.saveManagerState())
+	}()
+
 	for {
 		if ready, err := m.ensureSessionActive(ctx); err != nil {
 			return false, 0, err
@@ -494,17 +514,15 @@ func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
-	f, err := os.OpenFile(m.getManagerPath(), os.O_RDONLY, os.FileMode(0600))
+	*m.state = xtreemstoreS3BulkRetrieveManagerState{}
+
+	data, err := os.ReadFile(m.getManagerPath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		*m.state = xtreemstoreS3BulkRetrieveManagerState{}
-	} else {
-		defer f.Close()
-		if err := json.NewDecoder(f).Decode(m.state); err != nil {
-			return err
-		}
+	} else if err := json.Unmarshal(data, m.state); err != nil {
+		return err
 	}
 
 	// includedJobs is reconstructed from the status file rather than persisted in manager.json, so
@@ -522,36 +540,42 @@ func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
 	return nil
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) saveManagerState() (err error) {
-	f, err := os.OpenFile(m.getManagerPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+func (m *xtreemstoreS3BulkRetrieveManager) saveManagerState() error {
+	return m.writeManagerState(m.state)
+}
+
+// createManagerFile creates a persistent file for operation's manager state. An existing file
+// is left untouched.
+func (m *xtreemstoreS3BulkRetrieveManager) createManagerFile() error {
+	if _, err := os.Stat(m.getManagerPath()); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return m.writeManagerState(&xtreemstoreS3BulkRetrieveManagerState{})
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) writeManagerState(state *xtreemstoreS3BulkRetrieveManagerState) error {
+	data, err := json.Marshal(state)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encode manager state: %w", err)
 	}
 
-	defer func() {
-		if closeErr := f.Close(); closeErr != nil {
-			err = appendError(err, closeErr)
-		}
-	}()
-
-	if err := json.NewEncoder(f).Encode(m.state); err != nil {
-		return err
-	}
-
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync manager state: %w", err)
-	}
-
-	return nil
+	return writePersistentFile(m.getManagerPath(), data, 0600)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
-	if err := m.loadManagerState(); err != nil {
-		return fmt.Errorf("failed to load manager state: %w", err)
-	}
-
 	if err := os.MkdirAll(m.getStateMountPath(), 0o700); err != nil {
 		return fmt.Errorf("failed to create state directory: %w", err)
+	}
+
+	if err := m.createManagerFile(); err != nil {
+		return fmt.Errorf("failed to create manager state file: %w", err)
+	}
+
+	if err := m.loadManagerState(); err != nil {
+		return fmt.Errorf("failed to load manager state: %w", err)
 	}
 
 	defer func() {
@@ -560,19 +584,16 @@ func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
 		}
 	}()
 
-	if m.statusHandle, err = m.openStatusFile(); err != nil {
-		return fmt.Errorf("failed to open status append file: %w", err)
+	if m.statusAppendHandle, err = m.openStatusFileForAppend(); err != nil {
+		err = fmt.Errorf("failed to open status append file: %w", err)
+	} else if m.statusUpdateHandle, err = m.openStatusFileForUpdate(); err != nil {
+		err = fmt.Errorf("failed to open status update file: %w", err)
+	} else if m.recordHandle, err = m.openRecordFileForAppend(); err != nil {
+		err = fmt.Errorf("failed to open record file: %w", err)
+	} else if err = m.createErrorsFile(); err != nil {
+		err = fmt.Errorf("failed to create errors file: %w", err)
 	}
-
-	if m.statusUpdateHandle, err = m.openStatusUpdateFile(); err != nil {
-		return fmt.Errorf("failed to open status update file: %w", err)
-	}
-
-	if m.recordHandle, err = m.openRecordFile(); err != nil {
-		return fmt.Errorf("failed to open record file: %w", err)
-	}
-
-	return nil
+	return
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
@@ -586,9 +607,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 		m.statusUpdateHandle = nil
 	}
 
-	if m.statusHandle != nil {
-		err = appendError(err, m.statusHandle.Close())
-		m.statusHandle = nil
+	if m.statusAppendHandle != nil {
+		err = appendError(err, m.statusAppendHandle.Close())
+		m.statusAppendHandle = nil
 	}
 
 	return err
@@ -613,7 +634,16 @@ func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error
 func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3BulkRequestStatus, jobIndex int64) (err error) {
 	f := m.statusUpdateHandle
 	if f == nil {
-		if f, err = m.openStatusUpdateFile(); err != nil {
+		if f, err = m.openStatusFileForUpdate(); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// The operation's state has been destroyed, so there is nothing left to record.
+				// Only Destroy deletes state, and it runs once every request the builder sent has
+				// reached a terminal bulk status, so a job that outlives its builder (a FAILED
+				// download being cancelled or retried) has no operation left to report to. Treating
+				// this as an error would make such a job impossible to resolve, since cancelling or
+				// retrying it resolves its bulk request first.
+				return nil
+			}
 			return
 		}
 		defer f.Close()
@@ -623,39 +653,53 @@ func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3Bul
 	return err
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openStatusFile() (*os.File, error) {
-	return openFile(m.getStatusPath())
+func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForAppend() (*os.File, error) {
+	return openFileForAppend(m.getStatusPath())
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openStatusUpdateFile() (*os.File, error) {
-	path := m.getStatusPath()
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_DSYNC|unix.O_CLOEXEC, 0)
+func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForUpdate() (*os.File, error) {
+	return openFileForUpdate(m.getStatusPath())
+}
+
+// createErrorsFile ensures the operation's errors file exists so its absence unambiguously means the
+// operation's state was destroyed. It must not truncate or fail when the file is already there: a
+// reason recorded by a previous Cancel has to survive the builder reopening state.
+func (m *xtreemstoreS3BulkRetrieveManager) createErrorsFile() error {
+	return touchFile(m.getErrorsPath())
+}
+
+func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*os.File, error) {
+	return openFileForAppend(m.getRecordPath())
+}
+
+func openFileForAppend(path string) (*os.File, error) {
+	return createPersistentFile(path, unix.O_WRONLY|unix.O_APPEND, 0600)
+}
+
+func openFileForUpdate(path string) (*os.File, error) {
+	return updatePersistentFile(path, unix.O_WRONLY)
+}
+
+func touchFile(path string) error {
+	f, err := createPersistentFile(path, 0, 0600)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		unix.Close(fd)
-		return nil, errors.New("failed to create status update handle")
-	}
-
-	return f, nil
+	return f.Close()
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openRecordFile() (*os.File, error) {
-	return openFile(m.getRecordPath())
-}
+// createPersistentFile opens path for durable writes, creating it if needed. It first attempts to
+// create the file exclusively and, if the file already exists, reopens it without truncating. Newly
+// created files have their parent directory fsynced so the directory entry is persisted. The
+// returned file uses O_DSYNC so successful writes are committed to stable storage before returning.
+func createPersistentFile(path string, mode int, perm uint32) (*os.File, error) {
+	mode |= unix.O_DSYNC | unix.O_CLOEXEC
 
-// openFile opens path for durable append-only writes. It first attempts to create the file
-// exclusively and, if the file already exists, reopens it normally. Newly created files have their
-// parent directory fsynced so the directory entry is persisted. The returned file uses O_DSYNC so
-// successful writes are committed to stable storage before returning.
-func openFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_APPEND|unix.O_DSYNC|unix.O_CLOEXEC, 0600)
+	fd, err := unix.Open(path, mode|unix.O_CREAT|unix.O_EXCL, perm)
 	created := err == nil
 	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_DSYNC|unix.O_CLOEXEC, 0)
+		fd, err = unix.Open(path, mode, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -664,32 +708,101 @@ func openFile(path string) (*os.File, error) {
 	f := os.NewFile(uintptr(fd), path)
 	if f == nil {
 		_ = unix.Close(fd)
-		return nil, errors.New("failed to create status append handle")
+		return nil, fmt.Errorf("failed to create file handle for %s", path)
 	}
 
 	if created {
-		dirPath := filepath.Dir(path)
-
-		dirFD, err := unix.Open(dirPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-		if err != nil {
+		if err := syncDir(filepath.Dir(path)); err != nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("failed to open status directory for sync: %w", err)
-		}
-
-		syncErr := unix.Fsync(dirFD)
-		closeErr := unix.Close(dirFD)
-
-		if syncErr != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("failed to sync status directory: %w", syncErr)
-		}
-		if closeErr != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("failed to close status directory: %w", closeErr)
+			return nil, err
 		}
 	}
 
 	return f, nil
+}
+
+// updatePersistentFile opens an existing path for durable in-place writes. The returned file uses
+// O_DSYNC so successful writes are committed to stable storage before returning.
+func updatePersistentFile(path string, mode int) (*os.File, error) {
+	fd, err := unix.Open(path, mode|unix.O_DSYNC|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("failed to create file handle for %s", path)
+	}
+
+	return f, nil
+}
+
+// writePersistentFile atomically replaces path with data. Content is staged in a temporary file that
+// is fsynced before being renamed over path, then the parent directory is fsynced so the rename is
+// persisted. A crash therefore leaves path either fully replaced or untouched, never truncated part
+// way through a rewrite the way an O_TRUNC write would.
+func writePersistentFile(path string, data []byte, perm uint32) (err error) {
+	tmpPath := persistentTmpPath(path)
+
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(perm))
+	if err != nil {
+		return err
+	}
+
+	closed := false
+	defer func() {
+		if err != nil {
+			if !closed {
+				_ = f.Close()
+			}
+			_ = removeIfExists(tmpPath)
+		}
+	}()
+
+	if _, err = f.Write(data); err != nil {
+		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+	}
+
+	if err = f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync %s: %w", tmpPath, err)
+	}
+
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("failed to close %s: %w", tmpPath, err)
+	}
+	closed = true
+
+	if err = os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, path, err)
+	}
+
+	return syncDir(filepath.Dir(path))
+}
+
+// persistentTmpPath is where writePersistentFile stages content before renaming it over path.
+func persistentTmpPath(path string) string {
+	return path + ".tmp"
+}
+
+// syncDir fsyncs path so that directory entries created or replaced within it are persisted.
+func syncDir(path string) error {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open %s for sync: %w", path, err)
+	}
+
+	syncErr := unix.Fsync(fd)
+	closeErr := unix.Close(fd)
+
+	if syncErr != nil {
+		return fmt.Errorf("failed to sync %s: %w", path, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close %s: %w", path, closeErr)
+	}
+
+	return nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getStateMountPath() string {

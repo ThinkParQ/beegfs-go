@@ -101,9 +101,14 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
+		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		require.NoError(t, os.MkdirAll(statusDir, 0o700))
+		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestReceived.Bytes(), 0o600))
+
 		request := &flex.WorkRequest{
 			Type:     &flex.WorkRequest_Sync{Sync: &flex.SyncJob{}},
-			BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"},
+			BulkInfo: bulkInfo,
 		}
 		ready, _, err := x.IsWorkRequestReady(context.Background(), request)
 		require.NoError(t, err)
@@ -132,6 +137,32 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		ready, _, err := x.IsWorkRequestReady(context.Background(), request)
 		assert.False(t, ready)
 		assert.ErrorContains(t, err, "object no longer exists")
+	})
+
+	// Destroy removes the errors file along with the rest of the operation's state, so a request
+	// whose job outlived its builder finds no recorded reason to refuse it. It must still be refused:
+	// the retrieve-session that staged its object has been released, so reporting it ready would let
+	// the download run against whatever the object has decayed to.
+	t.Run("bulk request whose operation was destroyed is not ready", func(t *testing.T) {
+		mountPath := t.TempDir()
+		mockProvider := &MockClient{}
+		x := &xtreemstoreS3Provider{
+			Provider:   mockProvider,
+			mountPoint: stubMountPoint{mountPath: mountPath},
+		}
+		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
+
+		// The state directory survives but every file in it is gone, as Destroy leaves it.
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
+		require.NoError(t, os.MkdirAll(path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation), 0o700))
+
+		request := &flex.WorkRequest{
+			Type:     &flex.WorkRequest_Sync{Sync: &flex.SyncJob{}},
+			BulkInfo: bulkInfo,
+		}
+		ready, _, err := x.IsWorkRequestReady(context.Background(), request)
+		assert.False(t, ready)
+		assert.ErrorIs(t, err, ErrBulkOperationDestroyed)
 	})
 
 	t.Run("non-bulk request delegates entirely to the embedded Provider", func(t *testing.T) {
@@ -206,8 +237,12 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
-		// No status file was ever created for this bulk operation, so marking it complete fails.
+		// The status path is a directory, so opening it for writing fails with something other
+		// than ErrNotExist and is reported rather than tolerated.
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve", JobIndex: 0}
+		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		require.NoError(t, os.MkdirAll(path.Join(statusDir, "status"), 0o700))
+
 		job := &beeremote.Job{Request: &beeremote.JobRequest{
 			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}},
 			BulkInfo: bulkInfo,
@@ -218,5 +253,41 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "failed to mark bulk request complete")
 		assert.ErrorIs(t, err, assert.AnError)
+	})
+
+	// A job can outlive the bulk operation that spawned it: once every request the builder sent has
+	// reached a terminal bulk status the builder job completes and destroys the operation's state,
+	// but a request whose own job ended up FAILED is still live on remote. Cancelling or retrying
+	// that job resolves its bulk request first, so if the missing state were an error the job could
+	// never be resolved at all.
+	t.Run("resolving a request whose bulk operation state was destroyed succeeds", func(t *testing.T) {
+		mountPath := t.TempDir()
+		mockProvider := &MockClient{}
+		x := &xtreemstoreS3Provider{
+			Provider:   mockProvider,
+			mountPoint: stubMountPoint{mountPath: mountPath},
+		}
+		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
+
+		// No status file exists: the owning builder job already destroyed the operation's state.
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve", JobIndex: 0}
+		job := &beeremote.Job{Request: &beeremote.JobRequest{
+			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}},
+			BulkInfo: bulkInfo,
+		}}
+
+		// Aborting a FAILED job is what a cancel does, and it must be allowed to succeed.
+		mockProvider.On("CompleteWorkRequests", job, mock.Anything, true).Return(nil)
+		require.NoError(t, x.CompleteWorkRequests(context.Background(), job, nil, true))
+
+		// Regenerating work requests is what a retry does, and it marks the request received.
+		mockProvider.On("GenerateWorkRequests", job, 1).Return([]*flex.WorkRequest{}, nil, nil)
+		_, err := x.GenerateWorkRequests(context.Background(), nil, job, 1)
+		require.NoError(t, err)
+
+		// ResolveBulkRequest is the release path for a request whose job never ran at all.
+		require.NoError(t, x.ResolveBulkRequest(context.Background(), job.GetRequest()))
+
+		mockProvider.AssertExpectations(t)
 	})
 }
