@@ -511,6 +511,36 @@ func newTestWalk(results ...*filesystem.StreamPathResult) (walkCh <-chan *filesy
 	return ch, func() { stopped.Store(true) }, stopped
 }
 
+// submitToChan adapts a channel of submitted requests to a SubmitRequestFn so tests can assert what
+// the builder submitted. Every submission succeeds; the channel needs enough capacity for the test
+// because a submission blocks the goroutine that built the request.
+func submitToChan(jobSubmissionCh chan *beeremote.JobRequest) SubmitRequestFn {
+	return func(request *beeremote.JobRequest) error {
+		jobSubmissionCh <- request
+		return nil
+	}
+}
+
+// testSubmitter records the requests a builder submitted so tests can assert on them. When err is
+// set it is returned instead, so tests can exercise the rollback the builder performs for a request
+// remote refuses.
+type testSubmitter struct {
+	ch  chan *beeremote.JobRequest
+	err error
+}
+
+func newTestSubmitter(size int) *testSubmitter {
+	return &testSubmitter{ch: make(chan *beeremote.JobRequest, size)}
+}
+
+func (s *testSubmitter) submit(request *beeremote.JobRequest) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.ch <- request
+	return nil
+}
+
 // submittedPaths closes and drains jobSubmissionCh, returning the path of every submitted request.
 // Callers must only invoke this once no further sends can occur, e.g. after
 // requestBuildController.WaitForWalk()/WaitForBulkOperations().
@@ -536,7 +566,7 @@ func drainRequests(jobSubmissionCh chan *beeremote.JobRequest) []*beeremote.JobR
 func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan *beeremote.JobRequest) *requestBuildController {
 	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS())
 	cfg := &flex.JobRequestCfg{RemoteStorageTarget: 1}
-	controller := client.newRequestBuildController(ctx, cfg, jobSubmissionCh, func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+	controller := client.newRequestBuildController(ctx, cfg, submitToChan(jobSubmissionCh), func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 		return false, nil
 	}, nil)
 

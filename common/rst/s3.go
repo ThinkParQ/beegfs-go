@@ -485,7 +485,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) *SchedulingResult {
+func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
 	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 }
 

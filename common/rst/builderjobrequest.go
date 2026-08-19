@@ -32,7 +32,7 @@ const requestCleanupTimeout = 1 * time.Minute
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
 	RstMap           map[uint32]Provider
-	jobSubmissionCh  chan<- *beeremote.JobRequest
+	submitRequest    SubmitRequestFn
 	builderCfg       *flex.JobRequestCfg
 	addBulkRequest   addBulkRequestFn
 	getPathState     getPathStateFn
@@ -243,11 +243,7 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 }
 
 // processRequest builds, prepares, and submits the job request for cfg. canReleaseLock is
-// returned true only when this path produced no in-flight work that still depends on the lock; once
-// the request is routed, prepared, or submitted for real work, the lock must remain held.
-//
-// submitted reports whether the request actually reached submitJobRequest. It is false when the
-// request was absorbed into a bulk operation, which resubmits it later through its own walk.
+// returned true only when this path produced no in-flight work that still depends on the lock.
 func (w *jobRequestBuilder) processRequest(
 	ctx context.Context,
 	cfg *flex.JobRequestCfg,
@@ -286,21 +282,13 @@ func (w *jobRequestBuilder) processRequest(
 				canReleaseLock = true
 				return
 			} else if request.HasGenerationStatus() {
-				// addBulkRequest may reject inclusion outright (eg the target bulk operation
-				// previously failed permanently) by attaching a GenerationStatus rather than
-				// deferring to the bulk operation's own walk. Honor it the same way as if it had
-				// been set from the start, so the request is submitted as-is instead of being
-				// planned and applied as though nothing happened.
 				canReleaseLock = true
 			}
 		}
 	}
 
-	// Both cleanup paths run on a context detached from ctx, because the cleanup that matters most
-	// runs precisely when ctx has been cancelled: the undo steps that talk to BeeGFS over BeeMsg and
-	// the externalId release that talks to the remote target would otherwise fail before doing
-	// anything. The timeout keeps wedged cleanup from holding up shutdown, which waits on the
-	// workers that call this.
+	// newCleanupCtx returns a context detached from ctx so the undo functions can still complete
+	// when ctx is already cancelled because sync is shutting down.
 	newCleanupCtx := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.WithoutCancel(ctx), requestCleanupTimeout)
 	}
@@ -383,22 +371,57 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// Check for cancellation error first so it has priority over submitting the job request.
+	// undo reverts everything prepared for this request and must only be called once it is certain
+	// no job will ever run it.
+	undo := func() (err error) {
+		if releaseErr := releaseExternalId(); releaseErr != nil {
+			err = appendError(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
+		} else if generatedExternalId != "" {
+			generatedExternalId = ""
+			lockedInfo.SetExternalId("")
+		}
+
+		if planApplied {
+			// A failed plan rollback is reported by leaving planApplied set rather than as an
+			// error. The file is left mutated so it must stay locked for recovery to find. However,
+			// one path failing to roll back must not fail the whole builder job.
+			if undoErr := undoAppliedPlan(); undoErr == nil {
+				planApplied = false
+			}
+		}
+
+		// Bulk operations may need to track the outcome for each added request. In such cases, it
+		// is important to notify the bulk operation of the rejected request since the job will
+		// never be created.
+		if request.HasBulkInfo() {
+			if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; !ok {
+				err = appendError(err, fmt.Errorf("unable to resolve bulk request for %s: %w: rstId %d", cfg.GetPath(), ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget()))
+			} else {
+				cleanupCtx, cancelCleanup := newCleanupCtx()
+				defer cancelCleanup()
+				if bulkErr := client.ResolveBulkRequest(cleanupCtx, request); bulkErr != nil {
+					err = appendError(err, fmt.Errorf("unable to resolve bulk request for %s: %w", cfg.GetPath(), bulkErr))
+				}
+			}
+		}
+		return err
+	}
+
 	if ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
-		case w.jobSubmissionCh <- request:
+		if submitErr := w.submitRequest(request); submitErr == nil {
 			submitted = true
+			return
 		}
 	}
 
-	if !submitted {
-		if releaseErr := releaseExternalId(); releaseErr != nil {
-			err = appendError(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
-		}
-		if planApplied {
-			canReleaseLock = undoAppliedPlan() == nil
-		}
+	// The submission failed or the parent context was cancelled. In either case revert all changes.
+	planWasApplied := planApplied
+	if undoErr := undo(); undoErr != nil {
+		err = appendError(err, undoErr)
+	}
+	if planWasApplied {
+		// The lock can only be released if the applied changes are successfully reverted.
+		canReleaseLock = !planApplied
 	}
 	return
 }

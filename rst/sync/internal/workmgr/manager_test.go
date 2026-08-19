@@ -355,8 +355,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_CompletesInSingleExecution(t 
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-job", "0")).Return(true, time.Duration(0), nil).Times(1)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -370,7 +370,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_CompletesInSingleExecution(t 
 					Operation:      "retrieve",
 					JobIndex:       0,
 				},
-			}
+			})
 		}).
 		Return(false, time.Duration(0), nil, nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-job", "0", flex.Work_RUNNING)).Return(nil).Times(1)
@@ -453,8 +453,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-reschedule-job", "0")).Return(true, time.Duration(0), nil).Times(3)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/first",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -468,7 +468,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 					Operation:      "retrieve",
 					JobIndex:       0,
 				},
-			}
+			})
 		}).
 		// The delay has to be at least workDelayMinimum. Anything shorter is absorbed in-process by
 		// processBuilder's fast path, which loops without persisting the reschedule, so the
@@ -481,8 +481,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/final",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -496,7 +496,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 					Operation:      "retrieve",
 					JobIndex:       1,
 				},
-			}
+			})
 		}).
 		Return(false, time.Duration(0), nil, nil).Once()
 
@@ -605,8 +605,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 					Operation:      "retrieve",
 				}.Build(),
 			}
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/first",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -620,8 +620,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 					Operation:      "retrieve",
 					JobIndex:       0,
 				},
-			}
-			jobSubmissionChan <- &pbr.JobRequest{
+			})
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/second",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -635,7 +635,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 					Operation:      "retrieve",
 					JobIndex:       1,
 				},
-			}
+			})
 		}).
 		Return(false, time.Duration(0), fmt.Errorf("bulk restore session failed")).Once()
 
@@ -799,8 +799,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-duplicate-job", "0")).Return(true, time.Duration(0), nil).Times(2)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-duplicate-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/duplicate",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -814,7 +814,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 					Operation:      "retrieve",
 					JobIndex:       0,
 				},
-			}
+			})
 		}).
 		// The delay has to be at least workDelayMinimum. Anything shorter is absorbed in-process by
 		// processBuilder's fast path, which loops without persisting the reschedule, so the
@@ -822,8 +822,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-duplicate-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			jobSubmissionChan := args.Get(2).(chan<- *pbr.JobRequest)
-			jobSubmissionChan <- &pbr.JobRequest{
+			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/duplicate",
 				RemoteStorageTarget: 0,
 				Type: &pbr.JobRequest_Sync{
@@ -837,7 +837,7 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 					Operation:      "retrieve",
 					JobIndex:       0,
 				},
-			}
+			})
 		}).
 		Return(false, time.Duration(0), nil, nil).Once()
 

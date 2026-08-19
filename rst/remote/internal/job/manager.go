@@ -788,6 +788,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 
 	}
 
+	var rstClient rst.Provider
 	var jobSubmission workermgr.JobSubmission
 	if jr.HasGenerationStatus() {
 		status := jr.GetGenerationStatus()
@@ -818,8 +819,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			}
 		}
 	} else {
-		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
-		if !ok {
+		var ok bool
+		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
 			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
 		}
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
@@ -858,8 +859,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status.State = beeremote.Job_COMPLETED
 				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
 
-				var mtimeErr *rst.MtimeErr
-				if errors.As(err, &mtimeErr) {
+				if mtimeErr, ok := errors.AsType[*rst.MtimeErr](err); ok {
 					pbMtime := timestamppb.New(mtimeErr.Mtime())
 					job.SetStartMtime(pbMtime)
 					job.SetStopMtime(pbMtime)
@@ -915,7 +915,13 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
-	if !isTerminalState(job.GetStatus().GetState()) {
+	if isTerminalState(job.GetStatus().GetState()) {
+		// The client's work requests were generated but never assigned to a worker, so abort the
+		// job so the client can clean up.
+		if completeErr := job.Complete(m.ctx, rstClient, true); completeErr != nil {
+			job.Status.SetMessage(appendMessage(job.Status.GetMessage(), "error requesting the RST abort this job: "+completeErr.Error()))
+		}
+	} else {
 		m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
 	}
 

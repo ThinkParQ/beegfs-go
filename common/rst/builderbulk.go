@@ -179,7 +179,7 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 		return fmt.Errorf("cannot add request to bulk operation %s: it previously failed permanently", m.Key())
 	}
 	if m.clientBulkOperation == nil {
-		return fmt.Errorf("cannot add request to bulk operation %s: it could not be opened and has no provider handle", m.Key())
+		return fmt.Errorf("cannot add request to bulk operation %s: %w", m.Key(), m.notOpenedReason())
 	}
 
 	m.mu.Lock()
@@ -207,7 +207,7 @@ func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *Bulk
 
 func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
 	if m.clientBulkOperation == nil {
-		err = fmt.Errorf("cannot cancel bulk operation %s: it could not be opened and has no provider handle", m.Key())
+		err = fmt.Errorf("cannot cancel bulk operation %s: %w", m.Key(), m.notOpenedReason())
 		return
 	}
 	return m.clientBulkOperation.Cancel(ctx, reason)

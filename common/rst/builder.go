@@ -69,15 +69,15 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) *SchedulingResult {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
 	if !workRequest.HasBuilder() {
 		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 
-	return c.executeBuilderRequest(ctx, workRequest, jobSubmissionCh, workerSaturation)
+	return c.executeBuilderRequest(ctx, workRequest, submitRequest, workerSaturation)
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) (result *SchedulingResult) {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) (result *SchedulingResult) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
@@ -88,7 +88,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		}
 	}()
 
-	controller := c.newRequestBuildController(ctx, cfg, jobSubmissionCh, registry.AddRequest, workerSaturation)
+	controller := c.newRequestBuildController(ctx, cfg, submitRequest, registry.AddRequest, workerSaturation)
 	abort := func(reason error) *SchedulingResult {
 		reason = fmt.Errorf("request was aborted: %w", reason)
 		if ctx.Err() != nil {
@@ -150,14 +150,6 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	return
 }
 
-// walkBufferSize is the buffer on the channel returned by getWalk. It only decouples the walk from
-// the controller consuming it, absorbing short stalls while the controller dispatches paths, so it
-// is deliberately unrelated to maxRequests (which the controller can raise mid-walk) and to the
-// downstream jobSubmissionCh (a separate stage with its own backpressure). Keeping it small bounds
-// the waste when a walk is stopped: whatever is still buffered is discarded and walked again next
-// round, and the buffer is most likely to be full exactly then, because the controller stops when
-// the workers are saturated - the same condition that has it throttling and letting the walk run
-// ahead.
 const walkBufferSize = 256
 
 func (c *JobBuilderClient) getWalk(ctx context.Context, workRequest *flex.WorkRequest, chanSize int) (walk <-chan *filesystem.StreamPathResult, stopWalk func(), err error) {
@@ -343,51 +335,42 @@ func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builder
 const (
 	// requestBuildControllerWorkerMultiplier scales GOMAXPROCS to set the maximum number of
 	// concurrent path-processing goroutines. Each path always blocks on at least one BeeGFS
-	// metadata operation (lock acquisition via getPathState), making per-path goroutines the right
-	// model: goroutines are parked during the blocking I/O, freeing OS threads for other work. The
-	// multiplier must be large enough that enough goroutines are in flight to keep hardware threads
-	// busy, but small enough to avoid excessive concurrent pressure on the metadata server.
+	// metadata operation (lock acquisition via getPathState) and on submitting its request to
+	// remote which is why per-path goroutines the is right model.
+	//
+	// Each goroutines are parked during the blocking I/O, freeing OS threads for other work. The
+	// multiplier must be large enough to keep hardware threads busy, but small enough to avoid
+	// excessive concurrent pressure on the metadata server and on remote.
 	requestBuildControllerWorkerMultiplier = 8.0
-	// requestBuildControllerQueueDepthPerWorker controls the job submission backpressure threshold:
-	// threshold = min(cap(jobSubmissionCh), maxWorkers*queueDepthPerWorker). Once the submission
-	// queue reaches the threshold, processWalk stops spawning new path goroutines until it drains.
-	// Higher values allow more in-flight submissions before throttling, which smooths throughput
-	// but buffers more work in memory. Lower values throttle more tightly and respond faster to a
-	// slow downstream consumer.
-	requestBuildControllerQueueDepthPerWorker = 2.0
 )
 
 func (c *JobBuilderClient) newRequestBuildController(
 	ctx context.Context,
 	builderCfg *flex.JobRequestCfg,
-	jobSubmissionCh chan<- *beeremote.JobRequest,
+	submitRequest SubmitRequestFn,
 	addBulkRequest addBulkRequestFn,
 	workerSaturation []func() float64,
 ) *requestBuildController {
-	cpuLimit := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
-	queueLimit := max(1, cap(jobSubmissionCh))
-	maxWorkers := min(cpuLimit, queueLimit)
-	submissionBackpressureThreshold := max(1, min(cap(jobSubmissionCh), int(requestBuildControllerQueueDepthPerWorker*float32(maxWorkers))))
-	requestBuilder := c.newJobRequestBuilder(builderCfg, jobSubmissionCh, addBulkRequest)
+	maxWorkers := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
+	requestBuilder := c.newJobRequestBuilder(builderCfg, submitRequest, addBulkRequest)
 	return &requestBuildController{
-		ctx:                   ctx,
-		requestBuilder:        requestBuilder,
-		backpressureThreshold: submissionBackpressureThreshold,
-		getPaths:              c.getPathsFn(builderCfg),
-		maxWorkersCh:          make(chan struct{}, maxWorkers),
-		workerSaturation:      workerSaturation,
+		ctx:              ctx,
+		requestBuilder:   requestBuilder,
+		getPaths:         c.getPathsFn(builderCfg),
+		maxWorkersCh:     make(chan struct{}, maxWorkers),
+		workerSaturation: workerSaturation,
 	}
 }
 
 func (c *JobBuilderClient) newJobRequestBuilder(
 	builderCfg *flex.JobRequestCfg,
-	jobSubmissionCh chan<- *beeremote.JobRequest,
+	submitRequest SubmitRequestFn,
 	addBulkRequest addBulkRequestFn,
 ) *jobRequestBuilder {
 	requestBuilder := &jobRequestBuilder{
 		mountPoint:       c.mountPoint,
 		RstMap:           c.rstMap,
-		jobSubmissionCh:  jobSubmissionCh,
+		submitRequest:    submitRequest,
 		builderCfg:       builderCfg,
 		getPathState:     GetPathState,
 		planFileState:    PlanFileStateForWorkRequests,

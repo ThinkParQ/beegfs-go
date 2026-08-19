@@ -209,9 +209,10 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 
 func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	t.Run("request with generation status releases lock and is submitted", func(t *testing.T) {
+		submissionCh := make(chan *beeremote.JobRequest, 1)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
+			RstMap:        map[uint32]Provider{},
+			submitRequest: submitToChan(submissionCh),
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
 		request := w.buildRequest(context.Background(), cfg, nil)
@@ -221,14 +222,15 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, canReleaseLock)
 		assert.True(t, submitted)
-		require.Len(t, w.jobSubmissionCh, 1)
+		require.Len(t, submissionCh, 1)
 	})
 
 	t.Run("bulk request failure releases lock, returns err, and does not submit", func(t *testing.T) {
 		client := &MockClient{}
+		submissionCh := make(chan *beeremote.JobRequest, 1)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
@@ -244,14 +246,15 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, canReleaseLock)
 		assert.False(t, submitted)
-		assert.Empty(t, w.jobSubmissionCh)
+		assert.Empty(t, submissionCh)
 	})
 
 	t.Run("bulk request skip releases the lock and does not submit", func(t *testing.T) {
 		client := &MockClient{}
+		submissionCh := make(chan *beeremote.JobRequest, 1)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
@@ -273,7 +276,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// A bulk-absorbed request was never submitted, so it must not count against the walk's
 		// submission budget -- the bulk operation resubmits it later through its own walk.
 		assert.False(t, submitted)
-		assert.Empty(t, w.jobSubmissionCh)
+		assert.Empty(t, submissionCh)
 	})
 
 	t.Run("successful preparation submits the request and keeps the lock", func(t *testing.T) {
@@ -281,8 +284,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		submissionCh := make(chan *beeremote.JobRequest, 1)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: submissionCh,
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -310,11 +313,12 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	newCancelledBuilder := func(undo undoFn) (*jobRequestBuilder, *flex.JobRequestCfg) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		submissionCh := make(chan *beeremote.JobRequest, 0)
 		w := &jobRequestBuilder{
 			RstMap: map[uint32]Provider{1: client},
-			// Unbuffered with no reader, so the handoff cannot succeed and the cancelled context
-			// is the only way out of the select.
-			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			// Unbuffered with no reader, so a submission would block forever; the cancelled context
+			// is what keeps processRequest from attempting one.
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -389,9 +393,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		undoCalls := 0
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
+		submissionCh := make(chan *beeremote.JobRequest, 0)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -423,8 +428,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// cancellation must win deterministically, and the plan must be undone exactly once.
 		submissionCh := make(chan *beeremote.JobRequest, 4)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: submissionCh,
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -453,9 +458,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		undoCalls := 0
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
+		submissionCh := make(chan *beeremote.JobRequest, 4)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 4),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -503,9 +509,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				releaseCtxErr = releaseCtx.Err()
 				_, releaseHadDeadline = releaseCtx.Deadline()
 			}).Return(nil)
+		submissionCh := make(chan *beeremote.JobRequest, 0)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -532,9 +539,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
 		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").Return(errors.New("abort failed"))
+		submissionCh := make(chan *beeremote.JobRequest, 0)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -559,9 +567,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
 		client.On("ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		submissionCh := make(chan *beeremote.JobRequest, 1)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: client},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 1),
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -586,9 +595,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	// cancellation path must leave canReleaseLock alone rather than let a no-op rollback "succeed"
 	// into releasing it.
 	t.Run("cancellation of an already offloaded request keeps the lock", func(t *testing.T) {
+		submissionCh := make(chan *beeremote.JobRequest, 4)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{1: &MockClient{}},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 4),
+			RstMap:        map[uint32]Provider{1: &MockClient{}},
+			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
@@ -613,9 +623,10 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	})
 
 	t.Run("cancellation of a terminal request does not touch file state", func(t *testing.T) {
+		submissionCh := make(chan *beeremote.JobRequest, 0)
 		w := &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{},
-			jobSubmissionCh: make(chan *beeremote.JobRequest),
+			RstMap:        map[uint32]Provider{},
+			submitRequest: submitToChan(submissionCh),
 			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 				t.Fatal("planFileState must not be called for a request that already has a GenerationStatus")
 				return nil, nil
@@ -635,11 +646,13 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 }
 
 func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
+	var submissions *testSubmitter
 	newBuilder := func() *jobRequestBuilder {
+		submissions = newTestSubmitter(2)
 		return &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 2),
-			builderCfg:      &flex.JobRequestCfg{},
+			RstMap:        map[uint32]Provider{},
+			submitRequest: submissions.submit,
+			builderCfg:    &flex.JobRequestCfg{},
 		}
 	}
 
@@ -707,7 +720,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.True(t, cleared)
-		require.Len(t, w.jobSubmissionCh, 1)
+		require.Len(t, submissions.ch, 1)
 		assert.Zero(t, activeJobSubmissions)
 	})
 
@@ -715,7 +728,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		client := &MockClient{}
 		jobSubmissionCh := make(chan *beeremote.JobRequest, 2)
 		w := newBuilder()
-		w.jobSubmissionCh = jobSubmissionCh
+		w.submitRequest = submitToChan(jobSubmissionCh)
 		w.RstMap = map[uint32]Provider{1: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) (bool, error) { return false, nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
@@ -767,7 +780,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
-		require.Len(t, w.jobSubmissionCh, 2)
+		require.Len(t, submissions.ch, 2)
 		assert.EqualValues(t, 2, activeJobSubmissions)
 	})
 
@@ -794,11 +807,13 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 }
 
 func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
+	var submissions *testSubmitter
 	newBuilder := func() *jobRequestBuilder {
+		submissions = newTestSubmitter(2)
 		return &jobRequestBuilder{
-			RstMap:          map[uint32]Provider{},
-			jobSubmissionCh: make(chan *beeremote.JobRequest, 2),
-			builderCfg:      &flex.JobRequestCfg{},
+			RstMap:        map[uint32]Provider{},
+			submitRequest: submissions.submit,
+			builderCfg:    &flex.JobRequestCfg{},
 		}
 	}
 	bulkInfo := &flex.BulkJobRequestInfo{Operation: "retrieve"}
@@ -825,7 +840,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		// nothing to attach to and is dropped.
 		w := newBuilder()
 		submissionCh := make(chan *beeremote.JobRequest, 2)
-		w.jobSubmissionCh = submissionCh
+		w.submitRequest = submitToChan(submissionCh)
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// GetPathState always populates LockedInfo, even on its error paths, so mirror that here
 			// rather than returning a bare PathState -- the lock bookkeeping dereferences it.
@@ -849,7 +864,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 	t.Run("lock is cleared once processing completes without in-flight work", func(t *testing.T) {
 		w := newBuilder()
 		submissionCh := make(chan *beeremote.JobRequest, 2)
-		w.jobSubmissionCh = submissionCh
+		w.submitRequest = submitToChan(submissionCh)
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// No client registered for rstId 1 -> FAILED_PRECONDITION request.
 			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
@@ -869,6 +884,77 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		request := <-submissionCh
 		assert.Equal(t, uint32(1), request.GetRemoteStorageTarget())
 		assert.Equal(t, bulkInfo, request.GetBulkInfo())
+	})
+
+	t.Run("a request remote refuses is rolled back and released from its bulk operation", func(t *testing.T) {
+		// Regression test: a bulk request that never produces a job is only ever resolved here.
+		// Leaving it unresolved strands it in the bulk operation, whose batch then never completes,
+		// so the owning builder job reschedules forever waiting on a request that will never run.
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
+		client.On("ResolveBulkRequest", mock.Anything, mock.Anything).Return(nil)
+		w := newBuilder()
+		submissions.err = ErrJobNotAllowed
+		w.RstMap = map[uint32]Provider{1: client}
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, Mtime: timestamppb.Now()},
+				LockAcquired: true,
+				EntryInfo:    &entry.GetEntryCombinedInfo{},
+			}, nil
+		}
+		var undoCalls int
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(*PathState) (undoFn, error) {
+				return func(context.Context) error { undoCalls++; return nil }, nil
+			}, nil
+		}
+		var cleared bool
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			cleared = true
+			return nil
+		}
+
+		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
+
+		// A request remote refuses is an outcome for this one path, not a builder job failure.
+		require.NoError(t, err)
+		assert.Equal(t, 1, undoCalls, "the applied file state plan must be rolled back")
+		client.AssertCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, "external-id")
+		client.AssertCalled(t, "ResolveBulkRequest", mock.Anything, mock.Anything)
+		assert.True(t, cleared, "the lock must be released once the plan is rolled back")
+	})
+
+	t.Run("a refused request keeps its lock when the rollback fails", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
+		client.On("ResolveBulkRequest", mock.Anything, mock.Anything).Return(nil)
+		w := newBuilder()
+		submissions.err = ErrJobNotAllowed
+		w.RstMap = map[uint32]Provider{1: client}
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, Mtime: timestamppb.Now()},
+				LockAcquired: true,
+				EntryInfo:    &entry.GetEntryCombinedInfo{},
+			}, nil
+		}
+		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(*PathState) (undoFn, error) {
+				return func(context.Context) error { return errors.New("rollback failed") }, nil
+			}, nil
+		}
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			t.Fatal("the lock must stay held while the file is still mutated")
+			return nil
+		}
+
+		// The bulk operation is still released: leaving the file locked for recovery is the point,
+		// stalling the whole builder job on top of it is not.
+		require.NoError(t, w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil))
+		client.AssertCalled(t, "ResolveBulkRequest", mock.Anything, mock.Anything)
 	})
 
 	t.Run("lock is held when processing produces in-flight work", func(t *testing.T) {
@@ -893,7 +979,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, bulkInfo, nil)
 
 		require.NoError(t, err)
-		require.Len(t, w.jobSubmissionCh, 1)
+		require.Len(t, submissions.ch, 1)
 	})
 
 	t.Run("clearAccessFlags error is joined into the returned error", func(t *testing.T) {

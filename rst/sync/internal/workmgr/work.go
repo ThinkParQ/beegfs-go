@@ -5,7 +5,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -436,65 +435,18 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 	return
 }
 
-// builderJobSubmissionWorkerMultiplier scales GOMAXPROCS to size the pool of goroutines that drain
-// jobSubmissionCh concurrently. Submission is dominated by the SubmitJobRequest RPC round trip
-// (network/BeeRemote-side work, not CPU), so a single consumer goroutine becomes a serialization
-// bottleneck long before the job builder itself runs out of work to produce, especially for bulk
-// operations that can ready thousands of requests at once. BeeRemote locks per-path (not globally)
-// when handling SubmitJobRequest, so concurrent submissions for different paths shouldn't contend.
-const builderJobSubmissionWorkerMultiplier = 4
-
-// builderJobSubmissionGrace bounds how long submission workers keep trying to hand off job requests
-// to BeeRemote after their context is cancelled. Once a request reaches jobSubmissionCh the builder
-// has already applied its file state plan (stub created, data state changed, space preallocated) and
-// deliberately kept the file access lock held, so abandoning it leaves the file in a state only
-// crash recovery can resolve. Submissions therefore run on a context detached from cancellation, and
-// this grace period is what still guarantees shutdown terminates when BeeRemote is genuinely gone.
-const builderJobSubmissionGrace = 10 * time.Minute
-
 func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
 	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
-	jobSubmissionCh := make(chan *pbr.JobRequest, 2048)
-	var wg sync.WaitGroup
-
-	var result *rst.SchedulingResult
-	wg.Go(func() {
-		defer close(jobSubmissionCh)
-		result = client.ExecuteJobBuilderRequest(work.ctx, workRequest, jobSubmissionCh, w.workerSaturation)
-	})
-
 	var builderMu sync.Mutex
 
-	// Submissions run on a context detached from work.ctx that only starts winding down
-	// builderJobSubmissionGrace after work.ctx is cancelled. While work.ctx is live this is
-	// equivalent to work.ctx, preserving the retry-until-BeeRemote-is-available behavior below; on
-	// shutdown it buys already-planned requests a bounded window to reach BeeRemote instead of
-	// being silently dropped.
-	submitCtx, cancelSubmit := context.WithCancel(context.WithoutCancel(work.ctx))
-	stopGrace := context.AfterFunc(work.ctx, func() {
-		time.AfterFunc(builderJobSubmissionGrace, cancelSubmit)
-	})
-
-	submissionWorkers := max(1, runtime.GOMAXPROCS(0)*builderJobSubmissionWorkerMultiplier)
-	for range submissionWorkers {
-		wg.Go(func() {
-			// Always drain jobSubmissionCh until it is closed, even after cancellation, so the
-			// producer side (ExecuteJobBuilderRequest) never blocks trying to send.
-			for jobRequest := range jobSubmissionCh {
-				w.sendBuilderJobRequest(submitCtx, &builderMu, builder, jobRequest)
-			}
-		})
-	}
-
-	wg.Wait()
-
-	// All submission workers have returned, so the grace window is no longer needed. Both calls
-	// are idempotent and safe even if the grace timer already fired.
-	stopGrace()
-	cancelSubmit()
+	// Called concurrently from every goroutine the builder runs, since each submits the request it
+	// built. See rst.SubmitRequestFn for why submission is inline rather than queued.
+	result := client.ExecuteJobBuilderRequest(work.ctx, workRequest, func(request *pbr.JobRequest) error {
+		return w.sendBuilderJobRequest(work.ctx, &builderMu, builder, request)
+	}, w.workerSaturation)
 
 	bulkOperations := builder.GetBulkOperations()
 	if bulkOperations == nil {
@@ -555,49 +507,65 @@ func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool
 	}
 }
 
-// sendBuilderJobRequest submits request to BeeRemote, retrying indefinitely while it's unavailable.
-// builder's counters are mutated under mu since this is called concurrently by multiple submission
-// workers sharing the same builder job.
-func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) {
+// builderJobSubmissionTimeout bounds a single attempt to submit a job request to remote.
+const builderJobSubmissionTimeout = 1 * time.Minute
+
+// sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
+// submission's outcome. A nil error means remote accepted the request and a job now owns everything
+// the builder prepared for it. Any other error means no job will ever run this request, and the
+// builder should revert its changes.
+//
+// Cancelling ctx stops further attempts but never interrupts one already in flight.
+//
+// builder's counters are incremented under mu because requests are submitted concurrently from
+// every goroutine building a path for the same builder job. These counters are only updated when
+// the journal entry is committed; so, if the sync node crashes before committing them then they
+// will be incorrect.
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
 	const maxSendBuilderJobDelay = 60 * time.Second
 	delay := 1 * time.Second
 
 	for {
-		if err := w.beeRemoteClient.SubmitJobRequest(ctx, request); err != nil {
-			if errors.Is(err, beeremote.ErrUnavailable) {
-				// Retry with an exponential backoff until remote is available again.
-				select {
-				case <-time.After(delay):
-					delay *= 2
-					if delay > maxSendBuilderJobDelay {
-						delay = maxSendBuilderJobDelay
-					}
-				case <-ctx.Done():
-					return
+		// Detached from ctx so cancelling it cannot abort an attempt that is already in flight and
+		// leave the outcome unknown.
+		submitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), builderJobSubmissionTimeout)
+		err := w.beeRemoteClient.SubmitJobRequest(submitCtx, request)
+		cancel()
+
+		if errors.Is(err, beeremote.ErrUnavailable) {
+			// Retry with an exponential backoff until remote is available again.
+			select {
+			case <-time.After(delay):
+				delay *= 2
+				if delay > maxSendBuilderJobDelay {
+					delay = maxSendBuilderJobDelay
 				}
 				continue
+			case <-ctx.Done():
+				// Remote is still unreachable and the node is shutting down, so report a terminal
+				// outcome instead of leaving the request with its plan applied and its lock held. It
+				// is deliberately not counted: nothing is wrong with the request itself and the
+				// builder job rewalks this path when it resumes after the restart.
+				return fmt.Errorf("unable to submit job request before the node shut down: %w", err)
 			}
-
-			mu.Lock()
-			if errors.Is(err, rst.ErrJobAlreadyComplete) {
-				builder.JobsAlreadyComplete++
-			} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
-				builder.JobsAlreadyOffloaded++
-			} else if errors.Is(err, rst.ErrJobAlreadyExists) {
-				builder.JobsAlreadyExist++
-			} else if errors.Is(err, rst.ErrJobNotAllowed) {
-				builder.JobsNotAllowed++
-			} else {
-				builder.Errors++
-			}
-			mu.Unlock()
-			return
 		}
 
 		mu.Lock()
-		builder.Submitted++
+		if err == nil {
+			builder.Submitted++
+		} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
+			builder.JobsAlreadyComplete++
+		} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+			builder.JobsAlreadyOffloaded++
+		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
+			builder.JobsAlreadyExist++
+		} else if errors.Is(err, rst.ErrJobNotAllowed) {
+			builder.JobsNotAllowed++
+		} else {
+			builder.Errors++
+		}
 		mu.Unlock()
-		return
+		return err
 	}
 }
 

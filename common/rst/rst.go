@@ -72,8 +72,8 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
-	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
-	// any new requests into jobSubmissionCh. Set SchedulingResult.Reschedule when there's more work
+	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Hand
+	// any new requests to submitRequest. Set SchedulingResult.Reschedule when there's more work
 	// (e.g. the walk was cut off by its per round batch limit or a bulk operation isn't done yet).
 	// Use SchedulingResult.Delay to back off before the next round.
 	//
@@ -98,7 +98,7 @@ type Provider interface {
 	//
 	// Unclassified errors are treated as failed by callers.
 	//
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionCh chan<- *beeremote.JobRequest, workerSaturation []func() float64) *SchedulingResult
+	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -175,6 +175,16 @@ type Provider interface {
 	// retries. Return an error only when the bulk operation cannot be opened in a usable state.
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
+
+// SubmitRequestFn submits a fully prepared job request to remote and returns the outcome. A nil
+// error means remote accepted the request and a job now owns the request. Any other error means no
+// job will ever execute the request.
+//
+// Implementations own retrying transient failures and must only return once the outcome is final.
+// They also own the context and lifecycle of the submission, including how long submissions are
+// attempted after the builder's own context is cancelled, so no context is passed in.
+// Implementations must be safe to call concurrently.
+type SubmitRequestFn func(request *beeremote.JobRequest) error
 
 type SchedulingResult struct {
 	Reschedule bool
