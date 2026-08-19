@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -273,15 +271,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) deleteState() (err error) {
 	err = appendError(err, removeIfExists(m.getManagerPath()))
 	err = appendError(err, removeIfExists(persistentTmpPath(m.getManagerPath())))
 	return
-}
-
-// removeIfExists removes the file at path, returning nil if it does not exist since the state
-// files aren't guaranteed to have been created yet when deleteState() is called.
-func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
@@ -670,139 +659,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) createErrorsFile() error {
 
 func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*os.File, error) {
 	return openFileForAppend(m.getRecordPath())
-}
-
-func openFileForAppend(path string) (*os.File, error) {
-	return createPersistentFile(path, unix.O_WRONLY|unix.O_APPEND, 0600)
-}
-
-func openFileForUpdate(path string) (*os.File, error) {
-	return updatePersistentFile(path, unix.O_WRONLY)
-}
-
-func touchFile(path string) error {
-	f, err := createPersistentFile(path, 0, 0600)
-	if err != nil {
-		return err
-	}
-
-	return f.Close()
-}
-
-// createPersistentFile opens path for durable writes, creating it if needed. It first attempts to
-// create the file exclusively and, if the file already exists, reopens it without truncating. Newly
-// created files have their parent directory fsynced so the directory entry is persisted. The
-// returned file uses O_DSYNC so successful writes are committed to stable storage before returning.
-func createPersistentFile(path string, mode int, perm uint32) (*os.File, error) {
-	mode |= unix.O_DSYNC | unix.O_CLOEXEC
-
-	fd, err := unix.Open(path, mode|unix.O_CREAT|unix.O_EXCL, perm)
-	created := err == nil
-	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Open(path, mode, 0)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("failed to create file handle for %s", path)
-	}
-
-	if created {
-		if err := syncDir(filepath.Dir(path)); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-	}
-
-	return f, nil
-}
-
-// updatePersistentFile opens an existing path for durable in-place writes. The returned file uses
-// O_DSYNC so successful writes are committed to stable storage before returning.
-func updatePersistentFile(path string, mode int) (*os.File, error) {
-	fd, err := unix.Open(path, mode|unix.O_DSYNC|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("failed to create file handle for %s", path)
-	}
-
-	return f, nil
-}
-
-// writePersistentFile atomically replaces path with data. Content is staged in a temporary file that
-// is fsynced before being renamed over path, then the parent directory is fsynced so the rename is
-// persisted. A crash therefore leaves path either fully replaced or untouched, never truncated part
-// way through a rewrite the way an O_TRUNC write would.
-func writePersistentFile(path string, data []byte, perm uint32) (err error) {
-	tmpPath := persistentTmpPath(path)
-
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(perm))
-	if err != nil {
-		return err
-	}
-
-	closed := false
-	defer func() {
-		if err != nil {
-			if !closed {
-				_ = f.Close()
-			}
-			_ = removeIfExists(tmpPath)
-		}
-	}()
-
-	if _, err = f.Write(data); err != nil {
-		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
-	}
-
-	if err = f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync %s: %w", tmpPath, err)
-	}
-
-	if err = f.Close(); err != nil {
-		return fmt.Errorf("failed to close %s: %w", tmpPath, err)
-	}
-	closed = true
-
-	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, path, err)
-	}
-
-	return syncDir(filepath.Dir(path))
-}
-
-// persistentTmpPath is where writePersistentFile stages content before renaming it over path.
-func persistentTmpPath(path string) string {
-	return path + ".tmp"
-}
-
-// syncDir fsyncs path so that directory entries created or replaced within it are persisted.
-func syncDir(path string) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open %s for sync: %w", path, err)
-	}
-
-	syncErr := unix.Fsync(fd)
-	closeErr := unix.Close(fd)
-
-	if syncErr != nil {
-		return fmt.Errorf("failed to sync %s: %w", path, syncErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("failed to close %s: %w", path, closeErr)
-	}
-
-	return nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getStateMountPath() string {
