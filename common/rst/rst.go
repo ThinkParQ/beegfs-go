@@ -154,6 +154,14 @@ type Provider interface {
 	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
 	// requests within provider bulk request.
 	IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
+	// ResolveBulkRequest releases a request from the bulk operation it belongs to once it is certain
+	// no job will ever run it. It must be called whenever such a request is abandoned before a job
+	// is created for it since the bulk operation could potentially wait on that request.
+	//
+	// Implementations must tolerate a request with no bulk info and must be safe to call more than
+	// once for the same request since it usually runs while the request context is being cancelled.
+	// Callers should pass a context detached from that cancellation.
+	ResolveBulkRequest(ctx context.Context, request *beeremote.JobRequest) error
 	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
 	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
 	// operation for the current builder execution.

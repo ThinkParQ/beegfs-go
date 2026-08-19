@@ -209,6 +209,12 @@ func (c *JobBuilderClient) ExecuteWorkRequestPart(ctx context.Context, workReque
 	return ErrUnsupportedOpForRST
 }
 
+// ResolveBulkRequest is a no-op because builder jobs are never part of a bulk operation themselves.
+// The requests a builder job generates are resolved by the provider that owns their bulk operation.
+func (c *JobBuilderClient) ResolveBulkRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	return nil
+}
+
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
 	if !abort {
 		switch GetWorkResultsState(workResults) {

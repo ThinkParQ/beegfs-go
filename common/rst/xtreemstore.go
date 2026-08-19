@@ -142,6 +142,14 @@ func (x *xtreemstoreS3Provider) CompleteWorkRequests(ctx context.Context, job *b
 	return
 }
 
+// ResolveBulkRequest marks the request complete from the bulk operation's perspective. It is the
+// only thing that releases a request whose job was never created or will never run: the operation's
+// batch is not finished (and its retrieve-session not released) until every request in it reaches a
+// terminal status, so a request left behind here stalls the owning builder job indefinitely.
+func (x *xtreemstoreS3Provider) ResolveBulkRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	return x.resolveBulkRequest(request.GetBulkInfo(), xtreemstoreS3BulkRequestComplete, nil)
+}
+
 func (x *xtreemstoreS3Provider) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	if !request.HasSync() {
 		return

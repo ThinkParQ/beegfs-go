@@ -489,6 +489,12 @@ func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, workRequest *fl
 	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 }
 
+// ResolveBulkRequest is a no-op because plain S3 targets never include requests in a bulk operation,
+// so no request generated for one can be waiting on this to be released.
+func (r *S3Client) ResolveBulkRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	return nil
+}
+
 func (r *S3Client) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	return false, ""
 }

@@ -142,6 +142,13 @@ func (m *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	}
 }
 
+func (m *MockClient) ResolveBulkRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	if !m.hasExpectedCall("ResolveBulkRequest") {
+		return nil
+	}
+	return m.Called(ctx, request).Error(0)
+}
+
 func (m *MockClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
 	if m.hasExpectedCall("IncludeRequestInBulkOperation") {
 		args := m.Called(ctx, request)
