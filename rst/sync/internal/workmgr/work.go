@@ -448,12 +448,6 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 		return w.sendBuilderJobRequest(work.ctx, &builderMu, builder, request)
 	}, w.workerSaturation)
 
-	bulkOperations := builder.GetBulkOperations()
-	if bulkOperations == nil {
-		bulkOperations = []*flex.BulkOperation{}
-	}
-	workResult.Work.JobBuilderInfo = &flex.Work_JobBuilderInfo{BulkOperations: bulkOperations}
-
 	if shutdownCtx.Err() != nil {
 		// BeeSync is shutting down. Cancelling work.ctx is how we ask the builder to stop, so
 		// ExecuteJobBuilderRequest reports an aborted request, but the builder job itself is fine
@@ -612,7 +606,7 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 }
 
 // getBuilderResults generates a status message based on the builder submission counters and
-// reports whether any of those counters (or a bulk operation) indicate a failure.
+// reports whether any of those counters indicate a failure.
 func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool) {
 	cfg := builder.GetCfg()
 	jobsSubmitted := builder.GetSubmitted()
@@ -621,12 +615,6 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 	jobsAlreadyComplete := builder.GetJobsAlreadyComplete()
 	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
 	jobsAlreadyExist := builder.GetJobsAlreadyExist()
-
-	for _, bulkOperation := range builder.BulkOperations {
-		if bulkOperation.Failed {
-			hasErrors = true
-		}
-	}
 
 	var parts []string
 	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist

@@ -81,7 +81,10 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
-	registry := c.newBulkOperationRegistry(ctx, workRequest.GetJobId(), &builder.BulkOperations)
+	registry, err := c.newBulkOperationRegistry(ctx, workRequest.GetJobId())
+	if err != nil {
+		return &SchedulingResult{Err: err}
+	}
 	defer func() {
 		if closeErr := registry.Close(ctx); closeErr != nil {
 			result.Err = appendErrors(result.Err, closeErr)
@@ -217,12 +220,13 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 		}
 	}
 
-	bulkOperations := getBulkOperations(workResults)
-	if len(bulkOperations) == 0 {
-		return
+	registry, err := c.newBulkOperationRegistry(ctx, job.GetId())
+	if err != nil {
+		return err
 	}
-
-	registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
+	if len(registry.GetManagersSnapshot()) == 0 {
+		return nil
+	}
 	defer func() {
 		err = appendErrors(err, registry.Close(ctx))
 	}()
@@ -262,16 +266,6 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 	}
 
 	return
-}
-
-func getBulkOperations(workResults []*flex.Work) []*flex.BulkOperation {
-	jobBuilderOperations := []*flex.BulkOperation{}
-	for _, workResult := range workResults {
-		if workResult.HasJobBuilderInfo() {
-			jobBuilderOperations = append(jobBuilderOperations, workResult.JobBuilderInfo.BulkOperations...)
-		}
-	}
-	return jobBuilderOperations
 }
 
 // GetConfig is not implemented and should never be called.
@@ -316,21 +310,22 @@ func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath
 	return nil, ErrUnsupportedOpForRST
 }
 
-func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string, builderBulkOperations *[]*flex.BulkOperation) *bulkOperationRegistry {
-	manager := &bulkOperationRegistry{
-		managers:              make(map[string]*bulkOperationManager),
-		managersMu:            sync.Mutex{},
-		rstMap:                c.rstMap,
-		builderBulkOperations: builderBulkOperations,
-		builderJobId:          builderJobId,
+// newBulkOperationRegistry creates the registry for builderJobId and reopens every bulk operation
+// the job already started by loading the entries saved on the mount. Records are persistent so
+// operations are never lost when sync crashes or shuts down.
+func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string) (*bulkOperationRegistry, error) {
+	registry := &bulkOperationRegistry{
+		managers:     make(map[string]*bulkOperationManager),
+		managersMu:   sync.Mutex{},
+		mountPath:    c.mountPoint.GetMountPath(),
+		rstMap:       c.rstMap,
+		builderJobId: builderJobId,
+	}
+	if err := registry.Init(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load the saved bulk operations of builder job %s: %w", builderJobId, err)
 	}
 
-	for _, bulkOperation := range *builderBulkOperations {
-		key := bulkOperationKey(bulkOperation.RstId, bulkOperation.Operation)
-		client, _ := manager.rstMap[bulkOperation.RstId]
-		manager.managers[key] = newBulkOperationManager(ctx, client, builderJobId, bulkOperation)
-	}
-	return manager
+	return registry, nil
 }
 
 const (

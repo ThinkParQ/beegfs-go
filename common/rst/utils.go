@@ -147,11 +147,15 @@ func writePersistentFile(path string, data []byte, perm uint32) (err error) {
 	return syncDir(filepath.Dir(path))
 }
 
+// persistentTmpSuffix distinguishes the staging file writePersistentFile renames from. Listing code
+// needs it to tell a leftover apart from the file it was staging for.
+const persistentTmpSuffix = ".tmp"
+
 // persistentTmpPath is where writePersistentFile stages content before renaming it over path. A
 // crash can leave one behind, so anything that lists a directory of persisted files must skip
 // these, and anything deleting state should delete them alongside the file itself.
 func persistentTmpPath(path string) string {
-	return path + ".tmp"
+	return path + persistentTmpSuffix
 }
 
 // syncDir fsyncs the directory at path so entries created, renamed or removed within it are
@@ -172,6 +176,35 @@ func syncDir(path string) error {
 		return fmt.Errorf("failed to close %s: %w", path, closeErr)
 	}
 
+	return nil
+}
+
+// removeEmptyDirs removes dir and then each of its parents in turn, stopping at the first one that
+// is not empty or at stopAt, whichever comes first. stopAt itself is never removed.
+//
+// A directory that still holds another operation's state ends the walk rather than failing, which is
+// what lets every teardown call this without knowing whether it is the last one to finish. Without
+// it the per-job and per-operation directories accumulate on the mount forever, since the files
+// inside them are removed but nothing ever removes the directories themselves.
+func removeEmptyDirs(dir string, stopAt string) error {
+	stopAt = filepath.Clean(stopAt)
+	for dir = filepath.Clean(dir); dir != stopAt && dir != "." && dir != string(filepath.Separator); {
+		if err := os.Remove(dir); err != nil {
+			if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+				// Still in use by another operation, so this is as far up as the walk can go.
+				return nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("failed to remove empty state directory %s: %w", dir, err)
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
 	return nil
 }
 

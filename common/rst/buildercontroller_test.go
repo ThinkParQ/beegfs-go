@@ -178,7 +178,7 @@ func TestRequestBuildController_ExecuteBulkOperationProcessesPathsAndSubmitsRequ
 	}
 	close(bulkCh)
 
-	manager := newTestBulkManager("mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 		return bulkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 	}, nil)
 	controller.ExecuteBulkOperation(manager)
@@ -200,7 +200,7 @@ func TestRequestBuildController_ExecuteBulkOperationReturnsWalkErrors(t *testing
 	bulkCh <- &BulkStreamPathResult{Err: walkErr}
 	close(bulkCh)
 
-	manager := newTestBulkManager("mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 		return bulkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
 	}, nil)
 	controller.ExecuteBulkOperation(manager)
@@ -209,16 +209,92 @@ func TestRequestBuildController_ExecuteBulkOperationReturnsWalkErrors(t *testing
 	require.ErrorIs(t, err, walkErr)
 }
 
+// TestRequestBuildController_ExecuteBulkOperationFailsManagerOnNonTransientError asserts an execute
+// that ends in an error the operation cannot recover from marks the operation permanently failed,
+// even when the cancel that follows succeeds. Leaving it un-failed lets the next builder job reopen
+// it, repeat the same execute, and append the same error again on every reschedule.
+func TestRequestBuildController_ExecuteBulkOperationFailsManagerOnNonTransientError(t *testing.T) {
+	ctx := context.Background()
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	executeErr := fmt.Errorf("retrieve-session expired")
+	cancelled := false
+	manager := newTestBulkManager(t, "mgr",
+		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+			walkCh := make(chan *BulkStreamPathResult)
+			close(walkCh)
+			return walkCh, func() *SchedulingResult { return &SchedulingResult{Err: executeErr} }, nil
+		},
+		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+			cancelled = true
+			walkCh := make(chan *BulkStreamPathResult)
+			close(walkCh)
+			return walkCh, func() error { return nil }, nil
+		})
+	require.NoError(t, manager.Save())
+
+	controller.ExecuteBulkOperation(manager)
+	require.NoError(t, controller.WaitForBulkOperations())
+
+	assert.True(t, cancelled, "the operation must still be cancelled so its pending paths are drained")
+	assert.True(t, manager.IsFailed(), "a non-transient execute error must fail the operation permanently")
+	require.Error(t, manager.GetErrors())
+	assert.Contains(t, manager.GetErrors().Error(), executeErr.Error())
+
+	// The failure has to be durable, otherwise a rescheduled builder job reopens and retries it.
+	entries := readTestBulkOperationEntries(t, manager.mountPath, manager.jobId)
+	require.Contains(t, entries, manager.Key())
+	assert.True(t, entries[manager.Key()].Failed)
+	assert.Equal(t, []string{executeErr.Error()}, entries[manager.Key()].Errors)
+}
+
+// TestRequestBuildController_ExecuteBulkOperationDoesNotFailManagerWhileShuttingDown asserts an
+// operation interrupted by a graceful shutdown stays resumable. Shutdown cancels the builder's
+// context to ask it to stop, so whatever error surfaces then describes an interrupted operation, not
+// one that can never succeed. Recording it as a permanent failure would persist it and the operation
+// would be refused for good after the restart instead of picking up where it left off, stranding
+// whatever it had reserved remotely.
+func TestRequestBuildController_ExecuteBulkOperationDoesNotFailManagerWhileShuttingDown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
+	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
+
+	// Not a context error: this stands in for a cancellation the provider's client reported as
+	// something of its own, which is why isTransientBulkError alone is not enough of a guard.
+	interruptedErr := fmt.Errorf("connection reset by peer")
+	manager := newTestBulkManager(t, "mgr",
+		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+			walkCh := make(chan *BulkStreamPathResult)
+			close(walkCh)
+			return walkCh, func() *SchedulingResult { return &SchedulingResult{Err: interruptedErr} }, nil
+		},
+		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+			t.Fatal("a shutting down builder must not cancel its bulk operations")
+			return nil, nil, nil
+		})
+	require.NoError(t, manager.Save())
+
+	controller.ExecuteBulkOperation(manager)
+	cancel()
+	_ = controller.WaitForBulkOperations()
+
+	assert.False(t, manager.IsFailed(), "an interrupted operation must stay resumable")
+	entries := readTestBulkOperationEntries(t, manager.mountPath, manager.jobId)
+	require.Contains(t, entries, manager.Key())
+	assert.False(t, entries[manager.Key()].Failed, "the failure must not be persisted across the restart")
+}
+
 func TestRequestBuildController_ExecuteBulkOperationNoopWhenManagerAlreadyFailed(t *testing.T) {
 	ctx := context.Background()
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	manager := newTestBulkManager("mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 		t.Fatal("Execute should not be called for an already-failed manager")
 		return nil, nil, nil
 	}, nil)
-	manager.SetFailed()
+	require.NoError(t, manager.Fail(fmt.Errorf("previously failed permanently")))
 
 	controller.ExecuteBulkOperation(manager)
 	require.NoError(t, controller.WaitForBulkOperations())
@@ -236,7 +312,7 @@ func TestRequestBuildController_ExecuteBulkOperationExecuteErrorCancelsAndSurfac
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
 	openErr := fmt.Errorf("failed to open bulk operation")
-	manager := newTestBulkManager("mgr",
+	manager := newTestBulkManager(t, "mgr",
 		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			return nil, nil, openErr
 		},
@@ -279,8 +355,8 @@ func TestRequestBuildController_ExecuteBulkOperationMergesRescheduleAcrossManage
 		return walkCh, func() error { return nil }, nil
 	}
 
-	slowManager := newTestBulkManager("slow", emptyBulkExecuteFn(5*time.Second, nil), noopCancel)
-	fastManager := newTestBulkManager("fast", emptyBulkExecuteFn(2*time.Second, boomErr), noopCancel)
+	slowManager := newTestBulkManager(t, "slow", emptyBulkExecuteFn(5*time.Second, nil), noopCancel)
+	fastManager := newTestBulkManager(t, "fast", emptyBulkExecuteFn(2*time.Second, boomErr), noopCancel)
 	controller.ExecuteBulkOperation(slowManager)
 	controller.ExecuteBulkOperation(fastManager)
 
@@ -297,11 +373,11 @@ func TestRequestBuildController_CancelBulkOperationNoopWhenManagerAlreadyFailed(
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 		t.Fatal("Cancel should not be called for an already-failed manager")
 		return nil, nil, nil
 	})
-	manager.SetFailed()
+	require.NoError(t, manager.Fail(fmt.Errorf("previously failed permanently")))
 
 	controller.CancelBulkOperation(manager, fmt.Errorf("reason"))
 	require.NoError(t, controller.WaitForBulkOperations())
@@ -313,7 +389,7 @@ func TestRequestBuildController_CancelBulkOperationSetsManagerFailedWhenCancelEr
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
 	cancelErr := fmt.Errorf("cannot cancel")
-	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 		return nil, nil, cancelErr
 	})
 
@@ -332,7 +408,7 @@ func TestRequestBuildController_CancelBulkOperationSetsManagerFailedOnWaitError(
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
 	waitErr := fmt.Errorf("cancel wait failed")
-	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 		walkCh := make(chan *BulkStreamPathResult)
 		close(walkCh)
 		return walkCh, func() error { return waitErr }, nil
@@ -355,7 +431,7 @@ func TestRequestBuildController_ExecuteBulkOperationInterruptedDoesNotFailManage
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	manager := newTestBulkManager("mgr",
+	manager := newTestBulkManager(t, "mgr",
 		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			walkCh := make(chan *BulkStreamPathResult)
 			close(walkCh)
@@ -385,7 +461,7 @@ func TestRequestBuildController_CancelBulkOperationSkippedWhenContextCancelled(t
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 		t.Fatal("Cancel should not be attempted on a cancelled context")
 		return nil, nil, nil
 	})
@@ -405,7 +481,7 @@ func TestRequestBuildController_CancelBulkOperationInterruptedDoesNotFailManager
 	jobSubmissionCh := make(chan *beeremote.JobRequest, 10)
 	controller := newTestRequestBuildController(ctx, jobSubmissionCh)
 
-	manager := newTestBulkManager("mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	manager := newTestBulkManager(t, "mgr", nil, func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 		walkCh := make(chan *BulkStreamPathResult)
 		close(walkCh)
 		return walkCh, func() error {
@@ -620,11 +696,12 @@ func (m *stubBulkOperation) Destroy(ctx context.Context) error {
 // newTestBulkManager builds a *bulkOperationManager backed by a stub clientBulkOperation, so tests
 // can inject Execute/Cancel behavior without a real RST client. executeFn/cancelFn may be nil if the
 // test never exercises that method.
-func newTestBulkManager(operation string, executeFn BulkExecuteFn, cancelFn BulkCancelFn) *bulkOperationManager {
+func newTestBulkManager(t *testing.T, operation string, executeFn BulkExecuteFn, cancelFn BulkCancelFn) *bulkOperationManager {
 	return &bulkOperationManager{
 		clientBulkOperation: &stubBulkOperation{executeFn: executeFn, cancelFn: cancelFn},
-		operation:           operation,
-		errors:              new(string),
-		failed:              new(bool),
+		bulkOperationEntry:  &bulkOperationEntry{RstId: 1, Operation: operation},
+		// Recording a failure persists the entry, so the manager needs a real mount to write to.
+		mountPath: t.TempDir(),
+		jobId:     "job-1",
 	}
 }

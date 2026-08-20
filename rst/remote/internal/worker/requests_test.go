@@ -17,7 +17,6 @@ import (
 // the definition of the WorkResponse struct forcing the test to be updated.
 func TestEncodeDecodeWorkResults(t *testing.T) {
 
-	bulkOperationErrors := "test error"
 	workResult := &WorkResult{
 		AssignedNode: "test",
 		AssignedPool: BeeSync,
@@ -41,17 +40,6 @@ func TestEncodeDecodeWorkResults(t *testing.T) {
 					ChecksumSha256: "checksum11",
 				}.Build(),
 			},
-			JobBuilderInfo: flex.Work_JobBuilderInfo_builder{
-				BulkOperations: []*flex.BulkOperation{
-					flex.BulkOperation_builder{
-						StateMountPath: ".beegfs-rst/job/test-job/0",
-						RstId:          1,
-						Operation:      "bulk-retrieve",
-						Failed:         true,
-						Errors:         &bulkOperationErrors,
-					}.Build(),
-				},
-			}.Build(),
 		}.Build(),
 	}
 
@@ -75,31 +63,14 @@ func TestEncodeDecodeWorkResults(t *testing.T) {
 
 	// First check WorkResult message:
 	expectedWorkFields := map[string]protoreflect.Kind{
-		"path":             protoreflect.StringKind,
-		"job_id":           protoreflect.StringKind,
-		"request_id":       protoreflect.StringKind,
-		"status":           protoreflect.MessageKind,
-		"parts":            protoreflect.MessageKind,
-		"job_builder":      protoreflect.BoolKind,
-		"job_builder_info": protoreflect.MessageKind,
+		"path":        protoreflect.StringKind,
+		"job_id":      protoreflect.StringKind,
+		"request_id":  protoreflect.StringKind,
+		"status":      protoreflect.MessageKind,
+		"parts":       protoreflect.MessageKind,
+		"job_builder": protoreflect.BoolKind,
 	}
 	checkMessageFields(flex.Work_builder{}.Build().ProtoReflect().Descriptor().Fields(), expectedWorkFields)
-
-	// Then check JobBuilderInfo and the BulkOperation messages it carries, since those travel
-	// through Gob as part of a Work result too:
-	expectedJobBuilderInfoFields := map[string]protoreflect.Kind{
-		"bulk_operations": protoreflect.MessageKind,
-	}
-	checkMessageFields(flex.Work_JobBuilderInfo_builder{}.Build().ProtoReflect().Descriptor().Fields(), expectedJobBuilderInfoFields)
-
-	expectedBulkOperationFields := map[string]protoreflect.Kind{
-		"state_mount_path": protoreflect.StringKind,
-		"rst_id":           protoreflect.Uint32Kind,
-		"operation":        protoreflect.StringKind,
-		"failed":           protoreflect.BoolKind,
-		"errors":           protoreflect.StringKind,
-	}
-	checkMessageFields(flex.BulkOperation_builder{}.Build().ProtoReflect().Descriptor().Fields(), expectedBulkOperationFields)
 
 	// Then check Status message:
 	expectedStatusFields := map[string]protoreflect.Kind{

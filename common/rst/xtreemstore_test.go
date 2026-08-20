@@ -102,7 +102,7 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
-		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestReceived.Bytes(), 0o600))
 
@@ -126,7 +126,7 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
-		errDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		errDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(errDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(errDir, "errors"), []byte("object no longer exists"), 0o600))
 
@@ -154,7 +154,7 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 
 		// The state directory survives but every file in it is gone, as Destroy leaves it.
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve"}
-		require.NoError(t, os.MkdirAll(path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation), 0o700))
+		require.NoError(t, os.MkdirAll(path.Join(mountPath, bulkInfo.StateMountPath), 0o700))
 
 		request := &flex.WorkRequest{
 			Type:     &flex.WorkRequest_Sync{Sync: &flex.SyncJob{}},
@@ -209,7 +209,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve", JobIndex: 0}
-		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestAdded.Bytes(), 0o600))
 
@@ -240,7 +240,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		// The status path is a directory, so opening it for writing fails with something other
 		// than ErrNotExist and is reported rather than tolerated.
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: "bulk-retrieve", JobIndex: 0}
-		statusDir := path.Join(mountPath, bulkInfo.StateMountPath, bulkInfo.Operation)
+		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(path.Join(statusDir, "status"), 0o700))
 
 		job := &beeremote.Job{Request: &beeremote.JobRequest{

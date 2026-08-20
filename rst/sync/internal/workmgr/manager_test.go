@@ -74,30 +74,6 @@ func matchRespIDsAndStatus(expectedJobID string, expectedRequestID string, expec
 	})
 }
 
-func matchRespIDsStatusAndBuilderBulkOperations(expectedJobID string, expectedRequestID string, expectedState flex.Work_State, expectedBulkOperations []*flex.BulkOperation) any {
-	return mock.MatchedBy(func(actual *flex.Work) bool {
-		if actual.GetJobId() != expectedJobID || actual.GetRequestId() != expectedRequestID || actual.GetStatus().GetState() != expectedState {
-			return false
-		}
-		if !actual.HasJobBuilderInfo() {
-			return false
-		}
-		return proto.Equal(actual.GetJobBuilderInfo(), flex.Work_JobBuilderInfo_builder{BulkOperations: expectedBulkOperations}.Build())
-	})
-}
-
-func matchRespIDsStatusAndBuilderInfo(expectedJobID string, expectedRequestID string, expectedState flex.Work_State, expectedBulkOperations []*flex.BulkOperation) any {
-	return mock.MatchedBy(func(actual *flex.Work) bool {
-		if actual.GetJobId() != expectedJobID || actual.GetRequestId() != expectedRequestID || actual.GetStatus().GetState() != expectedState {
-			return false
-		}
-		if !actual.HasJobBuilderInfo() {
-			return false
-		}
-		return proto.Equal(actual.GetJobBuilderInfo(), flex.Work_JobBuilderInfo_builder{BulkOperations: expectedBulkOperations}.Build())
-	})
-}
-
 func matchSubmittedJobRequest(expectedPath string, expectedOperation string, expectedJobIndex int64) any {
 	return mock.MatchedBy(func(actual *pbr.JobRequest) bool {
 		return actual.GetPath() == expectedPath &&
@@ -597,14 +573,6 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-bulkerr-job", "0")).Return(true, time.Duration(0), nil).Times(1)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-bulkerr-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			workRequest := args.Get(1).(*flex.WorkRequest)
-			workRequest.GetBuilder().BulkOperations = []*flex.BulkOperation{
-				flex.BulkOperation_builder{
-					StateMountPath: ".beegfs-rst/job/bulk-builder-bulkerr-job/1",
-					RstId:          1,
-					Operation:      "retrieve",
-				}.Build(),
-			}
 			submitRequest := args.Get(2).(rst.SubmitRequestFn)
 			submitRequest(&pbr.JobRequest{
 				Path:                "/bulk/source/first",
@@ -642,14 +610,12 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-bulkerr-job", "0", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("submitJob", matchSubmittedJobRequest("/bulk/source/first", "retrieve", 0)).Return(nil).Times(1)
 	mockBeeRemote.On("submitJob", matchSubmittedJobRequest("/bulk/source/second", "retrieve", 1)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderBulkOperations("bulk-builder-bulkerr-job", "0", flex.Work_CANCELLED, []*flex.BulkOperation{
-		flex.BulkOperation_builder{
-			StateMountPath: ".beegfs-rst/job/bulk-builder-bulkerr-job/1",
-			RstId:          1,
-			Operation:      "retrieve",
-		}.Build(),
-	})).
-		Run(func(args mock.Arguments) { close(failedSent) }).
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-bulkerr-job", "0", flex.Work_CANCELLED)).
+		Run(func(args mock.Arguments) {
+			actual := args.Get(0).(*flex.Work)
+			require.Contains(t, actual.GetStatus().GetMessage(), "bulk restore session failed")
+			close(failedSent)
+		}).
 		Return(nil).Once()
 
 	resp, err := mgr.SubmitWorkRequest(builderRequest)
@@ -674,9 +640,9 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 }
 
 // Verifies that if a builder reports an error before any bulk operations were actually created,
-// the worker still reports the builder as cancelled and includes an empty JobBuilderInfo so the
-// provider can decide whether any cleanup is needed.
-func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithEmptyBuilderInfo(t *testing.T) {
+// the worker still reports the builder as cancelled and includes the reason so BeeRemote can decide
+// whether any cleanup is needed.
+func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithReason(t *testing.T) {
 	mgr, deferredFuncs, err := getTestManager(t)
 	defer func() {
 		for i := len(deferredFuncs) - 1; i >= 0; i-- {
@@ -713,7 +679,7 @@ func TestSubmitBuilderWorkRequestWithBulkErrAndNoBulkOperations_FailsWithEmptyBu
 		Return(false, time.Duration(0), fmt.Errorf("bulk restore session failed before session creation")).Once()
 
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-no-bulkops-job", "0", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsStatusAndBuilderInfo("bulk-builder-no-bulkops-job", "0", flex.Work_CANCELLED, []*flex.BulkOperation{})).
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("bulk-builder-no-bulkops-job", "0", flex.Work_CANCELLED)).
 		Run(func(args mock.Arguments) {
 			actual := args.Get(0).(*flex.Work)
 			require.Contains(t, actual.GetStatus().GetMessage(), "bulk restore session failed before session creation")

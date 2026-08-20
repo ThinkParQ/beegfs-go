@@ -172,7 +172,9 @@ type Provider interface {
 	// cancelling the operation.
 	//
 	// stateMountPath is reserved for provider state that must survive builder reschedules or
-	// retries. Return an error only when the bulk operation cannot be opened in a usable state.
+	// retries. It is already unique per builder job, remote storage target and operation, so
+	// implementations must not namespace it further and can write directly beneath it. Return an
+	// error only when the bulk operation cannot be opened in a usable state.
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 

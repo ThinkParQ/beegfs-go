@@ -33,6 +33,10 @@ type requestBuildController struct {
 	bulkGroup     *errgroup.Group
 	bulkGroupCtx  context.Context
 	bulkCallbacks []func()
+	// bulkStateErr collects failures to persist a bulk operation's state. They are reported by
+	// WaitForBulkOperations because the operation would otherwise be reopened and retried by a
+	// later builder job that has no record of why it failed.
+	bulkStateErr error
 
 	result      *SchedulingResult
 	resumeToken string
@@ -137,8 +141,8 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 	c.bulkCallbacks = append(c.bulkCallbacks, func() {
 		result := getResult()
 		if result.Err != nil && !isTransientBulkError(result.Err) {
-			manager.AppendError(result.Err)
 			c.CancelBulkOperation(manager, result.Err)
+			c.failBulkOperation(manager, result.Err)
 		}
 		if result.Reschedule && (c.result == nil || !c.result.Reschedule || result.Delay < c.result.Delay) {
 			c.result = result
@@ -160,17 +164,38 @@ func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManag
 
 	walkCh, getResult, err := manager.Cancel(c.bulkGroupCtx, reason)
 	if err != nil {
-		failBulkOperation(manager, err)
+		c.failBulkOperation(manager, err)
 		return
 	}
 
 	c.bulkCallbacks = append(c.bulkCallbacks, func() {
 		if err := getResult(); err != nil {
-			failBulkOperation(manager, err)
+			c.failBulkOperation(manager, err)
 		}
 	})
 
 	processWalkCh(c.bulkGroupCtx, c.bulkGroup, c.bulkProcess, walkCh)
+}
+
+// failBulkOperation marks manager permanently failed, unless sync is shutting down. Shutdown
+// cancels the builder's context to ask it to stop, so the errors indicate the operation was
+// interrupted, not that it can never succeed. Recording a permanent failure prevents the operation
+// from resuming.
+func (c *requestBuildController) failBulkOperation(manager *bulkOperationManager, reason error) {
+	if c.ctx.Err() != nil {
+		return
+	}
+	c.recordBulkStateErr(manager, failBulkOperation(manager, reason))
+}
+
+// recordBulkStateErr collects err, which is a failure to persist manager's state rather than a
+// failure of the operation itself. It is only ever called from the goroutine driving the bulk
+// callbacks, which is the same goroutine that appends to c.bulkCallbacks.
+func (c *requestBuildController) recordBulkStateErr(manager *bulkOperationManager, err error) {
+	if err == nil {
+		return
+	}
+	c.bulkStateErr = appendErrors(c.bulkStateErr, fmt.Errorf("failed to persist the state of bulk operation %s: %w", manager.Key(), err))
 }
 
 func processWalkCh[T any](ctx context.Context, group *errgroup.Group, process func(T) error, walkCh <-chan T) {
@@ -248,6 +273,9 @@ func (c *requestBuildController) WaitForBulkOperations() (err error) {
 			callback()
 		}
 	}
+
+	err = appendErrors(err, c.bulkStateErr)
+	c.bulkStateErr = nil
 	return err
 }
 

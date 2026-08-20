@@ -663,7 +663,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*os.File, 
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getStateMountPath() string {
-	return path.Join(m.mountPath, m.stateMountPath, m.operation)
+	return path.Join(m.mountPath, m.stateMountPath)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getStatusPath() string {

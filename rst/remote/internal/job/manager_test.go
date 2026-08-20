@@ -1020,7 +1020,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	}
 }
 
-func TestUpdateJobsCancelsFailedBuilderJobUsingStoredJobBuilderInfo(t *testing.T) {
+func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
 	require.NoError(t, err, "error setting up for test")
 	defer cleanupPathDBPath(t)
@@ -1110,23 +1110,13 @@ func TestUpdateJobsCancelsFailedBuilderJobUsingStoredJobBuilderInfo(t *testing.T
 	require.NotNil(t, jobResponse)
 
 	jobID := jobResponse.GetJob().GetId()
-	bulkStateMountPath := ".beegfs-rst/job/" + jobID + "/1"
-	expectedJobBuilderInfo := flex.Work_JobBuilderInfo_builder{
-		BulkOperations: []*flex.BulkOperation{
-			flex.BulkOperation_builder{
-				StateMountPath: bulkStateMountPath,
-				RstId:          1,
-				Operation:      "retrieve",
-			}.Build(),
-		},
-	}.Build()
+	const failedMessage = "job builder failed to complete bulk operation(s): bulk restore session failed"
 	mockRST.On("CompleteWorkRequests", mock.MatchedBy(func(job *beeremote.Job) bool {
 		return job.GetId() == jobID && job.GetRequest().HasBuilder()
 	}), mock.MatchedBy(func(workResults []*flex.Work) bool {
 		return len(workResults) == 1 &&
 			workResults[0].GetRequestId() == "0" &&
-			workResults[0].HasJobBuilderInfo() &&
-			proto.Equal(workResults[0].GetJobBuilderInfo(), expectedJobBuilderInfo)
+			workResults[0].GetStatus().GetState() == flex.Work_FAILED
 	}), true).Return(nil).Once()
 
 	workResult := flex.Work_builder{
@@ -1135,10 +1125,9 @@ func TestUpdateJobsCancelsFailedBuilderJobUsingStoredJobBuilderInfo(t *testing.T
 		RequestId: "0",
 		Status: flex.Work_Status_builder{
 			State:   flex.Work_FAILED,
-			Message: "job builder failed to complete bulk operation(s): bulk restore session failed",
+			Message: failedMessage,
 		}.Build(),
-		Parts:          []*flex.Work_Part{},
-		JobBuilderInfo: expectedJobBuilderInfo,
+		Parts: []*flex.Work_Part{},
 	}.Build()
 
 	err = jobManager.UpdateWork(workResult)
@@ -1157,7 +1146,9 @@ func TestUpdateJobsCancelsFailedBuilderJobUsingStoredJobBuilderInfo(t *testing.T
 	require.NoError(t, err)
 	getJobsResponse := <-responses
 	require.Equal(t, beeremote.Job_FAILED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
-	require.True(t, getJobsResponse.GetResults()[0].GetWorkResults()[0].GetWork().HasJobBuilderInfo())
+	storedWork := getJobsResponse.GetResults()[0].GetWorkResults()[0].GetWork()
+	require.Equal(t, flex.Work_FAILED, storedWork.GetStatus().GetState())
+	require.Equal(t, failedMessage, storedWork.GetStatus().GetMessage())
 
 	updateJobRequest := beeremote.UpdateJobsRequest_builder{
 		JobId:    new(jobID),
