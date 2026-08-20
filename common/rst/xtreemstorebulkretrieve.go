@@ -264,18 +264,19 @@ func (m *xtreemstoreS3BulkRetrieveManager) Destroy(ctx context.Context) error {
 	return nil
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) deleteState() (err error) {
-	err = appendError(err, removeIfExists(m.getStatusPath()))
-	err = appendError(err, removeIfExists(m.getRecordPath()))
-	err = appendError(err, removeIfExists(m.getErrorsPath()))
-	err = appendError(err, removeIfExists(m.getManagerPath()))
-	err = appendError(err, removeIfExists(persistentTmpPath(m.getManagerPath())))
-	return
+func (m *xtreemstoreS3BulkRetrieveManager) deleteState() error {
+	return appendErrors(
+		removeIfExists(m.getStatusPath()),
+		removeIfExists(m.getRecordPath()),
+		removeIfExists(m.getErrorsPath()),
+		removeIfExists(m.getManagerPath()),
+		removeIfExists(persistentTmpPath(m.getManagerPath())),
+	)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
 	defer func() {
-		err = appendError(err, m.saveManagerState())
+		err = appendErrors(err, m.saveManagerState())
 	}()
 
 	for {
@@ -366,7 +367,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatch(
 	}
 
 	defer func() {
-		err = appendError(err, m.saveManagerState())
+		err = appendErrors(err, m.saveManagerState())
 	}()
 
 	allComplete = true
@@ -587,17 +588,17 @@ func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
 
 func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 	if m.recordHandle != nil {
-		err = appendError(err, m.recordHandle.Close())
+		err = appendErrors(err, m.recordHandle.Close())
 		m.recordHandle = nil
 	}
 
 	if m.statusUpdateHandle != nil {
-		err = appendError(err, m.statusUpdateHandle.Close())
+		err = appendErrors(err, m.statusUpdateHandle.Close())
 		m.statusUpdateHandle = nil
 	}
 
 	if m.statusAppendHandle != nil {
-		err = appendError(err, m.statusAppendHandle.Close())
+		err = appendErrors(err, m.statusAppendHandle.Close())
 		m.statusAppendHandle = nil
 	}
 

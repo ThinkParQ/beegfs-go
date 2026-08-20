@@ -9,17 +9,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// appendError joins nextErr onto accumulatedErr, keeping both wrapped so errors.Is and errors.As
-// still match either one. Either argument may be nil, which is what makes it convenient for
-// accumulating the failures of steps that all have to run before returning.
-func appendError(accumulatedErr error, nextErr error) error {
-	if accumulatedErr == nil {
-		return nextErr
+// appendErrors joins each nextErr onto accumulatedErr in order, keeping them all wrapped so
+// errors.Is and errors.As still match any one of them. Any argument may be nil, which is what makes
+// it convenient for accumulating the failures of steps that all have to run before returning.
+func appendErrors(accumulatedErr error, nextErrs ...error) error {
+	for _, nextErr := range nextErrs {
+		if nextErr == nil {
+			continue
+		} else if accumulatedErr == nil {
+			accumulatedErr = nextErr
+		} else {
+			accumulatedErr = fmt.Errorf("%w; %w", accumulatedErr, nextErr)
+		}
 	}
-	if nextErr == nil {
-		return accumulatedErr
-	}
-	return fmt.Errorf("%w; %w", accumulatedErr, nextErr)
+	return accumulatedErr
 }
 
 // openFileForAppend returns a handle that durably appends to path, creating it if needed and never

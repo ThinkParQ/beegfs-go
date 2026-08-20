@@ -263,7 +263,7 @@ func (x *xtreemstoreS3Provider) resolveBulkRequest(bulkInfo *flex.BulkJobRequest
 	switch parseBulkOperation(bulkInfo.Operation) {
 	case xtreemstoreS3BulkOperationRetrieve:
 	default:
-		return appendError(opErr, fmt.Errorf("unknown xtreemstore bulk operation %q, unable to resolve request: %w", bulkInfo.Operation, ErrUnsupportedOpForRST))
+		return appendErrors(opErr, fmt.Errorf("unknown xtreemstore bulk operation %q, unable to resolve request: %w", bulkInfo.Operation, ErrUnsupportedOpForRST))
 	}
 
 	outcome := onSuccess
@@ -283,7 +283,7 @@ func (x *xtreemstoreS3Provider) resolveBulkRequest(bulkInfo *flex.BulkJobRequest
 		bulkErr = fmt.Errorf("unexpected on-success bulk request status %q for bulk operation %q (this is probably a bug)", outcome, bulkInfo.Operation)
 	}
 	if bulkErr != nil {
-		return appendError(opErr, fmt.Errorf("failed to mark bulk request %s: %w", outcome, bulkErr))
+		return appendErrors(opErr, fmt.Errorf("failed to mark bulk request %s: %w", outcome, bulkErr))
 	}
 
 	return opErr

@@ -84,7 +84,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	registry := c.newBulkOperationRegistry(ctx, workRequest.GetJobId(), &builder.BulkOperations)
 	defer func() {
 		if closeErr := registry.Close(ctx); closeErr != nil {
-			result.Err = appendError(result.Err, closeErr)
+			result.Err = appendErrors(result.Err, closeErr)
 		}
 	}()
 
@@ -105,7 +105,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		for _, manager := range managers {
 			controller.CancelBulkOperation(manager, reason)
 		}
-		return &SchedulingResult{Err: appendError(reason, controller.WaitForBulkOperations())}
+		return &SchedulingResult{Err: appendErrors(reason, controller.WaitForBulkOperations())}
 	}
 
 	resumeToken := workRequest.GetExternalId()
@@ -146,7 +146,8 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 	if result.Reschedule {
 		return
 	}
-	result.Err = appendError(result.Err, walkErr)
+
+	result.Err = appendErrors(result.Err, walkErr, registry.GetFailedOperationErrors())
 	return
 }
 
@@ -223,7 +224,7 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 
 	registry := c.newBulkOperationRegistry(ctx, job.GetId(), &bulkOperations)
 	defer func() {
-		err = appendError(err, registry.Close(ctx))
+		err = appendErrors(err, registry.Close(ctx))
 	}()
 
 	if abort {
@@ -233,7 +234,7 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 		for _, manager := range registry.GetManagersSnapshot() {
 			walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
 			if cancelErr != nil {
-				err = appendError(err, fmt.Errorf("failed to cancel bulk operation %s: %w", manager.Key(), cancelErr))
+				err = appendErrors(err, fmt.Errorf("failed to cancel bulk operation %s: %w", manager.Key(), cancelErr))
 				continue
 			}
 
@@ -246,9 +247,9 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 
 		for manager, wait := range cancelWaits {
 			if cancelErr := wait(); cancelErr != nil {
-				err = appendError(err, fmt.Errorf("failed to wait for bulk operation %s to cancel: %w", manager.Key(), cancelErr))
+				err = appendErrors(err, fmt.Errorf("failed to wait for bulk operation %s to cancel: %w", manager.Key(), cancelErr))
 			} else if destroyErr := manager.Destroy(ctx); destroyErr != nil {
-				err = appendError(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
+				err = appendErrors(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
 			}
 		}
 		return
@@ -256,7 +257,7 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 
 	for _, manager := range registry.GetManagersSnapshot() {
 		if destroyErr := manager.Destroy(ctx); destroyErr != nil {
-			err = appendError(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
+			err = appendErrors(err, fmt.Errorf("failed to destroy bulk operation %s: %w", manager.Key(), destroyErr))
 		}
 	}
 

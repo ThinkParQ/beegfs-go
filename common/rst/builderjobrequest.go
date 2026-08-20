@@ -90,18 +90,18 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inM
 	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(ctx, inMountPath); err != nil || skip {
 		return
 	} else if pathIssue != nil {
-		failedPrecondition = appendError(failedPrecondition, pathIssue)
+		failedPrecondition = appendErrors(failedPrecondition, pathIssue)
 	}
 
 	var keepLock bool
 	if FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo) {
 		keepLock = true
-		failedPrecondition = appendError(failedPrecondition, fmt.Errorf("file access lock is already held"))
+		failedPrecondition = appendErrors(failedPrecondition, fmt.Errorf("file access lock is already held"))
 	}
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
 			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
-				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
+				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
@@ -146,7 +146,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
 			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
-				err = appendError(err, fmt.Errorf("unable to clear lock: %w", clearErr))
+				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
@@ -375,7 +375,7 @@ func (w *jobRequestBuilder) processRequest(
 	// no job will ever run it.
 	undo := func() (err error) {
 		if releaseErr := releaseExternalId(); releaseErr != nil {
-			err = appendError(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
+			err = appendErrors(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
 		} else if generatedExternalId != "" {
 			generatedExternalId = ""
 			lockedInfo.SetExternalId("")
@@ -395,12 +395,12 @@ func (w *jobRequestBuilder) processRequest(
 		// never be created.
 		if request.HasBulkInfo() {
 			if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; !ok {
-				err = appendError(err, fmt.Errorf("unable to resolve bulk request for %s: %w: rstId %d", cfg.GetPath(), ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget()))
+				err = appendErrors(err, fmt.Errorf("unable to resolve bulk request for %s: %w: rstId %d", cfg.GetPath(), ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget()))
 			} else {
 				cleanupCtx, cancelCleanup := newCleanupCtx()
 				defer cancelCleanup()
 				if bulkErr := client.ResolveBulkRequest(cleanupCtx, request); bulkErr != nil {
-					err = appendError(err, fmt.Errorf("unable to resolve bulk request for %s: %w", cfg.GetPath(), bulkErr))
+					err = appendErrors(err, fmt.Errorf("unable to resolve bulk request for %s: %w", cfg.GetPath(), bulkErr))
 				}
 			}
 		}
@@ -417,7 +417,7 @@ func (w *jobRequestBuilder) processRequest(
 	// The submission failed or the parent context was cancelled. In either case revert all changes.
 	planWasApplied := planApplied
 	if undoErr := undo(); undoErr != nil {
-		err = appendError(err, undoErr)
+		err = appendErrors(err, undoErr)
 	}
 	if planWasApplied {
 		// The lock can only be released if the applied changes are successfully reverted.
