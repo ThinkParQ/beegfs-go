@@ -915,14 +915,32 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
-	if isTerminalState(job.GetStatus().GetState()) {
-		// The client's work requests were generated but never assigned to a worker, so abort the
-		// job so the client can clean up.
+
+	status := job.GetStatus()
+	state := status.GetState()
+	message := status.GetMessage()
+	switch state {
+	case beeremote.Job_FAILED:
+		// All work requests are cancelled so it is safe to cancel the job.
 		if completeErr := job.Complete(m.ctx, rstClient, true); completeErr != nil {
-			job.Status.SetMessage(appendMessage(job.Status.GetMessage(), "error requesting the RST abort this job: "+completeErr.Error()))
+			job.Status.SetMessage(appendMessage(message, "error requesting the RST abort this job (cancel the job to try again): "+completeErr.Error()))
+		} else {
+			job.Status.SetState(beeremote.Job_CANCELLED)
+			job.Status.SetMessage(appendMessage(message, "successfully aborted"))
+			if !job.Request.HasBuilder() {
+				if lockErr := m.releaseUnusedFileLockFunc(job.Request.GetPath(), pathEntry.Value); lockErr != nil {
+					job.Status.SetState(beeremote.Job_FAILED)
+					job.Status.SetMessage(appendMessage(message, "unable to clear lock: "+lockErr.Error()))
+				}
+			}
 		}
-	} else {
-		m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+	case beeremote.Job_UNKNOWN:
+		// One or more work requests could not be cancelled so a worker may still be acting on this
+		// path; so don't abort the job.
+	default:
+		if !isTerminalState(state) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(state)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		}
 	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
