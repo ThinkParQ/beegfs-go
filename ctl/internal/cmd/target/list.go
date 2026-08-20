@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/buddygroup/resync"
@@ -141,9 +142,9 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 		// in most circumstances but it be confusing/bug prone to add resync state as a field on
 		// GetTargets_Result without always populating it. Better instead the frontend determine if
 		// surfacing this detail to the user is important and get it only when necessary.
-		syncState := "Healthy"
+		syncState := "healthy"
 		if t.ConsistencyState != target.ConsistencyGood {
-			syncState = "Unknown"
+			syncState = "unknown"
 			mappings, err := util.GetMappings(ctx)
 			if err != nil {
 				logger.Debug("unable to determine resync job state because there was an error getting entity mappings", zap.Error(err))
@@ -168,7 +169,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 							if resp.EndTime == "" {
 								syncState = resp.State
 							} else {
-								syncState = "Not-started"
+								syncState = msg.NotStarted.String()
 							}
 						}
 					} else if t.NodeType == beegfs.Storage {
@@ -178,7 +179,7 @@ func PrintTargetList(ctx context.Context, cfg PrintConfig, targets []target.GetT
 							if resp.EndTime == "" {
 								syncState = resp.State
 							} else {
-								syncState = "Not-started"
+								syncState = msg.NotStarted.String()
 							}
 						}
 					}

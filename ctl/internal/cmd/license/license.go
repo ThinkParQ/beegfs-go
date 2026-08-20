@@ -332,6 +332,8 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	var numMeta int
 	var numStorage int
+	// These are lowercase wire values for the license server's net_proto query parameter, not
+	// display output, so they are not NicType.String().
 	var netProto = "tcp"
 	for _, node := range allNodes {
 		switch node.Node.Id.NodeType {

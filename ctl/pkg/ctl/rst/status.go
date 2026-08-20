@@ -2,6 +2,7 @@ package rst
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -61,25 +62,40 @@ const (
 	Directory
 )
 
+// String returns a string representation of the PathStatus taking into consideration if emojis are
+// globally enabled or disabled.
 func (s PathStatus) String() string {
-	if viper.GetBool(config.DisableEmojisKey) {
+	return s.string(viper.GetBool(config.DisableEmojisKey))
+}
+
+// MarshalJSON encodes the path status as a stable machine-readable string never using emojis.
+func (s PathStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.string(true))
+}
+
+func (s PathStatus) string(disableEmojis bool) string {
+	if disableEmojis {
 		switch s {
 		case Synchronized:
-			return "Synchronized (" + strconv.Itoa(int(s)) + ")"
+			return "synchronized"
 		case Offloaded:
-			return "Offloaded (" + strconv.Itoa(int(s)) + ")"
+			return "offloaded"
 		case Unsynchronized:
-			return "Unsynchronized (" + strconv.Itoa(int(s)) + ")"
+			return "unsynchronized"
 		case NotSupported:
-			return "Not Supported (" + strconv.Itoa(int(s)) + ")"
+			return "not-supported"
 		case NoTargets:
-			return "No Targets (" + strconv.Itoa(int(s)) + ")"
+			return "no-targets"
 		case NotAttempted:
-			return "Not Attempted (" + strconv.Itoa(int(s)) + ")"
+			return "not-attempted"
 		case Directory:
-			return "Directory (" + strconv.Itoa(int(s)) + ")"
+			return "directory"
+		case Unknown:
+			return "unknown"
 		default:
-			return "Unknown (" + strconv.Itoa(int(s)) + ")"
+			// Only a value that matches no variant carries its number, so an impossible status is
+			// still diagnosable.
+			return "unknown(" + strconv.Itoa(int(s)) + ")"
 		}
 	}
 	switch s {

@@ -29,7 +29,7 @@ func TestNewMetaResyncStats(t *testing.T) {
 
 	stats := newMetaResyncStats(r)
 	assert.Equal(t, "meta", stats.TargetType)
-	assert.Equal(t, "Running", stats.State)
+	assert.Equal(t, "running", stats.State)
 	assert.Equal(t, uint64(1), stats.DiscoveryErrors) // GatherErrors -> DiscoveryErrors
 	assert.True(t, stats.SessionSyncErrors)           // uint8 1 -> bool
 	assert.NotEmpty(t, stats.StartTime)
@@ -39,7 +39,7 @@ func TestNewMetaResyncStats(t *testing.T) {
 	require.NoError(t, err)
 	s := string(data)
 	assert.Contains(t, s, `"targetType":"meta"`)
-	assert.Contains(t, s, `"state":"Running"`)
+	assert.Contains(t, s, `"state":"running"`)
 	assert.Contains(t, s, `"discoveryErrors":1`)
 	assert.Contains(t, s, `"sessionSyncErrors":true`)
 	assert.NotContains(t, s, `"endTime"`) // omitted while running
@@ -62,7 +62,7 @@ func TestNewStorageResyncStats(t *testing.T) {
 
 	stats := newStorageResyncStats(r)
 	assert.Equal(t, "storage", stats.TargetType)
-	assert.Equal(t, "Success", stats.State)
+	assert.Equal(t, "success", stats.State)
 	assert.NotEmpty(t, stats.EndTime) // completed -> present
 
 	data, err := json.Marshal(stats)

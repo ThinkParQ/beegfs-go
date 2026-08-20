@@ -1,5 +1,7 @@
 package util
 
+import "fmt"
+
 // Contains an actual error and extra information on how to exit the cmd app
 type CtlError struct {
 	inner    error
@@ -22,15 +24,17 @@ const (
 func (c CtlExitCode) String() string {
 	switch c {
 	case Success:
-		return "Success"
+		return "success"
 	case GeneralError:
-		return "General Error"
+		return "general-error"
 	case PartialSuccess:
-		return "Partial Success"
+		return "partial-success"
 	case NodesUnreachable:
-		return "Nodes Unreachable"
+		return "nodes-unreachable"
 	default:
-		return "Unknown"
+		// There is no sentinel to fall back on, and 3 and 4 are deliberately unused, so an
+		// unnamed code keeps its number rather than all of them reading alike.
+		return fmt.Sprintf("unknown(%d)", int(c))
 	}
 }
 

@@ -1,6 +1,9 @@
 package beegfs
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // This file contains common types related to working with BeeGFS storage bench.
 
@@ -8,11 +11,18 @@ import "encoding/json"
 type StorageBenchAction int32
 
 const (
+	// BenchUnspecified is a CTL side sentinel meaning "no action set yet". It is outside the C++
+	// enum's range because 0 is a real action there; see NewStorageBenchConfig.
 	BenchUnspecified StorageBenchAction = -1
 	BenchStart       StorageBenchAction = 0
 	BenchStop        StorageBenchAction = 1
 	BenchStatus      StorageBenchAction = 2
 	BenchCleanup     StorageBenchAction = 3
+	// BenchActionNone mirrors StorageBenchAction_NONE in
+	// beegfs-core/common/source/common/benchmark/StorageBench.h. Storage nodes echo the requested
+	// action back, so it is not expected on the wire today, but naming it keeps the Go enum
+	// complete and reserves Unknown(<n>) for values that are genuinely out of range.
+	BenchActionNone StorageBenchAction = 4
 )
 
 func (a StorageBenchAction) String() string {
@@ -25,8 +35,14 @@ func (a StorageBenchAction) String() string {
 		return "status"
 	case BenchCleanup:
 		return "cleanup"
-	default:
+	case BenchActionNone:
+		return "none"
+	case BenchUnspecified:
 		return "unspecified"
+	default:
+		// Only a value matching no variant carries its number, so an out of range action stays
+		// diagnosable instead of being reported as the sentinel.
+		return fmt.Sprintf("unknown(%d)", int32(a))
 	}
 }
 
@@ -34,9 +50,14 @@ func (a StorageBenchAction) String() string {
 type StorageBenchType int32
 
 const (
+	// NoBench is a CTL side sentinel meaning "no type set yet"; see NewStorageBenchConfig.
 	NoBench    StorageBenchType = -1
 	ReadBench  StorageBenchType = 0
 	WriteBench StorageBenchType = 1
+	// BenchTypeNone mirrors StorageBenchType_NONE in
+	// beegfs-core/common/source/common/benchmark/StorageBench.h. StorageBenchSlave initializes its
+	// type to it, so every node that has not run a benchmark reports this value.
+	BenchTypeNone StorageBenchType = 2
 )
 
 func (b StorageBenchType) String() string {
@@ -45,8 +66,12 @@ func (b StorageBenchType) String() string {
 		return "read"
 	case WriteBench:
 		return "write"
+	case BenchTypeNone:
+		return "none"
+	case NoBench:
+		return "no-bench"
 	default:
-		return "unknown"
+		return fmt.Sprintf("unknown(%d)", int32(b))
 	}
 }
 
@@ -84,11 +109,15 @@ func (s StorageBenchStatus) String() string {
 	case BenchFinished:
 		return "finished"
 	default:
-		return "unknown"
+		// Every declared variant is handled above and matches the C++ enum, so anything here is out
+		// of range and keeps its number.
+		return fmt.Sprintf("unknown(%d)", int32(s))
 	}
 }
 
-// StorageBenchError communicates additional details if a node reports the BenchError status.
+// StorageBenchError communicates additional details if a node reports the BenchError status. Unlike
+// the other storage bench enums its String() is an error message, not a kebab-case variant name,
+// because it also implements error and is surfaced as the reason a benchmark failed.
 type StorageBenchError int32
 
 const (

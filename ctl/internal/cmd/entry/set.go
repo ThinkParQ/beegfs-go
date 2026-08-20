@@ -100,22 +100,29 @@ This enables normal users to change the default number of targets and chunksize 
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
 	This is an enterprise feature. See end-user license agreement for definition and usage.`)
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
-	When the pattern is set to "mirrored", each target will be mirrored on a corresponding mirror target.
-	Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
-	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
-	If the stripe pattern is "mirrored" this is the number of mirror groups.`)
+	When the pattern is set to "%s", each target will be mirrored on a corresponding mirror target.
+	Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", "), beegfs.StripePatternBuddyMirror))
+	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", fmt.Sprintf(`Number of targets to stripe each file across.
+	If the stripe pattern is "%s" this is the number of mirror groups.`, beegfs.StripePatternBuddyMirror))
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
 	All desired IDs must be specified. Specify 'none' to unset all RSTs.`)
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
 	cmd.Flags().Var(rst.NewCooldownFlag(&backendCfg.RemoteCooldownSecs), rst.RemoteCooldownFlag, rst.RemoteCooldownFlagHelp)
 	// Advanced options
 	cmd.Flags().BoolVar(&backendCfg.Force, "force", false, "Allow some configuration checks to be overridden.")
-	cmd.Flags().Var(newAccessControlFlag(&backendCfg.AccessFlags), "access-flags", "Set access control restrictions for files (values: unlocked, read-lock, write-lock, read-write-lock). Specify 'none' to reset the access restrictions.")
+	cmd.Flags().Var(newAccessControlFlag(&backendCfg.AccessFlags), "access-flags", fmt.Sprintf("Set access control restrictions for files (values: %s; the read-lock, write-lock and read-write-lock forms are also accepted). Specify 'none' to reset the access restrictions.",
+		strings.Join([]string{
+			beegfs.AccessFlagUnlocked.String(),
+			beegfs.AccessFlagReadLock.String(),
+			beegfs.AccessFlagWriteLock.String(),
+			(beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock).String(),
+		}, ", ")))
 	cmd.Flags().MarkHidden("access-flags")
 	// There isn't a separate user facing "restore-policy" flag on entry set as there is on remote
 	// push/pull because the restore policy needs to be set when stubbing files. The ability to
 	// manually override the data state here is intended only for debugging/support purposes.
-	cmd.Flags().Var(newDataStateFlag(&backendCfg.DataState), "data-state", "Set the data state for regular files (numeric values: 0-7). Specify 'none' to reset the state.")
+	cmd.Flags().Var(newDataStateFlag(&backendCfg.DataState), "data-state", fmt.Sprintf("Set the data state for regular files (values: %s, or a numeric value 0-7 for the reserved states). Specify 'none' to reset the state.",
+		strings.Join(dataStateNames(), ", ")))
 	cmd.Flags().MarkHidden("data-state")
 	cmd.Flags().BoolVar(&frontendCfg.confirmBulkUpdates, "yes", false, "Use to acknowledge when running this command may update a large number of entries.")
 	return cmd

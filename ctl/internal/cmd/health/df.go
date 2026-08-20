@@ -227,7 +227,7 @@ func summarizeStates(counts map[string]uint64, order []string) string {
 // of an empty string.
 func orUnknown(state string) string {
 	if state == "" {
-		return "Unknown"
+		return "unknown"
 	}
 	return state
 }

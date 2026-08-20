@@ -36,7 +36,7 @@ type MetaResyncStats struct {
 
 func newMetaResyncStats(r msg.GetMetaResyncStatsResp) MetaResyncStats {
 	return MetaResyncStats{
-		TargetType:               "meta",
+		TargetType:               beegfs.Meta.String(),
 		State:                    r.State.String(),
 		StartTime:                resyncTime(r.StartTime),
 		EndTime:                  resyncTime(r.EndTime),
@@ -72,7 +72,7 @@ type StorageResyncStats struct {
 
 func newStorageResyncStats(r msg.GetStorageResyncStatsResp) StorageResyncStats {
 	return StorageResyncStats{
-		TargetType:      "storage",
+		TargetType:      beegfs.Storage.String(),
 		State:           r.State.String(),
 		StartTime:       resyncTime(r.StartTime),
 		EndTime:         resyncTime(r.EndTime),

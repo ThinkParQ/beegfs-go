@@ -69,7 +69,7 @@ func TestReportJSONSchema(t *testing.T) {
 						MetaNodes: []NodeConn{{
 							Alias: "meta_1",
 							NumID: 1,
-							Peers: []PeerConn{{Type: "TCP", IP: "10.0.0.1", Connections: 2, Fallback: false}},
+							Peers: []PeerConn{{Type: beegfs.Tcp.String(), IP: "10.0.0.1", Connections: 2, Fallback: false}},
 						}},
 						Raw: procfs.Client{ID: "raw-client-should-not-appear"},
 					}},
@@ -94,12 +94,12 @@ func TestReportJSONSchema(t *testing.T) {
 	// Targets detail is serialized.
 	assert.Contains(t, s, `"targets":`)
 	assert.Contains(t, s, `"totalSpaceBytes":1000`)
-	assert.Contains(t, s, `"capacityPool":"Low"`)
+	assert.Contains(t, s, `"capacityPool":"low"`)
 
 	// Connections detail is serialized down to per-peer entries.
 	assert.Contains(t, s, `"clients":`)
 	assert.Contains(t, s, `"mount":"/mnt/beegfs"`)
-	assert.Contains(t, s, `"type":"TCP"`)
+	assert.Contains(t, s, `"type":"tcp"`)
 
 	// Raw fields and the operational ConnCheckErr must never appear in JSON.
 	assert.NotContains(t, s, "raw-client-should-not-appear")

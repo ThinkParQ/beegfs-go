@@ -66,8 +66,8 @@ Files created using this mode do not trigger filesystem modification events.`,
 	cmd.Flags().Var(newUserFlag(&backendCfg.UserID), "uid", "User ID of the file owner. Defaults to the current effective user ID.")
 	cmd.Flags().Var(newGroupFlag(&backendCfg.GroupID), "gid", "Group ID of the file owner. Defaults to the current effective group ID.")
 	cmd.Flags().Var(newStripePatternFlag(&backendCfg.FileCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
-	When the pattern is set to "buddymirror", each target will be mirrored on a corresponding mirror target.
-	Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
+	When the pattern is set to "%s", each target will be mirrored on a corresponding mirror target.
+	Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", "), beegfs.StripePatternBuddyMirror))
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.FileCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.`)
 	cmd.Flags().Var(rst.NewCooldownFlag(&backendCfg.FileCfg.RemoteCooldownSecs), rst.RemoteCooldownFlag, rst.RemoteCooldownFlagHelp)
 	cmd.MarkFlagsMutuallyExclusive("pool", "targets", "buddy-groups")

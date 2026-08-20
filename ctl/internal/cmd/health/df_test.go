@@ -116,9 +116,9 @@ func TestAggregateStoragePoolsCountsMixedStates(t *testing.T) {
 	pools := aggregateStoragePools([]tgtBackend.GetTargets_Result{online, offline, unset})
 	require.Len(t, pools, 1)
 
-	assert.Equal(t, "1 Online, 1 Offline, 1 Unknown", summarizeStates(pools[0].reachability, reachabilityOrder))
-	assert.Equal(t, "1 Good, 1 Needs-resync, 1 Unknown", summarizeStates(pools[0].consistency, consistencyOrder))
-	assert.Equal(t, "1 Normal, 1 Emergency, 1 Unknown", summarizeStates(pools[0].capacityPools, capacityPoolOrder))
+	assert.Equal(t, "1 online, 1 offline, 1 unknown", summarizeStates(pools[0].reachability, reachabilityOrder))
+	assert.Equal(t, "1 good, 1 needs-resync, 1 unknown", summarizeStates(pools[0].consistency, consistencyOrder))
+	assert.Equal(t, "1 normal, 1 emergency, 1 unknown", summarizeStates(pools[0].capacityPools, capacityPoolOrder))
 }
 
 func TestAggregateStoragePoolsEmptyInput(t *testing.T) {
@@ -133,17 +133,17 @@ func TestSummarizeStates(t *testing.T) {
 	}{
 		{"no counts", map[string]uint64{}, "-"},
 		{"zero counts are omitted", map[string]uint64{tgtBackend.ReachabilityOnline: 0}, "-"},
-		{"single state", map[string]uint64{tgtBackend.ReachabilityOnline: 3}, "3 Online"},
+		{"single state", map[string]uint64{tgtBackend.ReachabilityOnline: 3}, "3 online"},
 		{
 			"listed in order not map order",
 			map[string]uint64{tgtBackend.ReachabilityOffline: 1, tgtBackend.ReachabilityOnline: 2, tgtBackend.ReachabilityProbablyOffline: 4},
-			"2 Online, 4 Probably-offline, 1 Offline",
+			"2 online, 4 probably-offline, 1 offline",
 		},
 		{
 			// A state from a newer management service must still be shown, after the known ones.
 			"unrecognized states sort last alphabetically",
 			map[string]uint64{"Zeta": 1, tgtBackend.ReachabilityOnline: 2, "Alpha": 3},
-			"2 Online, 3 Alpha, 1 Zeta",
+			"2 online, 3 Alpha, 1 Zeta",
 		},
 	}
 	for _, tc := range tests {

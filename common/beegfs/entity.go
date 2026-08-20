@@ -56,7 +56,7 @@ type LegacyId struct {
 	NodeType NodeType `json:"node_type"`
 }
 
-// User friendly output of LegacyId
+// User friendly output of LegacyId, for example "m:1" or "mg:1".
 func (n LegacyId) String() string {
 	nt := n.NodeType.String()[:1]
 	if n.NodeType == Management {
@@ -66,7 +66,7 @@ func (n LegacyId) String() string {
 	return fmt.Sprintf("%s:%d", nt, n.NumId)
 }
 
-// User friendly long output of LegacyId
+// User friendly long output of LegacyId, for example "meta:1".
 func (n LegacyId) StringLong() string {
 	return fmt.Sprintf("%s:%d", n.NodeType.String(), n.NumId)
 }

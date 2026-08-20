@@ -2,6 +2,7 @@ package entry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -42,22 +43,29 @@ func (s MigrateStatus) String() string {
 	case MigrateError:
 		return "error"
 	case MigrateNotSupported:
-		return "migration not supported"
+		return "not-supported"
 	case MigrateSkippedDir:
-		return "skipped updating directory"
+		return "skipped-directory"
 	case MigrateNotNeeded:
-		return "migration not needed"
+		return "not-needed"
 	case MigrateNeeded:
-		return "migration needed"
+		return "needed"
 	case MigratedFile:
-		return "migrated file"
+		return "migrated-file"
 	case MigrateUpdatedDir:
-		return "updated directory"
+		return "updated-directory"
 	case MigrateStarted:
-		return "background migration started"
-	default:
+		return "started"
+	case MigrateUnknown:
 		return "unknown"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
 	}
+}
+
+// MarshalJSON encodes the migrate status as its human-readable string.
+func (s MigrateStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 type MigrateStats struct {
