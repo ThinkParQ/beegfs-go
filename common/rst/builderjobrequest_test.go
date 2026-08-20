@@ -234,8 +234,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, errors.New("bulk add failed")
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -258,8 +258,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return true, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -289,8 +289,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -310,10 +310,16 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	// A request that cannot be handed off is never completed by anyone, so the applied plan must be
 	// rolled back. Whether the lock may be released follows entirely from whether that rollback
 	// succeeded: succeeding restores the file, failing leaves it mutated and needing recovery.
-	newCancelledBuilder := func(undo undoFn) (*jobRequestBuilder, *flex.JobRequestCfg) {
+	// The returned context is cancelled as the plan is applied, which is the case the rollback
+	// exists for: preparation got far enough to mutate the file before the request was abandoned. A
+	// context already cancelled on entry is refused before anything is applied, covered separately
+	// below.
+	newCancelledBuilder := func(t *testing.T, undo undoFn) (*jobRequestBuilder, *flex.JobRequestCfg, context.Context) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		submissionCh := make(chan *beeremote.JobRequest, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap: map[uint32]Provider{1: client},
 			// Unbuffered with no reader, so a submission would block forever; the cancelled context
@@ -322,11 +328,14 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return undo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
+					return undo, nil
+				}, nil
 			},
 		}
-		return w, &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		return w, &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}, ctx
 	}
 
 	// The undo steps that restore BeeGFS state issue BeeMsg calls with the context they are handed,
@@ -338,16 +347,13 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		var undoRan bool
 		var undoCtxErr error
 		var undoHadDeadline bool
-		w, cfg := newCancelledBuilder(func(ctx context.Context) error {
+		w, cfg, ctx := newCancelledBuilder(t, func(ctx context.Context) error {
 			undoRan = true
 			undoCtxErr = ctx.Err()
 			_, undoHadDeadline = ctx.Deadline()
 			return ctx.Err()
 		})
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, _, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -358,13 +364,44 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.True(t, canReleaseLock)
 	})
 
-	t.Run("cancellation rolls back the applied plan and releases the lock", func(t *testing.T) {
-		undoCalls := 0
-		w, cfg := newCancelledBuilder(func(context.Context) error { undoCalls++; return nil })
+	// Applying the plan is a critical section, so a request that arrives after the builder is
+	// already shutting down must be refused outright rather than half-prepared and rolled back.
+	t.Run("a context already cancelled on entry applies nothing", func(t *testing.T) {
+		applyCalls := 0
+		client := &MockClient{}
+		submissionCh := make(chan *beeremote.JobRequest, 0)
+		w := &jobRequestBuilder{
+			RstMap:        map[uint32]Provider{1: client},
+			submitRequest: submitToChan(submissionCh),
+			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+				return false, nil
+			},
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					applyCalls++
+					return noopUndo, nil
+				}, nil
+			},
+		}
+		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
+		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+
+		require.NoError(t, err)
+		assert.False(t, submitted)
+		assert.Equal(t, 0, applyCalls, "no file state may be mutated once the context is done")
+		// Nothing was applied, so there is nothing for recovery to find and the lock must not leak.
+		assert.True(t, canReleaseLock)
+		client.AssertNotCalled(t, "GenerateExternalId", mock.Anything, mock.Anything)
+	})
+
+	t.Run("cancellation rolls back the applied plan and releases the lock", func(t *testing.T) {
+		undoCalls := 0
+		w, cfg, ctx := newCancelledBuilder(t, func(context.Context) error { undoCalls++; return nil })
+		request := w.buildRequest(context.Background(), cfg, nil)
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -375,11 +412,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 
 	t.Run("cancellation keeps the lock when the rollback fails", func(t *testing.T) {
 		undoCalls := 0
-		w, cfg := newCancelledBuilder(func(context.Context) error { undoCalls++; return errors.New("rollback failed") })
+		w, cfg, ctx := newCancelledBuilder(t, func(context.Context) error { undoCalls++; return errors.New("rollback failed") })
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -394,23 +428,23 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
 		submissionCh := make(chan *beeremote.JobRequest, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) {
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
 					return func(context.Context) error { undoCalls++; return nil }, nil
 				}, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -427,23 +461,23 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// Buffered with room to spare, so both the send and the cancellation could proceed. The
 		// cancellation must win deterministically, and the plan must be undone exactly once.
 		submissionCh := make(chan *beeremote.JobRequest, 4)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) {
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
 					return func(context.Context) error { undoCalls++; return nil }, nil
 				}, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -459,14 +493,17 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
 		submissionCh := make(chan *beeremote.JobRequest, 4)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) {
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
 					return func(context.Context) error {
 						// Fail the rollback attempted by the externalId path, then succeed on the
 						// retry from the cancellation path.
@@ -481,9 +518,6 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -510,21 +544,23 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				_, releaseHadDeadline = releaseCtx.Deadline()
 			}).Return(nil)
 		submissionCh := make(chan *beeremote.JobRequest, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
+					return noopUndo, nil
+				}, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		_, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -540,21 +576,23 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
 		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").Return(errors.New("abort failed"))
 		submissionCh := make(chan *beeremote.JobRequest, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
+					return noopUndo, nil
+				}, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		_, _, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		// Nothing else surfaces an orphaned upload, so the error has to come back here.
@@ -574,8 +612,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -596,23 +634,23 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	// into releasing it.
 	t.Run("cancellation of an already offloaded request keeps the lock", func(t *testing.T) {
 		submissionCh := make(chan *beeremote.JobRequest, 4)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{1: &MockClient{}},
 			submitRequest: submitToChan(submissionCh),
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(*PathState) (undoFn, error) {
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+				return func(context.Context, *PathState) (undoFn, error) {
+					cancel()
 					return noopUndo, ErrJobAlreadyOffloaded
 				}, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
 		canReleaseLock, submitted, err := w.processRequest(ctx, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
@@ -627,7 +665,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		w := &jobRequestBuilder{
 			RstMap:        map[uint32]Provider{},
 			submitRequest: submitToChan(submissionCh),
-			planFileState: func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
 				t.Fatal("planFileState must not be called for a request that already has a GenerationStatus")
 				return nil, nil
 			},
@@ -769,8 +807,8 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.addBulkRequest = func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 			return false, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")
@@ -905,8 +943,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			}, nil
 		}
 		var undoCalls int
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(*PathState) (undoFn, error) {
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(context.Context, *PathState) (undoFn, error) {
 				return func(context.Context) error { undoCalls++; return nil }, nil
 			}, nil
 		}
@@ -941,8 +979,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 				EntryInfo:    &entry.GetEntryCombinedInfo{},
 			}, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(*PathState) (undoFn, error) {
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(context.Context, *PathState) (undoFn, error) {
 				return func(context.Context) error { return errors.New("rollback failed") }, nil
 			}, nil
 		}
@@ -968,8 +1006,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 				EntryInfo:  &entry.GetEntryCombinedInfo{},
 			}, nil
 		}
-		w.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+			return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")

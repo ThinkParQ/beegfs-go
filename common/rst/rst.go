@@ -508,16 +508,16 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 //
 // Be aware that the apply function takes a *PathState argument so it can be updated when the file
 // is created.
-func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (apply applyPlanFn, failedPrecondition error) {
-	addStep, apply := newApplyPlan(ctx)
-	defer addStep(prepareUpdateFileRstPattern(ctx, cfg))
+func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (apply applyPlanFn, failedPrecondition error) {
+	addStep, apply := newApplyPlan()
+	defer addStep(prepareUpdateFileRstPattern(cfg))
 
 	lockedInfo := cfg.LockedInfo
 	originalLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
 	alreadySynced := IsFileAlreadySynced(lockedInfo)
 	if cfg.StubLocal {
 		if (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced {
-			addStep(prepareStubLocalOffload(ctx, mountPoint, cfg, alreadySynced))
+			addStep(prepareStubLocalOffload(mountPoint, cfg, alreadySynced))
 			return
 		}
 
@@ -527,7 +527,7 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 				return
 			}
 
-			addStep(prepareAlreadyOffloaded(ctx, cfg))
+			addStep(prepareAlreadyOffloaded(cfg))
 			return
 		}
 
@@ -549,7 +549,7 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 					return
 				}
 
-				addStep(prepareDownloadRestoreDataState(ctx, cfg))
+				addStep(prepareDownloadRestoreDataState(cfg))
 				allowOverwrite = true
 			}
 
@@ -567,7 +567,7 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 			return
 		}
 	} else if cfg.Download {
-		addStep(prepareDownloadNoFile(ctx, mountPoint, cfg))
+		addStep(prepareDownloadNoFile(mountPoint, cfg))
 	} else {
 		failedPrecondition = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
 		return
@@ -576,30 +576,34 @@ func PlanFileStateForWorkRequests(ctx context.Context, mountPoint filesystem.Pro
 	return
 }
 
-// undoFn rolls back the mutations made by an applyFn. It takes its own context rather than reusing
-// the one the plan was applied with: rollbacks routinely run because that context was cancelled,
-// and the undo steps that talk to BeeGFS over BeeMsg would fail immediately if handed a context
-// that is already done. Callers that roll back on cancellation must pass a context detached from
-// it (see context.WithoutCancel), bounded by a timeout so cleanup cannot hang shutdown.
 type undoFn func(ctx context.Context) error
-type applyPlanFn func(*PathState) (undoFn, error)
-type applyFn func(pathState *PathState, appliedErr error) (undoFn, error)
+type applyPlanFn func(ctx context.Context, pathState *PathState) (undoFn, error)
+type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error)
 
 var noopUndo = func(context.Context) error { return nil }
 
-// newApplyPlan builds a plan whose steps are applied with applyCtx. Note applyCtx is only used for
-// the rollback that happens inline when a step fails mid-apply; the undoFn handed back to the caller
-// takes its own context, since a later rollback may well be running because applyCtx was cancelled.
-func newApplyPlan(applyCtx context.Context) (add func(applyFn), apply applyPlanFn) {
+// detachedTimeout bounds an operation that runs detached from the caller's context, keeping it
+// from stalling a shutdown that waits on it.
+const detachedTimeout = 1 * time.Minute
+
+func newDetachedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), detachedTimeout)
+}
+
+// newApplyPlan builds a plan whose steps all run with the context handed to apply, rather than one
+// captured while the plan was being built. The plan is a critical section, so that context should
+// be detached and bounded. Otherwise, only part of the plan will be applied leaving the file in an
+// unknown state. The undoFn handed back to the caller should take similar precautions.
+func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 	applySteps := []applyFn{}
 	add = func(step applyFn) {
 		applySteps = append(applySteps, step)
 	}
-	apply = func(pathState *PathState) (undoFn, error) {
+	apply = func(ctx context.Context, pathState *PathState) (undoFn, error) {
 		undoSteps := []undoFn{}
-		undo := func(ctx context.Context) (undoErr error) {
+		undo := func(undoCtx context.Context) (undoErr error) {
 			for i := len(undoSteps) - 1; i >= 0; i-- {
-				undoErr = errors.Join(undoErr, undoSteps[i](ctx))
+				undoErr = errors.Join(undoErr, undoSteps[i](undoCtx))
 			}
 			return
 		}
@@ -607,12 +611,12 @@ func newApplyPlan(applyCtx context.Context) (add func(applyFn), apply applyPlanF
 		var undoStep undoFn
 		var applyErr error
 		for _, applyStep := range applySteps {
-			undoStep, applyErr = applyStep(pathState, applyErr)
+			undoStep, applyErr = applyStep(ctx, pathState, applyErr)
 			undoSteps = append(undoSteps, undoStep)
 		}
 
 		if applyErr != nil && !IsErrJobTerminalSentinel(applyErr) {
-			if undoErr := undo(applyCtx); undoErr != nil {
+			if undoErr := undo(ctx); undoErr != nil {
 				applyErr = fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
 			} else {
 				applyErr = fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
@@ -627,13 +631,13 @@ func newApplyPlan(applyCtx context.Context) (add func(applyFn), apply applyPlanF
 
 func prepareAlreadyComplete(cfg *flex.JobRequestCfg) applyFn {
 	lockedInfo := cfg.LockedInfo
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+	return func(_ context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		return noopUndo, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 	}
 }
 
-func prepareAlreadyOffloaded(ctx context.Context, cfg *flex.JobRequestCfg) applyFn {
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+func prepareAlreadyOffloaded(cfg *flex.JobRequestCfg) applyFn {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		undo := noopUndo
 		if cfg.HasRestorePolicy() {
 			state := restorePolicyToDataState(cfg.GetRestorePolicy())
@@ -666,9 +670,9 @@ func prepareAlreadyOffloaded(ctx context.Context, cfg *flex.JobRequestCfg) apply
 // the remote target or about to be created as a download stub, taking over the file's access lock
 // if it didn't already exist. It always terminates the plan with ErrJobAlreadyOffloaded since
 // nothing else needs to run after it.
-func prepareStubLocalOffload(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, alreadySynced bool) applyFn {
+func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, alreadySynced bool) applyFn {
 	lockedInfo := cfg.LockedInfo
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
 			return noopUndo, appliedErr
 		}
@@ -744,8 +748,8 @@ func prepareStubLocalOffload(ctx context.Context, mountPoint filesystem.Provider
 
 // prepareDownloadRestoreDataState clears the offloaded data state on an existing stub file so a
 // download can overwrite its contents, restoring the original data state if a later step fails.
-func prepareDownloadRestoreDataState(ctx context.Context, cfg *flex.JobRequestCfg) applyFn {
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+func prepareDownloadRestoreDataState(cfg *flex.JobRequestCfg) applyFn {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		ownerNode := pathState.OwnerNode
 		entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
 		if entryInfoMsg == nil {
@@ -777,7 +781,7 @@ func prepareDownloadRestoreDataState(ctx context.Context, cfg *flex.JobRequestCf
 // fails.
 func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, allowOverwrite bool, originalLockedInfo *flex.JobLockedInfo) applyFn {
 	lockedInfo := cfg.LockedInfo
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+	return func(_ context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
 			return noopUndo, appliedErr
 		}
@@ -801,8 +805,8 @@ func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequ
 	}
 }
 
-func prepareDownloadNoFile(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) applyFn {
-	return func(pathState *PathState, appliedErr error) (undoFn, error) {
+func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) applyFn {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
 			return noopUndo, appliedErr
 		}
@@ -837,8 +841,8 @@ func prepareDownloadNoFile(ctx context.Context, mountPoint filesystem.Provider, 
 	}
 }
 
-func prepareUpdateFileRstPattern(ctx context.Context, cfg *flex.JobRequestCfg) applyFn {
-	return func(pathState *PathState, appliedErr error) (undo undoFn, err error) {
+func prepareUpdateFileRstPattern(cfg *flex.JobRequestCfg) applyFn {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error) {
 		undo = noopUndo
 		if !(appliedErr == nil || IsErrJobTerminalSentinel(appliedErr)) {
 			err = appliedErr

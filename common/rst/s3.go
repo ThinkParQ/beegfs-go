@@ -384,8 +384,13 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 			return
 		}
 
+		// The detached context is used to prevents a shutdown from interrupting changes to the file
+		// which would leave the it in an unknown state.
+		cleanupCtx, cancelCleanup := newDetachedCtx(ctx)
+		defer cancelCleanup()
+
 		if !IsErrJobTerminalSentinel(err) {
-			if undoErr := undoAppliedPlan(ctx); undoErr != nil {
+			if undoErr := undoAppliedPlan(cleanupCtx); undoErr != nil {
 				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
 			} else {
 				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
@@ -393,7 +398,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if lockAcquired && !errors.Is(err, ErrJobAlreadyOffloaded) {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(cleanupCtx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -467,11 +472,21 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 
 	var applyPlan applyPlanFn
 
-	if applyPlan, err = PlanFileStateForWorkRequests(ctx, r.mountPoint, cfg); err != nil {
+	if applyPlan, err = PlanFileStateForWorkRequests(r.mountPoint, cfg); err != nil {
 		return
 	}
 
-	undoAppliedPlan, err = applyPlan(pathState)
+	if err = ctx.Err(); err != nil {
+		// No changes have been applied and sync is shutting down.
+		return
+	}
+
+	// The detached context is used to prevents a shutdown from interrupting changes to the file
+	// which would leave the it in an unknown state.
+	planCtx, cancelPlan := newDetachedCtx(ctx)
+	defer cancelPlan()
+
+	undoAppliedPlan, err = applyPlan(planCtx, pathState)
 	if err != nil {
 		return
 	}

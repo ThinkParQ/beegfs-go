@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -19,15 +20,9 @@ import (
 type requestPathResolverFn func(walkPath string) (inMountPath string, remotePath string, err error)
 type addBulkRequestFn func(ctx context.Context, request *beeremote.JobRequest) (skipSubmit bool, err error)
 type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error)
-type planFileStateForWorkRequestsFn func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error)
+type planFileStateForWorkRequestsFn func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error)
 type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.AccessFlags) error
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
-
-// requestCleanupTimeout bounds how long cleaning up after an abandoned job request may take once the
-// request context is gone. Cleanup (rolling back the applied file state plan, releasing the
-// externalId) runs detached from that context so it can still reach BeeGFS and the remote target
-// after cancellation, and this is what keeps it from stalling a shutdown that waits on it.
-const requestCleanupTimeout = 1 * time.Minute
 
 type jobRequestBuilder struct {
 	mountPoint       filesystem.Provider
@@ -256,7 +251,7 @@ func (w *jobRequestBuilder) processRequest(
 		canReleaseLock = true
 	} else {
 		var planErr error
-		if applyPlan, planErr = w.planFileState(ctx, w.mountPoint, cfg); planErr != nil {
+		if applyPlan, planErr = w.planFileState(w.mountPoint, cfg); planErr != nil {
 			canReleaseLock = true
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
@@ -287,48 +282,35 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// newCleanupCtx returns a context detached from ctx so the undo functions can still complete
-	// when ctx is already cancelled because sync is shutting down.
-	newCleanupCtx := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.WithoutCancel(ctx), requestCleanupTimeout)
+	if ctx.Err() != nil && (!request.HasGenerationStatus() || request.GetGenerationStatus().GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION) {
+		// Shutting down and there's been no changes. Cancel immediately and don't apply the plan.
+		canReleaseLock = true
+		return
 	}
 
-	planApplied := false
 	applyUndo := noopUndo
-	undoAppliedPlan := func() error {
-		cleanupCtx, cancelCleanup := newCleanupCtx()
-		defer cancelCleanup()
-		return applyUndo(cleanupCtx)
-	}
-
-	var generatedExternalId string
-	releaseExternalId := func() error {
-		if generatedExternalId == "" {
-			return nil
-		}
-		client, ok := w.RstMap[request.GetRemoteStorageTarget()]
-		if !ok {
-			return fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget())
-		}
-		cleanupCtx, cancelCleanup := newCleanupCtx()
-		defer cancelCleanup()
-		return client.ReleaseExternalId(cleanupCtx, cfg, generatedExternalId)
-	}
-
+	var planApplied bool
 	if !request.HasGenerationStatus() {
-		undo, applyErr := applyPlan(&pathState)
+		// Use detached context to prevent corrupting the file if sync is shutdown.
+		applyPlanCtx, applyPlanCancel := newDetachedCtx(ctx)
+		defer applyPlanCancel()
+
+		var applyErr error
+		applyUndo, applyErr = applyPlan(applyPlanCtx, &pathState)
+		planApplied = applyErr == nil || IsErrJobTerminalSentinel(applyErr)
+
 		if applyErr != nil {
 			if errors.Is(applyErr, ErrJobAlreadyComplete) {
 				canReleaseLock = true
-				request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 					State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
 					Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-				}
+				})
 			} else if errors.Is(applyErr, ErrJobAlreadyOffloaded) {
 				canReleaseLock = false
-				request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
+				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 					State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
-				}
+				})
 			} else if errors.Is(applyErr, ErrJobFailedPrecondition) {
 				canReleaseLock = true
 				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
@@ -343,13 +325,14 @@ func (w *jobRequestBuilder) processRequest(
 				})
 			}
 		} else {
-			applyUndo = undo
-			planApplied = true
-
+			canReleaseLock = false
 			client := w.RstMap[request.GetRemoteStorageTarget()]
-			externalId, externalIdErr := client.GenerateExternalId(ctx, cfg)
+			externalId, externalIdErr := client.GenerateExternalId(applyPlanCtx, cfg)
 			if externalIdErr != nil {
-				if undoErr := undoAppliedPlan(); undoErr != nil {
+				cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
+				defer cleanupCancel()
+
+				if undoErr := applyUndo(cleanupCtx); undoErr != nil {
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ERROR,
@@ -364,64 +347,52 @@ func (w *jobRequestBuilder) processRequest(
 					})
 				}
 			} else {
-				generatedExternalId = externalId
 				lockedInfo.SetExternalId(externalId)
-				canReleaseLock = false
 			}
 		}
 	}
 
-	// undo reverts everything prepared for this request and must only be called once it is certain
-	// no job will ever run it.
-	undo := func() (err error) {
-		if releaseErr := releaseExternalId(); releaseErr != nil {
-			err = appendErrors(err, fmt.Errorf("unable to release external id %q for %s: %w", generatedExternalId, cfg.GetPath(), releaseErr))
-		} else if generatedExternalId != "" {
-			generatedExternalId = ""
-			lockedInfo.SetExternalId("")
-		}
+	if submitErr := w.submitRequest(request); submitErr != nil {
+
+		// TODO: log failure?
+
+		// Use detached context to prevent corrupting the file if sync is shutdown.
+		cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
+		defer cleanupCancel()
+
+		wg := sync.WaitGroup{}
+		var undoPlanErr, resolveBulkRequestErr error
 
 		if planApplied {
-			// A failed plan rollback is reported by leaving planApplied set rather than as an
-			// error. The file is left mutated so it must stay locked for recovery to find. However,
-			// one path failing to roll back must not fail the whole builder job.
-			if undoErr := undoAppliedPlan(); undoErr == nil {
-				planApplied = false
-			}
+			wg.Go(func() {
+				undoPlanErr = applyUndo(cleanupCtx)
+				canReleaseLock = undoPlanErr == nil
+			})
 		}
-
-		// Bulk operations may need to track the outcome for each added request. In such cases, it
-		// is important to notify the bulk operation of the rejected request since the job will
-		// never be created.
 		if request.HasBulkInfo() {
-			if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; !ok {
-				err = appendErrors(err, fmt.Errorf("unable to resolve bulk request for %s: %w: rstId %d", cfg.GetPath(), ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget()))
-			} else {
-				cleanupCtx, cancelCleanup := newCleanupCtx()
-				defer cancelCleanup()
-				if bulkErr := client.ResolveBulkRequest(cleanupCtx, request); bulkErr != nil {
-					err = appendErrors(err, fmt.Errorf("unable to resolve bulk request for %s: %w", cfg.GetPath(), bulkErr))
+			wg.Go(func() {
+				if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; ok {
+					resolveBulkRequestErr = client.ResolveBulkRequest(cleanupCtx, request)
+				} else {
+					resolveBulkRequestErr = fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget())
 				}
-			}
+			})
 		}
-		return err
-	}
-
-	if ctx.Err() == nil {
-		if submitErr := w.submitRequest(request); submitErr == nil {
-			submitted = true
-			return
+		if lockedInfo.ExternalId != "" {
+			wg.Go(func() {
+				client := w.RstMap[request.GetRemoteStorageTarget()]
+				if err := client.ReleaseExternalId(cleanupCtx, cfg, lockedInfo.ExternalId); err != nil {
+					// TODO: log failure?
+					return
+				}
+				lockedInfo.SetExternalId("")
+			})
 		}
-	}
 
-	// The submission failed or the parent context was cancelled. In either case revert all changes.
-	planWasApplied := planApplied
-	if undoErr := undo(); undoErr != nil {
-		err = appendErrors(err, undoErr)
-	}
-	if planWasApplied {
-		// The lock can only be released if the applied changes are successfully reverted.
-		canReleaseLock = !planApplied
+		wg.Wait()
+		err = appendErrors(err, undoPlanErr, resolveBulkRequestErr)
+	} else {
+		submitted = true
 	}
 	return
 }

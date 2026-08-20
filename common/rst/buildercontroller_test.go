@@ -656,8 +656,8 @@ func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan *be
 			},
 		}, nil
 	}
-	controller.requestBuilder.planFileState = func(ctx context.Context, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-		return func(*PathState) (undoFn, error) { return noopUndo, nil }, nil
+	controller.requestBuilder.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+		return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
 	}
 	controller.requestBuilder.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 		return nil
