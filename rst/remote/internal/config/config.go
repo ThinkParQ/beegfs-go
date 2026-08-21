@@ -38,8 +38,10 @@ type AppConfig struct {
 	Workers              []worker.Config             `mapstructure:"worker"`
 	RemoteStorageTargets []*flex.RemoteStorageTarget `mapstructure:"remote-storage-target"`
 	Developer            struct {
-		PerfProfilingPort int  `mapstructure:"perf-profiling-port"`
-		DumpConfig        bool `mapstructure:"dump-config"`
+		PerfProfilingPort    int  `mapstructure:"perf-profiling-port"`
+		BlockProfileRate     int  `mapstructure:"block-profile-rate"`
+		MutexProfileFraction int  `mapstructure:"mutex-profile-fraction"`
+		DumpConfig           bool `mapstructure:"dump-config"`
 	}
 }
 
