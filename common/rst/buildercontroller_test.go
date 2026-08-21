@@ -17,6 +17,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 )
 
 // testMaxRequests is high enough that the walk is never stopped for reaching it, so tests that only
@@ -642,7 +643,7 @@ func drainRequests(jobSubmissionCh chan *beeremote.JobRequest) []*beeremote.JobR
 func newTestRequestBuildController(ctx context.Context, jobSubmissionCh chan *beeremote.JobRequest) *requestBuildController {
 	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS())
 	cfg := &flex.JobRequestCfg{RemoteStorageTarget: 1}
-	controller := client.newRequestBuildController(ctx, cfg, submitToChan(jobSubmissionCh), func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+	controller := client.newRequestBuildController(ctx, zap.NewNop(), cfg, submitToChan(jobSubmissionCh), func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 		return false, nil
 	}, nil)
 

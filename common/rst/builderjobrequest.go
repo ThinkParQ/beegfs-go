@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -25,6 +26,7 @@ type clearAccessFlagsFn func(ctx context.Context, path string, flags beegfs.Acce
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) (isDir bool, err error)
 
 type jobRequestBuilder struct {
+	log              *zap.Logger
 	mountPoint       filesystem.Provider
 	RstMap           map[uint32]Provider
 	submitRequest    SubmitRequestFn
@@ -37,6 +39,9 @@ type jobRequestBuilder struct {
 }
 
 func (w *jobRequestBuilder) init() {
+	if w.log == nil {
+		w.log = zap.NewNop()
+	}
 	w.initSetRstConfig()
 }
 
@@ -353,8 +358,10 @@ func (w *jobRequestBuilder) processRequest(
 	}
 
 	if submitErr := w.submitRequest(request); submitErr != nil {
-
-		// TODO: log failure?
+		w.log.Warn("unable to submit job request, reverting everything prepared for this path",
+			zap.String("path", cfg.GetPath()),
+			zap.Uint32("rstId", request.GetRemoteStorageTarget()),
+			zap.Error(submitErr))
 
 		// Use detached context to prevent corrupting the file if sync is shutdown.
 		cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
@@ -382,7 +389,13 @@ func (w *jobRequestBuilder) processRequest(
 			wg.Go(func() {
 				client := w.RstMap[request.GetRemoteStorageTarget()]
 				if err := client.ReleaseExternalId(cleanupCtx, cfg, lockedInfo.ExternalId); err != nil {
-					// TODO: log failure?
+					// Leaked remote state for one path, which is not worth failing the builder job
+					// over, but it may need to be cleaned up manually.
+					w.log.Warn("unable to release external id",
+						zap.String("path", cfg.GetPath()),
+						zap.Uint32("rstId", request.GetRemoteStorageTarget()),
+						zap.String("externalId", lockedInfo.ExternalId),
+						zap.Error(err))
 					return
 				}
 				lockedInfo.SetExternalId("")

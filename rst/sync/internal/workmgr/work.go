@@ -343,7 +343,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 	}
 
 	if request.HasBuilder() {
-		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry)
+		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry, log)
 	} else {
 		// processWork can run for a long time without returning, so it checkpoints the entry after
 		// each completed part instead of relying on the commit in the deferred function above.
@@ -435,16 +435,13 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 	return
 }
 
-func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
+func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, log *zap.Logger) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
 	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
 	var builderMu sync.Mutex
-
-	// Called concurrently from every goroutine the builder runs, since each submits the request it
-	// built. See rst.SubmitRequestFn for why submission is inline rather than queued.
-	result := client.ExecuteJobBuilderRequest(work.ctx, workRequest, func(request *pbr.JobRequest) error {
+	result := client.ExecuteJobBuilderRequest(work.ctx, log, workRequest, func(request *pbr.JobRequest) error {
 		return w.sendBuilderJobRequest(work.ctx, &builderMu, builder, request)
 	}, w.workerSaturation)
 

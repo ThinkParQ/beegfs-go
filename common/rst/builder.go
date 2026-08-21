@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 )
 
 // TODO: Add to remote a global builder section that has a maxRequests. Also, allow per remote storage target overrides
@@ -69,15 +70,15 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
 	if !workRequest.HasBuilder() {
 		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 
-	return c.executeBuilderRequest(ctx, workRequest, submitRequest, workerSaturation)
+	return c.executeBuilderRequest(ctx, log, workRequest, submitRequest, workerSaturation)
 }
 
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) (result *SchedulingResult) {
+func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) (result *SchedulingResult) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
@@ -91,7 +92,7 @@ func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, workReques
 		}
 	}()
 
-	controller := c.newRequestBuildController(ctx, cfg, submitRequest, registry.AddRequest, workerSaturation)
+	controller := c.newRequestBuildController(ctx, log, cfg, submitRequest, registry.AddRequest, workerSaturation)
 	abort := func(reason error) *SchedulingResult {
 		reason = fmt.Errorf("request was aborted: %w", reason)
 		if ctx.Err() != nil {
@@ -342,13 +343,14 @@ const (
 
 func (c *JobBuilderClient) newRequestBuildController(
 	ctx context.Context,
+	log *zap.Logger,
 	builderCfg *flex.JobRequestCfg,
 	submitRequest SubmitRequestFn,
 	addBulkRequest addBulkRequestFn,
 	workerSaturation []func() float64,
 ) *requestBuildController {
 	maxWorkers := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
-	requestBuilder := c.newJobRequestBuilder(builderCfg, submitRequest, addBulkRequest)
+	requestBuilder := c.newJobRequestBuilder(log, builderCfg, submitRequest, addBulkRequest)
 	return &requestBuildController{
 		ctx:              ctx,
 		requestBuilder:   requestBuilder,
@@ -359,11 +361,13 @@ func (c *JobBuilderClient) newRequestBuildController(
 }
 
 func (c *JobBuilderClient) newJobRequestBuilder(
+	log *zap.Logger,
 	builderCfg *flex.JobRequestCfg,
 	submitRequest SubmitRequestFn,
 	addBulkRequest addBulkRequestFn,
 ) *jobRequestBuilder {
 	requestBuilder := &jobRequestBuilder{
+		log:              log,
 		mountPoint:       c.mountPoint,
 		RstMap:           c.rstMap,
 		submitRequest:    submitRequest,
