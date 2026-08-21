@@ -591,6 +591,14 @@ func newTestWalk(results ...*filesystem.StreamPathResult) (walkCh <-chan *filesy
 // submitToChan adapts a channel of submitted requests to a SubmitRequestFn so tests can assert what
 // the builder submitted. Every submission succeeds; the channel needs enough capacity for the test
 // because a submission blocks the goroutine that built the request.
+// errSubmitUnavailable stands in for remote being unreachable until the builder gives up, which is
+// what abandons a prepared request now that submission is attempted even while shutting down.
+var errSubmitUnavailable = errors.New("remote unavailable")
+
+func submitAlwaysFails(*beeremote.JobRequest) error {
+	return errSubmitUnavailable
+}
+
 func submitToChan(jobSubmissionCh chan *beeremote.JobRequest) SubmitRequestFn {
 	return func(request *beeremote.JobRequest) error {
 		jobSubmissionCh <- request
