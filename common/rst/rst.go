@@ -579,8 +579,8 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 }
 
 type undoFn func(ctx context.Context) error
-type applyPlanFn func(ctx context.Context, pathState *PathState) (undoFn, error)
-type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error)
+type applyPlanFn func(ctx context.Context, pathState *PathState) (applied bool, undo undoFn, err error)
+type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error)
 
 var noopUndo = func(context.Context) error { return nil }
 
@@ -598,10 +598,12 @@ func newDetachedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 // unknown state. The undoFn handed back to the caller should take similar precautions.
 func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 	applySteps := []applyFn{}
+
 	add = func(step applyFn) {
 		applySteps = append(applySteps, step)
 	}
-	apply = func(ctx context.Context, pathState *PathState) (undoFn, error) {
+
+	apply = func(ctx context.Context, pathState *PathState) (bool, undoFn, error) {
 		undoSteps := []undoFn{}
 		undo := func(undoCtx context.Context) (undoErr error) {
 			for i := len(undoSteps) - 1; i >= 0; i-- {
@@ -619,15 +621,13 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 
 		if applyErr != nil && !IsErrJobTerminalSentinel(applyErr) {
 			if undoErr := undo(ctx); undoErr != nil {
-				applyErr = fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
-			} else {
-				applyErr = fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
+				return true, undo, fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
 			}
-			return noopUndo, applyErr
+			return false, noopUndo, fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
 		}
-		return undo, applyErr
-
+		return true, undo, applyErr
 	}
+
 	return
 }
 

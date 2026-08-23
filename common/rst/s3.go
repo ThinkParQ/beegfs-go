@@ -425,7 +425,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	if !IsFileLocked(sync.LockedInfo) {
 		// The file access lock was not previously acquired which means the file state information
 		// has not been determine and by extension, work request in unprepared.
-		if undoAppliedPlan, lockAcquired, err = r.prepareJobRequest(ctx, request, sync); err != nil {
+		if _, undoAppliedPlan, lockAcquired, err = r.prepareJobRequest(ctx, request, sync); err != nil {
 			return
 		}
 	}
@@ -448,7 +448,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 // configuration if requested, and generates an external ID for the job. It is only called the
 // first time GenerateWorkRequests runs for a given job; callers should skip it once
 // sync.LockedInfo indicates the lock was already acquired by an earlier call.
-func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (undoAppliedPlan undoFn, lockAcquired bool, err error) {
+func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (planApplied bool, undoAppliedPlan undoFn, lockAcquired bool, err error) {
 	undoAppliedPlan = noopUndo
 	cfg := r.getJobRequestCfg(request)
 
@@ -472,7 +472,6 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 	}
 
 	var applyPlan applyPlanFn
-
 	if applyPlan, err = PlanFileStateForWorkRequests(r.mountPoint, cfg); err != nil {
 		return
 	}
@@ -487,7 +486,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 	planCtx, cancelPlan := newDetachedCtx(ctx)
 	defer cancelPlan()
 
-	undoAppliedPlan, err = applyPlan(planCtx, pathState)
+	planApplied, undoAppliedPlan, err = applyPlan(planCtx, pathState)
 	if err != nil {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -241,7 +242,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, errors.New("bulk add failed")
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -266,7 +267,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return true, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -298,7 +299,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -336,9 +337,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
 					cancel()
-					return undo, nil
+					return true, undo, nil
 				}, nil
 			},
 		}
@@ -376,7 +377,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	t.Run("a context already cancelled on entry applies nothing", func(t *testing.T) {
 		applyCalls := 0
 		client := &MockClient{}
-		submissionCh := make(chan *beeremote.JobRequest, 0)
+		// Unbuffered: a submission would block, proving nothing was submitted.
+		submissionCh := make(chan *beeremote.JobRequest)
 		w := &jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{1: client},
@@ -385,9 +387,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
 					applyCalls++
-					return noopUndo, nil
+					return true, noopUndo, nil
 				}, nil
 			},
 		}
@@ -445,8 +447,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
-					return func(context.Context) error { undoCalls++; return nil }, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) {
+					return true, func(context.Context) error { undoCalls++; return nil }, nil
 				}, nil
 			},
 		}
@@ -478,9 +480,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
 					cancel()
-					return func(context.Context) error { undoCalls++; return nil }, nil
+					return true, func(context.Context) error { undoCalls++; return nil }, nil
 				}, nil
 			},
 		}
@@ -509,8 +511,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
-					return func(context.Context) error {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
+					return true, func(context.Context) error {
 						// Fail the rollback attempted by the externalId path, then succeed on the
 						// retry from the submission path.
 						undoCalls++
@@ -559,9 +561,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
 					cancel()
-					return noopUndo, nil
+					return true, noopUndo, nil
 				}, nil
 			},
 		}
@@ -591,9 +593,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
 					cancel()
-					return noopUndo, nil
+					return true, noopUndo, nil
 				}, nil
 			},
 		}
@@ -627,7 +629,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -643,21 +645,65 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.Equal(t, "upload-id", cfg.GetLockedInfo().GetExternalId())
 	})
 
-	// A terminal sentinel still leaves changes behind: ALREADY_OFFLOADED comes back from a plan that
-	// created the stub file. Those changes count as applied, so an unsubmittable request reverts
-	// them and the lock follows whether that revert succeeded.
-	t.Run("an already offloaded request that cannot be submitted is reverted", func(t *testing.T) {
+	// A plan that ends in a terminal sentinel left the entry in the state the request asked for
+	// instead of preparing it for work: ALREADY_OFFLOADED comes back from a plan that created the
+	// stub file. That state is the outcome, so it stands no matter why the request was abandoned —
+	// remote declining it as already offloaded is the expected answer rather than a failure, and an
+	// unexpected failure only means the record has yet to catch up with the entry. Reverting would
+	// destroy the offload itself, and for a stub written over an already synced file the undo cannot
+	// restore the contents anyway.
+	for _, tc := range []struct {
+		name      string
+		submitErr error
+	}{
+		{"remote declines it as already offloaded", ErrJobAlreadyOffloaded},
+		{"the submission fails unexpectedly", errSubmitUnavailable},
+	} {
+		t.Run("an already offloaded request is kept when "+tc.name, func(t *testing.T) {
+			undoCalls := 0
+			w := &jobRequestBuilder{
+				log:           zap.NewNop(),
+				RstMap:        map[uint32]Provider{1: &MockClient{}},
+				submitRequest: func(*beeremote.JobRequest) error { return tc.submitErr },
+				addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
+					return false, nil
+				},
+				planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
+					return func(context.Context, *PathState) (bool, undoFn, error) {
+						return true, func(context.Context) error { undoCalls++; return nil }, ErrJobAlreadyOffloaded
+					}, nil
+				},
+			}
+			cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+			request := w.buildRequest(context.Background(), cfg, nil)
+			canReleaseLock, submitted, err := w.processRequest(context.Background(), cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+
+			require.NoError(t, err)
+			assert.False(t, submitted)
+			require.True(t, request.HasGenerationStatus())
+			assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED, request.GetGenerationStatus().GetState())
+			// The stub is the offload, so it survives and keeps holding the lock it took over.
+			assert.Zero(t, undoCalls)
+			assert.False(t, canReleaseLock)
+		})
+	}
+
+	// An already synced entry reaches the same conclusion from the other terminal sentinel: nothing
+	// about it is preparation for work, so an abandoned request leaves it alone. Unlike the offload
+	// there is no stub holding the lock, so the lock has nothing left to protect.
+	t.Run("an already complete request is kept when it cannot be submitted", func(t *testing.T) {
 		undoCalls := 0
 		w := &jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{1: &MockClient{}},
-			submitRequest: submitAlwaysFails,
+			submitRequest: func(*beeremote.JobRequest) error { return ErrJobAlreadyComplete },
 			addBulkRequest: func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 				return false, nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-				return func(context.Context, *PathState) (undoFn, error) {
-					return func(context.Context) error { undoCalls++; return nil }, ErrJobAlreadyOffloaded
+				return func(context.Context, *PathState) (bool, undoFn, error) {
+					return true, func(context.Context) error { undoCalls++; return nil },
+						GetErrJobAlreadyCompleteWithMtime(time.Unix(0, 0))
 				}, nil
 			},
 		}
@@ -668,14 +714,14 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, submitted)
 		require.True(t, request.HasGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED, request.GetGenerationStatus().GetState())
-		// The stub the plan created was removed again, so the lock has nothing left to protect.
-		assert.Equal(t, 1, undoCalls)
+		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, request.GetGenerationStatus().GetState())
+		assert.Zero(t, undoCalls)
 		assert.True(t, canReleaseLock)
 	})
 
 	t.Run("cancellation of a terminal request does not touch file state", func(t *testing.T) {
-		submissionCh := make(chan *beeremote.JobRequest, 0)
+		// Unbuffered: a submission would block, proving nothing was submitted.
+		submissionCh := make(chan *beeremote.JobRequest)
 		w := &jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{},
@@ -824,7 +870,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 			return false, nil
 		}
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")
@@ -961,8 +1007,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		}
 		var undoCalls int
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(context.Context, *PathState) (undoFn, error) {
-				return func(context.Context) error { undoCalls++; return nil }, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) {
+				return true, func(context.Context) error { undoCalls++; return nil }, nil
 			}, nil
 		}
 		var cleared bool
@@ -997,8 +1043,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			}, nil
 		}
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(context.Context, *PathState) (undoFn, error) {
-				return func(context.Context) error { return errors.New("rollback failed") }, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) {
+				return true, func(context.Context) error { return errors.New("rollback failed") }, nil
 			}, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
@@ -1024,7 +1070,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			}, nil
 		}
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, error) {
-			return func(context.Context, *PathState) (undoFn, error) { return noopUndo, nil }, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")

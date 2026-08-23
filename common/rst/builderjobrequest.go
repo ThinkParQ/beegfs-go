@@ -295,15 +295,19 @@ func (w *jobRequestBuilder) processRequest(
 
 	applyUndo := noopUndo
 	var planApplied bool
+	// A plan that ends in a terminal sentinel already left the entry in the state the request asked
+	// for rather than preparing it for work, so that state is the outcome and stands on its own. It
+	// often cannot be undone anyway: the undo for a stub created over an already synced file only
+	// detects that the contents changed, it cannot put them back.
+	var terminalOutcome bool
 	if !request.HasGenerationStatus() {
 		// Use detached context to prevent corrupting the file if sync is shutdown.
 		applyPlanCtx, applyPlanCancel := newDetachedCtx(ctx)
 		defer applyPlanCancel()
 
 		var applyErr error
-		applyUndo, applyErr = applyPlan(applyPlanCtx, &pathState)
-		planApplied = applyErr == nil || IsErrJobTerminalSentinel(applyErr)
-
+		planApplied, applyUndo, applyErr = applyPlan(applyPlanCtx, &pathState)
+		terminalOutcome = IsErrJobTerminalSentinel(applyErr)
 		if applyErr != nil {
 			if errors.Is(applyErr, ErrJobAlreadyComplete) {
 				canReleaseLock = true
@@ -332,23 +336,25 @@ func (w *jobRequestBuilder) processRequest(
 		} else {
 			canReleaseLock = false
 			client := w.RstMap[request.GetRemoteStorageTarget()]
-			externalId, externalIdErr := client.GenerateExternalId(applyPlanCtx, cfg)
-			if externalIdErr != nil {
+
+			externalId, externalErr := client.GenerateExternalId(applyPlanCtx, cfg)
+			if externalErr != nil {
 				cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
 				defer cleanupCancel()
 
+				message := fmt.Sprintf("failed to generate external id: %s", externalErr.Error())
 				if undoErr := applyUndo(cleanupCtx); undoErr != nil {
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ERROR,
-						Message: fmt.Sprintf("failed to generate external id: %s; rollback also failed: %s", externalIdErr.Error(), undoErr.Error()),
+						Message: fmt.Sprintf("%s; rollback also failed: %s", message, undoErr.Error()),
 					})
 				} else {
 					planApplied = false
 					canReleaseLock = true
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-						Message: fmt.Sprintf("failed to generate external id: %s", externalIdErr.Error()),
+						Message: message,
 					})
 				}
 			} else {
@@ -358,11 +364,6 @@ func (w *jobRequestBuilder) processRequest(
 	}
 
 	if submitErr := w.submitRequest(request); submitErr != nil {
-		w.log.Warn("unable to submit job request, reverting everything prepared for this path",
-			zap.String("path", cfg.GetPath()),
-			zap.Uint32("rstId", request.GetRemoteStorageTarget()),
-			zap.Error(submitErr))
-
 		// Use detached context to prevent corrupting the file if sync is shutdown.
 		cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
 		defer cleanupCancel()
@@ -370,12 +371,20 @@ func (w *jobRequestBuilder) processRequest(
 		wg := sync.WaitGroup{}
 		var undoPlanErr, resolveBulkRequestErr error
 
-		if planApplied {
+		if planApplied && !terminalOutcome {
 			wg.Go(func() {
 				undoPlanErr = applyUndo(cleanupCtx)
+				if undoPlanErr != nil {
+					w.log.Warn("unable to revert what was prepared for a job request that could not be submitted, the entry is left modified and its lock retained",
+						zap.String("path", cfg.GetPath()),
+						zap.Uint32("rstId", request.GetRemoteStorageTarget()),
+						zap.NamedError("submitError", submitErr),
+						zap.Error(undoPlanErr))
+				}
 				canReleaseLock = undoPlanErr == nil
 			})
 		}
+
 		if request.HasBulkInfo() {
 			wg.Go(func() {
 				if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; ok {
