@@ -138,10 +138,11 @@ type worker struct {
 	metrics              managerMetrics
 }
 
-func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func (w *worker) run(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -437,26 +438,12 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 
 func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, log *zap.Logger) (cleanupEntries bool) {
 	workRequest := entry.WorkRequest.WorkRequest
-	workResult := entry.WorkResult
 	builder := workRequest.GetBuilder()
 
 	var builderMu sync.Mutex
-	result := client.ExecuteJobBuilderRequest(work.ctx, log, workRequest, func(request *pbr.JobRequest) error {
+	result := client.ExecuteJobBuilderRequest(shutdownCtx, work.ctx, log, workRequest, func(request *pbr.JobRequest) error {
 		return w.sendBuilderJobRequest(work.ctx, &builderMu, builder, request)
 	}, w.workerSaturation)
-
-	if shutdownCtx.Err() != nil {
-		// BeeSync is shutting down. Cancelling work.ctx is how we ask the builder to stop, so
-		// ExecuteJobBuilderRequest reports an aborted request, but the builder job itself is fine
-		// and must not be cancelled. Leave the entry rescheduled without sending a result to
-		// BeeRemote so it is picked back up after the restart. process() commits the entry on the
-		// way out, which is what persists the state set here.
-		status := workResult.GetStatus()
-		status.SetState(flex.Work_RESCHEDULED)
-		status.SetMessage("stopped before the builder job completed because the node is shutting down (it will resume)")
-		entry.ExecuteAfter = time.Time{}
-		return false
-	}
 
 	if result == nil {
 		result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}

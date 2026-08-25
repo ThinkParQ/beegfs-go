@@ -1,10 +1,12 @@
 package rst
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -215,4 +217,30 @@ func removeIfExists(path string) error {
 		return err
 	}
 	return nil
+}
+
+// WithCancellationDelay returns a context that's derived from the parent context but delays
+// propagating the parent’s cancellation by the specified duration. The returned context can also be
+// canceled independently.
+func WithCancellationDelay(parent context.Context, delay time.Duration) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(parent)
+	ctx, cancel := context.WithCancel(base)
+
+	go func() {
+		select {
+		case <-parent.Done():
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+
+			select {
+			case <-timer.C:
+				cancel()
+			case <-ctx.Done():
+			}
+
+		case <-ctx.Done():
+		}
+	}()
+
+	return ctx, cancel
 }

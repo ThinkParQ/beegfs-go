@@ -70,88 +70,72 @@ func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *be
 	return
 }
 
-func (c *JobBuilderClient) ExecuteJobBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
+func (c *JobBuilderClient) ExecuteJobBuilderRequest(
+	shutdownCtx context.Context,
+	workCtx context.Context,
+	log *zap.Logger,
+	workRequest *flex.WorkRequest,
+	submitRequest SubmitRequestFn,
+	workerSaturation []func() float64,
+) (result *SchedulingResult) {
 	if !workRequest.HasBuilder() {
 		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 
-	return c.executeBuilderRequest(ctx, log, workRequest, submitRequest, workerSaturation)
-}
-
-func (c *JobBuilderClient) executeBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) (result *SchedulingResult) {
 	builder := workRequest.GetBuilder()
 	cfg := builder.GetCfg()
 
-	registry, err := c.newBulkOperationRegistry(ctx, workRequest.GetJobId())
+	registry, err := c.newBulkOperationRegistry(workCtx, workRequest.GetJobId())
 	if err != nil {
 		return &SchedulingResult{Err: err}
 	}
 	defer func() {
-		if closeErr := registry.Close(ctx); closeErr != nil {
+		if closeErr := registry.Close(workCtx); closeErr != nil {
 			result.Err = appendErrors(result.Err, closeErr)
 		}
 	}()
 
-	controller := c.newRequestBuildController(ctx, log, cfg, submitRequest, registry.AddRequest, workerSaturation)
-	abort := func(reason error) *SchedulingResult {
-		reason = fmt.Errorf("request was aborted: %w", reason)
-		if ctx.Err() != nil {
-			// Sync is shutting down, not that the builder job has failed so return without
-			// cancelling the bulk operations so they can resume when the sync node restarts.
-			return &SchedulingResult{Err: reason}
-		}
-
-		managers := registry.GetManagersSnapshot()
-		if len(managers) == 0 {
-			return &SchedulingResult{Err: reason}
-		}
-
-		for _, manager := range managers {
-			controller.CancelBulkOperation(manager, reason)
-		}
-		return &SchedulingResult{Err: appendErrors(reason, controller.WaitForBulkOperations())}
-	}
-
+	controller := c.newRequestBuildController(shutdownCtx, workCtx, log, cfg, submitRequest, registry.AddRequest, workerSaturation)
 	resumeToken := workRequest.GetExternalId()
-	walkComplete, walkErr := parseResumeToken(resumeToken, workRequest.JobId)
-	if !walkComplete {
-		walk, stopWalk, err := c.getWalk(ctx, workRequest, walkBufferSize)
-		if err != nil {
-			if len(registry.GetManagersSnapshot()) == 0 {
-				return abort(err)
+
+	var walkErr error
+	if workCtx.Err() == nil {
+		var walkComplete bool
+		if walkComplete, walkErr = parseResumeToken(resumeToken, workRequest.JobId); !walkComplete {
+			if walk, stopWalk, err := c.getWalk(workCtx, workRequest, walkBufferSize); err != nil {
+				walkErr = err
+			} else if err = controller.AddWalk(walk, stopWalk, maxRequests); err != nil {
+				walkErr = err
+			} else if err = controller.WaitForWalk(); err != nil {
+				walkErr = err
 			}
-			walkErr = err
-		} else if err = controller.AddWalk(walk, stopWalk, maxRequests); err != nil {
-			if len(registry.GetManagersSnapshot()) == 0 {
-				return abort(err)
-			}
-			walkErr = err
-		} else if err = controller.WaitForWalk(); err != nil {
-			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) || len(registry.GetManagersSnapshot()) == 0 {
-				return abort(err)
-			}
-			walkErr = err
 		}
 	}
 
-	for _, manager := range registry.GetManagersSnapshot() {
-		controller.ExecuteBulkOperation(manager)
-	}
-	if err := controller.WaitForBulkOperations(); err != nil {
-		return abort(err)
+	var fatalBulkOperationsError error
+	managers := registry.GetManagersSnapshot()
+	if workCtx.Err() == nil {
+		for _, manager := range managers {
+			controller.ExecuteBulkOperation(manager)
+		}
+		fatalBulkOperationsError = controller.WaitForBulkOperations()
 	}
 
 	result, resumeToken = controller.GetResults()
-	if resumeToken == "" || walkErr != nil {
+	if resumeToken == walkCompleteToken || walkErr != nil {
 		resumeToken = buildWalkCompleteSentinel(workRequest.JobId, walkErr)
 	}
-
 	workRequest.SetExternalId(resumeToken)
-	if result.Reschedule {
-		return
+
+	isWorkCancelled := shutdownCtx == nil && workCtx.Err() != nil
+	if isWorkCancelled || fatalBulkOperationsError != nil {
+		for _, manager := range managers {
+			controller.CancelBulkOperation(manager, fatalBulkOperationsError)
+		}
+	} else if !result.Reschedule {
+		result.Err = appendErrors(result.Err, walkErr, registry.GetFailedOperationErrors())
 	}
 
-	result.Err = appendErrors(result.Err, walkErr, registry.GetFailedOperationErrors())
 	return
 }
 
@@ -213,9 +197,10 @@ func (c *JobBuilderClient) ResolveBulkRequest(ctx context.Context, request *beer
 }
 
 func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) (err error) {
+	workState := GetWorkResultsState(workResults)
 	if !abort {
-		switch GetWorkResultsState(workResults) {
-		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		switch workState {
+		case flex.Work_COMPLETED, flex.Work_CANCELLED:
 		default:
 			return fmt.Errorf("unable to resolve failure")
 		}
@@ -232,8 +217,14 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 		err = appendErrors(err, registry.Close(ctx))
 	}()
 
-	if abort {
-		reason := fmt.Errorf("builder job %q was aborted", job.GetId())
+	cancelled := workState == flex.Work_CANCELLED
+	if cancelled || abort {
+		var reason error
+		if cancelled {
+			reason = fmt.Errorf("builder job was cancelled")
+		} else {
+			reason = fmt.Errorf("builder job was aborted")
+		}
 
 		cancelWaits := map[*bulkOperationManager]BulkCancelResultFn{}
 		for _, manager := range registry.GetManagersSnapshot() {
@@ -342,7 +333,8 @@ const (
 )
 
 func (c *JobBuilderClient) newRequestBuildController(
-	ctx context.Context,
+	shutdownCtx context.Context,
+	workCtx context.Context,
 	log *zap.Logger,
 	builderCfg *flex.JobRequestCfg,
 	submitRequest SubmitRequestFn,
@@ -352,7 +344,8 @@ func (c *JobBuilderClient) newRequestBuildController(
 	maxWorkers := max(1, int(requestBuildControllerWorkerMultiplier*float32(runtime.GOMAXPROCS(0))))
 	requestBuilder := c.newJobRequestBuilder(log, builderCfg, submitRequest, addBulkRequest)
 	return &requestBuildController{
-		ctx:              ctx,
+		shutdownCtx:      shutdownCtx,
+		workCtx:          workCtx,
 		requestBuilder:   requestBuilder,
 		getPaths:         c.getPathsFn(builderCfg),
 		maxWorkersCh:     make(chan struct{}, maxWorkers),
@@ -414,6 +407,8 @@ func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) requestPathResolv
 	}
 }
 
+const walkCompleteToken = ""
+
 func buildWalkCompleteSentinel(jobId string, err error) string {
 	if err != nil {
 		return fmt.Sprintf("sentinel:%s:%s", jobId, err.Error())
@@ -422,7 +417,7 @@ func buildWalkCompleteSentinel(jobId string, err error) string {
 }
 
 func parseResumeToken(token string, jobId string) (walkComplete bool, sentinelErr error) {
-	if token == "" {
+	if token == walkCompleteToken {
 		return
 	}
 

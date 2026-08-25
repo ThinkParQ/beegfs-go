@@ -100,7 +100,7 @@ type Provider interface {
 	// Unclassified errors are treated as failed by callers.
 	//
 	// log is used for per-path problems that must be reported without failing the builder job.
-	ExecuteJobBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
+	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel the provided context to
 	// return early. It determines and executes the requested operation (if supported) then directly
@@ -583,14 +583,6 @@ type applyPlanFn func(ctx context.Context, pathState *PathState) (applied bool, 
 type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error)
 
 var noopUndo = func(context.Context) error { return nil }
-
-// detachedTimeout bounds an operation that runs detached from the caller's context, keeping it
-// from stalling a shutdown that waits on it.
-const detachedTimeout = 1 * time.Minute
-
-func newDetachedCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), detachedTimeout)
-}
 
 // newApplyPlan builds a plan whose steps all run with the context handed to apply, rather than one
 // captured while the plan was being built. The plan is a critical section, so that context should

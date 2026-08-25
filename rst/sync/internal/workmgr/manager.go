@@ -312,8 +312,9 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			workerSaturation:     workerSaturation,
 			metrics:              m.metrics,
 		}
-		m.workerWG.Add(1)
-		go w.run(m.workerCtx, m.workerWG)
+		m.workerWG.Go(func() {
+			w.run(m.workerCtx)
+		})
 	}
 	m.log.Info("finished startup")
 
@@ -450,6 +451,23 @@ func (m *Manager) startUpdateWorkerSaturation(windows ...time.Duration) []func()
 	return statFns
 }
 
+// queueActiveWork hands activeWork off to the workers, blocking while the activeWorkQueue is full.
+// Callers must hold activeWorkMu and have already added activeWork to the activeWork map. It returns
+// true once the work is queued. If the workers shut down first it cancels the work's context,
+// removes it from the activeWork map, and returns false to tell the caller to stop pulling in work.
+func (m *Manager) queueActiveWork(activeWork workAssignment, cancel context.CancelFunc) bool {
+	if m.workerCtx.Err() == nil {
+		select {
+		case m.activeWorkQueue <- activeWork:
+			return true
+		case <-m.workerCtx.Done():
+		}
+	}
+	cancel()
+	delete(m.activeWork, activeWork.workIdentifier)
+	return false
+}
+
 // activeWorkLen returns the current number of in-flight work items (queued or being processed).
 func (m *Manager) activeWorkLen() int {
 	m.activeWorkMu.RLock()
@@ -508,7 +526,11 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
 			activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 			m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
-			m.activeWorkQueue <- activeWork
+			if !m.queueActiveWork(activeWork, workCtxCancel) {
+				// Shutting down. The returned nextSubmissionId is moot because it is only ever kept
+				// in memory and the journal is replayed from the start on the next startup.
+				return lastSubmissionId, nil
+			}
 			*availableTokens -= 1
 			m.scheduler.RemoveWorkToken(submissionId)
 			m.metrics.workRequests.Add(context.Background(), 1,
@@ -587,7 +609,10 @@ func (m *Manager) pullInRescheduledWork(start string, stop string, availableToke
 					workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
 					activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 					m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
-					m.activeWorkQueue <- activeWork
+					if !m.queueActiveWork(activeWork, workCtxCancel) {
+						// Shutting down, so the next reschedule time no longer matters.
+						return
+					}
 					*availableTokens -= 1
 					m.scheduler.RemoveRescheduledWorkToken(submissionId)
 					m.metrics.workRequests.Add(context.Background(), 1,

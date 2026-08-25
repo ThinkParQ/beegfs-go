@@ -368,7 +368,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 	}
 }
 
-func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	request := job.GetRequest()
 	if !request.HasSync() {
 		return nil, ErrReqAndRSTTypeMismatch
@@ -378,6 +378,9 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		return nil, ErrJobAlreadyHasExternalID
 	}
 
+	ctx, cancel := WithCancellationDelay(workCtx, time.Minute)
+	defer cancel()
+
 	undoAppliedPlan := noopUndo
 	lockAcquired := true
 	defer func() {
@@ -385,13 +388,8 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 			return
 		}
 
-		// The detached context is used to prevents a shutdown from interrupting changes to the file
-		// which would leave the it in an unknown state.
-		cleanupCtx, cancelCleanup := newDetachedCtx(ctx)
-		defer cancelCleanup()
-
 		if !IsErrJobTerminalSentinel(err) {
-			if undoErr := undoAppliedPlan(cleanupCtx); undoErr != nil {
+			if undoErr := undoAppliedPlan(ctx); undoErr != nil {
 				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
 			} else {
 				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
@@ -399,7 +397,7 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		}
 
 		if lockAcquired && !errors.Is(err, ErrJobAlreadyOffloaded) {
-			if clearWriteLockErr := entry.ClearAccessFlags(cleanupCtx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
+			if clearWriteLockErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
 			}
 		}
@@ -476,17 +474,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 		return
 	}
 
-	if err = ctx.Err(); err != nil {
-		// No changes have been applied and sync is shutting down.
-		return
-	}
-
-	// The detached context is used to prevents a shutdown from interrupting changes to the file
-	// which would leave the it in an unknown state.
-	planCtx, cancelPlan := newDetachedCtx(ctx)
-	defer cancelPlan()
-
-	planApplied, undoAppliedPlan, err = applyPlan(planCtx, pathState)
+	planApplied, undoAppliedPlan, err = applyPlan(ctx, pathState)
 	if err != nil {
 		return
 	}
@@ -500,7 +488,7 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.Job
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *S3Client) ExecuteJobBuilderRequest(ctx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
+func (r *S3Client) ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
 	return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 }
 

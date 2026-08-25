@@ -16,14 +16,13 @@ import (
 // that path back is still in scope. Concurrency is therefore also the only backpressure: nothing is
 // queued for a separate consumer to bound how far the builder runs ahead.
 type requestBuildController struct {
-	ctx              context.Context
+	shutdownCtx      context.Context
+	workCtx          context.Context
 	maxWorkersCh     chan struct{}
 	getPaths         requestPathResolverFn
 	requestBuilder   *jobRequestBuilder
 	workerSaturation []func() float64
 
-	sourceGroup         *errgroup.Group
-	sourceGroupCtx      context.Context
 	sourceProducerGroup *errgroup.Group
 	// activeSourceSubmissions counts the requests this walk has submitted. It only ever increases,
 	// so it is the running total for the current walk rather than a live in-flight gauge. Paths
@@ -51,30 +50,45 @@ const (
 // it yields. It returns immediately; call WaitForWalk to wait for the walk and everything it
 // dispatched to finish.
 func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), maxRequests int64) error {
-	if c.sourceGroup != nil {
+	if c.sourceProducerGroup != nil {
 		releaseWalk(walkCh, stopWalk)
 		return fmt.Errorf("unable to add walk: another walk is already in progress")
 	}
-	c.sourceGroup, c.sourceGroupCtx = errgroup.WithContext(c.ctx)
+
 	c.sourceProducerGroup = new(errgroup.Group)
 
 	maxRequestsExtension := max(1, int64(float64(maxRequests)*walkContinuationMaxRequestExtensionMultiplier))
-	c.sourceGroup.Go(func() error {
+	c.sourceProducerGroup.Go(func() error {
 		defer releaseWalk(walkCh, stopWalk)
 
+		check := func() (shutdown bool, err error) {
+			if c.shutdownCtx.Err() != nil {
+				shutdown = true
+			} else {
+				err = c.workCtx.Err()
+			}
+			return
+		}
+
 		for {
+
+			if shutdown, err := check(); shutdown || err != nil {
+				return err
+			}
+
 			select {
-			case <-c.sourceGroupCtx.Done():
-				return c.sourceGroupCtx.Err()
+			case <-c.workCtx.Done():
+				_, err := check()
+				return err
 			case result, ok := <-walkCh:
 				if !ok {
-					if err := c.ctx.Err(); err != nil {
-						// The parent's context was cancelled not the walk itself so return the error.
+					if shutdown, err := check(); shutdown || err != nil {
 						return err
 					}
-					c.resumeToken = ""
+					c.resumeToken = walkCompleteToken
 					return nil
 				}
+				c.resumeToken = result.ResumeToken
 
 				var failedPrecondition error
 				if result.Err != nil {
@@ -89,7 +103,6 @@ func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathRes
 					if c.getWorkerSaturation() < walkContinuationWorkerSaturationThreshold {
 						maxRequests += maxRequestsExtension
 					} else {
-						c.resumeToken = result.ResumeToken
 						c.result = &SchedulingResult{Reschedule: true}
 						return nil
 					}
@@ -103,8 +116,7 @@ func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathRes
 				c.addWorker()
 				c.sourceProducerGroup.Go(func() error {
 					defer c.releaseWorker()
-					// c.ctx must be used so processing always completes unless the sync is shutting down.
-					submitted, err := c.requestBuilder.ProcessPathFromOriginalWalk(c.ctx, inMountPath, remotePath, failedPrecondition)
+					submitted, err := c.requestBuilder.ProcessPathFromOriginalWalk(c.workCtx, inMountPath, remotePath, failedPrecondition)
 					c.activeSourceSubmissions.Add(submitted)
 					return err
 				})
@@ -129,7 +141,7 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 	}
 
 	if c.bulkGroup == nil {
-		c.bulkGroup, c.bulkGroupCtx = errgroup.WithContext(c.ctx)
+		c.bulkGroup, c.bulkGroupCtx = errgroup.WithContext(c.workCtx)
 	}
 
 	walkCh, getResult, err := manager.Execute(c.bulkGroupCtx)
@@ -153,13 +165,12 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 }
 
 func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManager, reason error) {
-	if manager.IsFailed() || c.ctx.Err() != nil {
-		// Either the manager is permanently failed or sync is shutting down.
+	if manager.IsFailed() {
 		return
 	}
 
 	if c.bulkGroup == nil {
-		c.bulkGroup, c.bulkGroupCtx = errgroup.WithContext(c.ctx)
+		c.bulkGroup, c.bulkGroupCtx = errgroup.WithContext(c.workCtx)
 	}
 
 	walkCh, getResult, err := manager.Cancel(c.bulkGroupCtx, reason)
@@ -182,7 +193,7 @@ func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManag
 // interrupted, not that it can never succeed. Recording a permanent failure prevents the operation
 // from resuming.
 func (c *requestBuildController) failBulkOperation(manager *bulkOperationManager, reason error) {
-	if c.ctx.Err() != nil {
+	if c.workCtx.Err() != nil {
 		return
 	}
 	c.recordBulkStateErr(manager, failBulkOperation(manager, reason))
@@ -237,13 +248,12 @@ func (c *requestBuildController) GetResults() (result *SchedulingResult, resumeT
 // It returns nil when no walk was added. Any returned error should not be considered fatal on its
 // own so bulk operations registered during the walk can still be finished.
 func (c *requestBuildController) WaitForWalk() error {
-	if c.sourceGroup == nil {
+	// if c.sourceGroup == nil {
+	if c.sourceProducerGroup == nil {
 		return nil
 	}
 
-	err := errors.Join(c.sourceGroup.Wait(), c.sourceProducerGroup.Wait())
-	c.sourceGroup = nil
-	c.sourceGroupCtx = nil
+	err := c.sourceProducerGroup.Wait()
 	c.sourceProducerGroup = nil
 	c.activeSourceSubmissions.Store(0)
 
@@ -297,7 +307,7 @@ func (c *requestBuildController) bulkProcess(result *BulkStreamPathResult) error
 	c.addWorker()
 	c.bulkGroup.Go(func() error {
 		defer c.releaseWorker()
-		return c.requestBuilder.ProcessPathFromBulkOperation(c.ctx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
+		return c.requestBuilder.ProcessPathFromBulkOperation(c.workCtx, inMountPath, remotePath, result.RstId, result.BulkInfo, failedPrecondition)
 	})
 
 	return nil

@@ -77,8 +77,16 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 	}
 }
 
-func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inMountPath string, remotePath string, failedPrecondition error) (activeSourceSubmissions int64, err error) {
-	if isDir, err := w.setDirRstConfig(ctx, inMountPath); isDir || err != nil {
+func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
+	ctx context.Context,
+	inMountPath string,
+	remotePath string,
+	failedPrecondition error,
+) (activeSourceSubmissions int64, err error) {
+	workCtx, cancel := WithCancellationDelay(ctx, time.Minute)
+	defer cancel()
+
+	if isDir, err := w.setDirRstConfig(workCtx, inMountPath); isDir || err != nil {
 		// Abort the builder job since the beegfs was unable to set the directory's rst
 		// configuration. The issue is likely systemic.
 		return 0, err
@@ -87,7 +95,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inM
 	var pathState PathState
 	var skip bool
 	var pathIssue error
-	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(ctx, inMountPath); err != nil || skip {
+	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(workCtx, inMountPath); err != nil || skip {
 		return
 	} else if pathIssue != nil {
 		failedPrecondition = appendErrors(failedPrecondition, pathIssue)
@@ -100,15 +108,15 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(ctx context.Context, inM
 	}
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
-			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
 
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
-		request := w.buildRequest(ctx, cfg, failedPrecondition)
-		canReleaseLock, submitted, processErr := w.processRequest(ctx, cfg, pathState, request)
+		request := w.buildRequest(workCtx, cfg, failedPrecondition)
+		canReleaseLock, submitted, processErr := w.processRequest(workCtx, cfg, pathState, request)
 		if !canReleaseLock {
 			keepLock = true
 		}
@@ -136,7 +144,10 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	BulkInfo *flex.BulkJobRequestInfo,
 	failedPrecondition error,
 ) (err error) {
-	pathState, pathStateErr := w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
+	workCtx, cancel := WithCancellationDelay(ctx, time.Minute)
+	defer cancel()
+
+	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, inMountPath, PathStateWithLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		err = pathStateErr
 		return
@@ -145,18 +156,18 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
-			if clearErr := w.clearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
 
 	cfg := w.buildJobRequestCfg(inMountPath, remotePath, rstId, pathState.LockedInfo, w.builderCfg)
-	request := w.buildRequest(ctx, cfg, failedPrecondition)
+	request := w.buildRequest(workCtx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(rstId)
 	request.SetBulkInfo(BulkInfo)
 
-	canReleaseLock, _, processErr := w.processRequest(ctx, cfg, pathState, request)
+	canReleaseLock, _, processErr := w.processRequest(workCtx, cfg, pathState, request)
 	if !canReleaseLock {
 		keepLock = true
 	}
@@ -301,12 +312,9 @@ func (w *jobRequestBuilder) processRequest(
 	// detects that the contents changed, it cannot put them back.
 	var terminalOutcome bool
 	if !request.HasGenerationStatus() {
-		// Use detached context to prevent corrupting the file if sync is shutdown.
-		applyPlanCtx, applyPlanCancel := newDetachedCtx(ctx)
-		defer applyPlanCancel()
 
 		var applyErr error
-		planApplied, applyUndo, applyErr = applyPlan(applyPlanCtx, &pathState)
+		planApplied, applyUndo, applyErr = applyPlan(ctx, &pathState)
 		terminalOutcome = IsErrJobTerminalSentinel(applyErr)
 		if applyErr != nil {
 			if errors.Is(applyErr, ErrJobAlreadyComplete) {
@@ -337,13 +345,10 @@ func (w *jobRequestBuilder) processRequest(
 			canReleaseLock = false
 			client := w.RstMap[request.GetRemoteStorageTarget()]
 
-			externalId, externalErr := client.GenerateExternalId(applyPlanCtx, cfg)
+			externalId, externalErr := client.GenerateExternalId(ctx, cfg)
 			if externalErr != nil {
-				cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
-				defer cleanupCancel()
-
 				message := fmt.Sprintf("failed to generate external id: %s", externalErr.Error())
-				if undoErr := applyUndo(cleanupCtx); undoErr != nil {
+				if undoErr := applyUndo(ctx); undoErr != nil {
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 						State:   beeremote.JobRequest_GenerationStatus_ERROR,
@@ -364,16 +369,12 @@ func (w *jobRequestBuilder) processRequest(
 	}
 
 	if submitErr := w.submitRequest(request); submitErr != nil {
-		// Use detached context to prevent corrupting the file if sync is shutdown.
-		cleanupCtx, cleanupCancel := newDetachedCtx(ctx)
-		defer cleanupCancel()
-
 		wg := sync.WaitGroup{}
 		var undoPlanErr, resolveBulkRequestErr error
 
 		if planApplied && !terminalOutcome {
 			wg.Go(func() {
-				undoPlanErr = applyUndo(cleanupCtx)
+				undoPlanErr = applyUndo(ctx)
 				if undoPlanErr != nil {
 					w.log.Warn("unable to revert what was prepared for a job request that could not be submitted, the entry is left modified and its lock retained",
 						zap.String("path", cfg.GetPath()),
@@ -388,7 +389,7 @@ func (w *jobRequestBuilder) processRequest(
 		if request.HasBulkInfo() {
 			wg.Go(func() {
 				if client, ok := w.RstMap[request.GetRemoteStorageTarget()]; ok {
-					resolveBulkRequestErr = client.ResolveBulkRequest(cleanupCtx, request)
+					resolveBulkRequestErr = client.ResolveBulkRequest(ctx, request)
 				} else {
 					resolveBulkRequestErr = fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget())
 				}
@@ -397,7 +398,7 @@ func (w *jobRequestBuilder) processRequest(
 		if lockedInfo.ExternalId != "" {
 			wg.Go(func() {
 				client := w.RstMap[request.GetRemoteStorageTarget()]
-				if err := client.ReleaseExternalId(cleanupCtx, cfg, lockedInfo.ExternalId); err != nil {
+				if err := client.ReleaseExternalId(ctx, cfg, lockedInfo.ExternalId); err != nil {
 					// Leaked remote state for one path, which is not worth failing the builder job
 					// over, but it may need to be cleaned up manually.
 					w.log.Warn("unable to release external id",
