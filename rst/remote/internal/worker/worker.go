@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -34,26 +36,24 @@ type Worker interface {
 	//   UpdateConfig(*flex.WorkerNodeConfigRequest) (*flex.WorkerNodeConfigResponse, error)
 }
 
-// grpcClientHandler defines the interface for managing gRPC connections in
-// worker nodes. Implementers of this interface are responsible for establishing
-// and terminating gRPC connections and clients specific to their node type.
-// This interface enables a common handler implementation through dependency
-// injection. Implementations must ensure that they set the grpcClientHandler in
+// grpcClientHandler defines the interface for managing gRPC connections in worker nodes.
+// Implementers of this interface are responsible for establishing and terminating gRPC connections
+// and clients specific to their node type. This interface enables a common handler implementation
+// through dependency injection. Implementations must ensure that they set the grpcClientHandler in
 // their respective constructor functions.
 //
-// The interface consists of two methods:
+// The interface consists of three methods:
+//
 //   - connect: Establishes a gRPC connection and initializes a gRPC client of the appropriate type
 //     that is reused for all unary RPCs. After the new client is setup it should update the
-//     configuration and state of any existing work requests on the node. It should return false if
-//     an error occurred that is fatal (i.e., remote node was unable to update config or WRs) or
-//     true if an transient error occurred that can be retried (i.e., network connectivity).
+//     configuration and state of any existing work requests on the node.
+//   - heartbeat: Sends a heartbeat request to verify the node is online and ready.
 //   - disconnect: Cleanup the gRPC connection and client that was created for this node.
 //     It should return an error if there were any problems freeing these resources.
 //
-// Note: Connect and disconnect operations should be idempotent and safe to call
-// multiple times.
+// Note: Connect and disconnect operations should be idempotent and safe to call multiple times.
 type grpcClientHandler interface {
-	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) (retry bool, err error)
+	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) error
 	heartbeat(*flex.HeartbeatRequest) (*flex.HeartbeatResponse, error)
 	disconnect() error
 }
@@ -159,126 +159,132 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 	n.nodeMu.Lock()
 	defer n.nodeMu.Unlock()
 
-	// Ticker used to control the interval at which heartbeat requests are send to worker nodes.
-	ticker := time.NewTicker(time.Duration(n.config.HeartbeatInterval) * time.Second)
-	defer ticker.Stop()
-	// Set to true if the handler was stopped.
-	done := false
+	shutdown := func(reason error) {
+		n.log.Info("node is shutting down", zap.Error(reason))
+		n.setOffline()
+	}
+
 	for {
-		if n.GetState() == OFFLINE {
-			if n.connectLoop(config, wrUpdates, requiredFeatures) {
-				n.setState(ONLINE)
-			connectedLoop:
-				for {
-					select {
-					case <-n.nodeCtx.Done():
-						n.log.Debug("node is shutting down because its context was cancelled")
-						done = true
-						break connectedLoop
-					case err := <-n.rpcErr:
-						n.log.Error("placing node offline due to an error", zap.Error(err))
-						break connectedLoop
-					case <-ticker.C:
-						// When worker nodes start up they wait for BeeRemote to configure them and
-						// tell what to do with any outstanding requests (in case they were
-						// cancelled while the node was offline). Because BeeRemote and worker nodes
-						// communicate using unary RPCs, unless requests are actively being assigned
-						// to this worker, it is possible for the worker to reboot and BeeRemote to
-						// never notice. This is because BeeRemote doesn't poll the status of
-						// requests once they are assigned to a node, and worker nodes don't know
-						// where to reach BeeRemote until it tells them. While it is not important
-						// we immediately detect when a node is offline or rebooted (because unary
-						// RPCs will trigger a reconnect and retry automatically), the heartbeat
-						// mechanism ensures worker nodes aren't stuck indefinitely waiting for
-						// configuration from BeeRemote.
-						resp, err := n.heartbeat(&flex.HeartbeatRequest{})
-						if err != nil {
-							n.log.Error("failed to receive heartbeat response from node, placing offline and attempting to reconnect", zap.Error(err))
-							break connectedLoop
-						} else if !resp.GetIsReady() {
-							n.log.Error("received a heartbeat response but the node is not ready, placing offline and attempting to update its configuration")
-							break connectedLoop
-						}
-						n.log.Debug("received heartbeat from worker node", zap.Any("response", resp))
-						// Otherwise continue.
-					}
-				}
-			}
-		}
-		// We'll first set the node state to offline so the node is not assigned
-		// more WRs and any RPC requests that do/did make it through are
-		// rejected. We'll then wait up to the disconnect timeout for any active
-		// RPCs to gracefully complete before cancelling the shared RPC context
-		// and immediately trying to disconnect the node. Probably this is a bit
-		// excessive, but allows for tight control over the shutdown process.
-		n.setState(OFFLINE)
-		allDone := make(chan struct{})
-		go func() {
-			n.rpcWG.Wait()
-			select {
-			case allDone <- struct{}{}:
-			default:
-				// Don't leak the goroutine if we reached the timeout and aren't
-				// listening on the channel anymore.
+		if err := n.waitUntilConnected(config, wrUpdates, requiredFeatures); err != nil {
+			if errors.Is(err, context.Canceled) {
+				shutdown(err)
 				return
 			}
-		}()
-		select {
-		case <-allDone:
-		case <-time.After(time.Duration(n.config.DisconnectTimeout) * time.Second):
+			n.log.Error("unexpected error while connecting to node", zap.Error(err))
 		}
-		// If we hit the timeout this allows us to cancel the context for any
-		// outstanding RPCs and ensure they complete before disconnecting.
-		// Otherwise this is essentially a no-op and we'll go straight to the
-		// disconnect without further waiting.
-		n.rpcCancel()
-		n.rpcWG.Wait()
-		err := n.disconnect()
-		if err != nil {
-			n.log.Error("error disconnecting node", zap.Error(err))
+
+		if n.GetState() == ONLINE {
+			err := n.manageConnection()
+			if errors.Is(err, context.Canceled) {
+				shutdown(err)
+				return
+			}
+			n.log.Error("placing node offline due to an error", zap.Error(err))
 		}
-		if done {
-			return
-		}
+
+		n.setOffline()
 	}
 }
 
-// connectLoop() attempts to connect to a worker node. If the node is not ready
-// or there is an error it will attempt to reconnect with an exponential
-// backoff. If it returns false there was an unrecoverable error and the caller
-// should first call doDisconnect() before reconnecting.
-func (n *baseNode) connectLoop(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) bool {
-	n.log.Info("connecting to node")
+// waitUntilConnected attempts to connect to a worker node until either a connection succeeds or the
+// node context is cancelled. For any error, an exponential backoff delay will be observed before
+// retrying.
+func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var reconnectBackOff float64 = 1
+	var retryDelay time.Duration
 
 	// If a disconnect happened previously the RPC context would be cancelled.
 	// Ensure it is initialized when connecting.
 	n.rpcCtx, n.rpcCancel = context.WithCancel(context.Background())
 
+	n.log.Info("connecting to node")
 	for {
 		select {
 		case <-n.nodeCtx.Done():
-			n.log.Info("not attempting to connect to node because its context was cancelled")
-			return false
-		case <-time.After(time.Second * time.Duration(reconnectBackOff)):
-			retry, err := n.connect(config, wrUpdates, requiredFeatures)
-			if err != nil {
-				if !retry {
-					n.log.Error("unable to connect to node (unable to retry)", zap.Error(err))
-					return false
-				}
+			return n.nodeCtx.Err()
+		case <-time.After(retryDelay):
+			if err := n.connect(config, wrUpdates, requiredFeatures); err != nil {
 				// We'll retry to connect with an exponential back off. We'll add some jitter to avoid load spikes.
 				reconnectBackOff *= 2 + rand.Float64()
 				if reconnectBackOff > float64(n.config.MaxReconnectBackOff) {
 					reconnectBackOff = float64(n.config.MaxReconnectBackOff) - rand.Float64()
 				}
-
-				n.log.Warn("unable to connect to node (retrying)", zap.Error(err), zap.Any("retry_in_seconds", reconnectBackOff))
-				continue
+				retryDelay = time.Duration(reconnectBackOff * float64(time.Second))
+				n.log.Warn("unable to connect to node (retrying)", zap.Error(err), zap.Duration("retry_in", retryDelay))
+			} else {
+				n.setState(ONLINE)
+				n.log.Info("connected to node")
+				return nil
 			}
-			n.log.Info("connected to node")
-			return true
 		}
+	}
+}
+
+// manageConnection checks for node heartbeats and returns on a rpc error or context cancellation.
+func (n *baseNode) manageConnection() error {
+	// Ticker used to control the interval at which heartbeat requests are send to worker nodes.
+	ticker := time.NewTicker(time.Duration(n.config.HeartbeatInterval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.nodeCtx.Done():
+			return n.nodeCtx.Err()
+		case err := <-n.rpcErr:
+			return err
+		case <-ticker.C:
+			// When worker nodes start up they wait for BeeRemote to configure them and tell what to
+			// do with any outstanding requests (in case they were cancelled while the node was
+			// offline). Because BeeRemote and worker nodes communicate using unary RPCs, unless
+			// requests are actively being assigned to this worker, it is possible for the worker to
+			// reboot and BeeRemote to never notice. This is because BeeRemote doesn't poll the
+			// status of requests once they are assigned to a node, and worker nodes don't know
+			// where to reach BeeRemote until it tells them. While it is not important we
+			// immediately detect when a node is offline or rebooted (because unary RPCs will
+			// trigger a reconnect and retry automatically), the heartbeat mechanism ensures worker
+			// nodes aren't stuck indefinitely waiting for configuration from BeeRemote.
+			resp, err := n.heartbeat(&flex.HeartbeatRequest{})
+			if err != nil {
+				return fmt.Errorf("failed to receive heartbeat response: %w", err)
+			}
+
+			n.log.Debug("received heartbeat from worker node", zap.Any("response", resp))
+			if !resp.GetIsReady() {
+				return fmt.Errorf("received a heartbeat response but the node is not ready")
+			}
+		}
+	}
+}
+
+// setOffline stops all new work request assigments and waits any for any outstanding rpcs to
+// complete before disconnecting. If the configured DisconnectTimeout time expires before the rpcs
+// can gracefully complete, the rpc context will be cancelled.
+func (n *baseNode) setOffline() {
+	// We'll first set the node state to offline so the node is not assigned more WRs and any RPC
+	// requests that do/did make it through are rejected. We'll then wait up to the disconnect
+	// timeout for any active RPCs to gracefully complete before cancelling the shared RPC context
+	// and immediately trying to disconnect the node. Probably this is a bit excessive, but allows
+	// for tight control over the shutdown process.
+	n.setState(OFFLINE)
+
+	allDone := make(chan struct{})
+	go func() {
+		n.rpcWG.Wait()
+		close(allDone)
+	}()
+	select {
+	case <-allDone:
+	case <-time.After(time.Duration(n.config.DisconnectTimeout) * time.Second):
+	}
+
+	// If we hit the timeout this allows us to cancel the context for any outstanding RPCs and
+	// ensure they complete before disconnecting.
+	n.rpcCancel()
+	n.rpcWG.Wait()
+
+	err := n.disconnect()
+	if err != nil {
+		n.log.Error("error disconnecting node", zap.Error(err))
 	}
 }
 

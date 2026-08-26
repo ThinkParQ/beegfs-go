@@ -33,13 +33,13 @@ func newBeeSyncNode(baseNode *baseNode) Worker {
 	return beeSyncNode
 }
 
-func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
+func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var cert []byte
 	var err error
 	if !n.config.TlsDisable && n.config.TlsCertFile != "" {
 		cert, err = os.ReadFile(n.config.TlsCertFile)
 		if err != nil {
-			return false, fmt.Errorf("reading certificate file failed: %w", err)
+			return fmt.Errorf("reading certificate file failed: %w", err)
 		}
 	}
 	n.conn, err = beegrpc.NewClientConn(
@@ -50,7 +50,7 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		beegrpc.WithProxy(n.config.UseProxy),
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	n.client = flex.NewWorkerNodeClient(n.conn)
@@ -59,23 +59,23 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	// a heartbeat rpc call to determine a valid address for the sync node to reach remote.
 	host, port, err := net.SplitHostPort(config.BeeRemote.Address)
 	if err != nil {
-		return false, err
+		return err
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsUnspecified() {
 		var pr peer.Peer
 		_, err := n.client.Heartbeat(n.nodeCtx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
 		if err != nil {
-			return true, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+			return fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
 
 		if pr.LocalAddr == nil {
-			return false, fmt.Errorf("failed to determine remote address for sync node")
+			return fmt.Errorf("failed to determine remote address for sync node")
 		}
 
 		host, _, err = net.SplitHostPort(pr.LocalAddr.String())
 		if err != nil {
-			return false, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+			return fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
 		config = proto.Clone(config).(*flex.UpdateConfigRequest)
 		remoteAddr := net.JoinHostPort(host, port)
@@ -85,9 +85,9 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 
 	// Verify the sync node capabilities support remote.
 	if clientRegistry, _, err := registry.GetComponentRegistry(n.rpcCtx, n.client); err != nil {
-		return true, fmt.Errorf("failed to determine sync node capabilities: %w", err)
+		return fmt.Errorf("failed to determine sync node capabilities: %w", err)
 	} else if err = clientRegistry.RequireFeatures(requiredFeatures); err != nil {
-		return true, fmt.Errorf("incompatible sync node: %w", err)
+		return fmt.Errorf("incompatible sync node: %w", err)
 	}
 
 	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)
@@ -97,30 +97,30 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 			// Note this is just a hint to the user, other error conditions may have the same
 			// message so we don't adjust behavior (i.e., treat it as fatal).
 			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				return true, fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+				return fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
 			}
 		}
-		return true, err
+		return err
 	}
 
 	// If we could send the message but the node didn't update the configuration
 	// correctly probably we can't recover with a simple retry so consider fatal.
 	if configureResp.GetResult() != flex.UpdateConfigResponse_SUCCESS {
-		return false, fmt.Errorf("%s: node rejected config update: %s", configureResp.GetResult(), configureResp.GetMessage())
+		return fmt.Errorf("%s: node rejected config update: %s", configureResp.GetResult(), configureResp.GetMessage())
 	}
 
 	updateWRResp, err := n.client.BulkUpdateWork(n.rpcCtx, bulkUpdate)
 	if err != nil {
-		return true, err
+		return err
 	}
 
 	// If we could send the message but the node couldn't update the WRs,
 	// probably we can't recover with a simply retry so consider fatal.
 	if !updateWRResp.GetSuccess() {
-		return false, fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
+		return fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
 	}
 
-	return false, nil
+	return nil
 }
 
 func (n *BeeSyncNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
