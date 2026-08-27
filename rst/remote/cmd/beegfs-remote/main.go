@@ -37,6 +37,10 @@ const (
 	// Note the concept of a BeeRemote nodeID will be used to support multiple BeeRemote nodes in the future.
 	nodeID            = "0"
 	FeatureLicenseStr = "io.beegfs.rst"
+	// deprecatedRequestQueueDepth is the default job.request-queue-depth shipped through v8.4.1.
+	// The setting no longer does anything; the default is retained so a value that differs from it
+	// can be recognized as one the user deliberately set.
+	deprecatedRequestQueueDepth = 1024
 )
 
 // Set by the build process using ldflags.
@@ -98,7 +102,6 @@ func main() {
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Remote node's gRPC server.")
 	pflag.String("job.path-db", "/var/lib/beegfs/remote/path.badger", "Path where the database tracking jobs for each path will be created/maintained.")
-	pflag.Int("job.request-queue-depth", 1024, "Number of requests that can be made to JobMgr before new requests are blocked.")
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
 	pflag.Int("job.max-job-entries-per-rst", 4, "Once this threshold is exceeded, older jobs will be deleted (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.")
 	// Hidden flags:
@@ -112,6 +115,10 @@ func main() {
 	pflag.CommandLine.MarkHidden("developer.mutex-profile-fraction")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
 	pflag.CommandLine.MarkHidden("developer.dump-config")
+	// Deprecated flags: kept so existing configurations still parse. MarkDeprecated hides the flag
+	// and prints a warning if it is set on the command line.
+	pflag.Int("job.request-queue-depth", deprecatedRequestQueueDepth, "Deprecated: no longer used.")
+	pflag.CommandLine.MarkDeprecated("job.request-queue-depth", "it is no longer used and will be removed in a future release")
 
 	pflag.CommandLine.SortFlags = false
 	pflag.Usage = func() {
@@ -193,6 +200,13 @@ Using environment variables:
 			log.Printf("error during logger shutdown: %v", err)
 		}
 	}()
+
+	// pflag warns on its own when a deprecated flag is passed on the command line, but says nothing
+	// when the value arrives from a config file or environment variable, so warn about those here.
+	//lint:ignore SA1019 reading the deprecated field is how we detect someone set it.
+	if initialCfg.Job.RequestQueueDepth != deprecatedRequestQueueDepth {
+		logger.Warn("the job.request-queue-depth setting is deprecated and no longer has any effect (it will be removed in a future release)")
+	}
 
 	err = ctl.InitLoggerFromExternal(logger.With(zap.String("component", "ctl")))
 	if err != nil {
