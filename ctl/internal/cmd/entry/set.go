@@ -96,6 +96,13 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, "Print what configuration was updated for each entry.")
 
 	// Entry options
+	cmd.Flags().Var(newGroupsParityFlag(&backendCfg.GroupsParity),
+		"groups-parity",
+		`When set, the parity targets in an erasure coded stripe pattern will
+		be grouped together in the same target. This option is only
+		applicable when the stripe pattern is one of the ec-* patterns. If the
+		stripe pattern is not one of the ec-* patterns, then this value is
+		ignored.`)
 	cmd.Flags().Var(newChunksizeFlag(&backendCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
 	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory.
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
@@ -105,6 +112,12 @@ This enables normal users to change the default number of targets and chunksize 
 	NOTE: Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", ")))
 	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", `Number of targets to stripe each file across.
 	If the stripe pattern is "mirrored" this is the number of mirror groups.`)
+	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumDataTargets),
+		"num-data-targets",
+		`Number of data targets to stripe each file across.
+	This option is only applicable when the stripe pattern is
+	one of the ec-* patterns. If the stripe pattern is not
+	one of the ec-* patterns, then this value is ignored.`)
 	cmd.Flags().VarP(iUtil.NewRemoteTargetsFlag(&backendCfg.RemoteTargets), "remote-targets", "r", `Comma-separated list of Remote Storage Target IDs.
 	All desired IDs must be specified. Specify 'none' to unset all RSTs.`)
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)

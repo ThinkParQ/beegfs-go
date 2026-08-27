@@ -33,15 +33,17 @@ type CreateEntryCfg struct {
 // CreateFileCfg contains optional configuration that can be set when creating a new file. By
 // default configuration is inherited from the parent directory.
 type CreateFileCfg struct {
-	Force              bool
-	StripePattern      *beegfs.StripePatternType
-	Chunksize          *uint32
-	DefaultNumTargets  *uint32
-	Pool               *beegfs.EntityId
-	TargetIDs          []beegfs.EntityId
-	BuddyGroups        []beegfs.EntityId
-	RemoteTargets      []uint32
-	RemoteCooldownSecs *uint16
+	Force                 bool
+	StripePattern         *beegfs.StripePatternType
+	GroupsParity          *bool
+	Chunksize             *uint32
+	DefaultNumTargets     *uint32
+	DefaultNumDataTargets *uint32
+	Pool                  *beegfs.EntityId
+	TargetIDs             []beegfs.EntityId
+	BuddyGroups           []beegfs.EntityId
+	RemoteTargets         []uint32
+	RemoteCooldownSecs    *uint16
 }
 
 // CreateDirCfg contains optional configuration that can be set when creating a new directory.
@@ -104,6 +106,9 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 	if userCfg.FileCfg.StripePattern != nil {
 		request.Pattern.Type = *userCfg.FileCfg.StripePattern
 	}
+	if userCfg.FileCfg.GroupsParity != nil {
+		request.Pattern.GroupsParity = *userCfg.FileCfg.GroupsParity
+	}
 
 	// Set the chunksize if requested:
 	if userCfg.FileCfg.Chunksize != nil {
@@ -113,6 +118,10 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 	// Set the default number of targets if requested:
 	if userCfg.FileCfg.DefaultNumTargets != nil {
 		request.Pattern.DefaultNumTargets = *userCfg.FileCfg.DefaultNumTargets
+	}
+	if userCfg.FileCfg.DefaultNumDataTargets != nil {
+		request.Pattern.DefaultNumDataTargets =
+			*userCfg.FileCfg.DefaultNumDataTargets
 	}
 
 	// Set the pool if requested:

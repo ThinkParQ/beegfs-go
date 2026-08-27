@@ -54,6 +54,7 @@ const (
 	StripePatternRaid0
 	StripePatternRaid10
 	StripePatternBuddyMirror
+	StripePatternECReedSolomonGF256
 )
 
 func (p StripePatternType) String() string {
@@ -64,6 +65,8 @@ func (p StripePatternType) String() string {
 		return "RAID10"
 	case StripePatternBuddyMirror:
 		return "Buddy Mirror"
+	case StripePatternECReedSolomonGF256:
+		return "EC Reed-Solomon GF(256)"
 	default:
 		return "invalid"
 	}

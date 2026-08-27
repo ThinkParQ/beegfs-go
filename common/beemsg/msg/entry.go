@@ -3,6 +3,7 @@ package msg
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"structs"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -285,12 +286,14 @@ func (m *GetEntryInfoResponse) Deserialize(d *beeserde.Deserializer) {
 // aren't interested in recreating all the logic associated with different stripe patterns, so we
 // just deserialize into a common StripePattern struct.
 type StripePattern struct {
-	Length            uint32
-	Type              beegfs.StripePatternType
-	HasPoolID         bool
-	Chunksize         uint32
-	StoragePoolID     uint16
-	DefaultNumTargets uint32
+	Length                uint32
+	Type                  beegfs.StripePatternType
+	HasPoolID             bool
+	GroupsParity          bool
+	Chunksize             uint32
+	StoragePoolID         uint16
+	DefaultNumTargets     uint32
+	DefaultNumDataTargets uint32
 	// For StripePatternType=RAID0 this is the equivalent of stripeTargetIDs. For
 	// StripePatternType=BuddyMirror, this is mirrorBuddyGroupIDs. While the C++ classes internally
 	// distinguish between stripe targets and buddy group IDs, this distinction is less important
@@ -300,25 +303,53 @@ type StripePattern struct {
 	TargetIDs []uint16
 }
 
-// Equivalent of HasNoPoolFlag in C++.
+// Equivalent of HasNoPoolFlag and GroupParityFlag in C++.
 const hasNoPoolFlag uint32 = 1 << 24
+const groupParityFlag uint32 = 1 << 25
+const typeFlagsMask uint32 = 0xFF << 24
 
 func (m *StripePattern) Serialize(s *beeserde.Serializer) {
 	// Length is populated at the end once we know the size of the message.
 	lengthPos := s.Buf.Len()
 	beeserde.SerializeInt(s, int32(0))
+
+	typeWithFlags := uint32(m.Type)
 	// This flag is for compatibility with really old versions of BeeGFS (e.g., 2014). If we
 	// find a stripe pattern with the no pool flag set, most likely something went wrong or
 	// someone is trying to use CTL with an unsupported version of BeeGFS.
 	if !m.HasPoolID {
 		s.Fail(fmt.Errorf("unsupported message (has no storage pool ID)"))
 	}
-	beeserde.SerializeInt(s, m.Type)
+	if m.GroupsParity {
+		typeWithFlags |= groupParityFlag
+	}
+	beeserde.SerializeInt(s, typeWithFlags)
 	beeserde.SerializeInt(s, m.Chunksize)
 	beeserde.SerializeInt(s, m.StoragePoolID)
-	beeserde.SerializeInt(s, m.DefaultNumTargets)
 	switch m.Type {
 	case beegfs.StripePatternRaid0, beegfs.StripePatternBuddyMirror:
+		beeserde.SerializeInt(s, m.DefaultNumTargets)
+		beeserde.SerializeSeq(s, m.TargetIDs, true, func(out uint16) {
+			beeserde.SerializeInt(s, out)
+		})
+	case beegfs.StripePatternECReedSolomonGF256:
+		if m.DefaultNumTargets > math.MaxUint16 ||
+			m.DefaultNumDataTargets > m.DefaultNumTargets {
+			s.Fail(fmt.Errorf("invalid stripe pattern configuration: "+
+				"number of targets (%d) and number of data targets (%d) "+
+				"must be less than %d",
+				m.DefaultNumTargets, m.DefaultNumDataTargets, math.MaxUint16))
+			break
+		}
+		if m.DefaultNumDataTargets == 0 {
+			s.Fail(fmt.Errorf("invalid stripe pattern configuration: "+
+				"--num-data-targets cannot be zero and must be specified for %s",
+				beegfs.StripePatternECReedSolomonGF256))
+			break
+		}
+		beeserde.SerializeInt(s, uint16(m.DefaultNumDataTargets))
+		beeserde.SerializeInt(s,
+			uint16(m.DefaultNumTargets-m.DefaultNumDataTargets))
 		beeserde.SerializeSeq(s, m.TargetIDs, true, func(out uint16) {
 			beeserde.SerializeInt(s, out)
 		})
@@ -345,16 +376,26 @@ func (m *StripePattern) Deserialize(d *beeserde.Deserializer) {
 		// someone is trying to use CTL with an unsupported version of BeeGFS.
 		d.Fail(fmt.Errorf("unsupported message (has no storage pool ID)"))
 	}
-	m.Type = beegfs.StripePatternType((typeWithFlags & ^hasNoPoolFlag))
+	m.GroupsParity = (typeWithFlags & groupParityFlag) != 0
+	m.Type = beegfs.StripePatternType((typeWithFlags &^ typeFlagsMask))
 	beeserde.DeserializeInt(d, &m.Chunksize)
 	if m.HasPoolID {
 		beeserde.DeserializeInt(d, &m.StoragePoolID)
 	}
 
 	// Then deserialize the actual pattern.
-	beeserde.DeserializeInt(d, &m.DefaultNumTargets)
 	switch m.Type {
 	case beegfs.StripePatternRaid0, beegfs.StripePatternBuddyMirror:
+		beeserde.DeserializeInt(d, &m.DefaultNumTargets)
+		beeserde.DeserializeSeq(d, &m.TargetIDs, true, func(out *uint16) {
+			beeserde.DeserializeInt(d, out)
+		})
+	case beegfs.StripePatternECReedSolomonGF256:
+		var numDataTargets, numParityTargets uint16
+		beeserde.DeserializeInt(d, &numDataTargets)
+		beeserde.DeserializeInt(d, &numParityTargets)
+		m.DefaultNumDataTargets = uint32(numDataTargets)
+		m.DefaultNumTargets = uint32(numDataTargets) + uint32(numParityTargets)
 		beeserde.DeserializeSeq(d, &m.TargetIDs, true, func(out *uint16) {
 			beeserde.DeserializeInt(d, out)
 		})

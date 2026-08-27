@@ -51,8 +51,21 @@ NOTE: Files created using this mode do not trigger file system modification even
 		},
 	}
 	cmd.Flags().BoolVar(&backendCfg.FileCfg.Force, "force", false, "Ignore if the specified targets/buddy groups are not in the same pool as the entry.")
+	cmd.Flags().Var(newGroupsParityFlag(&backendCfg.FileCfg.GroupsParity),
+		"groups-parity",
+		`When set, the parity targets in an erasure coded stripe pattern will
+		be grouped together in the same target. This option is only
+		applicable when the stripe pattern is one of the ec-* patterns. If the
+		stripe pattern is not one of the ec-* patterns, then this value is
+		ignored.`)
 	cmd.Flags().Var(newChunksizeFlag(&backendCfg.FileCfg.Chunksize), "chunk-size", "Block size for striping (per storage target). Suffixes 'Ki' (Kibibytes) and 'Mi` (Mebibytes) are allowed.")
 	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.FileCfg.DefaultNumTargets), "num-targets", `Number of targets or mirror groups to stripe each file across.`)
+	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.FileCfg.DefaultNumDataTargets),
+		"num-data-targets",
+		`Number of data targets to stripe each file across.
+	This option is only applicable when the stripe pattern is
+	one of the ec-* patterns. If the stripe pattern is not
+	one of the ec-* patterns, then this value is ignored.`)
 	cmd.Flags().Var(beegfs.NewEntityIdSlicePFlag(&backendCfg.FileCfg.TargetIDs, 16, beegfs.Storage), "targets", `Comma-separated list of targets to use for the new file (stripe pattern will always be RAID0).
 	The number of targets may be longer than the num-targets parameter, but cannot be less.
 	If the targets are not in the same storage pool that will be assigned to the new file, the force flag must be set.`)

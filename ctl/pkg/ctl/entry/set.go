@@ -30,14 +30,16 @@ type SetEntryCfg struct {
 	// Allow bypassing some configuration checks.
 	Force bool
 	// Entry metadata updates:
-	Chunksize          *uint32
-	Pool               *beegfs.EntityId
-	DefaultNumTargets  *uint32
-	StripePattern      *beegfs.StripePatternType
-	RemoteTargets      []uint32
-	RemoteCooldownSecs *uint16
-	AccessFlags        *beegfs.AccessFlags
-	DataState          *beegfs.DataState
+	Chunksize             *uint32
+	Pool                  *beegfs.EntityId
+	GroupsParity          *bool
+	DefaultNumTargets     *uint32
+	DefaultNumDataTargets *uint32
+	StripePattern         *beegfs.StripePatternType
+	RemoteTargets         []uint32
+	RemoteCooldownSecs    *uint16
+	AccessFlags           *beegfs.AccessFlags
+	DataState             *beegfs.DataState
 
 	FilterExpr string
 }
@@ -164,6 +166,12 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 	}
 	if cfg.DefaultNumTargets != nil {
 		request.Pattern.DefaultNumTargets = *cfg.DefaultNumTargets
+	}
+	if cfg.DefaultNumDataTargets != nil {
+		request.Pattern.DefaultNumDataTargets = *cfg.DefaultNumDataTargets
+	}
+	if cfg.GroupsParity != nil {
+		request.Pattern.GroupsParity = *cfg.GroupsParity
 	}
 	// Important to check if the pool was updated before determining the stripe pattern
 	// configuration because eligible patterns are determined based on the pool configuration.

@@ -2,14 +2,44 @@ package entry
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 )
+
+type groupsParityFlag struct {
+	p **bool
+}
+
+func newGroupsParityFlag(p **bool) *groupsParityFlag {
+	return &groupsParityFlag{p: p}
+}
+
+func (f *groupsParityFlag) String() string {
+	if *f.p == nil {
+		return "unchanged"
+	}
+	return fmt.Sprintf("%t", **f.p)
+}
+
+func (f *groupsParityFlag) Type() string {
+	return "<true|false>"
+}
+
+func (f *groupsParityFlag) Set(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	*f.p = &v
+	return nil
+}
 
 const (
 	// Equivalent of STRIPEPATTERN_MIN_CHUNKSIZE
@@ -88,18 +118,21 @@ type stripePatternFlag struct {
 	p **beegfs.StripePatternType
 }
 
-var validStripePatterns = map[string]beegfs.StripePatternType{"raid0": beegfs.StripePatternRaid0, "mirrored": beegfs.StripePatternBuddyMirror}
+var validStripePatterns = map[string]beegfs.StripePatternType{
+	"raid0":                 beegfs.StripePatternRaid0,
+	"mirrored":              beegfs.StripePatternBuddyMirror,
+	"ec-reed-solomon-gf256": beegfs.StripePatternECReedSolomonGF256,
+}
 
 func newStripePatternFlag(p **beegfs.StripePatternType) *stripePatternFlag {
 	return &stripePatternFlag{p: p}
 }
 
 func validStripePatternKeys() []string {
-	keys := make([]string, 0, len(validStripePatterns))
-	for k := range validStripePatterns {
-		keys = append(keys, k)
-	}
-	return keys
+	ret := slices.Collect(maps.Keys(validStripePatterns))
+	slices.Sort(ret)
+
+	return ret
 }
 
 func (f *stripePatternFlag) String() string {

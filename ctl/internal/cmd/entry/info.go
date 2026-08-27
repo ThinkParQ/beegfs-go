@@ -2,6 +2,7 @@ package entry
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dsnet/golib/unitconv"
@@ -187,6 +188,10 @@ func assembleRetroEntry(info *entry.GetEntryCombinedInfo, frontendCfg entryInfoC
 		} else {
 			fmt.Fprintf(entryToPrint, "desired: %d; actual: %d\n", details.Pattern.DefaultNumTargets, actualNumStorageTgts)
 		}
+		if details.Pattern.DefaultNumDataTargets != 0 {
+			fmt.Fprintf(entryToPrint, "+ Number of data targets: %d\n", details.Pattern.DefaultNumDataTargets)
+			fmt.Fprintf(entryToPrint, "+ Groups parity: %t\n", details.Pattern.GroupsParity)
+		}
 
 		if info.Entry.Type == beegfs.EntryDirectory {
 			fmt.Fprintf(entryToPrint, "+ Storage Pool: %d  (%s)\n", details.Pattern.StoragePoolID, details.Pattern.StoragePoolName)
@@ -312,10 +317,29 @@ func assembleTableRow(info *entry.GetEntryCombinedInfo, rowLen int) []any {
 		row = append(row, fmt.Sprintf("(%s)", info.Entry.Type))
 	}
 
+	var targetComposition string
+	switch d.Pattern.Type {
+	case beegfs.StripePatternECReedSolomonGF256:
+		// FIXME: have an UX export choose the symbolage here
+		targetCompositionFmt := "[%d⇄%d]"
+		if d.Pattern.GroupsParity {
+			targetCompositionFmt = "[%d↕%d]"
+		}
+		targetComposition = fmt.Sprintf(targetCompositionFmt,
+			d.Pattern.DefaultNumDataTargets,
+			d.Pattern.DefaultNumTargets-
+				d.Pattern.DefaultNumDataTargets)
+	default:
+		targetComposition = strconv.FormatUint(
+			uint64(d.Pattern.DefaultNumTargets), 10)
+	}
 	if viper.GetBool(config.RawKey) {
-		row = append(row, fmt.Sprintf("%s (%dx%d)", d.Pattern.Type, d.Pattern.DefaultNumTargets, d.Pattern.Chunksize))
+		row = append(row, fmt.Sprintf("%s (%sx%d)", d.Pattern.Type,
+			targetComposition, d.Pattern.Chunksize))
 	} else {
-		row = append(row, fmt.Sprintf("%s (%dx%s)", d.Pattern.Type, d.Pattern.DefaultNumTargets, unitconv.FormatPrefix(float64(d.Pattern.Chunksize), unitconv.Base1024, 0)))
+		row = append(row, fmt.Sprintf("%s (%sx%s)", d.Pattern.Type,
+			targetComposition, unitconv.FormatPrefix(float64(
+				d.Pattern.Chunksize), unitconv.Base1024, 0)))
 	}
 
 	fmtTgtIDsFunc := func(targetIDs []uint16) string {
