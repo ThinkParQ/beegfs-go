@@ -7,6 +7,7 @@ import (
 	"path"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -37,6 +38,9 @@ type WorkerNodeServer struct {
 	workMgr    *workmgr.Manager
 	registry   *registry.ComponentRegistry
 	startTime  time.Time
+	// Set by Drain() and never cleared. While set the server keeps serving so in-flight work can
+	// finish and Remote can still update or cancel it, but refuses to create any new work.
+	draining atomic.Bool
 }
 
 // New() creates a new WorkerNodeServer that can be used with ListenAndServe().
@@ -89,11 +93,26 @@ func (s *WorkerNodeServer) ListenAndServe(errChan chan<- error) {
 	}()
 }
 
+// Drain marks this node as no longer accepting new work and returns immediately. The server keeps
+// listening, so Remote can still update or cancel the work already assigned here, and learns the
+// node is draining from its responses instead of discovering it by failing to connect.
+//
+// Drain should be called before stopping the work manager. It only stops new work from arriving;
+// waiting for the work already underway to finish is the caller's responsibility, as is calling
+// Stop() once it has. Draining is permanent for the lifetime of the server, so Drain is idempotent
+// and calling it more than once is a no-op.
+func (s *WorkerNodeServer) Drain() {
+	if !s.draining.CompareAndSwap(false, true) {
+		return
+	}
+	s.log.Info("draining: refusing new work requests while work already assigned to this node finishes")
+}
+
 // Stop should be called to gracefully terminate the server. It will stop the
 // server then wait for outstanding RPCs to complete before returning.
 func (s *WorkerNodeServer) Stop() {
 	s.log.Info("attempting to stop gRPC server")
-	s.grpcServer.Stop()
+	s.grpcServer.GracefulStop()
 	s.wg.Wait()
 }
 
@@ -133,11 +152,17 @@ func (s *WorkerNodeServer) BulkUpdateWork(ctx context.Context, request *flex.Bul
 
 func (s *WorkerNodeServer) SubmitWork(ctx context.Context, request *flex.SubmitWorkRequest) (*flex.SubmitWorkResponse, error) {
 	s.log.Debug("received work request", zap.Any("request", request))
+	// Checked before the work manager is touched so the rejection is unambiguous: nothing was
+	// created here, and Remote is free to assign the request to another node.
+	if s.draining.Load() {
+		s.log.Debug("rejecting work request because this node is draining", zap.Any("request", request))
+		return flex.SubmitWorkResponse_builder{Status: flex.SubmitWorkResponse_DRAINING}.Build(), nil
+	}
 	work, err := s.workMgr.SubmitWorkRequest(request.GetRequest())
 	if err != nil {
 		return nil, err
 	}
-	return flex.SubmitWorkResponse_builder{Work: work}.Build(), nil
+	return flex.SubmitWorkResponse_builder{Work: work, Status: flex.SubmitWorkResponse_ACCEPTED}.Build(), nil
 }
 
 func (s *WorkerNodeServer) UpdateWork(ctx context.Context, request *flex.UpdateWorkRequest) (*flex.UpdateWorkResponse, error) {
@@ -160,9 +185,24 @@ func (s *WorkerNodeServer) UpdateWork(ctx context.Context, request *flex.UpdateW
 
 func (s *WorkerNodeServer) Heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
 	s.log.Debug("processing heartbeat request", zap.Any("request", request))
-	//ready := s.workMgr.IsReady()
+
+	// Draining takes precedence over readiness. The work manager is still ready to service the work
+	// it already holds, but reporting READY would invite Remote to send more.
+	draining := s.draining.Load()
+	ready := s.workMgr.IsReady()
+	state := flex.HeartbeatResponse_NOT_READY
+	if draining {
+		state = flex.HeartbeatResponse_DRAINING
+	} else if ready {
+		state = flex.HeartbeatResponse_READY
+	}
+
+	// IsReady is deprecated in favor of State but is still populated for Remote nodes predating it.
+	// Those nodes have no way to represent draining, so it is reported as not ready: they will place
+	// this node offline and stop assigning it work, which is the safe approximation.
 	return flex.HeartbeatResponse_builder{
-		IsReady: s.workMgr.IsReady(),
+		IsReady: ready && !draining,
+		State:   state,
 	}.Build(), nil
 }
 
