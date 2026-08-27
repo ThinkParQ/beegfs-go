@@ -210,7 +210,14 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 	g.Go(func() error {
 		defer close(cancelWalkCh)
 
-		if err := m.recordError(reason); err != nil {
+		// Wrapping a nil or empty reason would produce a non-empty but useless message, which
+		// recordError could no longer recognize as having nothing to say. Pass it through instead so
+		// recordError frames it.
+		cancelled := reason
+		if reason != nil && reason.Error() != "" {
+			cancelled = fmt.Errorf("the bulk operation that staged this request was cancelled: %w", reason)
+		}
+		if err := m.recordError(cancelled); err != nil {
 			return fmt.Errorf("failed to record cancellation reason: %w", err)
 		}
 
@@ -242,9 +249,15 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 	return cancelWalkCh, g.Wait, nil
 }
 
-// recordError writes reason to the operation's shared errors file, overwriting any previous content.
+// recordError records reason as the operation's cancellation reason which
+// xtreemstoreS3BulkRetrieveError returns. Only the first recorded error will be returned.
 func (m *xtreemstoreS3BulkRetrieveManager) recordError(reason error) error {
-	if err := os.WriteFile(m.getErrorsPath(), []byte(reason.Error()), 0o600); err != nil {
+	message := "the bulk operation that staged this request was cancelled for an unspecified reason"
+	if reason != nil && reason.Error() != "" {
+		message = reason.Error()
+	}
+
+	if err := os.WriteFile(m.getErrorsPath(), []byte(message), 0o600); err != nil {
 		return fmt.Errorf("failed to write bulk-retrieve errors file: %w", err)
 	}
 	return nil

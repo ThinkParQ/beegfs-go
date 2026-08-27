@@ -61,28 +61,34 @@ func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathRes
 	c.sourceProducerGroup.Go(func() error {
 		defer releaseWalk(walkCh, stopWalk)
 
-		check := func() (shutdown bool, err error) {
+		// checkStop reports whether the walk must stop, and the error to stop with. A shutdown is not
+		// a failure: the builder job itself is fine and picks up from the resume token after the
+		// restart, so it records the reschedule and stops cleanly. Only a deliberate cancellation of
+		// this work stops with an error.
+		checkStop := func() (bool, error) {
 			if c.shutdownCtx.Err() != nil {
-				shutdown = true
-			} else {
-				err = c.workCtx.Err()
+				c.result = &SchedulingResult{Reschedule: true}
+				return true, nil
 			}
-			return
+			if err := c.workCtx.Err(); err != nil {
+				return true, err
+			}
+			return false, nil
 		}
 
 		for {
-
-			if shutdown, err := check(); shutdown || err != nil {
+			if stop, err := checkStop(); stop {
 				return err
 			}
 
 			select {
 			case <-c.workCtx.Done():
-				_, err := check()
+				_, err := checkStop()
 				return err
+
 			case result, ok := <-walkCh:
 				if !ok {
-					if shutdown, err := check(); shutdown || err != nil {
+					if stop, err := checkStop(); stop {
 						return err
 					}
 					c.resumeToken = walkCompleteToken
@@ -99,6 +105,7 @@ func (c *requestBuildController) AddWalk(walkCh <-chan *filesystem.StreamPathRes
 					}
 				}
 
+				// Reschedule if we've exceeded the maximum requests unless the worker is not busy.
 				if c.activeSourceSubmissions.Load() >= maxRequests {
 					if c.getWorkerSaturation() < walkContinuationWorkerSaturationThreshold {
 						maxRequests += maxRequestsExtension
@@ -191,12 +198,9 @@ func (c *requestBuildController) CancelBulkOperation(manager *bulkOperationManag
 	processWalkCh(c.bulkGroupCtx, c.bulkGroup, c.bulkProcess, walkCh)
 }
 
-// failBulkOperation marks manager permanently failed, unless sync is shutting down. Shutdown
-// cancels the builder's context to ask it to stop, so the errors indicate the operation was
-// interrupted, not that it can never succeed. Recording a permanent failure prevents the operation
-// from resuming.
+// failBulkOperation marks manager permanently failed, unless sync is shutting down.
 func (c *requestBuildController) failBulkOperation(manager *bulkOperationManager, reason error) {
-	if c.workCtx.Err() != nil {
+	if c.shutdownCtx.Err() != nil {
 		return
 	}
 	c.recordBulkStateErr(manager, failBulkOperation(manager, reason))
@@ -254,7 +258,6 @@ func (c *requestBuildController) GetResults() (result *SchedulingResult, resumeT
 // It returns nil when no walk was added. Any returned error should not be considered fatal on its
 // own so bulk operations registered during the walk can still be finished.
 func (c *requestBuildController) WaitForWalk() error {
-	// if c.sourceGroup == nil {
 	if c.sourceProducerGroup == nil {
 		return nil
 	}

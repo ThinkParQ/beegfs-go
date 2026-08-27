@@ -611,9 +611,10 @@ type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (
 var noopUndo = func(context.Context) error { return nil }
 
 // newApplyPlan builds a plan whose steps all run with the context handed to apply, rather than one
-// captured while the plan was being built. The plan is a critical section, so that context should
-// be detached and bounded. Otherwise, only part of the plan will be applied leaving the file in an
-// unknown state. The undoFn handed back to the caller should take similar precautions.
+// captured while the plan was being built. The plan is a critical section, so that context must be
+// detached from the caller's own cancellation and separately bounded. Otherwise, only part of the
+// plan will be applied leaving the file in an unknown state. The undoFn handed back to the caller
+// should take similar precautions.
 func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 	applySteps := []applyFn{}
 

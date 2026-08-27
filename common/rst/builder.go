@@ -127,11 +127,20 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 	}
 	workRequest.SetExternalId(resumeToken)
 
-	isWorkCancelled := shutdownCtx == nil && workCtx.Err() != nil
-	if isWorkCancelled || fatalBulkOperationsError != nil {
-		for _, manager := range managers {
-			controller.CancelBulkOperation(manager, fatalBulkOperationsError)
+	// A shutdown must never cancel the bulk operations since the builder job is not complete and
+	// will resume after the restart. Only a deliberate cancellation or a fatal bulk failure should
+	// cancel the bulk operations.
+	if shutdownCtx.Err() == nil && (workCtx.Err() != nil || fatalBulkOperationsError != nil) {
+		var reason error
+		if fatalBulkOperationsError != nil {
+			reason = fmt.Errorf("bulk operation failed: %w", fatalBulkOperationsError)
+		} else {
+			reason = fmt.Errorf("builder job work request was cancelled")
 		}
+		for _, manager := range managers {
+			controller.CancelBulkOperation(manager, reason)
+		}
+		result.Err = appendErrors(result.Err, reason, controller.WaitForBulkOperations())
 	} else if !result.Reschedule {
 		result.Err = appendErrors(result.Err, walkErr, registry.GetFailedOperationErrors())
 	}
