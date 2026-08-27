@@ -189,7 +189,8 @@ func TestManage(t *testing.T) {
 		Path:     "/test/myfile",
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 	}.Build()
-	jobManager.JobUpdates <- updateJobRequest
+	_, err = jobManager.UpdateJobs(updateJobRequest)
+	require.NoError(t, err)
 
 	getJobRequestsByID := beeremote.GetJobsRequest_builder{
 		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
@@ -200,16 +201,11 @@ func TestManage(t *testing.T) {
 		IncludeWorkResults:  true,
 	}.Build()
 
-	require.Eventually(t, func() bool {
-		responses = make(chan *beeremote.GetJobsResponse, 1)
-		if err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses); err != nil {
-			return false
-		}
-		getJobsResponse = <-responses
-		return len(getJobsResponse.GetResults()) > 0 &&
-			getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
-	}, 10*time.Second, 100*time.Millisecond, "job did not reach CANCELLED state")
+	responses = make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses)
 	require.NoError(t, err)
+	getJobsResponse = <-responses
+	require.Len(t, getJobsResponse.GetResults(), 1)
 	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
 	for _, wr := range getJobsResponse.GetResults()[0].GetWorkResults() {
@@ -604,29 +600,22 @@ func TestManageErrorHandling(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 4}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	jobManager.JobRequests <- testJobRequest
+	// An error is expected: the mock worker refuses to schedule the work requests, so JobMgr
+	// cancels whatever it did schedule and the overall job ends up cancelled.
+	_, err = jobManager.SubmitJobRequest(testJobRequest)
+	assert.Error(t, err)
 
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
 		ByPathPrefix:        new("/"),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
-	// Poll until the async job is stored and reaches CANCELLED state. A fixed
-	// sleep is too tight because the mock worker connection takes ~1 second,
-	// and SubmitJobRequest blocks until it is established.
-	var getJobsResponse *beeremote.GetJobsResponse
-	require.Eventually(t, func() bool {
-		responses := make(chan *beeremote.GetJobsResponse, 1)
-		if err := jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses); err != nil {
-			return false
-		}
-		resp := <-responses
-		if len(resp.GetResults()) == 0 {
-			return false
-		}
-		getJobsResponse = resp
-		return resp.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
-	}, 10*time.Second, 100*time.Millisecond)
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses)
+	require.NoError(t, err)
+	getJobsResponse := <-responses
+	require.Len(t, getJobsResponse.GetResults(), 1)
+	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
 	// JobMgr should have cancelled all outstanding requests:
 	assert.Len(t, getJobsResponse.GetResults()[0].GetWorkResults(), 4)
@@ -1559,7 +1548,6 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
-	m.ready = true
 
 	cleanup := func() {
 		cancel()
@@ -2067,7 +2055,6 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
-	m.ready = true
 
 	cleanup := func() {
 		workerManager.Stop()

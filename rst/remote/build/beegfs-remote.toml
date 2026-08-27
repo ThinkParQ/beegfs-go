@@ -294,8 +294,8 @@ rate-limit-event-types = ["*"]
 
 # path-db: Path where the database tracking jobs for each path will be created/maintained.
 
-# request-queue-depth: Number of requests that can be made to before new requests are blocked until
-# the existing requests have been assigned to worker nodes.
+# request-queue-depth: Deprecated and no longer used. It is still accepted so existing configuration
+# files continue to work, but the value is ignored. It will be removed in a future release.
 
 # min-job-entries-per-rst: This many jobs for each RST configured for a particular path is
 # guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync
