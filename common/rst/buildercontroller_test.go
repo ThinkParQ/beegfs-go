@@ -180,7 +180,7 @@ func TestRequestBuildController_ExecuteBulkOperationProcessesPathsAndSubmitsRequ
 	close(bulkCh)
 
 	manager := newTestBulkManager(t, "mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
-		return bulkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
+		return bulkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
 	}, nil)
 	controller.ExecuteBulkOperation(manager)
 	require.NoError(t, controller.WaitForBulkOperations())
@@ -202,7 +202,7 @@ func TestRequestBuildController_ExecuteBulkOperationReturnsWalkErrors(t *testing
 	close(bulkCh)
 
 	manager := newTestBulkManager(t, "mgr", func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
-		return bulkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
+		return bulkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
 	}, nil)
 	controller.ExecuteBulkOperation(manager)
 
@@ -225,7 +225,7 @@ func TestRequestBuildController_ExecuteBulkOperationFailsManagerOnNonTransientEr
 		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			walkCh := make(chan *BulkStreamPathResult)
 			close(walkCh)
-			return walkCh, func() *SchedulingResult { return &SchedulingResult{Err: executeErr} }, nil
+			return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{Err: executeErr} }, nil
 		},
 		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 			cancelled = true
@@ -268,7 +268,7 @@ func TestRequestBuildController_ExecuteBulkOperationDoesNotFailManagerWhileShutt
 		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			walkCh := make(chan *BulkStreamPathResult)
 			close(walkCh)
-			return walkCh, func() *SchedulingResult { return &SchedulingResult{Err: interruptedErr} }, nil
+			return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{Err: interruptedErr} }, nil
 		},
 		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
 			t.Fatal("a shutting down builder must not cancel its bulk operations")
@@ -343,8 +343,8 @@ func TestRequestBuildController_ExecuteBulkOperationMergesRescheduleAcrossManage
 		return func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			walkCh := make(chan *BulkStreamPathResult)
 			close(walkCh)
-			return walkCh, func() *SchedulingResult {
-				return &SchedulingResult{Reschedule: true, Delay: delay, Err: err}
+			return walkCh, func() *BulkExecuteResult {
+				return &BulkExecuteResult{Reschedule: true, Delay: delay, Err: err}
 			}, nil
 		}
 	}
@@ -436,8 +436,8 @@ func TestRequestBuildController_ExecuteBulkOperationInterruptedDoesNotFailManage
 		func(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 			walkCh := make(chan *BulkStreamPathResult)
 			close(walkCh)
-			return walkCh, func() *SchedulingResult {
-				return &SchedulingResult{Err: fmt.Errorf("retrieve-session poll failed: %w", context.Canceled)}
+			return walkCh, func() *BulkExecuteResult {
+				return &BulkExecuteResult{Err: fmt.Errorf("retrieve-session poll failed: %w", context.Canceled)}
 			}, nil
 		},
 		func(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {

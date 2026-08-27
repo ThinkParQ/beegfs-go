@@ -155,9 +155,12 @@ func (c *requestBuildController) ExecuteBulkOperation(manager *bulkOperationMana
 		if result.Err != nil && !isTransientBulkError(result.Err) {
 			c.CancelBulkOperation(manager, result.Err)
 			c.failBulkOperation(manager, result.Err)
+			return
 		}
+
+		// Let controller know whether the bulk operation needs to reschedule.
 		if result.Reschedule && (c.result == nil || !c.result.Reschedule || result.Delay < c.result.Delay) {
-			c.result = result
+			c.result = &SchedulingResult{Reschedule: true, Delay: result.Delay}
 		}
 	})
 
@@ -232,12 +235,15 @@ func processWalkCh[T any](ctx context.Context, group *errgroup.Group, process fu
 // WaitForBulkOperations to ensure all in-flight work has completed. It is safe to call more than
 // once but will only return the results accumulated since requestBuildController's instantiation or
 // the previous GetResults call.
+//
+// The result never carries an error: everything the controller accumulates is either a reschedule or
+// a failure reported through another channel (WaitForWalk, WaitForBulkOperations, or the registry's
+// failed operations).
 func (c *requestBuildController) GetResults() (result *SchedulingResult, resumeToken string) {
 	result = &SchedulingResult{}
 	if c.result != nil {
 		result.Reschedule = c.result.Reschedule
 		result.Delay = c.result.Delay
-		result.Err = c.result.Err
 		c.result = nil
 	}
 	resumeToken = c.resumeToken

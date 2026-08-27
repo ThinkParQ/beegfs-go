@@ -190,13 +190,40 @@ type Provider interface {
 // Implementations must be safe to call concurrently.
 type SubmitRequestFn func(request *beeremote.JobRequest) error
 
+// SchedulingResult reports how a builder job ended.
 type SchedulingResult struct {
+	// Reschedule means nothing is wrong and the builder job simply has more to do. It is mutually
+	// exclusive with Err: setting both is a bug.
 	Reschedule bool
-	Delay      time.Duration
-	Err        error
+	// Delay is how long to wait before the rescheduled builder job runs again. It is only
+	// meaningful when Reschedule is set.
+	Delay time.Duration
+	// Err means the builder job cannot proceed at all and is reserved for systemic failures.
+	// Problems with an individual job request are counted on flex.BuilderJob by the submission
+	// itself and surface through the work status message, never here.
+	Err error
 }
 
-type BulkExecuteResultFn func() *SchedulingResult
+// BulkExecuteResult reports how a single bulk operation's execution ended.
+type BulkExecuteResult struct {
+	// Reschedule means nothing is wrong and the operation simply has more to do. The controller
+	// merges it into the parent builder job's SchedulingResult so the job runs again.
+	Reschedule bool
+	// Delay is how long to wait before the rescheduled builder job runs again. It is only
+	// meaningful when Reschedule is set. When several operations reschedule, the smallest delay
+	// wins.
+	Delay time.Duration
+	// Err fails this operation, not the builder job. The controller cancels the operation and marks
+	// it permanently failed. The error message will be added to the builder job. Err wins over
+	// Reschedule. Setting both is allowed here, unlike on SchedulingResult. An operation that has
+	// more to do, but cannot save that fact, is done anyway.
+	//
+	// A cancelled or timed out context is the one case that spares the operation. It is left as it
+	// was, so a later builder job can open it again and pick up where this one stopped.
+	Err error
+}
+
+type BulkExecuteResultFn func() *BulkExecuteResult
 type BulkExecuteFn func(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
 type BulkCancelResultFn func() error
 type BulkCancelFn func(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, getResults BulkCancelResultFn, err error)
@@ -208,11 +235,10 @@ type clientBulkOperation interface {
 	// for failures that should stop the parent builder job.
 	AddRequest(ctx context.Context, request *beeremote.JobRequest) error
 	// Execute starts a bulk operation for the currently accumulated requests. The returned
-	// getResults function must not return until walkCh has been closed, and it returns the
-	// reschedule details and any errors that occurred. err should only be returned when the builder
-	// job itself should fail. All other errors should be reported on walkCh with the relevant path
-	// so the request can reflect the failure.
-	//
+	// getResults function must not return until walkCh has been closed, and it reports the
+	// reschedule details and any error that ends this operation (see BulkExecuteResult). err should
+	// only be returned when the builder job itself should fail. All other errors should be reported
+	// on walkCh with the relevant path so the request can reflect the failure.
 	//
 	// Any paths that are ready may be sent to walkCh immediately so their requests can be
 	// submitted.

@@ -28,7 +28,7 @@ func (t *trackingBulkOperation) AddRequest(ctx context.Context, request *beeremo
 func (t *trackingBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 	walkCh := make(chan *BulkStreamPathResult)
 	close(walkCh)
-	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
+	return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
 }
 
 func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {

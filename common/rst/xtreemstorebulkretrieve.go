@@ -176,9 +176,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) Execute(ctx context.Context) (walkCh 
 		reschedule, delay, executeErr = m.execute(ctx, executeWalkCh)
 	})
 
-	getResults = func() *SchedulingResult {
+	getResults = func() *BulkExecuteResult {
 		wg.Wait()
-		return &SchedulingResult{
+		return &BulkExecuteResult{
 			Reschedule: reschedule,
 			Delay:      delay,
 			Err:        executeErr,

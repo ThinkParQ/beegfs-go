@@ -318,7 +318,7 @@ func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPath
 		walkCh <- &BulkStreamPathResult{Path: path}
 	}
 	close(walkCh)
-	return walkCh, func() *SchedulingResult { return &SchedulingResult{} }, nil
+	return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
 }
 
 func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
