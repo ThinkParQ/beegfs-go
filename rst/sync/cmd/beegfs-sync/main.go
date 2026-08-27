@@ -250,9 +250,16 @@ Using environment variables:
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-	jobServer.Stop()
+
+	// Shutdown is ordered so this node is never unreachable while it still has work to finish.
+	// Draining stops Remote from assigning new work but leaves the server listening, so Remote can
+	// still cancel or update what is already assigned here and is told this node is draining rather
+	// than inferring it from a refused connection. Only once the work manager has drained is the
+	// server actually stopped, and the Remote client is closed last because workers use it to report
+	// results and submit job requests right up until they return.
+	jobServer.Drain()
 	workMgr.Stop()
+	jobServer.Stop()
 	beeRemoteClient.Disconnect()
 	logger.Info("shutdown all components, exiting")
-
 }
