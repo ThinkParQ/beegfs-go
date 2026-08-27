@@ -113,10 +113,12 @@ func init() {
 }
 
 type Config struct {
-	PathDBPath          string `mapstructure:"path-db"`
-	RequestQueueDepth   int    `mapstructure:"request-queue-depth"`
-	MinJobEntriesPerRST int    `mapstructure:"min-job-entries-per-rst"`
-	MaxJobEntriesPerRST int    `mapstructure:"max-job-entries-per-rst"`
+	PathDBPath string `mapstructure:"path-db"`
+	// Deprecated: no longer used. Retained so configuration files that still set it continue to
+	// parse, because configuration is decoded with UnmarshalExact which rejects unknown keys.
+	RequestQueueDepth   int `mapstructure:"request-queue-depth"`
+	MinJobEntriesPerRST int `mapstructure:"min-job-entries-per-rst"`
+	MaxJobEntriesPerRST int `mapstructure:"max-job-entries-per-rst"`
 }
 
 type Manager struct {
@@ -125,34 +127,6 @@ type Manager struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 	config    Config
-	// Ready indicates the Manage() loop has been started and finished setting
-	// up all MapStores and their backing databases. Methods besides the
-	// Manage() loop must check the ready state before interacting with the
-	// MapStores. Before the Manage() loop terminates and closes connections to
-	// the databases it will update the ready state to ensure databases aren't
-	// closed out from under other methods.
-	ready bool
-	// readyMu is used to coordinate updating the ready state. Manage() will
-	// take a write lock before changing the ready state. Other methods should
-	// take a read lock before checking the ready state.
-	readyMu sync.RWMutex
-	// JobRequests is where external callers should submit requests that can be
-	// handled asynchronously by JobMgr. It is best suited for submitting jobs
-	// when no user is waiting on a response (i.e., in response to FS events).
-	// For interactive use cases (i.e., beegfs-ctl) the SubmitJobRequest method
-	// can be used directly to immediately create a job and return a response.
-	JobRequests chan<- *beeremote.JobRequest
-	// jobRequests is where goroutines manged by JobMgr listen for requests.
-	jobRequests <-chan *beeremote.JobRequest
-	// JobUpdates is where external callers should submit requests to update existing jobs.
-	JobUpdates chan<- *beeremote.UpdateJobsRequest
-	//jobUpdates is where goroutines manged by JobMgr listen for requests.
-	jobUpdates <-chan *beeremote.UpdateJobsRequest
-	// WorkResults is where work results from worker nodes should be sent.
-	// These updates are sent to JobMgr via the gRPC server.
-	WorkResults chan<- *flex.Work
-	// workResults is where goroutines managed by JobMgr listen for work results.
-	workResults <-chan *flex.Work
 	// pathStore is the store where entries for file system paths with jobs
 	// are kept. This store keeps a mapping of paths to Job(s). Note the inner
 	// map is a map of Job IDs to jobs (not RST IDs to jobs) so we can retain
@@ -185,15 +159,12 @@ func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
 	}
 }
 
-// NewManager initializes and returns a new Job manager and channels used to submit and update job requests.
+// NewManager initializes and returns a new Job manager. Start() must be called before the returned
+// Manager can be used.
 func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Manager, managerOpts ...managerOpt) *Manager {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	meter := log.Meter("job")
 	ctx, cancel := context.WithCancel(context.Background())
-	jobRequestChan := make(chan *beeremote.JobRequest, config.RequestQueueDepth)
-	jobUpdatesChan := make(chan *beeremote.UpdateJobsRequest, config.RequestQueueDepth)
-	workResultsChan := make(chan *flex.Work, config.RequestQueueDepth)
-
 	cfg := &managerOptConfig{
 		releaseUnusedFileLockFunc: getDefaultReleaseUnusedFileLock(ctx),
 	}
@@ -241,14 +212,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		ctx:                       ctx,
 		ctxCancel:                 cancel,
 		config:                    config,
-		ready:                     false,
 		workerManager:             workerManager,
-		JobRequests:               jobRequestChan,
-		jobRequests:               jobRequestChan,
-		JobUpdates:                jobUpdatesChan,
-		jobUpdates:                jobUpdatesChan,
-		WorkResults:               workResultsChan,
-		workResults:               workResultsChan,
 		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
 		metrics: managerMetrics{
 			jobRequests:     jobRequests,
@@ -280,113 +244,27 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	return m
 }
 
-// Start handles initializing all databases and starting a goroutine that
-// handles job requests. It returns an error if there were any issues on setup,
-// otherwise it returns nil to indicate the manager is ready to accept requests.
-// Additional calls to manage while the Manager is already started will return
-// an error. Use Stop() to shutdown a running manager.
+// Start initializes the path database, then starts a goroutine running the scheduler that syncs
+// files with their remote targets once their cooldown period expires. The goroutine closes the path
+// database when the manager is stopped.
 func (m *Manager) Start() error {
-
-	m.readyMu.Lock()
-	if m.ready {
-		return fmt.Errorf("job manager is already running")
-	}
-
-	// If anything goes wrong we want to execute all deferred functions
-	// immediately to cleanup anything that did get initialized correctly. If we
-	// startup normally then we don't want to execute deferred functions until
-	// we're shutting down.
-	executeDefersImmediately := true
-	deferredFuncs := []func() error{}
-	defer func() {
-		if executeDefersImmediately {
-			// Deferred function calls should happen LIFO.
-			for i := len(deferredFuncs) - 1; i >= 0; i-- {
-				if err := deferredFuncs[i](); err != nil {
-					m.log.Error("encountered an error aborting JobMgr startup", zap.Error(err))
-				}
-			}
-		}
-	}()
-
-	// We initialize databases in Manage() so we can ensure the DBs are closed properly when shutting down.
 	pathDBOpts := badger.DefaultOptions(m.config.PathDBPath)
 	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log.Logger))
 	pathStore, closePathDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
 	if err != nil {
 		return fmt.Errorf("unable to setup paths DB: %w", err)
 	}
-	deferredFuncs = append(deferredFuncs, closePathDB)
 	m.pathStore = pathStore
 
-	m.ready = true
-	m.readyMu.Unlock()
-	executeDefersImmediately = false
-
-	// Start a separate goroutine that will handle closing the databases when
-	// the Manager shuts down.
-	m.wg.Add(1)
-	go func() {
-
-		defer func() {
-			m.log.Info("shutting down because the app is shutting down")
-			m.readyMu.Lock()
-			m.ready = false
-			m.readyMu.Unlock()
-
-			// Deferred function calls should happen LIFO.
-			for i := len(deferredFuncs) - 1; i >= 0; i-- {
-				if err := deferredFuncs[i](); err != nil {
-					m.log.Error("encountered an error shutting down JobMgr", zap.Error(err))
-				}
-			}
-			m.wg.Done()
-		}()
-
-		m.log.Info("now accepting job requests and work responses")
-		// TODO: https://github.com/ThinkParQ/bee-remote/issues/11.
-		//
-		// Decide if this is still needed and consider removing. If it is kept consider using a pool
-		// of goroutines to process job requests and work responses.
-		for {
-			select {
-			case <-m.ctx.Done():
-				return
-			case jobRequest := <-m.jobRequests:
-				response, err := m.SubmitJobRequest(jobRequest)
-				if err != nil {
-					m.log.Error("error submitting job request", zap.Error(err), zap.Any("jobRequest", jobRequest))
-				} else {
-					m.log.Debug("submitted job request", zap.Any("response", response))
-				}
-			case jobUpdate := <-m.jobUpdates:
-				response, err := m.UpdateJobs(jobUpdate)
-				if err != nil {
-					m.log.Error("error updating job request", zap.Error(err), zap.Any("jobUpdate", jobUpdate))
-				} else {
-					m.log.Debug("updated job request", zap.Any("response", response))
-				}
-			case workResult := <-m.workResults:
-				err := m.UpdateWork(workResult)
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
-				// Once we are using a journal to keep track of job results, it needs to be updated
-				// depending if the update was successful or not (this will likely be unneeded
-				// depending on the outcome of #11.
-				if err != nil {
-					m.log.Error("error updating job with work result", zap.Error(err), zap.Any("workResult", workResult))
-				} else {
-					m.log.Debug("processed work result", zap.Any("workResult", workResult))
-				}
-			}
-		}
-	}()
-
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.log.Info("now accepting job requests and work responses")
+	m.wg.Go(func() {
+		// Run blocks until m.ctx is cancelled.
 		m.pendingSync.Run(m.ctx)
-	}()
-
+		m.log.Info("shutting down because the app is shutting down")
+		if err := closePathDB(); err != nil {
+			m.log.Error("encountered an error shutting down JobMgr", zap.Error(err))
+		}
+	})
 	return nil
 }
 
@@ -543,12 +421,6 @@ func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest
 
 	defer close(responses)
 
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return fmt.Errorf("unable to get jobs (JobMgr is not ready)")
-	}
-
 	getJobResults := func(job *Job) *beeremote.JobResult {
 		workRequests := make([]*flex.WorkRequest, 0)
 		workResults := make([]*beeremote.JobResult_WorkResult, 0)
@@ -672,11 +544,6 @@ func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest
 // If the response is not nil the status of the overall job and individual work requests should be
 // reviewed to troubleshoot as errors are more general to guide the user on broad recovery steps.
 func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResult, error) {
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return nil, fmt.Errorf("unable to get jobs (JobMgr is not ready)")
-	}
 
 	job, err := New(jr)
 	if err != nil {
@@ -788,16 +655,21 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 
 	}
 
-	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
-	if !ok {
-		return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
-	}
-
+	var rstClient rst.Provider
 	var jobSubmission workermgr.JobSubmission
-	if jr.GenerationStatus != nil {
-		status := jr.GenerationStatus
-		if status != nil {
-			switch status.State {
+	if jr.HasGenerationStatus() {
+		status := jr.GetGenerationStatus()
+		if _, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+			// A FAILED_PRECONDITION with an unknown rstId means the builder encountered a file
+			// whose RST config references an rstId that no longer exists (or never did). Treat it
+			// as ErrJobFailedPrecondition so the job gets the error rather than rejected.
+			if status.GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
+				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+			} else {
+				return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+			}
+		} else {
+			switch status.GetState() {
 			case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE:
 				// ParseDataTime will return the parsed mtime or a zero-mtime. Either way we should
 				// mark the job as complete so ignore the err.
@@ -814,6 +686,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 			}
 		}
 	} else {
+		var ok bool
+		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+		}
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
 	}
 
@@ -850,8 +726,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 				status.State = beeremote.Job_COMPLETED
 				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
 
-				var mtimeErr *rst.MtimeErr
-				if errors.As(err, &mtimeErr) {
+				if mtimeErr, ok := errors.AsType[*rst.MtimeErr](err); ok {
 					pbMtime := timestamppb.New(mtimeErr.Mtime())
 					job.SetStartMtime(pbMtime)
 					job.SetStopMtime(pbMtime)
@@ -907,8 +782,32 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest) (*beeremote.JobResu
 	// the job from being scheduled before trying again.
 	pathEntry.Value[job.GetId()] = job
 	job.WorkResults, job.Status, err = m.workerManager.SubmitJob(jobSubmission)
-	if !isTerminalState(job.GetStatus().GetState()) {
-		m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(job.GetStatus().GetState())), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+
+	status := job.GetStatus()
+	state := status.GetState()
+	message := status.GetMessage()
+	switch state {
+	case beeremote.Job_FAILED:
+		// All work requests are cancelled so it is safe to cancel the job.
+		if completeErr := job.Complete(m.ctx, rstClient, true); completeErr != nil {
+			job.Status.SetMessage(appendMessage(message, "error requesting the RST abort this job (cancel the job to try again): "+completeErr.Error()))
+		} else {
+			job.Status.SetState(beeremote.Job_CANCELLED)
+			job.Status.SetMessage(appendMessage(message, "successfully aborted"))
+			if !job.Request.HasBuilder() {
+				if lockErr := m.releaseUnusedFileLockFunc(job.Request.GetPath(), pathEntry.Value); lockErr != nil {
+					job.Status.SetState(beeremote.Job_FAILED)
+					job.Status.SetMessage(appendMessage(message, "unable to clear lock: "+lockErr.Error()))
+				}
+			}
+		}
+	case beeremote.Job_UNKNOWN:
+		// One or more work requests could not be cancelled so a worker may still be acting on this
+		// path; so don't abort the job.
+	default:
+		if !isTerminalState(state) {
+			m.metrics.jobActive.Add(context.Background(), 1, metric.WithAttributes(attrState.String(jobStateString(state)), attrRSTID.Int(int(job.Request.GetRemoteStorageTarget()))))
+		}
 	}
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/11
@@ -941,12 +840,6 @@ func (m *Manager) UpdatePaths(ctx context.Context, request *beeremote.UpdatePath
 
 	defer close(responses)
 
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return fmt.Errorf("unable to update paths (JobMgr is not ready)")
-	}
-
 	// Similar approach as used to get the results for multiple paths.
 	nextEntry, cleanupEntries, err := m.pathStore.GetEntries(kvstore.WithKeyPrefix(request.GetPathPrefix()))
 	if err != nil {
@@ -954,28 +847,28 @@ func (m *Manager) UpdatePaths(ctx context.Context, request *beeremote.UpdatePath
 	}
 	defer cleanupEntries()
 
-sendResponses:
-	for {
-		select {
-		case <-ctx.Done():
-			break sendResponses
-		default:
-			entry, err := nextEntry()
-			if err != nil {
-				return err
-			}
-			if entry == nil {
-				break sendResponses
-			}
-			request.GetRequestedUpdate().SetPath(entry.Key)
-			resp, err := m.UpdateJobs(request.GetRequestedUpdate())
-			if err != nil {
-				return err
-			}
-			responses <- beeremote.UpdatePathsResponse_builder{
+	for ctx.Err() == nil {
+		entry, err := nextEntry()
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			break
+		}
+
+		request.GetRequestedUpdate().SetPath(entry.Key)
+		resp, err := m.UpdateJobs(request.GetRequestedUpdate())
+		if err != nil {
+			return err
+		}
+
+		if ctx.Err() == nil {
+			select {
+			case <-ctx.Done():
+			case responses <- &beeremote.UpdatePathsResponse{
 				Path:         entry.Key,
-				UpdateResult: resp,
-			}.Build()
+				UpdateResult: resp}:
+			}
 		}
 	}
 	return nil
@@ -1019,12 +912,6 @@ sendResponses:
 //	COMPLETED => DELETE / CANCEL // only if ForceUpdate==true
 //	OFFLOADED => DELETE / CANCEL // only if ForceUpdate==true
 func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote.UpdateJobsResponse, error) {
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return nil, fmt.Errorf("unable to get jobs (JobMgr is not ready)")
-	}
-
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_UNSPECIFIED {
 		return nil, fmt.Errorf("no new job state specified (probably this indicates a bug in the caller)")
 	}
@@ -1067,12 +954,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		err := m.releaseUnusedFileLockFunc(jobUpdate.GetPath(), pathEntry.Value)
 		if err != nil {
 			response.SetOk(false)
-			message := "unable to clear lock: " + err.Error()
-			if response.Message != "" {
-				response.SetMessage(fmt.Sprintf("%s; %s", response.Message, message))
-			} else {
-				response.SetMessage(message)
-			}
+			response.SetMessage(appendMessage(response.Message, "unable to clear lock: "+err.Error()))
 		}
 	}()
 
@@ -1086,7 +968,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		// from some other job, don't overwrite it:
 		response.SetOk(success && response.GetOk())
 		if newMessage != "" {
-			response.SetMessage(response.GetMessage() + "; " + newMessage)
+			response.SetMessage(appendMessage(response.GetMessage(), newMessage))
 		}
 		// Only if the user requested a deletion and the job is safe to delete mark it for deletion:
 		if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && safeToDelete {
@@ -1275,11 +1157,11 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if !ok {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
-				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
+				status.SetMessage(appendMessage(status.GetMessage(), "unable to request the RST abort this job because the specified RST no longer exists (ignoring because this is a forced update)"))
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
-			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
+			status.SetMessage(appendMessage(status.GetMessage(), "unable to request the RST abort this job because the specified RST no longer exists (add it back or force the update to cancel the job anyway)"))
 			return false, false, ""
 		}
 
@@ -1287,16 +1169,16 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if err != nil {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
-				status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (ignoring because this is a forced update): " + err.Error()))
+				status.SetMessage(appendMessage(status.GetMessage(), "error requesting the RST abort this job (ignoring because this is a forced update): "+err.Error()))
 				return true, true, ""
 			}
 			status.SetState(beeremote.Job_FAILED)
-			status.SetMessage(status.GetMessage() + (status.GetMessage() + "; error requesting the RST abort this job (try again or force the update to cancel the job anyway): " + err.Error()))
+			status.SetMessage(appendMessage(status.GetMessage(), "error requesting the RST abort this job (try again or force the update to cancel the job anyway): "+err.Error()))
 			return false, false, ""
 		}
 
 		status.SetState(beeremote.Job_CANCELLED)
-		status.SetMessage(status.GetMessage() + "; successfully requested the RST abort this job")
+		status.SetMessage(appendMessage(status.GetMessage(), "successfully requested the RST abort this job"))
 		m.log.Debug("successfully updated job", zap.Any("job", job))
 		return true, true, ""
 	}
@@ -1361,7 +1243,29 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	allSameState := true
 	for _, workResult := range job.WorkResults {
 		if !workResult.InTerminalState() && !workResult.RequiresUserIntervention() {
-			// Don't do anything else if all work requests haven't reached a terminal state or aren't failed.
+
+			if entryToUpdate.Status().GetState() == flex.Work_RUNNING {
+				status := job.GetStatus()
+				status.SetState(beeremote.Job_RUNNING)
+				status.SetUpdated(timestamppb.Now())
+
+				switch job.Request.WhichType() {
+				case beeremote.JobRequest_Builder_case:
+					// Builder jobs only ever have one work request, so workResult == entryToUpdate
+					// here. If that changes, this is unstable: map iteration order isn't fixed, and
+					// we return on the first running result found, so the message shown may not be
+					// from the work result that was just updated.
+					builderStatus := workResult.WorkResult.GetStatus()
+					status.SetMessage(builderStatus.Message)
+				default:
+					// Don't do anything else if all work requests haven't reached a terminal state
+					// or aren't failed. Reflect active execution once any worker reports progress,
+					// but don't finalize job state until all work requests have finished or need
+					// intervention.
+					status.SetMessage("one or more work requests are in progress")
+				}
+			}
+
 			return nil
 		}
 		// Verify all work requests have reached the same terminal state.
@@ -1398,24 +1302,10 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		if !job.InActiveState() {
 			if err := m.releaseUnusedFileLockFunc(workResult.GetPath(), pathEntry.Value); err != nil {
 				status.SetState(beeremote.Job_FAILED)
-				message := "unable to clear lock: " + err.Error()
-				if status.Message != "" {
-					status.SetMessage(fmt.Sprintf("%s; %s", status.Message, message))
-				} else {
-					status.SetMessage(message)
-				}
+				status.SetMessage(appendMessage(status.Message, "unable to clear lock: "+err.Error()))
 			}
 		}
 	}()
-
-	// This might happen if WRs could complete on some nodes, but not on other nodes. This could be
-	// due to some worker nodes having an issue uploading their segments to the RST, or a user
-	// cancelling the job partway through while some WRs are complete and others are still running.
-	if !allSameState {
-		status.SetState(beeremote.Job_UNKNOWN)
-		status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
-		return nil
-	}
 
 	rst, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
 	if !ok {
@@ -1424,6 +1314,21 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		// nothing we can do unless they were to add it back.
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage(fmt.Sprintf("unable to complete job because the RST no longer exists: %d (add it back or manually cleanup any artifacts from this job)", job.Request.GetRemoteStorageTarget()))
+		return nil
+	}
+
+	// This might happen if WRs could complete on some nodes, but not on other nodes. This could be
+	// due to some worker nodes having an issue uploading their segments to the RST, or a user
+	// cancelling the job partway through while some WRs are complete and others are still running.
+	if !allSameState {
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			status.SetState(beeremote.Job_UNKNOWN)
+			status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 		return nil
 	}
 
@@ -1459,17 +1364,29 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			attemptToClearLock = true
 		}
 	case flex.Work_FAILED:
-		// Something that went wrong that requires user intervention. We don't know what so don't
-		// try to complete or abort the request as it may make it more difficult to recover.
-		status.SetState(beeremote.Job_FAILED)
-		status.SetMessage("job cannot continue without user intervention (see work results for details)")
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			// Something that went wrong that requires user intervention. We don't know what so don't
+			// try to complete or abort the request as it may make it more difficult to recover.
+			status.SetState(beeremote.Job_FAILED)
+			status.SetMessage("job cannot continue without user intervention (see work results for details): " + err.Error())
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 	default:
-		status.SetState(beeremote.Job_UNKNOWN)
-		status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
-		// We return an error here because this is an internal problem that shouldn't happen and
-		// hopefully a test will catch it. Most likely some new terminal states were added and this
-		// function needs to be updated.
-		return fmt.Errorf("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior): %s", entryToUpdate.Status().GetState())
+		if err := job.Complete(m.ctx, rst, false); err != nil {
+			status.SetState(beeremote.Job_UNKNOWN)
+			status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
+			// We return an error here because this is an internal problem that shouldn't happen and
+			// hopefully a test will catch it. Most likely some new terminal states were added and this
+			// function needs to be updated.
+			return fmt.Errorf("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior): %s", entryToUpdate.Status().GetState())
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("job failed but has been cancelled by client (see work results for details)")
+			attemptToClearLock = true
+		}
 	}
 	m.log.Debug("job result", zap.Any("job", job))
 	return nil
@@ -1557,11 +1474,6 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs
 }
 
 func (m *Manager) GetRSTConfig() ([]*flex.RemoteStorageTarget, error) {
-	m.readyMu.RLock()
-	defer m.readyMu.RUnlock()
-	if !m.ready {
-		return nil, fmt.Errorf("unable to get RST config (JobMgr is not ready)")
-	}
 	rstConfigs := []*flex.RemoteStorageTarget{}
 	for _, client := range m.workerManager.RemoteStorageTargets {
 		rstConfigs = append(rstConfigs, client.GetConfig())
@@ -1574,17 +1486,6 @@ func (m *Manager) GetStubContents(path string) (uint32, string, error) {
 }
 
 func (m *Manager) Stop() {
-
-	m.readyMu.Lock()
-	if !m.ready {
-		m.readyMu.Unlock()
-		return // Nothing to do.
-	}
-	m.readyMu.Unlock()
-
-	// Canceling the manager's context initiates the shutdown process. During this process, the manager updates the
-	// m.ready flag while holding the readyMu lock. Any further attempts to acquire the readyMu lock after this point
-	// can lead to a deadlock.
 	m.ctxCancel()
 	m.wg.Wait()
 	if m.pendingSyncGaugeReg != nil {

@@ -87,6 +87,7 @@ func TestEncodeDecodeWorkResults(t *testing.T) {
 		"entity_tag":      protoreflect.StringKind,
 		"checksum_sha256": protoreflect.StringKind,
 		"completed":       protoreflect.BoolKind,
+		"started":         protoreflect.BoolKind,
 	}
 	checkMessageFields(flex.Work_Part_builder{}.Build().ProtoReflect().Descriptor().Fields(), expectedPartsFields)
 }
