@@ -329,7 +329,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	}
 
 	nextPriorityTokensChan := m.scheduler.GetNextPriorityTokenChan()
-	for {
+	for m.mgrCtx.Err() == nil {
 		select {
 		case <-m.mgrCtx.Done():
 			return
@@ -1002,12 +1002,106 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	return workResult, nil
 }
 
+// shutdownProgressInterval keeps a quick shutdown quiet without letting a slow one look hung.
+const shutdownProgressInterval = 2 * time.Second
+
+// reportShutdownProgress logs what is still holding the shutdown open until the returned function is
+// called. Cancelling the workers does not stop work already underway - each path in flight keeps a
+// grace period, and extends it while it makes progress - so a stop can sit for a while with nothing
+// to show for it. It keeps reporting after the paths drain, since a worker's own teardown can block
+// too and silence there is indistinguishable from a hang.
+func (m *Manager) reportShutdownProgress() func() {
+	startedAt := time.Now()
+	initial := rst.GetCollectiveCancellationDelayStat()
+	if initial.InFlight == 0 {
+		return func() {}
+	}
+	m.log.Info("waiting for in flight work to wind down", zap.Int("pathsInFlight", initial.InFlight))
+
+	// Only the reporting goroutine writes drainedAt; waiting on it is what publishes it.
+	var drainedAt time.Time
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		ticker := time.NewTicker(shutdownProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+
+			stat := rst.GetCollectiveCancellationDelayStat()
+			if stat.InFlight == 0 {
+				// The paths are done but the stop is not, so say so rather than going quiet.
+				if drainedAt.IsZero() {
+					drainedAt = time.Now()
+					m.log.Info("in flight work drained, waiting for workers to stop",
+						zap.Int("pathsDrained", initial.InFlight),
+						zap.Duration("drainTook", drainedAt.Sub(startedAt).Round(time.Millisecond)))
+					continue
+				}
+				m.log.Info("waiting for workers to stop",
+					zap.Duration("sincePathsDrained", time.Since(drainedAt).Round(time.Second)))
+				continue
+			}
+
+			fields := []zap.Field{
+				zap.Int("pathsDone", max(0, initial.InFlight-stat.InFlight)),
+				zap.Int("pathsInFlight", stat.InFlight),
+				zap.Int("pathsWindingDown", stat.InGrace),
+				zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)),
+			}
+			if stat.AverageCheckpointDuration > 0 {
+				fields = append(fields, zap.Duration("pacePerStep", stat.AverageCheckpointDuration.Round(time.Millisecond)))
+			}
+			if stat.AverageGraceDuration > 0 {
+				fields = append(fields, zap.Duration("windDownPerPath", stat.AverageGraceDuration.Round(time.Millisecond)))
+			}
+			if stat.AverageCompletionInterval > 0 {
+				// Paths left over how fast they are actually finishing, so whatever parallelism the
+				// drain achieves is already in it. This is the figure to watch: the deadline below
+				// only says how long they are permitted to take.
+				fields = append(fields,
+					zap.Duration("perPathCompletion", stat.AverageCompletionInterval.Round(time.Millisecond)),
+					zap.Duration("expectedIn", max(0, time.Until(stat.EstimatedTime)).Round(time.Second)))
+			}
+			if !stat.LatestDeadline.IsZero() {
+				// When the paths would be let go if none made further progress. It receding says
+				// steps are still finishing; it sitting still is the sign to investigate.
+				fields = append(fields,
+					zap.Duration("deadlineIn", max(0, time.Until(stat.LatestDeadline)).Round(time.Second)))
+			}
+			m.log.Info("waiting for in flight work to wind down", fields...)
+		}
+	})
+
+	return func() {
+		close(done)
+		wg.Wait()
+		fields := []zap.Field{
+			zap.Int("pathsDrained", initial.InFlight),
+			zap.Duration("took", time.Since(startedAt).Round(time.Millisecond)),
+		}
+		if !drainedAt.IsZero() {
+			// Separating the two says whether the time went into letting work finish or the
+			// teardown after it.
+			fields = append(fields, zap.Duration("pathDrainTook", drainedAt.Sub(startedAt).Round(time.Millisecond)))
+		}
+		m.log.Info("workers stopped", fields...)
+	}
+}
+
 func (m *Manager) Stop() {
 	m.log.Info("stopping workers")
 	m.workerCancel()
+	// Cancelling the workers starts the grace periods, so reporting begins here.
+	stopProgressReports := m.reportShutdownProgress()
 	// Wait until all workers are stopped before shutting down the manager which will automatically
 	// cleanup all shared resources (DB, RST/BeeRemote clients, etc).
 	m.workerWG.Wait()
+	stopProgressReports()
 	m.log.Info("stopped all workers, attempting stop manager")
 	m.mgrCancel()
 	m.mgrWG.Wait()

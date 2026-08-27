@@ -139,10 +139,7 @@ type worker struct {
 }
 
 func (w *worker) run(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
@@ -161,7 +158,13 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 	// Regardless if the work request was processed successfully, tell WorkMgr when we stop
 	// processing this work item so it can pull more work into the queue.
 	defer func() {
-		w.completedWork <- work.workIdentifier
+		if shutdownCtx.Err() != nil {
+			return
+		}
+		select {
+		case w.completedWork <- work.workIdentifier:
+		case <-shutdownCtx.Done():
+		}
 	}()
 
 	if work.ctx.Err() != nil {
@@ -504,8 +507,10 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 	delay := 1 * time.Second
 
 	for {
-		// Detached from ctx so cancelling it cannot abort an attempt that is already in flight and
-		// leave the outcome unknown.
+		// Detached from ctx so cancelling it cannot abort an attempt already in flight and leave the
+		// outcome unknown, and bounded so a remote that has stopped answering cannot wedge one
+		// forever. The path being built already holds a delayed context, so a submission in flight
+		// during a shutdown is accounted for without needing one of its own.
 		submitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), builderJobSubmissionTimeout)
 		err := w.beeRemoteClient.SubmitJobRequest(submitCtx, request)
 		cancel()
