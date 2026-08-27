@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/stretchr/testify/mock"
@@ -48,10 +49,20 @@ func (n *MockNode) disconnect() error {
 func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
+	if state := n.GetState(); state != ONLINE {
+		if state == DRAINING {
+			return nil, ErrNodeDraining
+		}
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
 	args := n.Called(request)
+
+	// A mock node simulates draining by returning ErrNodeDraining, which is handled the same way
+	// BeeSyncNode handles it.
+	if errors.Is(args.Error(1), ErrNodeDraining) {
+		n.setState(DRAINING)
+		return nil, ErrNodeDraining
+	}
 
 	if args.Error(1) != nil {
 		select {
@@ -82,8 +93,9 @@ func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 func (n *MockNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
-		return nil, fmt.Errorf("unable to submit work request to an offline node")
+	// Matches BeeSyncNode: work already assigned to a draining node can still be updated.
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
+		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
 	args := n.Called(request)
 
