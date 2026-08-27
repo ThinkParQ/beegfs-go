@@ -1,6 +1,7 @@
 package workermgr
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -54,59 +55,42 @@ func (p *Pool) StopAll() {
 	}
 }
 
+const (
+	assignStartupRetries = 3
+	assignRetryInterval  = 1 * time.Second
+)
+
 // assignToLeastBusyWorker assigns the work request to the least busy node in the pool. It returns
 // the ID of the assigned node and the response from the node, or an error if the request could not
 // be assigned to a node. Note errors always mean the request was not assigned to a node, and the
 // caller is not expected to try and cancel or otherwise cleanup the request.
 func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest) (string, *flex.Work, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	poolSize := len(p.nodes)
-
-	if poolSize == 0 {
-		return "", nil, fmt.Errorf("unable to assign work request to the %s node pool: %w", p.nodeType, ErrNoWorkersInPool)
-	}
 
 	var multiErr types.MultiError
 
-	// If no workers are connected we'll wait a bit then retry.
-	// When first starting it can take time for all nodes to connect.
-	for i := 0; i <= 3; i++ {
-		// Don't retry more times than the number of workers in the pool. It could
-		// be all workers are disconnected.
-		for range poolSize {
-			if p.nodes[p.next].GetState() == worker.ONLINE {
-				assignedWorker := p.nodes[p.next].GetID()
-				work, err := p.nodes[p.next].SubmitWork(wr)
-
-				if err != nil {
-					errWithWorker := fmt.Errorf("node: %s - error: %w", assignedWorker, err)
-					multiErr.Errors = append(multiErr.Errors, errWithWorker)
-					// If that worker is disconnected or there was an error
-					// sending try the next.
-					p.next = (p.next + 1) % poolSize
-					continue
-				}
-
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/7.
-				// Implement a more advanced mechanism to get the least busy worker
-				// in the pool. For now we'll just assign work requests round robin
-				// so just advance the next cursor wrapping around if needed.
-				// However this will usually lead to imbalanced utilization as work
-				// requests are expected to take varying times to complete.
-				//
-				// Ideally move to a weighted system that takes into consideration
-				// the size of the work request.
-				p.next = (p.next + 1) % poolSize
-				return assignedWorker, work, nil
-			} else {
-				p.next = (p.next + 1) % poolSize
-			}
-
+	for i := 0; ; i++ {
+		candidates, poolSize, stillStarting := p.assignmentCandidates()
+		if poolSize == 0 {
+			return "", nil, fmt.Errorf("unable to assign work request to the %s node pool: %w", p.nodeType, ErrNoWorkersInPool)
 		}
-		// If no workers are connected sleep and retry.
-		time.Sleep(1 * time.Second)
+
+		for _, node := range candidates {
+			work, err := node.SubmitWork(wr)
+			if err == nil {
+				return node.GetID(), work, nil
+			}
+			if errors.Is(err, worker.ErrNodeDraining) {
+				continue
+			}
+			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("node: %s - error: %w", node.GetID(), err))
+		}
+
+		// The work was not accepted by any of the nodes. Retry only when a node was has not come
+		// online for the first time.
+		if !stillStarting || i >= assignStartupRetries {
+			break
+		}
+		time.Sleep(assignRetryInterval)
 	}
 
 	if len(multiErr.Errors) > 0 {
@@ -114,6 +98,46 @@ func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest) (string, *flex.Work
 	}
 
 	return "", nil, fmt.Errorf("unable to assign to the %s pool: %w", p.nodeType, ErrNoWorkersConnected)
+}
+
+// assignmentCandidates returns the nodes that may be offered a work request, in the order they
+// should be tried, along with the total pool size and whether any node has yet to connect for the
+// first time. It advances the round robin cursor so concurrent submissions start from different
+// nodes.
+func (p *Pool) assignmentCandidates() (candidates []worker.Worker, poolSize int, stillStarting bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	poolSize = len(p.nodes)
+	if poolSize == 0 {
+		return nil, 0, false
+	}
+
+	// TODO: https://github.com/ThinkParQ/bee-remote/issues/7.
+	// Implement a more advanced mechanism to get the least busy worker in the pool. For now we'll
+	// just assign work requests round robin so just advance the next cursor wrapping around if
+	// needed. However this will usually lead to imbalanced utilization as work requests are expected
+	// to take varying times to complete.
+	//
+	// Ideally move to a weighted system that takes into consideration the size of the work request.
+	start := p.next
+	p.next = (p.next + 1) % poolSize
+
+	for i := range poolSize {
+		node := p.nodes[(start+i)%poolSize]
+		switch node.GetState() {
+		case worker.ONLINE:
+			candidates = append(candidates, node)
+		case worker.UNKNOWN:
+			// Technically, workers that are offline could also come back online but don't retry for
+			// them since their connection handler's retry is based on an exponential backoff delay
+			// which is mostly likely MaxReconnectBackoff (user configurable) and likely on the
+			// order of minutes.
+			stillStarting = true
+		}
+	}
+
+	return candidates, poolSize, stillStarting
 }
 
 // updateWorkRequest on node takes a jobID and a work result representing a

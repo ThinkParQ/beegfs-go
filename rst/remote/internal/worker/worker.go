@@ -118,10 +118,32 @@ type baseNode struct {
 type State string
 
 const (
+	// UNKNOWN is the state of a node that has never connected.
 	UNKNOWN State = "unknown"
 	OFFLINE State = "offline"
 	ONLINE  State = "online"
+	// DRAINING nodes are reachable and still finishing the work they were assigned, but will not
+	// accept any new work.
+	DRAINING State = "draining"
 )
+
+func (n *baseNode) heartbeatState(resp *flex.HeartbeatResponse) State {
+	switch resp.GetState() {
+	case flex.HeartbeatResponse_DRAINING:
+		return DRAINING
+	case flex.HeartbeatResponse_READY:
+		return ONLINE
+	case flex.HeartbeatResponse_NOT_READY:
+		return OFFLINE
+	default:
+		// Worker nodes predating HeartbeatResponse.State will be UNSPECIFIED in which case the
+		// deprecated IsReady flag is the only thing they can tell us.
+		if resp.GetIsReady() {
+			return ONLINE
+		}
+		return OFFLINE
+	}
+}
 
 func (n *baseNode) setState(state State) {
 	n.stateMu.Lock()
@@ -165,7 +187,9 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 	// Set to true if the handler was stopped.
 	done := false
 	for {
-		if n.GetState() == OFFLINE {
+		// Any state other than ONLINE means we are not connected: UNKNOWN on the first pass because
+		// the node has never connected, OFFLINE on every pass after a disconnect.
+		if n.GetState() != ONLINE {
 			if n.connectLoop(config, wrUpdates, requiredFeatures) {
 				n.setState(ONLINE)
 			connectedLoop:
@@ -195,7 +219,28 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 						if err != nil {
 							n.log.Error("failed to receive heartbeat response from node, placing offline and attempting to reconnect", zap.Error(err))
 							break connectedLoop
-						} else if !resp.GetIsReady() {
+						}
+						switch n.heartbeatState(resp) {
+						case DRAINING:
+							// Deliberately stay in this loop. A draining node is shutting down
+							// cleanly and we want to keep the connection so outstanding requests
+							// can still be cancelled or updated, and so we notice when it does go
+							// away. The pool stops assigning it new work as soon as the state is
+							// set.
+							if n.GetState() != DRAINING {
+								n.log.Info("node reports it is draining, no new work requests will be assigned to it")
+								n.setState(DRAINING)
+							}
+						case ONLINE:
+							if n.GetState() == DRAINING {
+								// Only reachable if a node reports draining then reports ready
+								// again without ever becoming unreachable. Not expected during
+								// shutdown, but recovering is harmless and better than staying
+								// unusable.
+								n.log.Info("node is no longer draining, resuming work request assignment")
+								n.setState(ONLINE)
+							}
+						default:
 							n.log.Error("received a heartbeat response but the node is not ready, placing offline and attempting to update its configuration")
 							break connectedLoop
 						}
