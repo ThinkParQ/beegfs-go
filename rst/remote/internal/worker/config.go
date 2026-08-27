@@ -133,7 +133,7 @@ func newWorkerNodeFromConfig(log *zap.Logger, config Config) (Worker, error) {
 
 	baseNode := &baseNode{
 		config:     config,
-		State:      OFFLINE,
+		State:      UNKNOWN,
 		nodeCtx:    nodeCtx,
 		nodeCancel: nodeCancel,
 		rpcWG:      &sync.WaitGroup{},

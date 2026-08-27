@@ -141,7 +141,10 @@ func (n *BeeSyncNode) disconnect() error {
 func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
+	if state := n.GetState(); state != ONLINE {
+		if state == DRAINING {
+			return nil, ErrNodeDraining
+		}
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
 
@@ -176,6 +179,15 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 		}
 		return nil, err
 	}
+
+	if resp.GetStatus() == flex.SubmitWorkResponse_DRAINING {
+		if n.GetState() != DRAINING {
+			n.log.Info("node refused a work request because it is draining, no new work requests will be assigned to it")
+			n.setState(DRAINING)
+		}
+		return nil, ErrNodeDraining
+	}
+
 	return resp.GetWork(), nil
 }
 
@@ -189,8 +201,9 @@ func (n *BeeSyncNode) reportError(err error) {
 func (n *BeeSyncNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
-		return nil, fmt.Errorf("unable to submit work request to an offline node")
+
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
+		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
 
 	var resp *flex.UpdateWorkResponse
