@@ -378,7 +378,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 		return nil, ErrJobAlreadyHasExternalID
 	}
 
-	ctx, cancel := WithCancellationDelay(workCtx, time.Minute)
+	ctx, cancel, _ := WithCancellationDelay(workCtx, time.Minute)
 	defer cancel()
 
 	undoAppliedPlan := noopUndo

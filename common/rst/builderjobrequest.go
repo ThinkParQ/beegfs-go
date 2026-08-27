@@ -77,13 +77,28 @@ func (w *jobRequestBuilder) initSetRstConfig() {
 	}
 }
 
+const (
+	// builderStepGrace bounds how long any single step of processing one path may keep running
+	// after the builder job's context is cancelled. Each step checkpoints before it starts, so a
+	// path that keeps making progress keeps earning time while a path wedged on a single meta or
+	// remote operation is cut loose promptly. What bounds the total is that the steps below are
+	// finite: one per path, one per rstId it fans out to, and the cleanup that follows.
+	builderStepGrace = 30 * time.Second
+	// builderCleanupGrace is granted to work that must finish to avoid leaving an entry in a bad
+	// state: rolling back an applied plan, releasing a generated external id, and clearing a
+	// path's content access lock. Cleanup gets its own window because by the time it runs the
+	// forward steps may have already exhausted their grace, and abandoning it strands a modified
+	// entry, leaks remote state, or leaves a lock that blocks later jobs for that path.
+	builderCleanupGrace = 30 * time.Second
+)
+
 func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	ctx context.Context,
 	inMountPath string,
 	remotePath string,
 	failedPrecondition error,
 ) (activeSourceSubmissions int64, err error) {
-	workCtx, cancel := WithCancellationDelay(ctx, time.Minute)
+	workCtx, cancel, checkpoint := WithCancellationDelay(ctx, builderStepGrace)
 	defer cancel()
 
 	if isDir, err := w.setDirRstConfig(workCtx, inMountPath); isDir || err != nil {
@@ -95,6 +110,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	var pathState PathState
 	var skip bool
 	var pathIssue error
+	checkpoint(builderStepGrace)
 	if pathState, skip, pathIssue, err = w.resolvePathStateForRequest(workCtx, inMountPath); err != nil || skip {
 		return
 	} else if pathIssue != nil {
@@ -108,6 +124,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	}
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
+			checkpoint(builderCleanupGrace)
 			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
@@ -115,8 +132,10 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	}()
 
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
+		// Each rstId is an independent round of remote work, so it earns its own grace.
+		checkpoint(builderStepGrace)
 		request := w.buildRequest(workCtx, cfg, failedPrecondition)
-		canReleaseLock, submitted, processErr := w.processRequest(workCtx, cfg, pathState, request)
+		canReleaseLock, submitted, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 		if !canReleaseLock {
 			keepLock = true
 		}
@@ -144,7 +163,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	BulkInfo *flex.BulkJobRequestInfo,
 	failedPrecondition error,
 ) (err error) {
-	workCtx, cancel := WithCancellationDelay(ctx, time.Minute)
+	workCtx, cancel, checkpoint := WithCancellationDelay(ctx, builderStepGrace)
 	defer cancel()
 
 	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, inMountPath, PathStateWithLock)
@@ -156,18 +175,20 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
 		if FileExists(pathState.LockedInfo) && !keepLock {
+			checkpoint(builderCleanupGrace)
 			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
 	}()
 
+	checkpoint(builderStepGrace)
 	cfg := w.buildJobRequestCfg(inMountPath, remotePath, rstId, pathState.LockedInfo, w.builderCfg)
 	request := w.buildRequest(workCtx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(rstId)
 	request.SetBulkInfo(BulkInfo)
 
-	canReleaseLock, _, processErr := w.processRequest(workCtx, cfg, pathState, request)
+	canReleaseLock, _, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 	if !canReleaseLock {
 		keepLock = true
 	}
@@ -257,6 +278,7 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 // returned true only when this path produced no in-flight work that still depends on the lock.
 func (w *jobRequestBuilder) processRequest(
 	ctx context.Context,
+	checkpoint CancellationCheckpoint,
 	cfg *flex.JobRequestCfg,
 	pathState PathState,
 	request *beeremote.JobRequest,
@@ -282,6 +304,7 @@ func (w *jobRequestBuilder) processRequest(
 		// processed as a bulk request.
 		if !request.HasBulkInfo() {
 			var skipSubmission bool
+			checkpoint(builderStepGrace)
 			if skipSubmission, err = w.addBulkRequest(ctx, request); err != nil || skipSubmission {
 				// Whether there was an error while adding the bulk request or it was added and
 				// we're skipping the submission, the lock must be allowed to be released. The
@@ -306,14 +329,11 @@ func (w *jobRequestBuilder) processRequest(
 
 	applyUndo := noopUndo
 	var planApplied bool
-	// A plan that ends in a terminal sentinel already left the entry in the state the request asked
-	// for rather than preparing it for work, so that state is the outcome and stands on its own. It
-	// often cannot be undone anyway: the undo for a stub created over an already synced file only
-	// detects that the contents changed, it cannot put them back.
 	var terminalOutcome bool
 	if !request.HasGenerationStatus() {
 
 		var applyErr error
+		checkpoint(builderStepGrace)
 		planApplied, applyUndo, applyErr = applyPlan(ctx, &pathState)
 		terminalOutcome = IsErrJobTerminalSentinel(applyErr)
 		if applyErr != nil {
@@ -345,9 +365,11 @@ func (w *jobRequestBuilder) processRequest(
 			canReleaseLock = false
 			client := w.RstMap[request.GetRemoteStorageTarget()]
 
+			checkpoint(builderStepGrace)
 			externalId, externalErr := client.GenerateExternalId(ctx, cfg)
 			if externalErr != nil {
 				message := fmt.Sprintf("failed to generate external id: %s", externalErr.Error())
+				checkpoint(builderCleanupGrace)
 				if undoErr := applyUndo(ctx); undoErr != nil {
 					canReleaseLock = false
 					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
@@ -369,6 +391,9 @@ func (w *jobRequestBuilder) processRequest(
 	}
 
 	if submitErr := w.submitRequest(request); submitErr != nil {
+		// The submit is not governed by ctx, so it may have burned the whole grace on its own.
+		// These three run concurrently, so one checkpoint covers the entire fan-out.
+		checkpoint(builderCleanupGrace)
 		wg := sync.WaitGroup{}
 		var undoPlanErr, resolveBulkRequestErr error
 
