@@ -46,11 +46,23 @@ type Provider interface {
 	// entire file, but should use optimized methods like fallocate() or truncate(). This also means
 	// it is not safe to rely on CreatePreallocatedFile to securely wipe an existing file.
 	CreatePreallocatedFile(name string, size int64, overwrite bool) error
+	// Creates or resizes a file at the specified path, returning an error if the file already
+	// exists unless overwrite is true. If overwrite is true and the file already exists, the file
+	// will be resized to the specified size without first zeroing or truncating it to zero. If the
+	// file is extended, the new region may be sparse and may not reserve physical disk space. If
+	// the file is reduced, data beyond the specified size is discarded and cannot be restored by
+	// later extending the file. This is useful for setting the logical size of a file before
+	// subsequent operations, such as a multipart download, but callers must still handle write-time
+	// space errors. Note that expanding a file with overwrite==true will not cause and error to be
+	// returned.
+	CreateOrResizeFile(name string, size int64, overwrite bool) error
 	// CreateWriteClose creates the file specified by name and immediately writes the specified buf
 	// as the file contents then closes the file.
 	CreateWriteClose(name string, buf []byte, mode uint32, overwrite bool) error
 	// Removes the file specified by name.
 	Remove(name string) error
+	// Removes the specified path and any children it contains.
+	RemoveAll(name string) error
 	// Opens the file specified by name and returns it as an io.ReadCloser. The caller must close the
 	// file when it is no longer required.
 	Open(name string) (io.ReadCloser, error)
@@ -82,6 +94,8 @@ type Provider interface {
 	CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error
 	// CopyTimestamps sets the atime/mtime in fromStat on dstPath.
 	CopyTimestamps(fromStat fs.FileInfo, dstPath string) error
+	// Chtimes changes the access and modification times of the named file.
+	Chtimes(path string, atime time.Time, mtime time.Time) error
 	// Atomically renames srcPath to dstPath overwriting the dstPath with srcPath's contents.
 	OverwriteFile(srcPath, dstPath string) error
 	Readlink(path string) (string, error)
@@ -206,6 +220,26 @@ func (fs BeeGFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	return file.Close()
 }
 
+func (fs BeeGFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	absPath := filepath.Join(fs.MountPoint, path)
+	flags := os.O_RDWR | os.O_CREATE
+	if !overwrite {
+		flags |= os.O_EXCL
+	}
+
+	file, err := os.OpenFile(absPath, flags, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := file.Truncate(size); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	var file *os.File
 	var err error
@@ -229,6 +263,10 @@ func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrit
 
 func (fs BeeGFS) Remove(path string) error {
 	return os.Remove(filepath.Join(fs.MountPoint, path))
+}
+
+func (fs BeeGFS) RemoveAll(path string) error {
+	return os.RemoveAll(filepath.Join(fs.MountPoint, path))
 }
 
 func (fs BeeGFS) Open(path string) (io.ReadCloser, error) {
@@ -432,6 +470,11 @@ func (fs BeeGFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	}
 
 	return nil
+}
+
+func (fs BeeGFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
+	absPath := filepath.Join(fs.MountPoint, path)
+	return os.Chtimes(absPath, atime, mtime)
 }
 
 func (fs BeeGFS) OverwriteFile(srcPath, dstPath string) error {
