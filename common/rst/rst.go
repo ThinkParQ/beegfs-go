@@ -643,6 +643,11 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 				return
 			}
 
+			if lockedInfo.RemoteSize == 0 {
+				addStep(prepareDownloadEmptyObject(mountPoint, cfg, allowOverwrite, originalLockedInfo))
+				return
+			}
+
 			// Expand the file size if needed.
 			if lockedInfo.Size < lockedInfo.RemoteSize {
 				addStep(prepareDownloadExpandFile(mountPoint, cfg, allowOverwrite, originalLockedInfo))
@@ -653,6 +658,9 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 		}
 	} else if cfg.Download {
 		addStep(prepareDownloadNoFile(mountPoint, cfg))
+		if lockedInfo.RemoteSize == 0 {
+			addStep(prepareDownloadEmptyObject(mountPoint, cfg, cfg.Overwrite, originalLockedInfo))
+		}
 	} else {
 		failedPrecondition = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
 		return
@@ -723,7 +731,7 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 
 func prepareAlreadyComplete(cfg *flex.JobRequestCfg) applyFn {
 	lockedInfo := cfg.LockedInfo
-	return func(_ context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		return noopUndo, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 	}
 }
@@ -871,7 +879,7 @@ func prepareDownloadRestoreDataState(cfg *flex.JobRequestCfg) applyFn {
 // fails.
 func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, allowOverwrite bool, originalLockedInfo *flex.JobLockedInfo) applyFn {
 	lockedInfo := cfg.LockedInfo
-	return func(_ context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
 			return noopUndo, appliedErr
 		}
@@ -892,6 +900,60 @@ func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequ
 			return nil
 		}
 		return undo, nil
+	}
+}
+
+func prepareDownloadEmptyObject(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg, allowOverwrite bool, originalLockedInfo *flex.JobLockedInfo) applyFn {
+	lockedInfo := cfg.LockedInfo
+	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
+		if appliedErr != nil {
+			return noopUndo, appliedErr
+		}
+
+		// Truncating discards the original contents, which only a stub file can be rebuilt from.
+		// Anything else is unrecoverable, so the undo reports that rather than restoring the file
+		// to its original size and leaving an empty file behind that claims to be the original.
+		var truncated bool
+		restoreMtime := func() error {
+			mtime := originalLockedInfo.Mtime.AsTime()
+			return mountPoint.Chtimes(cfg.Path, mtime, mtime)
+		}
+		undo := func(context.Context) error {
+			if !FileExists(originalLockedInfo) {
+				if removeErr := mountPoint.Remove(cfg.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+					return fmt.Errorf("unable to remove empty file: %w", removeErr)
+				}
+				return nil
+			}
+			if !truncated {
+				return restoreMtime()
+			}
+			if IsFileOffloaded(originalLockedInfo) {
+				rstUrl := fmt.Appendf(nil, "rst://%d:%s\n", originalLockedInfo.StubUrlRstId, originalLockedInfo.StubUrlPath)
+				if err := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, true); err != nil {
+					return fmt.Errorf("failed to restore the original stub file: %w", err)
+				}
+				return restoreMtime()
+			}
+			return fmt.Errorf("unable to restore %q: its contents were discarded to match the empty remote object", cfg.Path)
+		}
+
+		if lockedInfo.Size != 0 {
+			if err := mountPoint.CreateOrResizeFile(cfg.Path, 0, allowOverwrite); err != nil {
+				return undo, fmt.Errorf("unable to resize file to match the empty remote object: %w", err)
+			}
+			truncated = true
+		}
+
+		// Resizing a file updates its mtime, so this must happen afterwards.
+		mtime := lockedInfo.RemoteMtime.AsTime()
+		if err := mountPoint.Chtimes(cfg.Path, mtime, mtime); err != nil {
+			return undo, fmt.Errorf("unable to update the downloaded file's mtime: %w", err)
+		}
+		lockedInfo.SetSize(0)
+		lockedInfo.SetMtime(timestamppb.New(mtime))
+
+		return undo, GetErrJobAlreadyCompleteWithMtime(mtime)
 	}
 }
 
