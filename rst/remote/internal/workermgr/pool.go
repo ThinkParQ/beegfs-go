@@ -105,6 +105,32 @@ func (p *Pool) assignToLeastBusyWorker(wr *flex.WorkRequest, originNodeID string
 	return "", nil, fmt.Errorf("unable to assign to the %s pool: %w", p.nodeType, ErrNoWorkersConnected)
 }
 
+// AvailableWorkers returns how many work requests the pool can run concurrently, summed over the
+// nodes that are currently eligible for assignment. Nodes that have not reported a worker count
+// (they predate num_workers in the heartbeat response, or have not been heard from yet) contribute
+// worker.AssumedNumWorkers so a mixed or still starting pool is not undercounted. Zero means no
+// node is currently eligible, in which case the caller should size work on its own terms rather
+// than treating the cluster as having no capacity.
+func (p *Pool) AvailableWorkers() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	available := 0
+	for _, node := range p.nodes {
+		// DRAINING nodes may still be handed a request as a last resort, but they cannot run one
+		// before they restart, so they are no capacity for a job being sized now.
+		if node.GetState() != worker.ONLINE {
+			continue
+		}
+		if numWorkers := node.GetNumWorkers(); numWorkers > 0 {
+			available += numWorkers
+		} else {
+			available += worker.AssumedNumWorkers
+		}
+	}
+	return available
+}
+
 // assignmentCandidates returns the nodes that may be offered a work request, in the order they
 // should be tried, along with the total pool size and whether any node has yet to connect for the
 // first time. It advances the round robin cursor so concurrent submissions start from different

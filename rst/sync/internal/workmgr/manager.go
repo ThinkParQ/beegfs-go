@@ -246,6 +246,12 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	return m, nil
 }
 
+// NumWorkers returns how many work requests this node processes concurrently. Remote reports it
+// when sizing jobs so a transfer is not split into more segments than the cluster can run at once.
+func (m *Manager) NumWorkers() int {
+	return m.config.NumWorkers
+}
+
 func (m *Manager) IsReady() bool {
 	m.readyMu.RLock()
 	defer m.readyMu.RUnlock()

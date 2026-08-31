@@ -220,8 +220,20 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 // generateSegments() implements a common strategy for generating segments for all RST types. Note
 // OffsetStop is inclusive of the last offset, so a 1 byte file will have OffsetStart/Stop=0. If the
 // file is empty then the OffsetStart will be 0 and the OffsetStop -1.
+//
+// segCount and partsPerSegment are each clamped to one when the file is too small to satisfy them,
+// so fewer segments or parts than requested may be returned. Callers wanting the file spread across
+// workers are responsible for requesting counts the file is actually large enough to satisfy.
 func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*flex.WorkRequest_Segment {
+	if segCount <= 0 || fileSize < segCount {
+		segCount = 1
+	}
+
 	var bytesPerSegment int64 = fileSize / segCount
+	if partsPerSegment <= 0 || bytesPerSegment < int64(partsPerSegment) {
+		partsPerSegment = 1
+	}
+
 	extraBytesForLastSegment := fileSize % segCount
 	segments := make([]*flex.WorkRequest_Segment, 0)
 
