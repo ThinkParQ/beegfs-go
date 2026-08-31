@@ -899,6 +899,11 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 		Key:      aws.String(path),
 		Metadata: metadata,
 		Tagging:  tagging,
+		// Every part is uploaded with a SHA256 checksum and CompleteMultipartUpload sends those
+		// checksums back, so the algorithm has to be declared when the upload is created.
+		// Otherwise providers reject the completion with InvalidPart because they never recorded a
+		// checksum for any part.
+		ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
 	}
 	if storageClass != nil && *storageClass != "" {
 		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
