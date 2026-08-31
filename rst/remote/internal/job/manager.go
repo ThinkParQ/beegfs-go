@@ -116,6 +116,9 @@ func init() {
 
 type Config struct {
 	PathDBPath string `mapstructure:"path-db"`
+	// StateRoot is the directory, relative to the BeeGFS mount point, where bulk operations persist
+	// the state a builder job needs to resume after a reschedule, crash or restart.
+	StateRoot string `mapstructure:"state-root"`
 	// Deprecated: no longer used. Retained so configuration files that still set it continue to
 	// parse, because configuration is decoded with UnmarshalExact which rejects unknown keys.
 	RequestQueueDepth   int `mapstructure:"request-queue-depth"`
@@ -589,6 +592,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	job, err := New(jr)
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate job from job request: %w", err)
+	}
+
+	// Every job is submitted here, whatever sent it, and Remote owns the state root setting. So
+	// this is the one place that can keep all jobs out of the bulk operation state.
+	if rst.IsInStateRoot(jr.GetPath(), m.config.StateRoot) {
+		return nil, fmt.Errorf("%w: path %s is inside the RST state root %s, which holds bulk operation state", rst.ErrJobNotAllowed, jr.GetPath(), rst.NormalizePath(m.config.StateRoot))
 	}
 
 	// Initialize reference types:
@@ -1526,6 +1535,9 @@ func (m *Manager) completeJob(job *Job, client rst.Provider, abort bool) error {
 // It takes the path lock itself, so no caller may hold it. A builder's own path is never absorbed
 // into a bulk operation, so a builder job cannot reach its own path entry through this.
 func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
+	// Path entries are keyed by absolute paths in the mount but a provider's walk may
+	// report a path without the leading slash.
+	path = rst.NormalizePath(path)
 	pathEntry, commitAndReleasePath, pathEntryErr := m.pathStore.GetAndLockEntry(path)
 	if pathEntryErr != nil {
 		if errors.Is(pathEntryErr, kvstore.ErrEntryNotInDB) || errors.Is(pathEntryErr, kvstore.ErrEntryAlreadyDeleted) {

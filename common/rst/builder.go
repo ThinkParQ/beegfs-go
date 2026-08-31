@@ -24,15 +24,17 @@ type JobBuilderClient struct {
 	ctx        context.Context
 	rstMap     map[uint32]Provider
 	mountPoint filesystem.Provider
+	stateRoot  string
 }
 
 var _ Provider = &JobBuilderClient{}
 
-func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, stateRoot string) *JobBuilderClient {
 	return &JobBuilderClient{
 		ctx:        ctx,
 		rstMap:     rstMap,
 		mountPoint: mountPoint,
+		stateRoot:  stateRoot,
 	}
 }
 
@@ -54,6 +56,10 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 	}
 }
 
+func GetBuilderJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	client := NewJobBuilderClient(context.Background(), nil, nil, "")
+	return client.GetJobRequest(cfg)
+}
 func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastSyncedJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (workRequests []*flex.WorkRequest, err error) {
 	if !job.Request.HasBuilder() {
 		return nil, ErrReqAndRSTTypeMismatch
@@ -214,6 +220,9 @@ func (c *JobBuilderClient) CompleteWorkRequests(ctx context.Context, job *beerem
 }
 
 func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, cancelRequest CancelRequestFn, abort bool) (err error) {
+	if !job.GetRequest().HasBuilder() {
+		return ErrReqAndRSTTypeMismatch
+	}
 	workState := GetWorkResultsState(workResults)
 	if !abort {
 		switch workState {
@@ -265,8 +274,8 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 		}
 		wg.Wait()
 
-		// Return if any bulk operations failed to be cancelled. This leaves keeps the bulk
-		// operation managers from being destroyed.
+		// Return if any bulk operations failed to be cancelled. This keeps the bulk operation
+		// managers from being destroyed.
 		if err != nil {
 			return
 		}
@@ -313,7 +322,7 @@ func cancelBulkOperation(ctx context.Context, checkpoint CancellationCheckpoint,
 
 	for result := range walkCh {
 		checkpoint(checkpointGrace)
-		if cancelRequestErr := cancelRequest(result.Path, result.ReservedJobId); cancelRequestErr != nil {
+		if cancelRequestErr := cancelRequest(result.InMountPath, result.ReservedJobId); cancelRequestErr != nil {
 			err = appendErrors(err, fmt.Errorf("failed to cancel request from bulk operation %s: %w", manager.Key(), cancelRequestErr))
 		}
 	}
@@ -370,11 +379,20 @@ func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath
 // newBulkOperationRegistry creates the registry for builderJobId and reopens every bulk operation
 // the job already started by loading the entries saved on the mount. Records are persistent so
 // operations are never lost when sync crashes or shuts down.
+//
+// builderJobId arrives in the work request and is joined into every state path the registry
+// builds, so it must be a UUID, which is what Remote assigns to every job. Anything else could
+// carry a "/" or ".." and address another job's state under the state root.
 func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string) (*bulkOperationRegistry, error) {
+	if err := uuid.Validate(builderJobId); err != nil {
+		return nil, fmt.Errorf("builder job ID %q is not a valid UUID: %w", builderJobId, err)
+	}
+
 	registry := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		managersMu:   sync.Mutex{},
 		mountPath:    c.mountPoint.GetMountPath(),
+		stateRoot:    c.stateRoot,
 		rstMap:       c.rstMap,
 		builderJobId: builderJobId,
 	}
@@ -413,6 +431,7 @@ func (c *JobBuilderClient) newRequestBuildController(
 		workCtx:          workCtx,
 		requestBuilder:   requestBuilder,
 		workerSaturation: workerSaturation,
+		stateRoot:        c.stateRoot,
 	}
 }
 

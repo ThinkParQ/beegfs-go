@@ -116,7 +116,7 @@ func TestManage(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -282,7 +282,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -586,7 +586,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -736,7 +736,7 @@ func TestUpdateJobResults(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -927,7 +927,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1057,7 +1057,7 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1202,7 +1202,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -2035,7 +2035,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
 	require.NoError(t, err)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -2933,7 +2933,7 @@ func newReservationManager(t *testing.T) *Manager {
 	}}
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -3116,4 +3116,49 @@ func TestCancelReservedJob(t *testing.T) {
 		assert.Equal(t, beeremote.Job_CANCELLED, job.GetStatus().GetState())
 		assert.Equal(t, shortCircuitMessage, job.GetStatus().GetMessage(), "force must not send a reservation through the RST abort")
 	})
+}
+
+// TestSubmitJobRequestRejectsStateRoot checks that Remote refuses any job for a path inside the
+// configured state root. The CLI sends a single file straight to Remote without a builder walk, so
+// this check is the only one between such a request and the bulk operation state files.
+func TestSubmitJobRequestRejectsStateRoot(t *testing.T) {
+	newRequest := func(path string) *beeremote.JobRequest {
+		return beeremote.JobRequest_builder{
+			Path:                path,
+			Name:                "state root job",
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		}.Build()
+	}
+
+	tests := []struct {
+		name      string
+		stateRoot string
+		path      string
+		rejected  bool
+	}{
+		{name: "the default state root itself", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst", rejected: true},
+		{name: "a file below the default state root", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst/job/1/state.bin", rejected: true},
+		{name: "an unset state root means the default", stateRoot: "", path: "/.beegfs-rst/job/1/state.bin", rejected: true},
+		{name: "a path that escapes back into the state root", stateRoot: rst.DefaultStateRoot, path: "/test/../.beegfs-rst/x", rejected: true},
+		{name: "a file below a custom state root", stateRoot: "custom/state", path: "/custom/state/job/1/state.bin", rejected: true},
+		{name: "the default state root when a custom one is set", stateRoot: "custom/state", path: "/.beegfs-rst/job/1/state.bin"},
+		{name: "a sibling that only shares a name prefix", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst2/file"},
+		{name: "an ordinary file", stateRoot: rst.DefaultStateRoot, path: "/test/bulkfile"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := newReservationManager(t)
+			m.config.StateRoot = test.stateRoot
+
+			_, err := m.SubmitJobRequest(newRequest(test.path), "")
+			if test.rejected {
+				require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+				assert.ErrorContains(t, err, "state root")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.opentelemetry.io/otel/metric"
@@ -37,7 +38,7 @@ func newWorkTestManager(t *testing.T, workerConfigs []worker.Config) (*Manager, 
 
 	mgr, err := NewManager(
 		context.Background(), log, Config{}, workerConfigs, rstConfigs,
-		&flex.BeeRemoteNode{}, filesystem.NewMockFS(), map[string]*flex.Feature{},
+		&flex.BeeRemoteNode{}, filesystem.NewMockFS(), map[string]*flex.Feature{}, rst.DefaultStateRoot,
 	)
 	require.NoError(t, err)
 

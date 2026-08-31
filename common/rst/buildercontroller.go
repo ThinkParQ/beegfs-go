@@ -30,6 +30,7 @@ type requestBuildController struct {
 	getPaths     requestPathResolverFn
 	getWalk      getWalkFn
 	jobId        string
+	stateRoot    string
 
 	requestBuilder   *jobRequestBuilder
 	workerSaturation []func() float64
@@ -163,6 +164,11 @@ func (c *requestBuildController) runWalk(walkCh <-chan *filesystem.StreamPathRes
 				}
 
 				inMountPath, remotePath := c.getPaths(result.Path)
+				if IsInStateRoot(inMountPath, c.stateRoot) {
+					// Remote would reject the request anyway. Skipping it here keeps a walk of
+					// the whole mount from reporting the state files as failed submissions.
+					continue
+				}
 
 				c.addWorker()
 				group.Go(func() error {
@@ -363,12 +369,10 @@ func (c *requestBuildController) bulkProcess(result *BulkStreamPathResult) error
 		}
 	}
 
-	inMountPath, remotePath := c.getPaths(result.Path)
-
 	c.addWorker()
 	c.bulkGroup.Go(func() error {
 		defer c.releaseWorker()
-		return c.requestBuilder.ProcessPathFromBulkOperation(c.workCtx, inMountPath, remotePath, result.RstId, result.ReservedJobId, result.BulkInfo, failedPrecondition)
+		return c.requestBuilder.ProcessPathFromBulkOperation(c.workCtx, result, failedPrecondition)
 	})
 
 	return nil
