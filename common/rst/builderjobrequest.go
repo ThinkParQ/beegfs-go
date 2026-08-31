@@ -9,6 +9,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -133,9 +134,10 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		}
 	}
 	defer func() {
-		if FileExists(pathState.LockedInfo) && !keepLock {
+		if !keepLock {
 			checkpoint(checkpointGrace)
-			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags)
+			if clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) && !errors.Is(clearErr, syscall.ENOTDIR) && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
@@ -205,9 +207,10 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 
 	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
-		if FileExists(pathState.LockedInfo) && !keepLock {
+		if !keepLock {
 			checkpoint(checkpointGrace)
-			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags)
+			if clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) && !errors.Is(clearErr, syscall.ENOTDIR) && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
