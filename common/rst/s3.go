@@ -895,10 +895,11 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	}
 
 	createMultipartUploadInput := &s3.CreateMultipartUploadInput{
-		Bucket:   aws.String(r.config.GetS3().Bucket),
-		Key:      aws.String(path),
-		Metadata: metadata,
-		Tagging:  tagging,
+		Bucket:            aws.String(r.config.GetS3().Bucket),
+		Key:               aws.String(path),
+		Metadata:          metadata,
+		Tagging:           tagging,
+		ChecksumAlgorithm: types.ChecksumAlgorithmCrc32c,
 	}
 	if storageClass != nil && *storageClass != "" {
 		createMultipartUploadInput.StorageClass = types.StorageClass(*storageClass)
@@ -930,7 +931,7 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 		completedParts[i] = types.CompletedPart{
 			PartNumber:     aws.Int32(part.PartNumber),
 			ETag:           aws.String(part.EntityTag),
-			ChecksumSHA256: aws.String(part.ChecksumSha256),
+			ChecksumCRC32C: aws.String(part.ChecksumSha256),
 		}
 	}
 
@@ -970,7 +971,7 @@ func (r *S3Client) upload(
 	storageClass *string,
 ) error {
 
-	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
+	filePart, checksum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
 
 	if err != nil {
 		// S3 allows uploading empty (zero byte) files. Only allow this if the offset start/stop are
@@ -981,7 +982,7 @@ func (r *S3Client) upload(
 			return err
 		}
 	}
-	part.ChecksumSha256 = sha256sum
+	part.ChecksumSha256 = checksum
 
 	if uploadID == "" {
 		// This should catch most issues where the user intended to perform a multi-part upload, but
@@ -1003,7 +1004,7 @@ func (r *S3Client) upload(
 			Bucket:         aws.String(r.config.GetS3().Bucket),
 			Key:            aws.String(remotePath),
 			Body:           filePart,
-			ChecksumSHA256: aws.String(part.ChecksumSha256),
+			ChecksumCRC32C: aws.String(part.ChecksumSha256),
 			// Could a local mtime match and allow for a continue/resume feature...
 			//	- If there was a previous failure and the mtime still match then continue from the last byte write
 			Metadata: metadata,
@@ -1028,7 +1029,7 @@ func (r *S3Client) upload(
 		UploadId:       aws.String(uploadID),
 		PartNumber:     aws.Int32(part.PartNumber),
 		Body:           filePart,
-		ChecksumSHA256: aws.String(part.ChecksumSha256),
+		ChecksumCRC32C: aws.String(part.ChecksumSha256),
 	}
 
 	resp, err := r.client.UploadPart(ctx, uploadPartReq)

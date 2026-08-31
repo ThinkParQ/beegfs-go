@@ -81,7 +81,7 @@ func (fs MockFS) ReadFilePart(path string, offsetStart int64, offsetStop int64) 
 		return nil, "", err
 	}
 
-	return bytes.NewReader(filePart), getFilePartChecksumSHA256(filePart), nil
+	return bytes.NewReader(filePart), getFilePartChecksumCRC32C(filePart), nil
 }
 
 func (fs MockFS) WriteFilePart(path string, offsetStart int64, offsetStop int64) (io.WriteCloser, error) {
