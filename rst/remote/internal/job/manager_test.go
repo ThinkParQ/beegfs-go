@@ -114,7 +114,7 @@ func TestManage(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -276,7 +276,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -580,7 +580,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -730,7 +730,7 @@ func TestUpdateJobResults(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -921,7 +921,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1051,7 +1051,7 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1194,7 +1194,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -2005,7 +2005,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
 	require.NoError(t, err)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 

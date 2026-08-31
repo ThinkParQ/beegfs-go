@@ -2,6 +2,7 @@ package rst
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/filesystem"
@@ -15,6 +16,9 @@ type ClientStore struct {
 	clients    map[uint32]Provider
 	mu         sync.RWMutex
 	mountPoint filesystem.Provider
+	// stateRoot is the value the first UpdateConfig was given. It is kept so a later config can be
+	// checked against it, not because anything here reads it back.
+	stateRoot string
 }
 
 func NewClientStore(mountPoint filesystem.Provider) *ClientStore {
@@ -46,13 +50,16 @@ const JobBuilderRstId = 0
 // so any remote network requests can be cancelled by the caller if needed.
 //
 // IMPORTANT: Currently once the initial RST config is set, it cannot be dynamically updated.
-func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget) error {
+func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget, stateRoot string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// If there are existing RSTs, verify the configuration did not change. Be aware that a job
 	// builder client is automatically added to the clientStore.
 	if len(s.clients) != 0 {
+		if stateRoot != s.stateRoot {
+			return fmt.Errorf("%w: the state root cannot change from %q to %q while bulk operations may be open", ErrConfigUpdateNotAllowed, s.stateRoot, stateRoot)
+		}
 		// The length won't match if subscribers were removed or added.
 		if len(rstConfigs) != len(s.clients)-1 {
 			return ErrConfigUpdateNotAllowed
@@ -86,8 +93,9 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 			}
 			rstMap[config.Id] = rst
 		}
-		rstMap[JobBuilderRstId] = NewJobBuilderClient(ctx, rstMap, s.mountPoint)
+		rstMap[JobBuilderRstId] = NewJobBuilderClient(ctx, rstMap, s.mountPoint, stateRoot)
 		s.clients = rstMap
+		s.stateRoot = stateRoot
 	}
 	return nil
 }

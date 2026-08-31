@@ -18,6 +18,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
@@ -102,6 +103,7 @@ func main() {
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Remote node's gRPC server.")
 	pflag.String("job.path-db", "/var/lib/beegfs/remote/path.badger", "Path where the database tracking jobs for each path will be created/maintained.")
+	pflag.String("job.state-root", rst.DefaultStateRoot, "Directory relative to the BeeGFS mount point where bulk operations persist state that must survive a builder job reschedule. Propagated to all Sync nodes. Changing it can orphan inflight bulk operations.")
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
 	pflag.Int("job.max-job-entries-per-rst", 4, "Once this threshold is exceeded, older jobs will be deleted (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.")
 	// Hidden flags:
@@ -335,7 +337,7 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities)
+	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities, initialCfg.Job.StateRoot)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}

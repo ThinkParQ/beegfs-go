@@ -100,6 +100,7 @@ func NewManager(
 	beeRmtConfig *flex.BeeRemoteNode,
 	mountPoint filesystem.Provider,
 	requiredFeatures map[string]*flex.Feature,
+	stateRoot string,
 ) (*Manager, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 
@@ -122,7 +123,7 @@ func NewManager(
 		rstMap[configId] = rst
 	}
 
-	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint)
+	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint, stateRoot)
 
 	nodePools := make(map[worker.Type]*Pool, 0)
 	nodes, err := worker.NewWorkerNodesFromConfig(log.Logger, workerConfigs)
@@ -142,7 +143,7 @@ func NewManager(
 				// If/when we allow dynamic configuration this won't work. We would need to
 				// pass a reference to the actual RST clients and provide methods to get their
 				// configuration. The ClientStore will likely make this easy to update.
-				workerConfig: flex.UpdateConfigRequest_builder{Rsts: rstConfigs, BeeRemote: beeRmtConfig}.Build(),
+				workerConfig: flex.UpdateConfigRequest_builder{Rsts: rstConfigs, BeeRemote: beeRmtConfig, StateRoot: stateRoot}.Build(),
 			}
 		}
 		nodePools[n.GetNodeType()].nodeMap[n.GetID()] = n

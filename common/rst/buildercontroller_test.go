@@ -652,7 +652,7 @@ func (s *testSubmitter) len() int {
 
 func newTestRequestBuildController(t *testing.T, ctx context.Context, submissions *testSubmitter) *requestBuildController {
 	t.Helper()
-	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS())
+	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS(), DefaultStateRoot)
 	cfg := &flex.JobRequestCfg{RemoteStorageTarget: 1}
 	controller, err := client.newRequestBuildController(ctx, ctx, zap.NewNop(), cfg, submissions.submit, func(ctx context.Context, request *beeremote.JobRequest) (bool, error) {
 		return false, nil
@@ -721,6 +721,7 @@ func newTestBulkManager(t *testing.T, operation string, executeFn BulkExecuteFn,
 		bulkOperationEntry:  &bulkOperationEntry{RstId: 1, Operation: operation},
 		// Recording a failure persists the entry, so the manager needs a real mount to write to.
 		mountPath: t.TempDir(),
+		stateRoot: DefaultStateRoot,
 		jobId:     "job-1",
 	}
 }
