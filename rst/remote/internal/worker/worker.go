@@ -122,8 +122,9 @@ const (
 	UNKNOWN State = "unknown"
 	OFFLINE State = "offline"
 	ONLINE  State = "online"
-	// DRAINING nodes are reachable and still finishing the work they were assigned, but will not
-	// accept any new work.
+	// DRAINING nodes are reachable and still finishing the work they were assigned. They cannot run
+	// anything new before they restart, so they are offered a request only as a last resort, once
+	// every online node in their pool has declined it. See Pool.assignmentCandidates.
 	DRAINING State = "draining"
 )
 
@@ -225,10 +226,11 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 							// Deliberately stay in this loop. A draining node is shutting down
 							// cleanly and we want to keep the connection so outstanding requests
 							// can still be cancelled or updated, and so we notice when it does go
-							// away. The pool stops assigning it new work as soon as the state is
-							// set.
+							// away. As soon as the state is set the pool stops treating it as a
+							// place work can run now, and only falls back to it when nothing else
+							// in the pool will take a request.
 							if n.GetState() != DRAINING {
-								n.log.Info("node reports it is draining, no new work requests will be assigned to it")
+								n.log.Info("node reports it is draining, new work requests will only be assigned to it as a last resort")
 								n.setState(DRAINING)
 							}
 						case ONLINE:
@@ -237,7 +239,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 								// again without ever becoming unreachable. Not expected during
 								// shutdown, but recovering is harmless and better than staying
 								// unusable.
-								n.log.Info("node is no longer draining, resuming work request assignment")
+								n.log.Info("node is no longer draining, it is a normal candidate for work requests again")
 								n.setState(ONLINE)
 							}
 						default:

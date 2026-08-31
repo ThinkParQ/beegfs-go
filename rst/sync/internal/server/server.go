@@ -93,19 +93,25 @@ func (s *WorkerNodeServer) ListenAndServe(errChan chan<- error) {
 	}()
 }
 
-// Drain marks this node as no longer accepting new work and returns immediately. The server keeps
-// listening, so Remote can still update or cancel the work already assigned here, and learns the
-// node is draining from its responses instead of discovering it by failing to connect.
+// Drain reports this node as draining and returns immediately. The server keeps listening, so Remote
+// can still update or cancel the work already assigned here, and learns the node is draining from its
+// responses instead of discovering it by failing to connect.
 //
-// Drain should be called before stopping the work manager. It only stops new work from arriving;
-// waiting for the work already underway to finish is the caller's responsibility, as is calling
-// Stop() once it has. Draining is permanent for the lifetime of the server, so Drain is idempotent
-// and calling it more than once is a no-op.
+// Draining demotes this node rather than closing it: Remote stops treating it as somewhere work can
+// run now and only falls back to it once every online node in its pool has declined a request. A
+// request accepted then cannot run before the restart, but it is journaled and replayed afterwards,
+// which beats failing a job that has nowhere else to go. Requests are refused outright only once the
+// work manager stops accepting them, see Manager.Accepting.
+//
+// Drain should be called before stopping the work manager. It does not wait for the work already
+// underway to finish; that is the caller's responsibility, as is calling Stop() once it has. Draining
+// is permanent for the lifetime of the server, so Drain is idempotent and calling it more than once
+// is a no-op.
 func (s *WorkerNodeServer) Drain() {
 	if !s.draining.CompareAndSwap(false, true) {
 		return
 	}
-	s.log.Info("draining: refusing new work requests while work already assigned to this node finishes")
+	s.log.Info("draining: finishing the work already assigned to this node, and accepting new requests only when Remote has nowhere else to place them")
 }
 
 // Stop should be called to gracefully terminate the server. It will stop the
@@ -118,7 +124,7 @@ func (s *WorkerNodeServer) Stop() {
 
 func (s *WorkerNodeServer) UpdateConfig(ctx context.Context, request *flex.UpdateConfigRequest) (*flex.UpdateConfigResponse, error) {
 	s.log.Info("attempting to apply new configuration")
-	err := s.workMgr.UpdateConfig(request.GetRsts(), request.GetBeeRemote())
+	err := s.workMgr.UpdateConfig(request.GetRsts(), request.GetBeeRemote(), request.GetNodeId())
 	if err != nil {
 		s.log.Error("error applying new configuration", zap.Error(err))
 		return flex.UpdateConfigResponse_builder{
@@ -152,10 +158,13 @@ func (s *WorkerNodeServer) BulkUpdateWork(ctx context.Context, request *flex.Bul
 
 func (s *WorkerNodeServer) SubmitWork(ctx context.Context, request *flex.SubmitWorkRequest) (*flex.SubmitWorkResponse, error) {
 	s.log.Debug("received work request", zap.Any("request", request))
-	// Checked before the work manager is touched so the rejection is unambiguous: nothing was
-	// created here, and Remote is free to assign the request to another node.
-	if s.draining.Load() {
-		s.log.Debug("rejecting work request because this node is draining", zap.Any("request", request))
+	// Draining alone is no longer a rejection: Remote offers a draining node work only after every
+	// online node has declined, and journaling it here so it runs after the restart beats failing
+	// the job outright. Once the manager starts shutting down there is no longer a journal to record
+	// it in, so reject then. The rejection is checked before the work manager is touched so it stays
+	// unambiguous: nothing was created here, and Remote is free to assign the request elsewhere.
+	if !s.workMgr.Accepting() {
+		s.log.Debug("rejecting work request because this node is shutting down", zap.Any("request", request))
 		return flex.SubmitWorkResponse_builder{Status: flex.SubmitWorkResponse_DRAINING}.Build(), nil
 	}
 	work, err := s.workMgr.SubmitWorkRequest(request.GetRequest())

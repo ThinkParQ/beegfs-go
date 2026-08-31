@@ -71,6 +71,10 @@ type Manager struct {
 type JobSubmission struct {
 	JobID        string
 	WorkRequests []*flex.WorkRequest
+	// OriginNode is the ID of the worker node that submitted this job, or empty when it came from
+	// somewhere that is not a worker node (such as the CLI). It is only a hint used to break ties
+	// when the request has to go to a draining node, see Pool.assignmentCandidates.
+	OriginNode string
 }
 
 type JobUpdate struct {
@@ -254,7 +258,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 			allScheduled = false
 		} else {
 			var work *flex.Work
-			workerID, work, err = pool.assignToLeastBusyWorker(workRequest)
+			workerID, work, err = pool.assignToLeastBusyWorker(workRequest, js.OriginNode)
 			if err != nil {
 				// If there was a failure assemble a minimal work result. An error from
 				// assignToLeastBusyWorker() means the request was not not assigned to any nodes so
@@ -268,6 +272,21 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 					Status: flex.Work_Status_builder{
 						State:   flex.Work_CREATED,
 						Message: "error communicating to node: " + err.Error(),
+					}.Build(),
+				}.Build()
+			} else if work.GetStatus() == nil {
+				// Nothing here can track or later update a result with no status, and recording one
+				// would hand a nil status to UpdateJob below. Treat it as a node that failed to
+				// accept the request, which it effectively did.
+				allScheduled = false
+				workerID = ""
+				result.WorkResult = flex.Work_builder{
+					Path:      workRequest.GetPath(),
+					JobId:     workRequest.GetJobId(),
+					RequestId: workRequest.GetRequestId(),
+					Status: flex.Work_Status_builder{
+						State:   flex.Work_CREATED,
+						Message: "node did not return a usable work result for the request",
 					}.Build(),
 				}.Build()
 			} else {
@@ -336,6 +355,19 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 	allUpdated := true
 
 	for reqID, workResult := range jobUpdate.WorkResults {
+		// Every branch below updates the status in place, so a result without one has to be given a
+		// minimal stand-in first. Results are also decoded from the database, so this cannot be ruled
+		// out by how they are built during submission alone.
+		if workResult.Status() == nil {
+			workResult.WorkResult = flex.Work_builder{
+				JobId:     jobUpdate.JobID,
+				RequestId: reqID,
+				Status: flex.Work_Status_builder{
+					State:   flex.Work_UNKNOWN,
+					Message: "no work result was recorded for this request",
+				}.Build(),
+			}.Build()
+		}
 		oldState := workResult.Status().GetState()
 
 		// If the WR was never assigned we can just cancel it.
