@@ -124,7 +124,7 @@ func (s *WorkerNodeServer) Stop() {
 
 func (s *WorkerNodeServer) UpdateConfig(ctx context.Context, request *flex.UpdateConfigRequest) (*flex.UpdateConfigResponse, error) {
 	s.log.Info("attempting to apply new configuration")
-	err := s.workMgr.UpdateConfig(request.GetRsts(), request.GetBeeRemote(), request.GetNodeId())
+	err := s.workMgr.UpdateConfig(request.GetRsts(), request.GetBeeRemote(), request.GetNodeId(), request.GetStateRoot())
 	if err != nil {
 		s.log.Error("error applying new configuration", zap.Error(err))
 		return flex.UpdateConfigResponse_builder{

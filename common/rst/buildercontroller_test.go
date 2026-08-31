@@ -723,7 +723,7 @@ func (s *testSubmitter) len() int {
 
 func newTestRequestBuildController(t *testing.T, ctx context.Context, submissions *testSubmitter) *requestBuildController {
 	t.Helper()
-	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS())
+	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS(), DefaultStateRoot)
 	// newRequestBuildController takes the work request rather than the config, and rejects one that
 	// carries no builder. The builder is the only field it reads, so the rest is left unset.
 	workRequest := &flex.WorkRequest{
@@ -800,6 +800,7 @@ func newTestBulkManager(t *testing.T, operation string, executeFn BulkExecuteFn,
 		bulkOperationEntry:  &bulkOperationEntry{RstId: 1, Operation: operation},
 		// Recording a failure persists the entry, so the manager needs a real mount to write to.
 		mountPath: t.TempDir(),
+		stateRoot: DefaultStateRoot,
 		jobId:     "job-1",
 	}
 }

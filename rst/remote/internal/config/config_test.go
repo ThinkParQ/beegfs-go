@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/protobuf/go/flex"
 )
 
@@ -182,5 +184,50 @@ name = "xtreemstore"
 		_, err := loadCfg(t, baseCfg+`  operation = "not-an-operation"`+"\n")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "EFFICIENT_RETRIEVE")
+	})
+}
+
+// TestValidateStateRoot covers what ValidateConfig does with job.state-root. The rules themselves
+// are pinned by TestValidateStateRoot in common/rst; what matters here is that ValidateConfig
+// applies them and writes the cleaned value back, since that value is what reaches the Sync nodes.
+func TestValidateStateRoot(t *testing.T) {
+	// validConfig is everything ValidateConfig checks besides the state root, so a failure here is
+	// always about the state root.
+	validConfig := func(stateRoot string) AppConfig {
+		return AppConfig{
+			ServiceName: "test-svc",
+			Job: job.Config{
+				PathDBPath:          "/var/lib/beegfs/remote/path.badger",
+				StateRoot:           stateRoot,
+				MinJobEntriesPerRST: 2,
+				MaxJobEntriesPerRST: 4,
+			},
+		}
+	}
+
+	t.Run("an unset state root defaults", func(t *testing.T) {
+		cfg := validConfig("")
+		require.NoError(t, cfg.ValidateConfig())
+		assert.Equal(t, rst.DefaultStateRoot, cfg.Job.StateRoot)
+	})
+
+	t.Run("a valid state root is cleaned in place", func(t *testing.T) {
+		cfg := validConfig("./state/bulk/")
+		require.NoError(t, cfg.ValidateConfig())
+		assert.Equal(t, "state/bulk", cfg.Job.StateRoot)
+	})
+
+	t.Run("an absolute state root is rejected", func(t *testing.T) {
+		cfg := validConfig("/mnt/beegfs/.beegfs-rst")
+		err := cfg.ValidateConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "job.state-root is invalid")
+	})
+
+	t.Run("a state root outside the mount is rejected", func(t *testing.T) {
+		cfg := validConfig("../outside")
+		err := cfg.ValidateConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "job.state-root is invalid")
 	})
 }

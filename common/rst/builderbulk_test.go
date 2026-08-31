@@ -76,6 +76,7 @@ func newTestBulkOperationRegistry(t *testing.T, client Provider) *bulkOperationR
 	return &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    t.TempDir(),
+		stateRoot:    DefaultStateRoot,
 		rstMap:       map[uint32]Provider{1: client},
 		builderJobId: "job-1",
 	}
@@ -84,10 +85,11 @@ func newTestBulkOperationRegistry(t *testing.T, client Provider) *bulkOperationR
 // saveTestBulkOperationEntry persists entry the way an earlier attempt of the builder job would have,
 // so tests can exercise recovery from the mount without opening a provider handle first.
 func saveTestBulkOperationEntry(t *testing.T, mountPath string, jobId string, entry *bulkOperationEntry) *bulkOperationManager {
-	entry.StateMountPath = path.Join(stateRoot, bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
+	entry.StateMountPath = path.Join(DefaultStateRoot, bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
 	manager := &bulkOperationManager{
 		bulkOperationEntry: entry,
 		mountPath:          mountPath,
+		stateRoot:          DefaultStateRoot,
 		jobId:              jobId,
 	}
 	require.NoError(t, manager.Save())
@@ -97,7 +99,7 @@ func saveTestBulkOperationEntry(t *testing.T, mountPath string, jobId string, en
 // readTestBulkOperationEntries decodes every entry saved for jobId, keyed the same way the registry
 // keys its managers, so tests can assert what actually landed on the mount.
 func readTestBulkOperationEntries(t *testing.T, mountPath string, jobId string) map[string]*bulkOperationEntry {
-	entriesPath := path.Join(mountPath, bulkOperationMountPath(jobId))
+	entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, jobId))
 	entryFiles, err := os.ReadDir(entriesPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -229,7 +231,7 @@ func TestNewBulkOperationManager_OpensHandleForAlreadyFailedOperation(t *testing
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
 	bulkOperation := &bulkOperationEntry{RstId: 1, Operation: "retrieve", Failed: true}
-	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), "job-1", bulkOperation)
+	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), DefaultStateRoot, "job-1", bulkOperation)
 
 	assert.True(t, manager.IsFailed(), "reopening must not clear the failure")
 	require.NotNil(t, manager.clientBulkOperation, "a failed operation still needs a handle to be torn down")
@@ -249,7 +251,7 @@ func TestNewBulkOperationManager_InterruptedOpenDoesNotFailOperation(t *testing.
 		Return(nil, fmt.Errorf("open state: %w", context.Canceled))
 
 	bulkOperation := &bulkOperationEntry{RstId: 1, Operation: "retrieve"}
-	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), "job-1", bulkOperation)
+	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), DefaultStateRoot, "job-1", bulkOperation)
 
 	assert.False(t, manager.IsFailed(), "an interrupted open must leave the operation resumable")
 	assert.False(t, bulkOperation.Failed, "the persisted flag must stay clear")
@@ -264,7 +266,7 @@ func TestNewBulkOperationManager_FailedOpenFailsOperation(t *testing.T) {
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(nil, openErr)
 
 	bulkOperation := &bulkOperationEntry{RstId: 1, Operation: "retrieve"}
-	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), "job-1", bulkOperation)
+	manager := newBulkOperationManager(context.Background(), client, t.TempDir(), DefaultStateRoot, "job-1", bulkOperation)
 
 	assert.True(t, manager.IsFailed())
 	assert.True(t, bulkOperation.Failed, "the failure must be persisted with the work request")
@@ -273,7 +275,14 @@ func TestNewBulkOperationManager_FailedOpenFailsOperation(t *testing.T) {
 }
 
 func TestBulkOperationManager_AppendErrorAccumulatesAndGetErrorsFormats(t *testing.T) {
-	manager := &bulkOperationManager{bulkOperationEntry: &bulkOperationEntry{Operation: "archive"}}
+	// AppendError persists the entry, so the manager needs a mount to write to. Without one it
+	// writes its state into the working directory, which for a test is the package source tree.
+	manager := &bulkOperationManager{
+		bulkOperationEntry: &bulkOperationEntry{Operation: "archive"},
+		mountPath:          t.TempDir(),
+		stateRoot:          DefaultStateRoot,
+		jobId:              "job-1",
+	}
 	assert.NoError(t, manager.GetErrors())
 
 	manager.AppendError(fmt.Errorf("first"))
@@ -319,7 +328,7 @@ func TestBulkOperationRegistry_AddRequestFailsOperationThatCannotBeSaved(t *test
 	mountPath := t.TempDir()
 	// Occupy rstId 1's entry path with a directory so the save's rename over it fails, while
 	// rstId 2 saves normally.
-	entriesPath := path.Join(mountPath, bulkOperationMountPath("job-1"))
+	entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
 	require.NoError(t, os.MkdirAll(path.Join(entriesPath, "1-retrieve"+bulkOperationEntryExtension), 0o700))
 
 	client := &MockClient{}
@@ -328,6 +337,7 @@ func TestBulkOperationRegistry_AddRequestFailsOperationThatCannotBeSaved(t *test
 	registry := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    mountPath,
+		stateRoot:    DefaultStateRoot,
 		rstMap:       map[uint32]Provider{1: client, 2: client},
 		builderJobId: "job-1",
 	}
@@ -366,7 +376,7 @@ func TestBulkOperationManager_SavePersistsFailure(t *testing.T) {
 	mountPath := t.TempDir()
 	// A nil client means the RST was removed from the configuration, which fails the operation
 	// permanently while it is being created.
-	manager := newBulkOperationManager(context.Background(), nil, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), nil, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.True(t, manager.IsFailed())
 	require.NoError(t, manager.Save())
 
@@ -408,6 +418,7 @@ func TestBulkOperationManager_RuntimeFailureSurvivesReload(t *testing.T) {
 	reloaded := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    registry.mountPath,
+		stateRoot:    DefaultStateRoot,
 		rstMap:       map[uint32]Provider{1: client},
 		builderJobId: "job-1",
 	}
@@ -426,7 +437,7 @@ func TestBulkOperationManager_TransientFailureIsNotPersisted(t *testing.T) {
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
-	manager := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 	require.NoError(t, failBulkOperation(manager, fmt.Errorf("walk stopped: %w", context.Canceled)))
 
@@ -445,7 +456,7 @@ func TestBulkOperationManager_DestroyRemovesSavedEntry(t *testing.T) {
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
-	manager := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 	require.FileExists(t, manager.getEntryPath())
 
@@ -463,7 +474,7 @@ func TestBulkOperationManager_DestroyRemovesEmptyStateDirectories(t *testing.T) 
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
-	manager := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 	// The provider owns this directory; creating it here stands in for the state it would have
 	// written and then deleted during its own Destroy.
@@ -485,11 +496,11 @@ func TestBulkOperationManager_DestroyKeepsDirectoriesSharedWithAnotherOperation(
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
-	torndown := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	torndown := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, torndown.Save())
 	require.NoError(t, os.MkdirAll(path.Join(mountPath, torndown.StateMountPath), 0o700))
 
-	survivor := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "archive"})
+	survivor := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "archive"})
 	require.NoError(t, survivor.Save())
 	require.NoError(t, os.MkdirAll(path.Join(mountPath, survivor.StateMountPath), 0o700))
 
@@ -510,7 +521,7 @@ func TestBulkOperationManager_DestroyKeepsEntryWhenStateIsNotFullyDeleted(t *tes
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 
-	manager := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 
 	// fakeBulkOperation.Destroy reports success without deleting anything, standing in for a
@@ -536,7 +547,7 @@ func TestBulkOperationManager_DestroyWithoutProviderHandleKeepsEntryForLeftoverS
 	mountPath := t.TempDir()
 	// A nil client means the RST was removed from the configuration, so there is no provider left to
 	// delete the state this operation already wrote.
-	manager := newBulkOperationManager(context.Background(), nil, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), nil, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 
 	stateDirPath := path.Join(mountPath, manager.StateMountPath)
@@ -555,7 +566,7 @@ func TestBulkOperationManager_DestroyWithoutProviderHandleKeepsEntryForLeftoverS
 // has nothing to strand, so it must tear down cleanly rather than keep an entry forever.
 func TestBulkOperationManager_DestroyWithoutProviderHandleCompletesWhenNothingWasWritten(t *testing.T) {
 	mountPath := t.TempDir()
-	manager := newBulkOperationManager(context.Background(), nil, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), nil, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 
 	require.NoError(t, manager.Destroy(context.Background()))
@@ -574,7 +585,7 @@ func TestBulkOperationManager_DestroyMarksEntryBeforeDeletingState(t *testing.T)
 	client := &MockClient{}
 	client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{destroyErr: destroyErr}, nil)
 
-	manager := newBulkOperationManager(context.Background(), client, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
 	require.False(t, readTestBulkOperationEntries(t, mountPath, "job-1")["1-retrieve"].Destroying)
 
@@ -603,6 +614,7 @@ func TestBulkOperationRegistry_InitFinishesInterruptedDestroy(t *testing.T) {
 	registry := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    mountPath,
+		stateRoot:    DefaultStateRoot,
 		rstMap:       map[uint32]Provider{1: client, 2: client},
 		builderJobId: "job-1",
 	}
@@ -623,6 +635,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		return &bulkOperationRegistry{
 			managers:     make(map[string]*bulkOperationManager),
 			mountPath:    mountPath,
+			stateRoot:    DefaultStateRoot,
 			rstMap:       map[uint32]Provider{},
 			builderJobId: "job-1",
 		}
@@ -639,7 +652,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// no Destroy will ever remove it, and while it is there the job's directories cannot be
 		// reclaimed either.
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath("job-1"))
+		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 		stagedPath := path.Join(entriesPath, "1-retrieve.json.tmp")
 		require.NoError(t, os.WriteFile(stagedPath, []byte(`{"rstId":1,`), 0o600))
@@ -657,7 +670,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// an operation that is still live.
 		mountPath := t.TempDir()
 		saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
-		entriesPath := path.Join(mountPath, bulkOperationMountPath("job-1"))
+		entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
 		stagedPath := path.Join(entriesPath, "1-retrieve.json.tmp")
 		require.NoError(t, os.WriteFile(stagedPath, []byte(`{"rstId":1,`), 0o600))
 
@@ -682,15 +695,15 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// a crash between them leaves these behind with nothing referring to them. Reopening the job
 		// is the only chance to notice.
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath("job-1"))
+		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 
 		require.NoError(t, registry.Init(context.Background()))
 
 		assert.Empty(t, registry.GetManagersSnapshot())
 		assert.NoDirExists(t, entriesPath)
-		assert.NoDirExists(t, path.Join(registry.mountPath, stateRoot, bulkManagerPath, "job-1"))
-		assert.DirExists(t, path.Join(registry.mountPath, stateRoot), "the shared state root must survive")
+		assert.NoDirExists(t, path.Join(registry.mountPath, DefaultStateRoot, bulkManagerPath, "job-1"))
+		assert.DirExists(t, path.Join(registry.mountPath, DefaultStateRoot), "the shared state root must survive")
 	})
 
 	t.Run("directories still holding an operation are left alone", func(t *testing.T) {
@@ -705,13 +718,13 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		require.NoError(t, registry.Init(context.Background()))
 
 		require.Contains(t, registry.GetManagersSnapshot(), "1-retrieve")
-		assert.DirExists(t, path.Join(mountPath, bulkOperationMountPath("job-1")), "a job that still has entries must keep its directories")
+		assert.DirExists(t, path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1")), "a job that still has entries must keep its directories")
 		assert.FileExists(t, registry.managers["1-retrieve"].getEntryPath())
 	})
 
 	t.Run("a corrupt entry is an error instead of a silently lost operation", func(t *testing.T) {
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath("job-1"))
+		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(entriesPath, "1-retrieve.json"), []byte("not json"), 0o600))
 
@@ -809,4 +822,60 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "1-retrieve")
 	})
+}
+
+// TestValidateStateRoot pins the two orderings the validator depends on.
+//
+// The leading slash is rejected before the value is cleaned, because path.Clean("/../outside") is
+// "/outside": cleaning first would turn an escape into a path that no longer looks like one. The
+// escape check runs after cleaning, so a value such as "a/../.." is caught even though no prefix of
+// it reads as an escape.
+func TestValidateStateRoot(t *testing.T) {
+	accepted := map[string]string{
+		"empty defaults":            "",
+		"the default":               DefaultStateRoot,
+		"a nested directory":        "sub/dir",
+		"an explicitly relative":    "./sub/dir",
+		"a redundant separator":     "sub//dir",
+		"an interior parent":        "sub/../other",
+		"a trailing separator":      "sub/dir/",
+		"a hidden nested directory": ".state/bulk",
+	}
+	expected := map[string]string{
+		"empty defaults":            DefaultStateRoot,
+		"the default":               DefaultStateRoot,
+		"a nested directory":        "sub/dir",
+		"an explicitly relative":    "sub/dir",
+		"a redundant separator":     "sub/dir",
+		"an interior parent":        "other",
+		"a trailing separator":      "sub/dir",
+		"a hidden nested directory": ".state/bulk",
+	}
+
+	for name, stateRoot := range accepted {
+		t.Run("accepts "+name, func(t *testing.T) {
+			got, err := ValidateStateRoot(stateRoot)
+			require.NoError(t, err)
+			assert.Equal(t, expected[name], got, "the cleaned value is what gets propagated to workers")
+		})
+	}
+
+	rejected := map[string]string{
+		"an absolute path":        "/abs/path",
+		"the filesystem root":     "/",
+		"an absolute escape":      "/../outside",
+		"a bare parent":           "..",
+		"a leading parent":        "../escape",
+		"an escape after cleanup": "a/../..",
+		"the mount point itself":  ".",
+		"a trailing dot slash":    "./",
+	}
+
+	for name, stateRoot := range rejected {
+		t.Run("rejects "+name, func(t *testing.T) {
+			_, err := ValidateStateRoot(stateRoot)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), stateRoot, "the error must name the value that was rejected")
+		})
+	}
 }

@@ -91,6 +91,9 @@ type Manager struct {
 	config               Config
 	remoteStorageTargets *rst.ClientStore
 	beeRemoteClient      *beeremote.Client
+	// warnDefaultStateRoot logs once that Remote sent no state root. UpdateConfig runs on every
+	// reconnect, so warning each time would repeat for as long as that Remote stays in service.
+	warnDefaultStateRoot sync.Once
 	// The workJournal has a work entry for each work request and its result. It uses an
 	// automatically incremented submission ID as the key for each entry, allowing it to be used as
 	// a journal to recreate the work queue(s) after a restart. This ensures requests are always
@@ -266,13 +269,27 @@ func (m *Manager) IsReady() bool {
 // an error if the configuration update is invalid/not allowed.
 //
 // IMPORTANT: Currently once the initial RST config is set, it cannot be dynamically updated without
-// first restarting BeeSync.
+// first restarting BeeSync. The same is true of stateRoot, which is where bulk operations persist
+// the state a builder job needs to resume.
 //
 // TODO: https://github.com/ThinkParQ/bee-remote/issues/29
 // Allow RST configuration to be updated dynamically.
-func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string) error {
+func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
 
-	err := m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs)
+	// A Remote predating the setting sends nothing, so fall back to the same default it would have
+	// used. Revalidating what Remote already validated costs nothing and keeps a malformed value
+	// from reaching the paths built from it.
+	if stateRoot == "" {
+		m.warnDefaultStateRoot.Do(func() {
+			m.log.Warn("remote did not provide a state root for bulk operations, assuming the default", zap.String("stateRoot", rst.DefaultStateRoot))
+		})
+	}
+	stateRoot, err := rst.ValidateStateRoot(stateRoot)
+	if err != nil {
+		return fmt.Errorf("remote provided an invalid state root: %w", err)
+	}
+
+	err = m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs, stateRoot)
 	if err != nil {
 		return err
 	}
