@@ -577,15 +577,15 @@ func (r *S3Client) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx c
 	}
 	sync := request.GetSync()
 
-	var err error
+	var result *SchedulingResult
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(workCtx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
+		result = r.upload(shutdownCtx, workCtx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
 	case flex.SyncJob_DOWNLOAD:
-		err = r.download(workCtx, request.Path, sync.RemotePath, part)
+		result = r.download(shutdownCtx, workCtx, request.Path, sync.RemotePath, part)
 	}
-	if err != nil {
-		return &SchedulingResult{Err: err}
+	if result != nil {
+		return result
 	}
 
 	part.Completed = true
@@ -1275,9 +1275,14 @@ func (r *S3Client) finishUpload(ctx context.Context, uploadID string, remotePath
 // requires the provided part number to be "1". When not performing a multi-part upload it still
 // honors the provided offset start/stop range and does not check to verify this range covers the
 // entirety of the specified file. If the upload is successful the part will be updated directly
-// with the results (such as the etag), otherwise an error will be returned.
+// with the results (such as the etag), otherwise a SchedulingResult describing how the part ended
+// is returned. A nil result means the part uploaded successfully.
+//
+// S3 only accepts a part in its entirety, so an upload interrupted partway has nothing to credit
+// the part with and simply uploads the same range again when the request is rescheduled.
 func (r *S3Client) upload(
-	ctx context.Context,
+	shutdownCtx context.Context,
+	workCtx context.Context,
 	path string,
 	remotePath string,
 	uploadID string,
@@ -1286,7 +1291,7 @@ func (r *S3Client) upload(
 	metadata map[string]string,
 	tagging *string,
 	storageClass *string,
-) error {
+) *SchedulingResult {
 
 	filePart, sha256sum, err := r.mountPoint.ReadFilePart(path, part.OffsetStart, part.OffsetStop)
 
@@ -1296,7 +1301,7 @@ func (r *S3Client) upload(
 		if errors.Is(err, io.EOF) && part.OffsetStart == 0 && part.OffsetStop == -1 {
 			filePart = bytes.NewReader([]byte{})
 		} else {
-			return err
+			return &SchedulingResult{Err: err}
 		}
 	}
 	part.ChecksumSha256 = sha256sum
@@ -1305,14 +1310,14 @@ func (r *S3Client) upload(
 		// This should catch most issues where the user intended to perform a multi-part upload, but
 		// did not generate an upload ID first or if multiple parts were generated inadvertently.
 		if part.PartNumber != 1 {
-			return fmt.Errorf("only multi-part uploads can have a part number other than 1 (did you intend to create a multi-part upload first?)")
+			return &SchedulingResult{Err: fmt.Errorf("only multi-part uploads can have a part number other than 1 (did you intend to create a multi-part upload first?)")}
 		}
 
 		beegfsMtime := mtime.Format(time.RFC3339)
 		if metadata == nil {
 			metadata = map[string]string{"beegfs-mtime": beegfsMtime}
 		} else if _, ok := metadata["beegfs-mtime"]; ok {
-			return fmt.Errorf("'beegfs-mtime' is a reserved metadata key")
+			return &SchedulingResult{Err: fmt.Errorf("'beegfs-mtime' is a reserved metadata key")}
 		} else {
 			metadata["beegfs-mtime"] = beegfsMtime
 		}
@@ -1331,10 +1336,14 @@ func (r *S3Client) upload(
 			input.StorageClass = types.StorageClass(*storageClass)
 		}
 
-		resp, err := r.apiClient.PutObject(ctx, input)
+		part.SetStarted(true)
+		resp, err := r.apiClient.PutObject(workCtx, input)
 
 		if err != nil {
-			return err
+			if shutdownCtx.Err() != nil {
+				return &SchedulingResult{Reschedule: true}
+			}
+			return &SchedulingResult{Err: err}
 		}
 		part.EntityTag = *resp.ETag
 		return nil
@@ -1350,28 +1359,57 @@ func (r *S3Client) upload(
 	}
 
 	part.SetStarted(true)
-	resp, err := r.apiClient.UploadPart(ctx, uploadPartReq)
+	resp, err := r.apiClient.UploadPart(workCtx, uploadPartReq)
 	if err != nil {
-		return err
+		if shutdownCtx.Err() != nil {
+			return &SchedulingResult{Reschedule: true}
+		}
+		return &SchedulingResult{Err: err}
 	}
 	part.EntityTag = *resp.ETag
 	return nil
 }
 
-func (r *S3Client) download(ctx context.Context, path string, remotePath string, part *flex.Work_Part) error {
+// download writes the requested range of the remote object into the given part of the local file. A
+// nil result means the part downloaded successfully, otherwise the returned SchedulingResult
+// describes how the part ended.
+//
+// If a shutdown interrupts the download partway without an error, the bytes already written are
+// credited to the part so the rescheduled request resumes where this attempt left off.
+func (r *S3Client) download(shutdownCtx context.Context, workCtx context.Context, path string, remotePath string, part *flex.Work_Part) (result *SchedulingResult) {
 	if part.OffsetStop == -1 {
 		if part.OffsetStart == 0 {
-			// There are no bytes to write to the file (i.e., the file is empty).
-			return nil
+			// There are no bytes to write for the empty file. Resizing the file to match the remote
+			// object already happened before any part ran, so the part is still marked started. The
+			// file already reflects the remote object.
+			part.SetStarted(true)
+		} else {
+			result = &SchedulingResult{Err: fmt.Errorf("the offset stop is %d however the offset start is %d not 0 (this is likely a bug)", part.OffsetStop, part.OffsetStart)}
 		}
-		return fmt.Errorf("the offset stop is %d however the offset start is %d not 0 (this is likely a bug)", part.OffsetStop, part.OffsetStart)
+		return
 	}
 
 	filePart, err := r.mountPoint.WriteFilePart(path, part.OffsetStart, part.OffsetStop)
 	if err != nil {
-		return err
+		result = &SchedulingResult{Err: err}
+		return
 	}
-	defer filePart.Close()
+
+	offsetStartBefore := part.GetOffsetStart()
+	defer func() {
+		if closeErr := filePart.Close(); closeErr != nil {
+			if result == nil {
+				result = &SchedulingResult{Err: closeErr}
+			} else {
+				result = &SchedulingResult{Err: appendErrors(result.Err, closeErr)}
+			}
+		}
+		if result != nil && result.Err != nil {
+			// Any error should reset the offset to the known starting offset since we cannot
+			// guarantee that data has been written.
+			part.SetOffsetStart(offsetStartBefore)
+		}
+	}()
 
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(r.s3Config.Bucket),
@@ -1379,21 +1417,37 @@ func (r *S3Client) download(ctx context.Context, path string, remotePath string,
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", part.OffsetStart, part.OffsetStop)),
 	}
 
-	resp, err := r.apiClient.GetObject(ctx, getObjectInput)
+	resp, err := r.apiClient.GetObject(workCtx, getObjectInput)
 	if err != nil {
-		return err
+		if shutdownCtx.Err() != nil {
+			result = &SchedulingResult{Reschedule: true}
+		} else {
+			result = &SchedulingResult{Err: err}
+		}
+		return
 	}
 	defer resp.Body.Close()
 
-	copiedBytes, err := io.Copy(filePart, resp.Body)
-	part.SetStarted(copiedBytes > 0)
-	if err != nil {
-		return err
+	requestedBytes := part.OffsetStop - part.OffsetStart + 1
+	copiedBytes, copyErr := io.Copy(filePart, resp.Body)
+	if copiedBytes > 0 {
+		part.SetStarted(true)
+		part.SetOffsetStart(part.GetOffsetStart() + copiedBytes)
 	}
-	if copiedBytes != part.OffsetStop-part.OffsetStart+1 {
-		return fmt.Errorf("%w (expected: %d, actual: %d)", ErrPartialPartDownload, part.OffsetStop-part.OffsetStart+1, copiedBytes)
+
+	if copyErr != nil {
+		if shutdownCtx.Err() != nil {
+			result = &SchedulingResult{Reschedule: true}
+		} else {
+			result = &SchedulingResult{Err: copyErr}
+		}
+		return
 	}
-	return nil
+
+	if copiedBytes != requestedBytes {
+		result = &SchedulingResult{Err: fmt.Errorf("%w (expected: %d, actual: %d)", ErrPartialPartDownload, requestedBytes, copiedBytes)}
+	}
+	return
 }
 
 const (
