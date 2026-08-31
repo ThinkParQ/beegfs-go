@@ -697,7 +697,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		if !ok {
 			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
 		}
-		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient)
+
+		nodeType := workermgr.NodeTypeForJobRequest(job.Request)
+		availableWorkers := m.workerManager.AvailableWorkers(nodeType)
+		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient, availableWorkers)
 	}
 
 	if err != nil {

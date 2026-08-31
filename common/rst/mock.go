@@ -60,7 +60,20 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beerem
 			return nil, fmt.Errorf("test requested an error")
 		}
 
-		workRequests := RecreateWorkRequests(job, generateSegments(job.Request.GetMock().FileSize, int64(job.Request.GetMock().NumTestSegments), 1))
+		numSegments := int64(job.Request.GetMock().NumTestSegments)
+		if numSegments <= 0 {
+			numSegments = 1
+		}
+
+		// Most tests only care how many work requests come back and leave FileSize unset. Segments
+		// must contain at least one byte each to stay distinguishable, so give the mock file just
+		// enough bytes to hand out one per requested segment.
+		fileSize := job.Request.GetMock().FileSize
+		if fileSize < numSegments {
+			fileSize = numSegments
+		}
+
+		workRequests := RecreateWorkRequests(job, generateSegments(fileSize, numSegments, 1))
 		return workRequests, nil
 	}
 

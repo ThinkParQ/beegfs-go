@@ -213,8 +213,9 @@ func (s *WorkerNodeServer) Heartbeat(ctx context.Context, request *flex.Heartbea
 	// this node offline and stop assigning it work, which is the safe approximation.
 	return flex.HeartbeatResponse_builder{
 		//lint:ignore SA1019 still populated for Remote nodes predating State, see above.
-		IsReady: ready && !draining,
-		State:   state,
+		IsReady:    ready && !draining,
+		State:      state,
+		NumWorkers: uint32(s.workMgr.NumWorkers()),
 	}.Build(), nil
 }
 

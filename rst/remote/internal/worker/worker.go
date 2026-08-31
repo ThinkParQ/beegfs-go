@@ -20,6 +20,7 @@ type Worker interface {
 	GetID() string
 	GetState() State
 	GetNodeType() Type
+	GetNumWorkers() int
 	Handle(*sync.WaitGroup, *flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature)
 	Stop()
 	// Implemented by specific node types:
@@ -105,6 +106,14 @@ type baseNode struct {
 	// blocked doesn't send a stale offline notification which would make the
 	// node offline again.
 	rpcErr chan error
+	// numWorkers is how many work requests this node runs concurrently, as reported by its last
+	// heartbeat. It is guarded by stateMu alongside State because the two are updated together and
+	// read together when sizing jobs. Zero means the node has not reported one yet, either because
+	// it has not been heard from or because it predates the field.
+	numWorkers int
+	// warnedNoNumWorkers suppresses repeating the "node did not report num_workers" warning on
+	// every heartbeat. It is reset whenever the node reconnects so an upgrade is noticed.
+	warnedNoNumWorkers bool
 }
 
 // While gRPC handles most aspects of managing connections with worker nodes,
@@ -127,6 +136,12 @@ const (
 	// every online node in their pool has declined it. See Pool.assignmentCandidates.
 	DRAINING State = "draining"
 )
+
+// AssumedNumWorkers is the worker count assumed for nodes that predate num_workers in the heartbeat
+// response. Overestimating only queues extra work requests on a node, while underestimating
+// permanently under parallelizes a job because its segments are fixed once generated, so this sits
+// toward the high end of a typical GOMAXPROCS rather than the low end.
+const AssumedNumWorkers = 32
 
 func (n *baseNode) heartbeatState(resp *flex.HeartbeatResponse) State {
 	switch resp.GetState() {
@@ -156,6 +171,35 @@ func (n *baseNode) GetState() State {
 	n.stateMu.RLock()
 	defer n.stateMu.RUnlock()
 	return n.State
+}
+
+// GetNumWorkers returns how many work requests this node runs concurrently, or zero when the node
+// has not reported a count. Callers are responsible for deciding what to assume when it is zero.
+func (n *baseNode) GetNumWorkers() int {
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	return n.numWorkers
+}
+
+// recordNumWorkers stores the worker count from a heartbeat response. Nodes predating the field
+// report zero, which is left as-is so the caller can substitute its own assumption. That is warned
+// about once per connection rather than on every heartbeat, which would otherwise repeat for as
+// long as the node stays connected.
+func (n *baseNode) recordNumWorkers(resp *flex.HeartbeatResponse) {
+	numWorkers := int(resp.GetNumWorkers())
+
+	n.stateMu.Lock()
+	n.numWorkers = numWorkers
+	warn := numWorkers == 0 && !n.warnedNoNumWorkers
+	if warn {
+		n.warnedNoNumWorkers = true
+	}
+	n.stateMu.Unlock()
+
+	if warn {
+		n.log.Warn("node did not report how many workers it runs, assuming a default when sizing jobs (hint: upgrade the node so jobs are split to match its actual capacity)",
+			zap.Int("assumedNumWorkers", AssumedNumWorkers))
+	}
 }
 
 func (n *baseNode) GetNodeType() Type {
@@ -221,6 +265,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 							n.log.Error("failed to receive heartbeat response from node, placing offline and attempting to reconnect", zap.Error(err))
 							break connectedLoop
 						}
+						n.recordNumWorkers(resp)
 						switch n.heartbeatState(resp) {
 						case DRAINING:
 							// Deliberately stay in this loop. A draining node is shutting down
@@ -259,6 +304,10 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 		// and immediately trying to disconnect the node. Probably this is a bit
 		// excessive, but allows for tight control over the shutdown process.
 		n.setState(OFFLINE)
+		n.stateMu.Lock()
+		n.numWorkers = 0
+		n.warnedNoNumWorkers = false
+		n.stateMu.Unlock()
 		allDone := make(chan struct{})
 		go func() {
 			n.rpcWG.Wait()

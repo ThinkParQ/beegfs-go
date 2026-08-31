@@ -88,19 +88,24 @@ func (j *Job) InActiveState() bool {
 // multiple times to check on the status of outstanding work requests (e.g., after an app crash or
 // because a user requests this).
 //
+// availableWorkers is how many work requests the cluster can run concurrently, used to avoid
+// splitting a transfer into far more segments than can ever run at once. Like the file size it is
+// only consulted while segments are first generated, so the segments reflect the cluster as it was
+// when the job was submitted rather than as it is when the job runs.
+//
 // IMPORTANT: After initially generating segments subsequent calls to GenerateSubmission will not
 // recheck the size of the file to determine if the generated segments are still valid, the original
 // segments will always be returned. This is to discourage misuse of the GenerateSubmission()
 // function as a method to determine if a file has changed and it is safe to resume a job or if it
 // should be cancelled. It also ensures even if the file changes the original job submission can be
 // recreated for troubleshooting.
-func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, error) {
+func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider, availableWorkers int) (workermgr.JobSubmission, error) {
 
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
 		var err error
-		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
+		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), availableWorkers)
 		if err != nil {
 			return workermgr.JobSubmission{}, err
 		}

@@ -212,6 +212,18 @@ func (m *Manager) Start() error {
 // failed if one or more requests cannot be cancelled after an initial failure. If an error occurs
 // the map and status should be checked to ensure they are not nil, otherwise they can be used to
 // further diagnose the issue without requiring additional requests to get the status of the job.
+// AvailableWorkers returns how many work requests the pool for nodeType can run concurrently right
+// now. It is used to size jobs so a transfer is not split into far more segments than the cluster
+// can ever run at once. Zero means there is no pool for the type or no node in it is currently
+// eligible for work.
+func (m *Manager) AvailableWorkers(nodeType worker.Type) int {
+	pool, ok := m.nodePools[nodeType]
+	if !ok {
+		return 0
+	}
+	return pool.AvailableWorkers()
+}
+
 func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *beeremote.Job_Status, error) {
 
 	workResults := make(map[string]worker.WorkResult)
@@ -229,19 +241,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 		// If an error occurs return it as the message in the work response status.
 		var err error
 
-		// Map work request types to worker nodes. If a new request type and
-		// worker node are added this should be updated.
-		var nodeType worker.Type
-		switch workRequest.WhichType() {
-		case flex.WorkRequest_Mock_case:
-			nodeType = worker.Mock
-		case flex.WorkRequest_Sync_case:
-			nodeType = worker.BeeSync
-		case flex.WorkRequest_Builder_case:
-			nodeType = worker.BeeSync
-		default:
-			nodeType = worker.Unknown
-		}
+		nodeType := NodeTypeForWorkRequest(workRequest)
 
 		pool, ok := m.nodePools[nodeType]
 		if !ok {
