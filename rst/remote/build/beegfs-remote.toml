@@ -524,6 +524,17 @@ rate-limit-event-types = ["*"]
 # an S3 bucket, Amazon generally recommends as object sizes approach 100MB, a multipart upload
 # should be used instead of uploading the object in a single operation, thus 104857600 is a
 # reasonable policy to set (https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html).
+# Leaving this unset (or zero) disables splitting entirely, so each file is transferred by a single
+# worker as one operation.
+#
+# There is no universally correct value; it depends on the remote target, network, and available
+# worker. What it controls is how much data a worker is handed at a time, so setting it too low
+# splits a transfer into many small pieces that each cost a separate request to the remote target
+# plus their own scheduling and bookkeeping on the worker. Past a certain point that overhead
+# dominates and throughput drops, even though more workers are involved. Error on the high side when
+# unsure, and use whatever the target recommends as a starting point (for S3, the 100MB above).
+# Remote storage targets may impose a lower bound where required or appropriate, in which case a
+# value below it has no further effect.
 
 
 #

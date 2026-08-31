@@ -260,9 +260,9 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		requests, err = r.generateSyncJobWorkRequest_Upload(job)
+		requests, err = r.generateSyncJobWorkRequest_Upload(job, availableWorkers)
 	case flex.SyncJob_DOWNLOAD:
-		requests, err = r.generateSyncJobWorkRequest_Download(job)
+		requests, err = r.generateSyncJobWorkRequest_Download(job, availableWorkers)
 	default:
 		err = ErrUnsupportedOpForRST
 	}
@@ -604,8 +604,8 @@ func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCf
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if !cfg.Download {
-		segCount, _ := r.recommendedSegments(cfg.LockedInfo.Size)
-		if segCount > 1 {
+		segCount, parts := r.recommendedSegments(cfg.LockedInfo.Size, 0)
+		if segCount*int64(parts) > 1 {
 			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.StorageClass)
 		}
 	}
@@ -617,7 +617,7 @@ func (r *S3Client) SanitizeRemotePath(remotePath string) string {
 	return strings.TrimLeft(remotePath, "/")
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*flex.WorkRequest, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
 	lockedInfo := sync.LockedInfo
@@ -633,18 +633,18 @@ func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job) ([]*fle
 		return nil, fmt.Errorf("%w", ErrFileTypeUnsupported)
 	}
 
-	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size)
+	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size, availableWorkers)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.Size, segCount, partsPerSegment))
 	return workRequests, nil
 }
 
-func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job) ([]*flex.WorkRequest, error) {
+func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job, availableWorkers int) ([]*flex.WorkRequest, error) {
 	request := job.GetRequest()
 	sync := request.GetSync()
 	lockedInfo := sync.LockedInfo
 	job.SetStartMtime(lockedInfo.RemoteMtime)
 
-	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize)
+	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize, availableWorkers)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.RemoteSize, segCount, partsPerSegment))
 	return workRequests, nil
 }
@@ -1080,18 +1080,74 @@ func (r *S3Client) download(ctx context.Context, path string, remotePath string,
 	return nil
 }
 
-func (r *S3Client) recommendedSegments(fileSize int64) (int64, int32) {
+const (
 
-	if fileSize <= r.config.Policies.FastStartMaxSize || r.config.Policies.FastStartMaxSize == 0 {
-		return 1, 1
-	} else if fileSize/4 < 5242880 {
-		// Each part must be at least 5MB except for the last part which can be any size.
-		// Regardless of the FastStartMaxSize ensure we don't try to use a multipart upload when it is not valid.
-		// https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-		return 1, 1
+	// TODO: Consider whether the following constants should be exposed to the user configuration.
+
+	// targetWorkRequestSegmentPartSize limits part size which behaves as a checkpoint. So when a
+	// shutdown or crash occurs, the request will resume from the last completed part. The target
+	// size will grow if maxWorkRequestSegments would be exceeded. 100MB is AWS's recommended size
+	// before splitting into parts.
+	targetWorkRequestSegmentPartSize = 100 * 1024 * 1024
+	// 10000 is the maximum number of multipart upload parts in accordance with AWS's
+	// recommendation and is commonly listed as the maximum for s3 cloud object storage.
+	maxWorkRequestSegments    = 10000
+	minWorkRequestSegmentSize = 5 * 1024 * 1024
+)
+
+// recommendedSegments determines how to split a transfer of fileSize bytes into work request
+// segments, and how many parts each segment is broken into. Segments are the unit of parallelism
+// (each is handed to a worker), while parts are the unit of resumption (a segment restarts from its
+// last completed part). It returns (1, 1) when segmentation is disabled (FastStartMaxSize <= 0) or
+// the file is small enough to fast start. Note that a file at or below FastStartMaxSize is sent as a
+// single part, so crossing that threshold by one byte jumps straight to multiple segments and parts.
+//
+// Segment count aims for FastStartMaxSize bytes per segment, but is bounded by
+// minWorkRequestSegmentSize per segment, by availableWorkers (when > 0), and by
+// maxWorkRequestSegments. Part count aims for targetWorkRequestSegmentPartSize bytes per part, but
+// is bounded so segments*parts stays within maxWorkRequestSegments, which means parts grow larger
+// than the target for very large transfers.
+//
+// For example, with FastStartMaxSize of 1GiB:
+//
+//	fileSize  availableWorkers  segments  parts   bytes/segment  bytes/part
+//	100MiB    any               1         1       100MiB         100MiB
+//	1GiB      any               1         1       1GiB           1GiB
+//	1GiB+1    unlimited or 8    2         6       512MiB         ~85MiB
+//	4GiB      unlimited or 8    4         11      1GiB           ~93MiB
+//	100GiB    unlimited         100       11      1GiB           ~93MiB
+//	100GiB    8                 8         128     12.5GiB        100MiB
+//	1TiB      unlimited         1024      9       1GiB           ~114MiB
+//	1TiB      8                 8         1250    128GiB         ~105MiB
+//	10TiB     unlimited         10000     1       ~1GiB          ~1GiB
+//	10TiB     8                 8         1250    1.25TiB        1GiB
+//
+// The last two rows show the maxWorkRequestSegments ceiling forcing parts well above the target
+// size, which coarsens resumption granularity.
+func (r *S3Client) recommendedSegments(fileSize int64, availableWorkers int) (segments int64, parts int32) {
+	segments, parts = 1, 1
+	fastStartMaxSize := r.config.Policies.FastStartMaxSize
+	if fastStartMaxSize <= 0 || fileSize <= fastStartMaxSize {
+		return
 	}
+
+	// Determine work request segment count.
+	targetSegments := (fileSize + fastStartMaxSize - 1) / fastStartMaxSize
+	maxSegmentsBySize := fileSize / minWorkRequestSegmentSize
+	maxSegmentsByWorker := int64(maxWorkRequestSegments)
+	if availableWorkers > 0 {
+		maxSegmentsByWorker = int64(availableWorkers)
+	}
+	segments = max(1, min(targetSegments, maxSegmentsBySize, maxSegmentsByWorker, maxWorkRequestSegments))
+
+	// Determine work request segment part count.
+	bytesPerSegment := fileSize / segments
+	maxParts := maxWorkRequestSegments / segments
+	targetParts := (bytesPerSegment + targetWorkRequestSegmentPartSize - 1) / targetWorkRequestSegmentPartSize
+	parts = int32(max(1, min(targetParts, maxParts)))
+
 	// TODO: https://github.com/thinkparq/gobee/issues/7
 	// Arbitrary selection for now. We should be smarter and take into
-	// consideration file size and number of workers for this RST type.
-	return 4, 1
+	// consideration the number of workers for this RST type.
+	return
 }
