@@ -144,7 +144,16 @@ type S3Client struct {
 var _ Provider = &S3Client{}
 
 func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
-	return newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), mountPoint)
+	if !rstConfig.HasS3() {
+		return nil, ErrConfigRSTTypeIsUnknown
+	}
+
+	s3Client, err := newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), mountPoint)
+	if err != nil {
+		return nil, err
+	}
+
+	return s3Client, nil
 }
 
 type s3ProviderOption func(*s3ProviderBuildCfg)
@@ -179,8 +188,10 @@ func s3ClientMaxIdleConns() int {
 }
 
 // newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
-// created, so shared wrapper state can rely on apiClient already being populated.
-func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (Provider, error) {
+// created, so shared wrapper state can rely on apiClient already being populated. It returns the
+// concrete *S3Client (rather than a Provider) so providers that extend the s3 implementation, such
+// as xtreemstore, can reach shared s3 state like the configured storage classes.
+func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (*S3Client, error) {
 	if s3Config == nil {
 		return nil, fmt.Errorf("s3 configuration must be specified")
 	}
