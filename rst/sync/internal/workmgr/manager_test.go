@@ -19,6 +19,8 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -157,7 +159,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 	err = mgr.UpdateConfig(config.rstConfigs, flex.BeeRemoteNode_builder{
 		Id:      "0",
 		Address: "mock:0",
-	}.Build())
+	}.Build(), "test-sync-node")
 	return mgr, deferredFuncs, err
 
 }
@@ -191,14 +193,14 @@ func TestUpdateConfig(t *testing.T) {
 	}.Build()
 
 	// No change to the config should not return an error:
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig, ""))
 
 	// Updating BR config is allowed:
 	notEqualBRConfig := flex.BeeRemoteNode_builder{
 		Id:      "1",
 		Address: "mock:0",
 	}.Build()
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig, ""))
 }
 
 func TestSubmitWorkRequest(t *testing.T) {
@@ -629,4 +631,64 @@ func BenchmarkJobStore(b *testing.B) {
 		commit2()
 	}
 	b.StopTimer()
+}
+
+// Stop must not close the job store or work journal while a call admitted on behalf of Remote is
+// still using them. The call is held open directly through admitRPC because the real calls finish
+// too quickly to observe the wait.
+func TestStopWaitsForAdmittedRPCs(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+
+	releaseRPC, err := mgr.admitRPC()
+	require.NoError(t, err)
+
+	stopped := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an admitted call was still in progress")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The manager context is only cancelled after the admitted call finishes, so the stores are
+	// still open.
+	require.NoError(t, mgr.mgrCtx.Err())
+
+	releaseRPC()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the admitted call finished")
+	}
+}
+
+// Once Stop has run, calls on behalf of Remote are rejected without touching the closed stores. A
+// rejected submission must return the bare ErrStopping so the server can tell Remote that nothing
+// was recorded.
+func TestRPCsRejectedAfterStop(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	mgr.Stop()
+
+	work, err := mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.Nil(t, work)
+	require.ErrorIs(t, err, ErrStopping)
+
+	work, err = mgr.UpdateWork(flex.UpdateWorkRequest_builder{JobId: "0", RequestId: "0", NewState: flex.UpdateWorkRequest_CANCELLED}.Build())
+	require.Nil(t, work)
+	require.Equal(t, codes.Unavailable, status.Code(err))
 }
