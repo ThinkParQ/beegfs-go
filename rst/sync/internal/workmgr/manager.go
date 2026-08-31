@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -70,7 +71,12 @@ type Config struct {
 type Manager struct {
 	ready   bool
 	readyMu sync.RWMutex
-	log     *logger.Logger
+	// stopping is set once Stop() has finished with the workers and starts tearing down the manager
+	// itself, after which the work journal is closing and no new request can be accepted. It is
+	// separate from ready because a draining node is still ready to record work, and separate from
+	// the worker context because workers are cancelled well before the journal closes.
+	stopping atomic.Bool
+	log      *logger.Logger
 	// When shutting down workers must be shutdown first so the manager can handle their results and
 	// store them in the database.
 	workerCtx    context.Context
@@ -257,7 +263,7 @@ func (m *Manager) IsReady() bool {
 //
 // TODO: https://github.com/ThinkParQ/bee-remote/issues/29
 // Allow RST configuration to be updated dynamically.
-func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode) error {
+func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string) error {
 
 	err := m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs)
 	if err != nil {
@@ -265,7 +271,7 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 	}
 
 	// If there are existing RSTs, verify the configuration did not change:
-	err = m.beeRemoteClient.UpdateConfig(beeRemoteConfig)
+	err = m.beeRemoteClient.UpdateConfig(beeRemoteConfig, nodeID)
 	if err != nil {
 		return err
 	}
@@ -274,6 +280,16 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 	defer m.readyMu.Unlock()
 	m.ready = true
 	return nil
+}
+
+// Accepting reports whether new work requests can still be recorded. It stays true for as long as
+// the work journal is open, which includes the drain that precedes shutdown: a request accepted then
+// cannot run in this process, but it is journaled and replayed when the node restarts, which is
+// better than rejecting work that has nowhere else to go. It goes false once Stop() begins tearing
+// the manager down, because past that point the journal is closing and an accepted request would be
+// lost rather than replayed.
+func (m *Manager) Accepting() bool {
+	return !m.stopping.Load()
 }
 
 // Once manage is started it will not exit until the context is cancelled. If an error happens it
@@ -910,6 +926,9 @@ func (m *Manager) Stop() {
 	// cleanup all shared resources (DB, RST/BeeRemote clients, etc).
 	m.workerWG.Wait()
 	m.log.Info("stopped all workers, attempting stop manager")
+	// Past this point the journal and shared clients are being closed, so nothing more can be
+	// accepted. Reject before touching the manager rather than surfacing errors from a closing DB.
+	m.stopping.Store(true)
 	m.mgrCancel()
 	m.mgrWG.Wait()
 	m.log.Info("stopped manager")

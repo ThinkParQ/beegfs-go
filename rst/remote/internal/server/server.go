@@ -115,7 +115,7 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 	defer s.wg.Done()
 
 	var status beeremote.SubmitJobResponse_ResponseStatus = beeremote.SubmitJobResponse_CREATED
-	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest())
+	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest(), request.GetOriginNodeId())
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyComplete) {
 			status = beeremote.SubmitJobResponse_ALREADY_COMPLETE
