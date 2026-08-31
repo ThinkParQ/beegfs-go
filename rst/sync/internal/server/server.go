@@ -210,8 +210,9 @@ func (s *WorkerNodeServer) Heartbeat(ctx context.Context, request *flex.Heartbea
 	// Those nodes have no way to represent draining, so it is reported as not ready: they will place
 	// this node offline and stop assigning it work, which is the safe approximation.
 	return flex.HeartbeatResponse_builder{
-		IsReady: ready && !draining,
-		State:   state,
+		IsReady:    ready && !draining,
+		State:      state,
+		NumWorkers: uint32(s.workMgr.NumWorkers()),
 	}.Build(), nil
 }
 
