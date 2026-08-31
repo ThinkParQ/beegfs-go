@@ -370,12 +370,6 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			continue
 		}
 
-		// Block until the request is completed. We pass a context to the request to handle
-		// graceful cancellation. If the context is cancelled we still want to update the
-		// journal with the latest result before exiting so we can resume later on. The part
-		// will simply not be marked completed if the context was cancelled.
-		//
-		// A nil result means the part ran with nothing further to report.
 		partResult := client.ExecuteWorkRequestPart(shutdownCtx, work.ctx, request.WorkRequest, part)
 		if partResult == nil {
 			partResult = &rst.SchedulingResult{}
@@ -405,35 +399,46 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			return
 		}
 
+		if partResult.Reschedule {
+			commitWorkPart()
+			status.SetState(flex.Work_RESCHEDULED)
+			if shutdownCtx.Err() != nil {
+				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+				entry.ExecuteAfter = time.Time{}
+				return
+			}
+			status.SetMessage("stopped before all parts were synced")
+			entry.ExecuteAfter = time.Now().Add(partResult.Delay)
+			w.sendWorkResult(work, result.Work)
+			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("rescheduled"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
+			return
+		}
+
 		if part.GetCompleted() {
 			completedParts++
 		}
-		// Commit each part as they are completed so other readers can monitor progress.
 		commitWorkPart()
 	}
 
 	if len(result.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
+	} else if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("the work context was cancelled before all parts can be synced")
+		return
 	} else {
-		if work.ctx.Err() != nil {
-			if shutdownCtx.Err() != nil {
-				// BeeSync is shutting down. Nothing is wrong with the request so leave it
-				// rescheduled rather than cancelled, otherwise process() would refuse to start it
-				// again after the restart. Parts already marked completed are skipped when it
-				// resumes.
-				status.SetState(flex.Work_RESCHEDULED)
-				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
-				entry.ExecuteAfter = time.Time{}
-				return
-			}
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("the work context was cancelled before all parts can be synced")
-			// Don't send the work result and don't try to cleanup entries. This request was
-			// cancelled specifically (not shut down), so whoever cancelled it owns sending the
-			// result and removing the journal entry.
-			return
-		}
 		// This shouldn't happen so we set the state to failed to avoid making things worse and
 		// ensure we don't silently retry this forever.
 		status.SetState(flex.Work_FAILED)
@@ -458,7 +463,7 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	if result == nil {
 		result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
 	}
-	return w.updateBuilderJob(work, entry, result)
+	return w.updateBuilderJob(shutdownCtx, work, entry, result)
 }
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state
@@ -548,7 +553,7 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 }
 
 // updateBuilderJob uses result to update the builder job's work status and state.
-func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result *rst.SchedulingResult) (cleanupEntries bool) {
+func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignment, entry *workEntry, result *rst.SchedulingResult) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	workRequest := request.WorkRequest
 	workResult := entry.WorkResult
@@ -563,7 +568,14 @@ func (w *worker) updateBuilderJob(work workAssignment, entry *workEntry, result 
 		}
 	}()
 
-	if result.Err != nil {
+	if shutdownCtx.Err() != nil {
+		// Worker is shutting down so reschedule so the job can finished after it's started
+		// again. If not, then the job will be cancelled which will be failed after the restart.
+		result.Reschedule = true
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for builder job to continue because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+	} else if result.Err != nil {
 		message := result.Err.Error()
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("job builder failed to complete: " + message)
