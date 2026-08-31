@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"math"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -111,9 +112,9 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		failedPrecondition = appendErrors(failedPrecondition, fmt.Errorf("file access lock is already held"))
 	}
 	defer func() {
-		if FileExists(pathState.LockedInfo) && !keepLock {
+		if !keepLock {
 			checkpoint(checkpointGrace)
-			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) && !errors.Is(clearErr, syscall.ENOTDIR) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
@@ -167,9 +168,9 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 
 	keepLock := FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo)
 	defer func() {
-		if FileExists(pathState.LockedInfo) && !keepLock {
+		if !keepLock {
 			checkpoint(checkpointGrace)
-			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) {
+			if clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags); clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) && !errors.Is(clearErr, syscall.ENOTDIR) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
 		}
