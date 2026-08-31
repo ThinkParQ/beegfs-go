@@ -902,11 +902,11 @@ func GetLastCompletedJobFromRst(ctx context.Context, inMountPath string, rstId u
 	var lastCompletedJob *beeremote.Job
 	for _, result := range resp.Results {
 		job := result.GetJob()
-		if job.Request.RemoteStorageTarget != rstId {
+		if job == nil || job.Request.RemoteStorageTarget != rstId {
 			continue
 		}
 
-		if job != nil && job.Status.State == beeremote.Job_COMPLETED {
+		if job.Status.State == beeremote.Job_COMPLETED {
 			if lastCompletedJob == nil || job.Created.Seconds > lastCompletedJob.Created.Seconds {
 				lastCompletedJob = job
 			}
