@@ -89,6 +89,15 @@ func (c *AppConfig) ValidateConfig() error {
 		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db-path must be set to a valid path (provided path: '%s')", c.Job.PathDBPath))
 	}
 
+	// The cleaned state root is written back so everything downstream, including the value sent to
+	// Sync nodes, uses the one canonical form. ValidateConfig runs on the new configuration before
+	// it is adopted, so nothing observes the value until it has been through here.
+	if stateRoot, err := rst.ValidateStateRoot(c.Job.StateRoot); err != nil {
+		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.state-root is invalid: %w", err))
+	} else {
+		c.Job.StateRoot = stateRoot
+	}
+
 	if c.Job.MinJobEntriesPerRST < 1 {
 		return fmt.Errorf("the job.min-job-entries-per-rst must be one or greater (provided value: %d)", c.Job.MinJobEntriesPerRST)
 	}

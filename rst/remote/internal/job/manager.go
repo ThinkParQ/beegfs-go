@@ -114,6 +114,9 @@ func init() {
 
 type Config struct {
 	PathDBPath string `mapstructure:"path-db"`
+	// StateRoot is the directory, relative to the BeeGFS mount point, where bulk operations persist
+	// the state a builder job needs to resume after a reschedule, crash or restart.
+	StateRoot string `mapstructure:"state-root"`
 	// Deprecated: no longer used. Retained so configuration files that still set it continue to
 	// parse, because configuration is decoded with UnmarshalExact which rejects unknown keys.
 	RequestQueueDepth   int `mapstructure:"request-queue-depth"`

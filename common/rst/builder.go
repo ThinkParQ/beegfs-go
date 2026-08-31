@@ -26,15 +26,17 @@ type JobBuilderClient struct {
 	ctx        context.Context
 	rstMap     map[uint32]Provider
 	mountPoint filesystem.Provider
+	stateRoot  string
 }
 
 var _ Provider = &JobBuilderClient{}
 
-func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider) *JobBuilderClient {
+func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, stateRoot string) *JobBuilderClient {
 	return &JobBuilderClient{
 		ctx:        ctx,
 		rstMap:     rstMap,
 		mountPoint: mountPoint,
+		stateRoot:  stateRoot,
 	}
 }
 
@@ -56,6 +58,10 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 	}
 }
 
+func GetBuilderJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	client := NewJobBuilderClient(context.Background(), nil, nil, "")
+	return client.GetJobRequest(cfg)
+}
 func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (workRequests []*flex.WorkRequest, err error) {
 	if !job.Request.HasBuilder() {
 		return nil, ErrReqAndRSTTypeMismatch
@@ -321,6 +327,7 @@ func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builder
 		managers:     make(map[string]*bulkOperationManager),
 		managersMu:   sync.Mutex{},
 		mountPath:    c.mountPoint.GetMountPath(),
+		stateRoot:    c.stateRoot,
 		rstMap:       c.rstMap,
 		builderJobId: builderJobId,
 	}

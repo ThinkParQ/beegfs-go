@@ -172,7 +172,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 	err = mgr.UpdateConfig(config.rstConfigs, flex.BeeRemoteNode_builder{
 		Id:      "0",
 		Address: "mock:0",
-	}.Build(), "test-sync-node")
+	}.Build(), "test-sync-node", rst.DefaultStateRoot)
 	return mgr, deferredFuncs, err
 
 }
@@ -206,14 +206,14 @@ func TestUpdateConfig(t *testing.T) {
 	}.Build()
 
 	// No change to the config should not return an error:
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig, ""))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig, "", rst.DefaultStateRoot))
 
 	// Updating BR config is allowed:
 	notEqualBRConfig := flex.BeeRemoteNode_builder{
 		Id:      "1",
 		Address: "mock:0",
 	}.Build()
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig, ""))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig, "", rst.DefaultStateRoot))
 }
 
 func TestSubmitWorkRequest(t *testing.T) {

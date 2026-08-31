@@ -75,7 +75,7 @@ func (f *recordingFS) calls() (created []string, creates []string) {
 
 func newDownloadPathsFn(t *testing.T, fs filesystem.Provider, cfg *flex.JobRequestCfg) requestPathResolverFn {
 	t.Helper()
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, fs)
+	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, fs, DefaultStateRoot)
 	getPaths, err := client.getPathsFn(cfg)
 	require.NoError(t, err)
 	return getPaths
@@ -156,7 +156,7 @@ func TestGetPathsFnToleratesMissingDestination(t *testing.T) {
 func TestGetPathsFnFailsOnUnreadableDestination(t *testing.T) {
 	rfs := newRecordingFS(t)
 	rfs.lstatErr = os.ErrPermission
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, rfs)
+	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, rfs, DefaultStateRoot)
 
 	getPaths, err := client.getPathsFn(&flex.JobRequestCfg{
 		Download:   true,

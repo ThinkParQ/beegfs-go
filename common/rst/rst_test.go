@@ -120,7 +120,7 @@ func TestRecreateWorkRequestsPropagatesBulkInfo(t *testing.T) {
 	}
 	jobBulk.Request.BulkInfo = &flex.BulkJobRequestInfo{
 		StateMountPath: "state",
-		Operation:      "bulk-retrieve",
+		Operation:      flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(),
 		JobIndex:       7,
 	}
 
