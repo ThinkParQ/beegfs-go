@@ -19,6 +19,7 @@ import (
 type grpcProvider struct {
 	conn   *grpc.ClientConn
 	client beeremote.BeeRemoteClient
+	nodeId string
 }
 
 var _ Provider = &grpcProvider{}
@@ -50,6 +51,7 @@ func (c *grpcProvider) init(cfg Config) error {
 
 	c.conn = conn
 	c.client = beeremote.NewBeeRemoteClient(c.conn)
+	c.nodeId = cfg.nodeId
 
 	if !cfg.dynamic.MgmtdTlsDisable && len(cfg.dynamic.MgmtdTlsCert) > 0 {
 		if err := os.WriteFile(syncMgmtdTLSCertFile, cfg.dynamic.MgmtdTlsCert, 0600); err != nil {
@@ -105,7 +107,10 @@ func (c *grpcProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 }
 
 func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
-	_, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{Request: jobRequest}.Build())
+	_, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
+		Request:      jobRequest,
+		OriginNodeId: c.nodeId,
+	}.Build())
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
