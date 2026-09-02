@@ -528,6 +528,9 @@ func (r *S3Client) IsWorkRequestReady(shutdownCtx context.Context, workCtx conte
 
 		_, _, archiveStatus, err := r.getObjectMetadata(workCtx, sync.RemotePath, true)
 		if err != nil {
+			if shutdownCtx.Err() != nil {
+				return false, 0, nil
+			}
 			return false, 0, err
 		}
 
@@ -550,6 +553,9 @@ func (r *S3Client) IsWorkRequestReady(shutdownCtx context.Context, workCtx conte
 				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
 				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
 				if _, err := r.apiClient.RestoreObject(workCtx, restoreObjectInput); err != nil {
+					if shutdownCtx.Err() != nil {
+						return false, 0, nil
+					}
 					if apiErr, ok := errors.AsType[smithy.APIError](err); !ok || apiErr.ErrorCode() != "RestoreAlreadyInProgress" {
 						return false, 0, err
 					}
@@ -920,6 +926,11 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 		job.SetStopMtime(timestamppb.New(stat.ModTime()))
 	}
 
+	// It's critical that a context cancellation doesn't prevent the following from completing so
+	// add a grace period to complete.
+	ctx, cancel, _ := WithCancellationDelay(ctx, time.Minute)
+	defer cancel()
+
 	if job.ExternalId != "" {
 		if abort {
 			// When aborting there is no reason to check the mtime below and it may not have
@@ -978,6 +989,11 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	request := job.GetRequest()
 	sync := request.GetSync()
 	mtime := sync.LockedInfo.Mtime.AsTime()
+
+	// It's critical that a context cancellation doesn't prevent the following from completing so
+	// add a grace period to complete.
+	ctx, cancel, _ := WithCancellationDelay(ctx, time.Minute)
+	defer cancel()
 
 	if abort {
 		if workStarted := isWorkStarted(workResults); workStarted == nil || *workStarted {
