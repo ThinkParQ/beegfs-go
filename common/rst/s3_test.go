@@ -8,6 +8,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -356,4 +358,109 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 		require.Len(t, fs.stubWrites, 1)
 		assert.Equal(t, "rst://7:/other-bucket/original-key\n", fs.stubWrites[0])
 	})
+}
+
+// cancellingRestoreClient answers HeadObject with an archived object and, when RestoreObject is
+// called, cancels the shutdown context before failing the way the AWS SDK does for a request that
+// was aborted in flight. This reproduces the race the entry guard cannot cover: the shutdown lands
+// after readiness has already decided to talk to S3.
+type cancellingRestoreClient struct {
+	s3ApiClient
+	shutdown           context.CancelFunc
+	headObjectErr      error
+	restoreObjectCalls int
+}
+
+func (c *cancellingRestoreClient) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	if c.headObjectErr != nil {
+		c.shutdown()
+		return nil, c.headObjectErr
+	}
+	return &s3.HeadObjectOutput{
+		ContentLength: aws.Int64(0),
+		LastModified:  aws.Time(time.Time{}),
+		StorageClass:  types.StorageClassGlacier,
+	}, nil
+}
+
+func (c *cancellingRestoreClient) RestoreObject(ctx context.Context, params *s3.RestoreObjectInput, optFns ...func(*s3.Options)) (*s3.RestoreObjectOutput, error) {
+	c.restoreObjectCalls++
+	c.shutdown()
+	return nil, cancelledOperationError("RestoreObject")
+}
+
+// cancelledOperationError is what the SDK returns when a request is aborted before any response,
+// which is what made these failures look like S3 errors rather than a shutdown.
+func cancelledOperationError(operation string) error {
+	return &smithy.OperationError{
+		ServiceID:     "S3",
+		OperationName: operation,
+		Err:           context.Canceled,
+	}
+}
+
+func newArchivedDownloadRequest() *flex.WorkRequest {
+	return &flex.WorkRequest{Type: &flex.WorkRequest_Sync{Sync: &flex.SyncJob{
+		Operation:  flex.SyncJob_DOWNLOAD,
+		RemotePath: "archived-object",
+		LockedInfo: &flex.JobLockedInfo{IsArchived: true},
+	}}}
+}
+
+func newArchivedTestClient(api s3ApiClient) *S3Client {
+	return &S3Client{
+		config:    &flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
+		s3Config:  &flex.RemoteStorageTarget_S3{Bucket: "test-bucket"},
+		apiClient: api,
+		storageClasses: map[types.StorageClass]S3StorageClass{
+			types.StorageClassGlacier: {
+				archival:      true,
+				autoRestore:   true,
+				retentionDays: 7,
+				checkTime:     5 * time.Hour,
+				recheckTime:   30 * time.Minute,
+			},
+		},
+	}
+}
+
+// TestIsWorkRequestReadyReschedulesWhenCancelledInFlight covers the failure that took eight download
+// jobs to a terminal FAILED state: a shutdown cancelled RestoreObject mid-request, and because the
+// SDK reports that as an operation error rather than an APIError, readiness returned it as a hard
+// failure instead of leaving the request resumable.
+func TestIsWorkRequestReadyReschedulesWhenCancelledInFlight(t *testing.T) {
+	t.Run("restore object", func(t *testing.T) {
+		shutdownCtx, shutdown := context.WithCancel(context.Background())
+		api := &cancellingRestoreClient{shutdown: shutdown}
+		client := newArchivedTestClient(api)
+
+		ready, delay, err := client.IsWorkRequestReady(shutdownCtx, context.Background(), newArchivedDownloadRequest())
+		require.NoError(t, err, "a shutdown that lands mid-request is not a failure of the request")
+		assert.False(t, ready, "the request must be reported not ready so the caller reschedules it")
+		assert.Zero(t, delay, "how long to wait before rechecking is left to the caller")
+		assert.Equal(t, 1, api.restoreObjectCalls, "the guard must cover the call rather than skip it")
+	})
+
+	t.Run("head object", func(t *testing.T) {
+		shutdownCtx, shutdown := context.WithCancel(context.Background())
+		api := &cancellingRestoreClient{shutdown: shutdown, headObjectErr: cancelledOperationError("HeadObject")}
+		client := newArchivedTestClient(api)
+
+		ready, _, err := client.IsWorkRequestReady(shutdownCtx, context.Background(), newArchivedDownloadRequest())
+		require.NoError(t, err, "a shutdown that lands mid-request is not a failure of the request")
+		assert.False(t, ready, "the request must be reported not ready so the caller reschedules it")
+	})
+}
+
+// TestIsWorkRequestReadyFailsWhenOnlyTheWorkIsCancelled is the other half of the discriminator. An
+// explicit `job cancel` cancels the work context but not the shutdown context, and that must stay
+// terminal rather than being rescheduled forever.
+func TestIsWorkRequestReadyFailsWhenOnlyTheWorkIsCancelled(t *testing.T) {
+	api := &cancellingRestoreClient{shutdown: func() {}}
+	client := newArchivedTestClient(api)
+
+	_, ready, err := client.IsWorkRequestReady(context.Background(), context.Background(), newArchivedDownloadRequest())
+	require.Error(t, err, "a cancellation that is not a shutdown must remain a failure")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, ready)
 }
