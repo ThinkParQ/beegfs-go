@@ -259,13 +259,15 @@ func TestSubmitWorkRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep a bit to allow time for the requests to process.
-	time.Sleep(defaultSleepTime * time.Second)
-
-	// If requests are in a terminal state and we were able to send responses to BeeRemote then
-	// all internal stores should be empty.
-	require.NoError(t, assertDBEntriesLenForTesting(mgr, 0))
-	require.Len(t, mgr.activeWork, 0)
+	// If requests are in a terminal state and we were able to send responses to BeeRemote then all
+	// internal stores should be empty. activeWork is read under activeWorkMu because the manage
+	// goroutine deletes from it as work completes.
+	require.Eventually(t, func() bool {
+		mgr.activeWorkMu.RLock()
+		activeLen := len(mgr.activeWork)
+		mgr.activeWorkMu.RUnlock()
+		return assertDBEntriesLenForTesting(mgr, 0) == nil && activeLen == 0
+	}, 5*time.Second, 25*time.Millisecond)
 
 	// Then simulate the request completing, but it was not able to be sent to BeeRemote.
 	// Also for some "reason" a job ID was skipped, but it should still get picked up.
@@ -284,8 +286,13 @@ func TestSubmitWorkRequest(t *testing.T) {
 	time.Sleep(defaultSleepTime * time.Second)
 
 	// Because we can't send the item to BeeRemote it should still be in the DB and activeWork map.
+	// The sleep above already gave the request time to reach that state, so this asserts it stayed
+	// there rather than waiting for it to arrive.
 	require.NoError(t, assertDBEntriesLenForTesting(mgr, 1))
-	require.Len(t, mgr.activeWork, 1)
+	mgr.activeWorkMu.RLock()
+	activeLen := len(mgr.activeWork)
+	mgr.activeWorkMu.RUnlock()
+	require.Equal(t, 1, activeLen)
 
 	// Assert all expectations set for the entire test were met.
 	mockRST.AssertExpectations(t)
@@ -360,11 +367,14 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_CompletesInSingleExecution(t 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	time.Sleep(defaultSleepTime * time.Second)
-
-	// A successful builder flow should leave no persisted or active work behind.
-	require.NoError(t, assertDBEntriesLenForTesting(mgr, 0))
-	require.Len(t, mgr.activeWork, 0)
+	// A successful builder flow should leave no persisted or active work behind. activeWork is read
+	// under activeWorkMu because the manage goroutine deletes from it as work completes.
+	require.Eventually(t, func() bool {
+		mgr.activeWorkMu.RLock()
+		activeLen := len(mgr.activeWork)
+		mgr.activeWorkMu.RUnlock()
+		return assertDBEntriesLenForTesting(mgr, 0) == nil && activeLen == 0
+	}, 5*time.Second, 25*time.Millisecond)
 	mockRST.AssertExpectations(t)
 	mockBeeRemote.AssertExpectations(t)
 }
@@ -982,8 +992,12 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Because the worker is busy and activeWQSize=1 this request should not become active.
-	require.Len(t, mgr.activeWork, 1)
+	// Because the worker is busy and activeWQSize=1 this request should not become active. Read
+	// under activeWorkMu because the manage goroutine deletes from the map as work completes.
+	mgr.activeWorkMu.RLock()
+	activeLen := len(mgr.activeWork)
+	mgr.activeWorkMu.RUnlock()
+	require.Equal(t, 1, activeLen)
 
 	// Then cancel the inactive request:
 	updateRequest.SetRequestId("4")
