@@ -1040,6 +1040,21 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 		m.activeWorkMu.Unlock()
 	}
 	if err != nil {
+		if errors.Is(err, kvstore.ErrEntryAlreadyDeleted) || errors.Is(err, kvstore.ErrEntryNotInDB) {
+			// A worker deletes the journal entry before it removes the job entry. So a missing journal
+			// entry means a worker finished this request and already sent its final result to Remote.
+			// That happens when this cancel raced the request's completion or when the worker failed
+			// to remove the index entry.
+			if len(jobEntry.Value) == 1 {
+				releaseJobWithDefer = false
+				if err := releaseJob(kvstore.WithDeleteEntry(true)); err != nil {
+					m.log.Warn("error deleting job entry", zap.Error(err), zap.Any("jobID", update.GetJobId()))
+				}
+			} else {
+				delete(jobEntry.Value, update.GetRequestId())
+			}
+			return nil, status.Errorf(codes.NotFound, "work request %s for job ID %s already finished on this worker node", update.GetRequestId(), update.GetJobId())
+		}
 		return nil, fmt.Errorf("error getting journal entry while updating work request: %w", err)
 	}
 
