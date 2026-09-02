@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -871,15 +872,27 @@ func TestUpdateRequests(t *testing.T) {
 	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
 	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
 
+	// newFailedSent returns a channel signalling that a work result remote refused has been
+	// attempted, along with the Run function that signals it. The expectations below deliberately
+	// keep failing, so the worker retries them and a draining worker takes one final attempt once
+	// remote is told to stop, meaning each can be called more than once. Every block also gets its
+	// own channel because the expectations from earlier blocks stay registered for the rest of the
+	// test.
+	newFailedSent := func() (chan struct{}, func(mock.Arguments)) {
+		ch := make(chan struct{})
+		var once sync.Once
+		return ch, func(mock.Arguments) { once.Do(func() { close(ch) }) }
+	}
+
 	// Simulate a request that isn't completed due to an error from the RST (note if an error
 	// happens the state is always failed). Force the the request to stay active because it can't
 	// send a response to BeeRemote.
-	failedSent := make(chan struct{})
+	failedSent, onFailedSent := newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(fmt.Errorf("test wants an error")).Times(1)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).
-		Run(func(args mock.Arguments) { close(failedSent) }).
+		Run(onFailedSent).
 		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2.SetJobId("1")
@@ -909,12 +922,12 @@ func TestUpdateRequests(t *testing.T) {
 
 	// Resubmit the same job ID and request. This time there is no error on the RST.
 	// Force the the request to stay active because it can't send a response to BeeRemote.
-	failedSent = make(chan struct{})
+	failedSent, onFailedSent = newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).
-		Run(func(args mock.Arguments) { close(failedSent) }).
+		Run(onFailedSent).
 		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2_2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2_2.SetJobId("1")
@@ -941,12 +954,12 @@ func TestUpdateRequests(t *testing.T) {
 	// worker should no longer be trying to send the request to BeeRemote making it available for
 	// another request. Force the the request to stay active (tying up the worker) because it can't
 	// send a response to BeeRemote.
-	failedSent = make(chan struct{})
+	failedSent, onFailedSent = newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "3"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "3")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_RUNNING)).Return(nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).
-		Run(func(args mock.Arguments) { close(failedSent) }).
+		Run(onFailedSent).
 		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest3 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest3.SetJobId("1")

@@ -287,7 +287,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("unable to execute work request: invalid starting state " + state.String())
 		}
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
@@ -298,17 +298,27 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		log.Debug("work request specifies an unknown RST")
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("work request specifies an unknown RST")
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
 	}
 
 	// Check whether the work request is ready. If not, reschedule the work for a later time.
-	if isWorkReady, workDelay, err := client.IsWorkRequestReady(shutdownCtx, work.ctx, request.WorkRequest); err != nil {
+	isWorkReady, workDelay, err := client.IsWorkRequestReady(shutdownCtx, work.ctx, request.WorkRequest)
+	if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before the work request started because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("work request was aborted")
+		return
+	} else if err != nil {
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("failed to determine if work request is ready: " + err.Error())
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
@@ -319,7 +329,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		entry.ExecuteAfter = time.Now().Add(workDelay)
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
-		w.sendWorkResult(work, result.Work)
+		w.sendWorkResult(shutdownCtx, work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -393,7 +403,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			} else {
 				status.SetMessage("error transferring part: " + err.Error())
 			}
-			if w.sendWorkResult(work, result.Work) {
+			if w.sendWorkResult(shutdownCtx, work, result.Work) {
 				cleanupEntries = true
 			}
 			return
@@ -409,7 +419,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			}
 			status.SetMessage("stopped before all parts were synced")
 			entry.ExecuteAfter = time.Now().Add(partResult.Delay)
-			w.sendWorkResult(work, result.Work)
+			w.sendWorkResult(shutdownCtx, work, result.Work)
 			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 			w.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
@@ -445,7 +455,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 		status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(shutdownCtx, work, result.Work) {
 		cleanupEntries = true
 	}
 	return
@@ -466,38 +476,48 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	return w.updateBuilderJob(shutdownCtx, work, entry, result)
 }
 
+// UpdateWorkRequestTimeout bounds a single attempt to update a work request to remote.
+const UpdateWorkRequestTimeout = 30 * time.Second
+
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state
 // is such we should not keep retrying and the work result is no longer needed (this should only
 // happen if the job was deleted on BeeRemote so there is nothing to update).
-func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool {
+func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment, workResult *flex.Work) bool {
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID))
-	for {
-		select {
-		case <-work.ctx.Done():
+
+	for work.ctx.Err() == nil || shutdownCtx.Err() != nil {
+		// Detached from work.ctx so cancelling it cannot abort an attempt already inflight and leave the
+		// outcome unknown.
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(work.ctx), UpdateWorkRequestTimeout)
+		canRetry, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, workResult)
+		cancel()
+
+		if err == nil {
+			return true
+		} else if !canRetry {
+			log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on remote?)")
+			return true
+		} else if shutdownCtx.Err() != nil {
+			// Only allowed shutdown one attempt and it failed so keep the entries.
+			log.Warn("error sending work result to remote", zap.Error(err))
 			return false
-		default:
-			canRetry, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, workResult)
-			if err != nil {
-				if !canRetry {
-					log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on BeeRemote?)")
-					return true
-				}
-				log.Warn("error sending work result to BeeRemote (retrying indefinitely)", zap.Error(err))
-			} else {
-				return true
-			}
-			// Don't block on shutdown waiting to retry if there is a problem sending the updated
-			// work request to BeeRemote. This particularly causes problems when testing because the
-			// test timeout can be exceeded because of all the time spent waiting here.
-			select {
-			case <-time.After(1 * time.Second):
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
-				// Evaluate if we should add an exponential backoff here and not log every time above.
-			case <-work.ctx.Done():
-				return false
-			}
+		}
+
+		log.Warn("error sending work result to remote (retrying indefinitely)", zap.Error(err))
+
+		// Don't block on shutdown waiting to retry if there is a problem sending the updated
+		// work request to BeeRemote. This particularly causes problems when testing because the
+		// test timeout can be exceeded because of all the time spent waiting here.
+		select {
+		case <-time.After(1 * time.Second):
+			// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
+			// Evaluate if we should add an exponential backoff here and not log every time above.
+		case <-work.ctx.Done():
 		}
 	}
+
+	// The work request was cancelled by user
+	return false
 }
 
 // sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
@@ -563,7 +583,7 @@ func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignme
 	builderMessage, builderHasErrors := getBuilderResults(builder)
 	defer func() {
 		status.SetMessage(appendMessage(status.Message, builderMessage))
-		if w.sendWorkResult(work, workResult.Work) && !result.Reschedule {
+		if w.sendWorkResult(shutdownCtx, work, workResult.Work) && !result.Reschedule {
 			cleanupEntries = true
 		}
 	}()
