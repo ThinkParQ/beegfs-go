@@ -197,7 +197,8 @@ func newEntry(ctx context.Context, mappings *util.Mappings, entry msg.EntryInfo,
 		e.Details.Pattern.StoragePoolName = pool.Pool.Alias.String()
 	}
 
-	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 {
+	if entryInfo.Pattern.Type == beegfs.StripePatternRaid0 ||
+		entryInfo.Pattern.Type == beegfs.StripePatternECReedSolomonGF256 {
 		for _, tgt := range entryInfo.Pattern.TargetIDs {
 			node, err := mappings.TargetToNode.Get(beegfs.LegacyId{NumId: beegfs.NumId(tgt), NodeType: beegfs.Storage})
 			if fetchedMappings && errors.Is(err, util.ErrMapperNotFound) {
