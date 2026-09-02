@@ -88,16 +88,29 @@ type stripePatternFlag struct {
 	p **beegfs.StripePatternType
 }
 
-var validStripePatterns = map[string]beegfs.StripePatternType{"raid0": beegfs.StripePatternRaid0, "mirrored": beegfs.StripePatternBuddyMirror}
+// validStripePatterns lists the patterns a user can set, in the order they are advertised in help.
+// Each pattern's display name and its separator spellings are accepted via beegfs.EnumInputMatches;
+// legacyAliases keeps the tokens accepted before the enums were standardized working so existing
+// scripts don't break. Note StripePatternRaid10 is intentionally absent: it is a pattern the system
+// can report but not one a user sets.
+var validStripePatterns = []struct {
+	pattern       beegfs.StripePatternType
+	legacyAliases []string
+}{
+	{pattern: beegfs.StripePatternRaid0},
+	{pattern: beegfs.StripePatternBuddyMirror, legacyAliases: []string{"mirrored"}},
+}
 
 func newStripePatternFlag(p **beegfs.StripePatternType) *stripePatternFlag {
 	return &stripePatternFlag{p: p}
 }
 
+// validStripePatternKeys returns the patterns to advertise in help, as their display names so what
+// `entry info` prints can be typed straight back in.
 func validStripePatternKeys() []string {
 	keys := make([]string, 0, len(validStripePatterns))
-	for k := range validStripePatterns {
-		keys = append(keys, k)
+	for _, p := range validStripePatterns {
+		keys = append(keys, p.pattern.String())
 	}
 	return keys
 }
@@ -106,12 +119,7 @@ func (f *stripePatternFlag) String() string {
 	if *f.p == nil {
 		return "unchanged"
 	}
-	for k, v := range validStripePatterns {
-		if **f.p == v {
-			return k
-		}
-	}
-	return "invalid"
+	return (**f.p).String()
 }
 
 func (f *stripePatternFlag) Type() string {
@@ -119,14 +127,15 @@ func (f *stripePatternFlag) Type() string {
 }
 
 func (f *stripePatternFlag) Set(value string) error {
-	pattern, ok := validStripePatterns[value]
-	if !ok {
-		return fmt.Errorf("unsupported stripe pattern (supported patterns: %s)", strings.Join(validStripePatternKeys(), ", "))
+	for _, p := range validStripePatterns {
+		if beegfs.EnumInputMatches(value, p.pattern, p.legacyAliases...) {
+			// Copy the value so the caller can do whatever they want with it.
+			pattern := p.pattern
+			*f.p = &pattern
+			return nil
+		}
 	}
-	// Copy the value so the caller can do whatever they want with it.
-	p := pattern
-	*f.p = &p
-	return nil
+	return fmt.Errorf("unsupported stripe pattern (supported patterns: %s)", strings.Join(validStripePatternKeys(), ", "))
 }
 
 type numTargetsFlag struct {
@@ -170,45 +179,40 @@ func (f *accessControlFlag) String() string {
 	if *f.p == nil {
 		return "unchanged"
 	}
-
-	// Format the access control flag in CLI format
-	accessCtlFlag := **f.p
-	switch accessCtlFlag {
-	case beegfs.AccessFlagUnlocked:
-		return "unlocked"
-	case beegfs.AccessFlagReadLock:
-		return "read-lock"
-	case beegfs.AccessFlagWriteLock:
-		return "write-lock"
-	case beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock:
-		return "read-write-lock"
-	default:
-		return fmt.Sprintf("Unknown(%d)", accessCtlFlag)
-	}
+	return (**f.p).String()
 }
 
 func (f *accessControlFlag) Type() string {
-	return "<unlocked|read-lock|write-lock|read-write-lock|none>"
+	return "<unlocked|locked-read|locked-write|locked-read-write|none>"
 }
 
+// Set accepts each access flag's display name and its separator spellings, plus the read-lock family
+// of tokens this flag accepted before the enums were standardized. The legacy tokens name what is
+// blocked where the display form names what is locked, so neither can be derived from the other and
+// both have to be listed.
 func (f *accessControlFlag) Set(value string) error {
 	// Create a new AccessFlags if it doesn't exist
 	if *f.p == nil {
 		*f.p = new(beegfs.AccessFlags)
 	}
 
-	// Parse the access flags
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "unlocked", "none":
+	switch {
+	case beegfs.EnumInputMatches(value, beegfs.AccessFlagUnlocked, "none"):
 		**f.p = beegfs.AccessFlagUnlocked
-	case "read-lock":
+	case beegfs.EnumInputMatches(value, beegfs.AccessFlagReadLock, "read-lock"):
 		**f.p = beegfs.AccessFlagReadLock
-	case "write-lock":
+	case beegfs.EnumInputMatches(value, beegfs.AccessFlagWriteLock, "write-lock"):
 		**f.p = beegfs.AccessFlagWriteLock
-	case "read-write-lock":
+	case beegfs.EnumInputMatches(value, beegfs.AccessFlagReadLock|beegfs.AccessFlagWriteLock, "read-write-lock"):
 		**f.p = beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock
 	default:
-		return fmt.Errorf("invalid access flags value: %s (valid values: unlocked, read-lock, write-lock, read-write-lock, none)", value)
+		return fmt.Errorf("invalid access flags value: %s (valid values: %s, none)", value,
+			strings.Join([]string{
+				beegfs.AccessFlagUnlocked.String(),
+				beegfs.AccessFlagReadLock.String(),
+				beegfs.AccessFlagWriteLock.String(),
+				(beegfs.AccessFlagReadLock | beegfs.AccessFlagWriteLock).String(),
+			}, ", "))
 	}
 
 	return nil
@@ -222,19 +226,30 @@ func newDataStateFlag(p **beegfs.DataState) *dataStateFlag {
 	return &dataStateFlag{p: p}
 }
 
+// namedDataStates are the data states with a display name, used to accept that name (and its
+// kebab-case spelling) as input. The remaining values in the 0-7 range are reserved and unnamed, so
+// they stay reachable only through the numeric form.
+var namedDataStates = []beegfs.DataState{
+	beegfs.DataStateAvailable,
+	beegfs.DataStateManualRestore,
+	beegfs.DataStateAutoRestore,
+	beegfs.DataStateDelayedRestore,
+	beegfs.DataStateUnavailable,
+}
+
 func (f *dataStateFlag) String() string {
 	if *f.p == nil {
 		return "unchanged"
 	}
-
-	// Format the data state
-	return fmt.Sprintf("%d", **f.p)
+	return (**f.p).String()
 }
 
 func (f *dataStateFlag) Type() string {
-	return "<0-7|none>"
+	return "<state|0-7|none>"
 }
 
+// Set accepts a data state's display name or its kebab-case spelling, and still accepts the raw 0-7
+// numeric form this support-only flag has always taken so existing scripts don't break.
 func (f *dataStateFlag) Set(value string) error {
 	// Create a new DataState if it doesn't exist
 	if *f.p == nil {
@@ -242,15 +257,21 @@ func (f *dataStateFlag) Set(value string) error {
 	}
 
 	// Handle special "none" value
-	if strings.ToLower(strings.TrimSpace(value)) == "none" {
+	if beegfs.NormalizeEnumInput(value) == "none" {
 		**f.p = 0
+		return nil
+	}
+
+	if state, ok := beegfs.MatchEnumInput(value, namedDataStates...); ok {
+		**f.p = state
 		return nil
 	}
 
 	// Parse the data state
 	val, err := strconv.ParseUint(value, 10, 8)
 	if err != nil {
-		return fmt.Errorf("invalid data state: %s (must be a numeric value between 0-7 or 'none')", value)
+		return fmt.Errorf("invalid data state: %s (must be one of %s, a numeric value between 0-7, or 'none')",
+			value, strings.Join(dataStateNames(), ", "))
 	}
 
 	if val > 7 {
@@ -260,6 +281,15 @@ func (f *dataStateFlag) Set(value string) error {
 	// Set the new data state
 	**f.p = beegfs.DataState(val)
 	return nil
+}
+
+// dataStateNames returns the display names of the named data states, for help and error messages.
+func dataStateNames() []string {
+	names := make([]string, 0, len(namedDataStates))
+	for _, s := range namedDataStates {
+		names = append(names, s.String())
+	}
+	return names
 }
 
 type permissionsFlag struct {

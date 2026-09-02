@@ -56,11 +56,11 @@ func (t *TermRefresher) StartRefresh() error {
 	var err error
 	t.width, t.height, err = term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
-		return fmt.Errorf("error determining terminal size (is stdout a terminal?): %w", err)
+		return fmt.Errorf("determining terminal size (is stdout a terminal?): %w", err)
 	}
 	t.pipeOut, t.pipeIn, err = os.Pipe()
 	if err != nil {
-		return fmt.Errorf("error setting up internal pipe: %w", err)
+		return fmt.Errorf("setting up internal pipe: %w", err)
 	}
 	t.originalStdout = os.Stdout
 	os.Stdout = t.pipeIn

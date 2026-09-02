@@ -120,7 +120,7 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 	if userCfg.FileCfg.Pool != nil {
 		storagePool, err = mappings.StoragePoolToConfig.Get(*userCfg.FileCfg.Pool)
 		if err != nil {
-			return nil, fmt.Errorf("error looking up the specified pool %s: %w", *userCfg.FileCfg.Pool, err)
+			return nil, fmt.Errorf("looking up the specified pool %s: %w", *userCfg.FileCfg.Pool, err)
 		}
 		request.Pattern.StoragePoolID = uint16(storagePool.Pool.LegacyId.NumId)
 	} else {
@@ -131,7 +131,7 @@ func generateAndVerifyMakeFileReq(userCfg *CreateEntryCfg, parent *GetEntryCombi
 			NumId:    beegfs.NumId(parent.Entry.Details.Pattern.StoragePoolID),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("error looking up pool for parent entry %s: %w", *userCfg.FileCfg.Pool, err)
+			return nil, fmt.Errorf("looking up pool for parent entry %s: %w", *userCfg.FileCfg.Pool, err)
 		}
 		// No need to do anything else, the parent pool is already set above on the request.
 	}

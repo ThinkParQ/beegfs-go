@@ -26,7 +26,7 @@ func newListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&withLimits, "with-limits", false, "Request and print pool default quota limits")
+	cmd.Flags().BoolVar(&withLimits, "with-limits", false, "Request and print pool default quota limits.")
 
 	return cmd
 }

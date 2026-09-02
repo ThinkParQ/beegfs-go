@@ -16,7 +16,7 @@ func newQueryCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cob
 
 	cmd := &cobra.Command{
 		Use:         "query [path]",
-		Short:       "Run an SQL query against the index.",
+		Short:       "Run an SQL query against the index",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if backendCfg.SQLEntries == "" && backendCfg.SQLSummary == "" &&

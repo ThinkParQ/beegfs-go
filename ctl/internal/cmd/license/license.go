@@ -80,9 +80,9 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&cfg.Reload, "reload", false,
-		"Reload and re-verify license certificate on the server.")
+		"Reload and re-verify license certificate on the management node.")
 	cmd.Flags().BoolVar(&cfg.Get, "get", false,
-		"Get and install a new license for this file system.")
+		"Get and install a new license for this filesystem.")
 
 	return cmd
 }
@@ -136,13 +136,21 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		return errors.Join(ret, errors.New(license.Message))
 	}
 
-	if viper.GetString(config.OutputKey) == config.OutputJSONPretty.String() {
-		pretty, _ := json.MarshalIndent(license, "", "  ")
-		fmt.Printf("%s\n", pretty)
-	} else if viper.GetString(config.OutputKey) == config.OutputJSON.String() {
-		json, _ := json.Marshal(license)
-		fmt.Printf("%s\n", json)
-	} else {
+	switch config.OutputType(viper.GetString(config.OutputKey)) {
+	case config.OutputJSONPretty:
+		data, err := json.MarshalIndent(license, "", "  ")
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	case config.OutputJSON, config.OutputNDJSON:
+		// A license is a single object, so NDJSON is the same single compact line as JSON.
+		data, err := json.Marshal(license)
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	default:
 		var features []string
 		var scopes []string
 		var numservers string
@@ -301,7 +309,7 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return "", fmt.Errorf("unable to connect to management: %w", err)
+		return "", err
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)
@@ -324,6 +332,8 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	var numMeta int
 	var numStorage int
+	// These are lowercase wire values for the license server's net_proto query parameter, not
+	// display output, so they are not NicType.String().
 	var netProto = "tcp"
 	for _, node := range allNodes {
 		switch node.Node.Id.NodeType {

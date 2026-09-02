@@ -66,7 +66,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return fmt.Errorf("unable to proceed without a working management node: %w", err)
+		return err
 	}
 
 	// Execute the actual command work
@@ -155,7 +155,7 @@ func runListCmd(cmd *cobra.Command, cfg backend.GetNodes_Config,
 	}
 
 	if reachabilityError && hasUnreachableNode {
-		return util.NewCtlError(fmt.Errorf("at least one node is unreachable"), 5)
+		return util.NewCtlError(fmt.Errorf("at least one node is unreachable"), util.NodesUnreachable)
 	}
 
 	return nil

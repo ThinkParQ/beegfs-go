@@ -19,7 +19,7 @@ func newMigrateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *c
 
 	cmd := &cobra.Command{
 		Use:   "migrate [path]",
-		Short: "Migrate old .bdm.db index databases to the new format.",
+		Short: "Migrate old .bdm.db index databases to the new format",
 		Args:  cobra.MaximumNArgs(1),
 		Long: `Migrate legacy BeeGFS Index databases (.bdm.db) to the
 new BeeGFS Index format (db.db) introduced in 8.4.
@@ -35,7 +35,7 @@ The index root comes from --index-root, or from the matching .beegfs.index
 entry at the BeeGFS mount root when the flag is omitted; an optional [path]
 selects which entry to use (defaulting to the current directory).
 
-Note: fields introduced in newer plugin versions (stripe_default_num_targets,
+Fields introduced in newer plugin versions (stripe_default_num_targets,
 storage_pool_id, path_info_flags, orig_parent_uid, orig_parent_entry_id,
 file_data_state, and the RST columns) will be NULL for entries migrated from
 old indexes. These are populated only after re-indexing with the current

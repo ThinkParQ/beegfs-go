@@ -1,6 +1,8 @@
 package beegfs
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	pb "github.com/thinkparq/protobuf/go/beegfs"
@@ -21,6 +23,10 @@ const (
 // Create a NodeType from a string. Providing a non-ambiguous prefix is sufficient, e.g. for client,
 // "c" is enough, for meta at least "me" is required and for management it is "ma". Returns Invalid
 // if there is no non-ambiguous match.
+//
+// Lowercasing the input is all that is needed to accept the form printed by String(): every variant
+// is a single word, so there is no separator to fold and deliberately no NormalizeEnumInput call,
+// which would let separator noise like "me_" match a prefix.
 func NodeTypeFromString(input string) NodeType {
 	input = strings.ToLower(strings.TrimSpace(input))
 
@@ -77,7 +83,7 @@ func (n NodeType) ToProto() *pb.NodeType {
 	return &nt
 }
 
-// Output user friendly string representation
+// Output user friendly string representation.
 func (n NodeType) String() string {
 	switch n {
 	case Client:
@@ -88,7 +94,13 @@ func (n NodeType) String() string {
 		return "storage"
 	case Management:
 		return "management"
+	case InvalidNodeType:
+		return "invalid"
 	default:
-		return "<invalid>"
+		return fmt.Sprintf("unknown(%d)", int(n))
 	}
+}
+
+func (n NodeType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
 }

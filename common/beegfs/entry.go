@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -25,6 +26,8 @@ func (t EntryType) IsFile() bool {
 	return t >= 2 && t <= 7
 }
 
+// String returns the entry type using the same vocabulary as the "type ==" clause of --filter-files
+// (see common/filesystem), so a type printed by `entry info` can be pasted into a filter.
 func (t EntryType) String() string {
 	switch t {
 	case EntryDirectory:
@@ -34,16 +37,25 @@ func (t EntryType) String() string {
 	case EntrySymlink:
 		return "symlink"
 	case EntryBlockDev:
-		return "block device node"
+		return "block"
 	case EntryCharDev:
-		return "character device node"
+		return "char"
 	case EntryFIFO:
-		return "pipe"
+		return "fifo"
 	case EntrySOCKET:
-		return "unix domain socket"
+		return "socket"
+	case EntryUnknown:
+		return "unknown"
 	default:
-		return "invalid"
+		// The type is read off the wire from meta, so a value no constant covers keeps its number
+		// instead of being reported as the sentinel a local caller would have set.
+		return fmt.Sprintf("unknown(%d)", uint32(t))
 	}
+}
+
+// MarshalJSON encodes the entry type as its human-readable string.
+func (t EntryType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
 }
 
 // Equivalent of StripePatternType in C++.
@@ -59,14 +71,22 @@ const (
 func (p StripePatternType) String() string {
 	switch p {
 	case StripePatternRaid0:
-		return "RAID0"
+		return "raid0"
 	case StripePatternRaid10:
-		return "RAID10"
+		return "raid10"
 	case StripePatternBuddyMirror:
-		return "Buddy Mirror"
-	default:
+		return "buddy-mirror"
+	case StripePatternInvalid:
 		return "invalid"
+	default:
+		// Also read off the wire, so an unmatched pattern stays diagnosable. See EntryType.String().
+		return fmt.Sprintf("unknown(%d)", uint32(p))
 	}
+}
+
+// MarshalJSON encodes the stripe pattern type as its human-readable string.
+func (p StripePatternType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.String())
 }
 
 type EntryFeatureFlags int32
@@ -200,43 +220,60 @@ func (fs FileState) GetRawValue() uint8 {
 	return uint8(fs)
 }
 
-// String returns a human-readable representation of the file state.
+// String returns a human-readable representation of the file state as its two component enums
+// separated by a slash, for example "unlocked/available".
 func (state FileState) String() string {
-	return fmt.Sprintf("%s : %s", state.GetAccessFlags(), state.GetDataState())
+	return fmt.Sprintf("%s/%s", state.GetAccessFlags(), state.GetDataState())
+}
+
+// MarshalJSON encodes the file state as its human-readable string so the packed byte is never
+// exposed as an integer.
+func (state FileState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(state.String())
 }
 
 // Helper function to convert access flags to a string.
 func (f AccessFlags) String() string {
 	switch f {
 	case AccessFlagUnlocked:
-		return "Unlocked"
+		return "unlocked"
 	case AccessFlagReadLock:
-		return "Locked (read)" // Indicates READ operations are blocked (write-only)
+		return "locked-read" // Indicates READ operations are blocked (write-only)
 	case AccessFlagWriteLock:
-		return "Locked (write)" // Indicates WRITE operations are blocked (read-only)
+		return "locked-write" // Indicates WRITE operations are blocked (read-only)
 	case AccessFlagReadLock | AccessFlagWriteLock:
-		return "Locked (read+write)" // All access blocked
+		return "locked-read-write" // All access blocked
 	default:
 		// For combinations with reserved bits
-		return fmt.Sprintf("Unknown(%d)", f)
+		return fmt.Sprintf("unknown(%d)", f)
 	}
+}
+
+// MarshalJSON encodes the access flags as their human-readable string.
+func (f AccessFlags) MarshalJSON() ([]byte, error) {
+	return json.Marshal(f.String())
 }
 
 func (s DataState) String() string {
 	switch s {
 	case DataStateAvailable:
-		return "Available"
+		return "available"
 	case DataStateManualRestore:
-		return "ManualRestore"
+		return "manual-restore"
 	case DataStateAutoRestore:
-		return "AutoRestore"
+		return "auto-restore"
 	case DataStateDelayedRestore:
-		return "DelayedRestore"
+		return "delayed-restore"
 	case DataStateUnavailable:
-		return "Unavailable"
+		return "unavailable"
 	default:
-		return fmt.Sprintf("Unknown(%d)", s)
+		return fmt.Sprintf("unknown(%d)", s)
 	}
+}
+
+// MarshalJSON encodes the data state as its human-readable string.
+func (s DataState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 // WithDataState returns a copy of the FileState with the updated data state.

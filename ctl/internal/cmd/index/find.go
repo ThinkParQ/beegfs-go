@@ -28,7 +28,7 @@ func newFindCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobr
 
 	cmd := &cobra.Command{
 		Use:         "find [path]",
-		Short:       "Searches for files in the index.",
+		Short:       "Search for files in the index",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Long: `Search the index for entries matching the given criteria, similar to find(1).
 
@@ -257,7 +257,7 @@ Example: find BeeGFS files by metadata owner
 	cmd.Flags().BoolVar(&backendCfg.Empty, "empty", false, "File is empty (type=f AND size=0).")
 
 	cmd.Flags().StringVar(&backendCfg.EntryID, "entryID", "", "BeeGFS entry ID matches pattern.")
-	cmd.Flags().StringVar(&backendCfg.OwnerID, "ownerID", "", "BeeGFS metadata owner (server) ID.")
+	cmd.Flags().StringVar(&backendCfg.OwnerID, "ownerID", "", "BeeGFS metadata owner (node) ID.")
 	cmd.Flags().StringVar(&backendCfg.TargetID, "targetID", "", "BeeGFS storage target or buddy group ID.")
 	cmd.Flags().BoolVar(&backendCfg.BeeGFS, "beegfs", false, "Include BeeGFS metadata columns in output.")
 

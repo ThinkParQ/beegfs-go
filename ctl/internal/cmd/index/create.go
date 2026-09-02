@@ -15,7 +15,7 @@ func newCreateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *co
 
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Generates or updates the index for the specified file system.",
+		Short: "Generate or update the index for the specified filesystem",
 		Args:  cobra.NoArgs,
 		Long: `Generate a new index by traversing the source directory.
 
