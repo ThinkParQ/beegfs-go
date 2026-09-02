@@ -154,6 +154,10 @@ func (x *xtreemstoreS3Provider) IsWorkRequestReady(shutdownCtx context.Context, 
 		return false, 0, ErrReqAndRSTTypeMismatch
 	}
 
+	if shutdownCtx.Err() != nil {
+		return false, 0, nil
+	}
+
 	bulkInfo := request.GetBulkInfo()
 	if bulkInfo == nil {
 		return x.Provider.IsWorkRequestReady(shutdownCtx, workCtx, request)
