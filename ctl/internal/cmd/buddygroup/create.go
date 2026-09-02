@@ -12,11 +12,12 @@ import (
 )
 
 type createBuddyGroup_Config struct {
-	nodeType beegfs.NodeType
-	groupId  uint16
-	alias    beegfs.Alias
-	pTarget  beegfs.EntityId
-	sTarget  beegfs.EntityId
+	nodeType        beegfs.NodeType
+	groupId         uint16
+	alias           beegfs.Alias
+	pTarget         beegfs.EntityId
+	sTarget         beegfs.EntityId
+	quotaAccounting *pm.BuddyGroupOptions_BuddyGroupQuotaAccounting
 }
 
 func newCreateBuddyGroupCmd() *cobra.Command {
@@ -33,6 +34,10 @@ func newCreateBuddyGroupCmd() *cobra.Command {
 			}
 			cfg.alias = alias
 
+			if cfg.quotaAccounting != nil && cfg.nodeType != beegfs.Storage {
+				return fmt.Errorf("--quota-accounting is only valid for storage buddy groups")
+			}
+
 			return runCreateBuddyGroupCmd(cmd, cfg)
 		},
 	}
@@ -47,6 +52,8 @@ func newCreateBuddyGroupCmd() *cobra.Command {
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.sTarget, 16, beegfs.Meta, beegfs.Storage),
 		"secondary", "The secondary target")
 	cmd.MarkFlagRequired("secondary")
+	cmd.Flags().Var(newQuotaAccountingFlag(&cfg.quotaAccounting), "quota-accounting",
+		quotaAccountingFlagHelp+" Chosen by the management service if unspecified.")
 
 	return cmd
 }
@@ -87,6 +94,9 @@ func runCreateBuddyGroupCmd(cmd *cobra.Command, cfg createBuddyGroup_Config) err
 		Alias:           &alias,
 		PrimaryTarget:   cfg.pTarget.ToProto(),
 		SecondaryTarget: cfg.sTarget.ToProto(),
+		Options: &pm.BuddyGroupOptions{
+			QuotaAccounting: cfg.quotaAccounting,
+		},
 	})
 	if err != nil {
 		return err
