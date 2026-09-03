@@ -42,6 +42,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const (
+	// JobIdLen is the length of a job ID, which is a UUID in its canonical form: 32 hex digits and
+	// 4 hyphens. BeeRemote generates every job ID with this form and never varies it, so callers
+	// that store IDs in fixed width records can rely on the width.
+	JobIdLen = 36
+)
+
 // SupportedRSTTypes is used with SetRSTTypeHook in the config package to allows configuring with
 // multiple RST types without writing repetitive code. The map contains the all lowercase string
 // identifier of the prefix key of the TOML table used to indicate the configuration options for a
@@ -68,32 +75,6 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
-	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Hand
-	// any new requests to submitRequest. Set SchedulingResult.Reschedule when there's more work
-	// (e.g. this round reached its own submission limit and stopped the walk, or a bulk operation
-	// isn't done yet). Use SchedulingResult.Delay to back off before the next round.
-	//
-	// A walk started here belongs to this call for as long as it runs. The implementation decides
-	// when the round is over, ends the walk through the stop function GetWalk returns, and records
-	// where the next round resumes.
-	//
-	// Builder reporting is split across three layers:
-	//
-	//   - Individual job request outcomes should be reported on the generated JobRequest via
-	//     GenerationStatus whenever the builder can continue generating more requests.
-	//   - Builder progress should be persisted on the builder itself via any resume token stored in
-	//     workRequest.ExternalId, so a later call can pick up where this one left off.
-	//   - Builder termination must be reported through SchedulingResult.Err when the builder can no
-	//     longer safely or usefully continue generating additional requests.
-	//
-	// A non-nil SchedulingResult.Err means the builder execution is over. The caller cancels the
-	// builder job's work request and reports the error on it, so the message must explain what
-	// stopped the builder and whether anything was left behind that needs manual attention.
-	// Whatever the implementation still has to clean up or persist must be handled before
-	// returning.
-	//
-	// log is used for per-path problems that must be reported without failing the builder job.
-	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel workCtx to return early.
 	// It determines and executes the requested operation (if supported) then directly updates the
@@ -120,6 +101,44 @@ type Provider interface {
 	//
 	// CompleteWorkRequests should evaluate the workResults status and update the job status.
 	CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error
+	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Hand
+	// any new requests to submitRequest. Set SchedulingResult.Reschedule when there's more work
+	// (e.g. this round reached its own submission limit and stopped the walk, or a bulk operation
+	// isn't done yet). Use SchedulingResult.Delay to back off before the next round.
+	//
+	// A walk started here belongs to this call for as long as it runs. The implementation decides
+	// when the round is over, ends the walk through the stop function GetWalk returns, and records
+	// where the next round resumes.
+	//
+	// Builder reporting is split across three layers:
+	//
+	//   - Individual job request outcomes should be reported on the generated JobRequest via
+	//     GenerationStatus whenever the builder can continue generating more requests.
+	//   - Builder progress should be persisted on the builder itself via any resume token stored in
+	//     workRequest.ExternalId, so a later call can pick up where this one left off.
+	//   - Builder termination must be reported through SchedulingResult.Err when the builder can no
+	//     longer safely or usefully continue generating additional requests.
+	//
+	// A non-nil SchedulingResult.Err means the builder execution is over. The caller cancels the
+	// builder job's work request and reports the error on it, so the message must explain what
+	// stopped the builder and whether anything was left behind that needs manual attention.
+	// Whatever the implementation still has to clean up or persist must be handled before
+	// returning.
+	//
+	// log is used for per-path problems that must be reported without failing the builder job.
+	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
+	// CompleteJobBuilderRequest is the builder job counterpart to CompleteWorkRequests. It runs
+	// before a builder job moves to a terminal state and releases the bulk operations the builder
+	// opened through OpenBulkOperation. Providers that never run builder jobs should return
+	// ErrUnsupportedOpForRST.
+	//
+	// Unless abort is set, every work result must be completed or cancelled. Any other state is
+	// refused with an error, so the job is not finalized over unresolved work.
+	//
+	// When the builder job was cancelled or aborted, each bulk operation is cancelled first. Every
+	// job request the operation reserved is passed to cancelRequest. If any cancellation fails, the
+	// bulk operations are left in place and the error is returned. Otherwise they are destroyed.
+	CompleteJobBuilderRequest(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, cancelRequest CancelRequestFn, abort bool) error
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
 	// GetWalk returns a channel that streams *StreamPathResult entries for matching files or
@@ -204,6 +223,11 @@ type Provider interface {
 //
 // Implementations must be safe to call concurrently.
 type SubmitRequestFn func(ctx context.Context, request *beeremote.JobRequest) error
+
+// CancelRequestFn cancels a reserved job and returns any errors.
+//
+// Implementations must be safe to call concurrently.
+type CancelRequestFn func(path string, jobId string) error
 
 // SchedulingResult reports how a builder job or a work request part ended.
 type SchedulingResult struct {
@@ -369,7 +393,7 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			ExternalId:          job.GetExternalId(),
 			Path:                request.GetPath(),
 			Segment:             nil,
-			RemoteStorageTarget: 0,
+			RemoteStorageTarget: JobBuilderRstId,
 			Type:                &flex.WorkRequest_Builder{Builder: proto.Clone(request.GetBuilder()).(*flex.BuilderJob)},
 			Priority:            new(request.GetPriority()),
 		}
@@ -392,6 +416,10 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			RestorePolicy:       new(request.GetRestorePolicy()),
 			CooldownSecs:        new(request.GetCooldownSecs()),
 			Priority:            new(request.GetPriority()),
+		}
+
+		if request.HasBulkInfo() {
+			wr.BulkInfo = proto.Clone(request.GetBulkInfo()).(*flex.BulkJobRequestInfo)
 		}
 
 		switch request.WhichType() {
@@ -449,101 +477,6 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 		segments = append(segments, segment)
 	}
 	return segments
-}
-
-// BuildJobRequests returns a list of job requests, one for each remote target. Unless
-// skipPrepareJob=true then remote resource information will be added to the request's lockedInfo
-// and common checks and tasks will be preformed.
-//
-// A returned error indicates that one or more job request were not able to be built. However, if
-// a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	keepLock := false
-	lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
-
-	defer func() {
-		if !keepLock && writeLockSet {
-			clearErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
-			if clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearErr))
-			}
-		}
-	}()
-
-	if err != nil {
-		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
-		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
-		// would always fail, whenever there is a file with no RSTs set on its entry info.
-		if errors.Is(err, ErrFileHasNoRSTs) {
-			return nil, nil
-		}
-		// If this function returns an error but it will also abort the entire builder job, which we
-		// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
-		// IDs available for this inMountPath (either specified by the user, or determined
-		// automatically), then report any errors as part of the generated requests for each file.
-		// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
-		// avoid it being silently dropped.
-		if errors.Is(err, ErrGetPathStateFatal) || len(rstIds) == 0 {
-			return nil, err
-		}
-	} else if len(rstIds) > 1 && (cfg.Download || cfg.StubLocal) {
-		err = errors.Join(err, ErrFileHasAmbiguousRSTs)
-	}
-
-	var errs []error
-	var requests []*beeremote.JobRequest
-	for _, rstId := range rstIds {
-		client, ok := rstMap[rstId]
-		if !ok {
-			errs = append(errs, errors.Join(err, fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, rstId)))
-			continue
-		}
-
-		requestCfg := proto.Clone(cfg).(*flex.JobRequestCfg)
-		requestCfg.SetPath(inMountPath)
-		requestCfg.SetRemotePath(client.SanitizeRemotePath(remotePath))
-		requestCfg.SetRemoteStorageTarget(rstId)
-		requestLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
-		requestCfg.SetLockedInfo(requestLockedInfo)
-
-		if err != nil {
-			request := client.GetJobRequest(requestCfg)
-			status := &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to build job request: %s", err.Error()),
-			}
-			request.SetGenerationStatus(status)
-			requests = append(requests, request)
-			continue
-		}
-
-		request := BuildJobRequest(ctx, client, requestCfg)
-		if request.GetGenerationStatus() == nil {
-			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, requestCfg); err != nil {
-				if errors.Is(err, ErrJobAlreadyComplete) {
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
-						Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-					}
-				} else if errors.Is(err, ErrJobAlreadyOffloaded) {
-					keepLock = true
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED}
-				} else {
-					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-						Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
-					})
-				}
-			} else {
-				// This request will execute so ensure the lock is kept.
-				keepLock = true
-			}
-		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
-
-		requests = append(requests, request)
-	}
-
-	return requests, errors.Join(errs...)
 }
 
 // GetWorkResultsState returns the combined work results state. flex.Work_UNKNOWN is returned when
@@ -666,27 +599,31 @@ func IsFileOffloadedUrlCorrect(rstId uint32, remotePath string, lockedInfo *flex
 	return rstId == lockedInfo.StubUrlRstId && remotePath == lockedInfo.StubUrlPath
 }
 
-// PlanFileStateForWorkRequests handles preflight checks and common tasks based on collected
-// lockedInfo.
+// PlanFileStateForWorkRequests determines what preliminary work needs to be done for the work
+// request. The caller must populate LockedInfo when the file exists.
 //
-// failedPrecondition reports a problem preparing the plan itself, such as an invalid configuration
-// or an unrecoverable precondition failure such as a download that would overwrite an existing
-// path without --overwrite. When it is non-nil, the returned apply function must not be invoked.
+//   - The returned apply function applies any necessary state changes and returns an undo
+//     function in case the changes need to be rolled back. apply can return a terminal sentinel which
+//     callers check with IsErrJobTerminalSentinel.
+//   - workRequired indicates whether the applied changes would require a work request.
+//   - failedPrecondition reports a problem preparing the plan itself such as an invalid
+//     configuration or an unrecoverable precondition failure such as a download that would
+//     overwrite an existing path without --overwrite.
 //
-// When failedPrecondition is nil, callers should invoke the returned apply function to determine
-// the outcome. Its own returned error may be a terminal sentinel when the file is already in the
-// expected synced or offloaded state, checked using IsErrJobTerminalSentinel. apply performs the
-// planned changes, and its own returned undo function best-effort rolls back any reversible local
-// changes when later request generation steps fail after preparation succeeds.
-//
-// It is the responsibility of the caller to ensure lockedInfo is populated when the file exists. If
-// the file does not exist, it will be created and cfg.LockedInfo will be updated.
-//
-// Be aware that the apply function takes a *PathState argument so it can be updated when the file
-// is created.
-func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (apply applyPlanFn, failedPrecondition error) {
+// Be aware that the apply function may update pathState when the changes are applied. So, store a
+// copy beforehand if needed.
+func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (apply applyPlanFn, workRequired bool, failedPrecondition error) {
 	addStep, apply := newApplyPlan()
-	defer addStep(prepareUpdateFileRstPattern(cfg))
+	defer func() {
+		if failedPrecondition != nil {
+			apply = func(context.Context, *PathState) (bool, undoFn, error) {
+				return false, noopUndo, fmt.Errorf("%w: %w", failedPrecondition, ErrJobFailedPrecondition)
+			}
+			return
+		}
+
+		addStep(prepareUpdateFileRstPattern(cfg))
+	}()
 
 	lockedInfo := cfg.LockedInfo
 	originalLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
@@ -749,7 +686,24 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 		return
 	}
 
+	// Every branch above that ends in a terminal sentinel or a failed precondition returns early.
+	// Only an upload, or a download of a non-empty object, reaches this point.
+	workRequired = true
 	return
+}
+
+// createWithParentDir runs create and, when it fails only because a parent directory is missing,
+// creates that directory and tries once more.
+func createWithParentDir(mountPoint filesystem.Provider, path string, create func() error) error {
+	err := create()
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	if dirErr := mountPoint.CreateDir(filepath.Dir(path), 0755); dirErr != nil {
+		return fmt.Errorf("unable to create parent directory: %w", dirErr)
+	}
+	return create()
 }
 
 type undoFn func(ctx context.Context) error
@@ -858,11 +812,9 @@ func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobReques
 				return nil
 			}
 
-			// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
-			// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
-			// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
-			// future fix for the O_TRUNC window must reapply that metadata to the new inode.
-			err := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, false)
+			err := createWithParentDir(mountPoint, cfg.Path, func() error {
+				return mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, false)
+			})
 			if err != nil {
 				if errors.Is(err, fs.ErrExist) {
 					return noopUndo, fmt.Errorf("unable to create stub file: %w", err)
@@ -988,7 +940,9 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 			return nil
 		}
 
-		err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+		err := createWithParentDir(mountPoint, cfg.Path, func() error {
+			return mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+		})
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return noopUndo, fmt.Errorf("unable to preallocate space for file: %w", err)
@@ -1262,7 +1216,7 @@ func parseRstUrl(url []byte) (uint32, string, error) {
 }
 
 func IsValidRstId(rstId uint32) bool {
-	return rstId != 0
+	return rstId != JobBuilderRstId
 }
 
 // GetDownloadRemotePathDirectory returns the directory part of remotePath before any globbing
@@ -1279,37 +1233,41 @@ func GetDownloadRemotePathDirectory(remotePath string) (directory string, isGlob
 	return
 }
 
-func GetDownloadInMountPath(path string, remotePath string, remotePathDir string, remotePathIsGlob bool, isPathDir bool, flatten bool) (string, error) {
-	var inMountPath string
-	normalizedRemotePathDir := NormalizePath(remotePathDir)
+func GetDownloadInMountPath(path string, remotePath string, remotePathDir string, remotePathIsGlob bool, isPathDir bool, flatten bool) (inMountPath string) {
 	normalizedRemotePath := NormalizePath(remotePath)
-	relPath, err := filepath.Rel(normalizedRemotePathDir, normalizedRemotePath)
-	if err != nil {
-		return "", fmt.Errorf("unable to determine download path: %w", err)
-	}
-
-	if flatten {
-		relPath = strings.ReplaceAll(relPath, "/", "_")
-	}
+	normalizedRemotePathDir := NormalizePath(remotePathDir)
+	// filepath.Rel cannot fail here because NormalizePath makes both arguments absolute and two
+	// absolute paths will always have a relative form.
+	relPath, _ := filepath.Rel(normalizedRemotePathDir, normalizedRemotePath)
 
 	if relPath == "." {
 		// Since the walked path and the supplied path is the same then the remotePath is a key for
 		// a non-existent file. If the provided path is not a directory then we'll treat it as the
 		// desired destination.
 		if isPathDir {
-			inMountPath = filepath.Join(path, filepath.Base(normalizedRemotePath))
-		} else {
-			inMountPath = path
+			return filepath.Join(path, filepath.Base(normalizedRemotePath))
 		}
-	} else if remotePathIsGlob {
-		inMountPath = filepath.Join(path, relPath)
-	} else {
-		// remotePath is a prefix so include the parent directory.
-		remotePathDirName := filepath.Base(normalizedRemotePathDir)
-		inMountPath = filepath.Join(path, remotePathDirName, relPath)
+		return path
 	}
 
-	return inMountPath, nil
+	if !remotePathIsGlob {
+		// remotePath is a prefix, so its own last component is recreated under the destination.
+		// Joining that component also resolves the ".." that filepath.Rel produces for a key which
+		// only matches the prefix as a string. The walk returns such a key because it lists by
+		// string prefix, and it has to land apart from the key that genuinely lives under the
+		// prefix. For prefix /bucket/prefix downloaded into /mnt/dest:
+		//
+		//  /bucket/prefix/2/a -> rel "2/a"          -> /mnt/dest/prefix/2/a
+		//  /bucket/prefix2/a  -> rel "../prefix2/a" -> /mnt/dest/prefix2/a
+		remotePathDirName := filepath.Base(normalizedRemotePathDir)
+		relPath = filepath.Join(remotePathDirName, relPath)
+	}
+
+	if flatten {
+		relPath = strings.ReplaceAll(relPath, "/", "_")
+	}
+
+	return filepath.Join(path, relPath)
 }
 
 // NormalizePath simply ensures that there is a single lead forward-slash. This is expected for all

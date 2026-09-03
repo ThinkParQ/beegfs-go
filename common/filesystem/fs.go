@@ -299,7 +299,7 @@ func (fs BeeGFS) WriteFilePart(path string, offsetStart int64, offsetStop int64)
 func (fs BeeGFS) CreateDir(path string, mode uint32) error {
 	err := os.MkdirAll(filepath.Join(fs.MountPoint, path), os.FileMode(mode))
 	if err != nil {
-		return fmt.Errorf("error creating directories for path (%s): %v", path, err)
+		return fmt.Errorf("error creating directories for path (%s): %w", path, err)
 	}
 	return nil
 }

@@ -273,6 +273,14 @@ func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) err
 	return client.CompleteWorkRequests(ctx, j.Get(), workResults, abort)
 }
 
+func (j *Job) CompleteBuilder(ctx context.Context, client rst.Provider, abort bool, cancelReservation rst.CancelRequestFn) error {
+	workResults := make([]*flex.Work, 0, len(j.WorkResults))
+	for _, r := range j.WorkResults {
+		workResults = append(workResults, r.WorkResult)
+	}
+	return client.CompleteJobBuilderRequest(ctx, j.Get(), workResults, cancelReservation, abort)
+}
+
 // New is the standard way to generate a Job from a JobRequest.
 func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 
