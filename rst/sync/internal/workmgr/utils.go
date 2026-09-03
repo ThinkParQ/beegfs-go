@@ -95,6 +95,7 @@ func newWorkFromRequest(workRequest *workRequest) *work {
 					PartNumber:  partNum,
 					OffsetStart: offsetStart,
 					OffsetStop:  offsetStop,
+					Started:     new(false),
 				}.Build())
 				continue
 			}
