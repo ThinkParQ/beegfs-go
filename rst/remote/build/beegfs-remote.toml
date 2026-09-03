@@ -273,7 +273,6 @@ rate-limit-event-types = ["*"]
 # tls-disable: Set to disable TLS encryption and send all gRPC messages in clear text over the
 # network. Discouraged for production as it exposes data to potential interception and tampering.
 
-
 #
 # --- Section 3.4: [Job Settings] ---
 #

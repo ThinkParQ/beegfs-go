@@ -5,11 +5,11 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -132,16 +132,14 @@ type worker struct {
 	workQueue            <-chan workAssignment
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
-	workJournal          *kvstore.MapStore[workEntry]
+	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
+	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
 	metrics              managerMetrics
 }
 
-func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func (w *worker) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -346,7 +344,7 @@ func (w *worker) process(work workAssignment) {
 	}
 }
 
-func (w *worker) processWork(work workAssignment, client rst.Provider, entry workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
+func (w *worker) processWork(work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -419,7 +417,7 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 	return
 }
 
-func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry workEntry) (cleanupEntries bool) {
+func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
