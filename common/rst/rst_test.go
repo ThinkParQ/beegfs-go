@@ -1,17 +1,35 @@
 package rst
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"io/fs"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
 )
+
+// stubMountPoint fakes a filesystem.Provider that points at a real on-disk directory, for the
+// paths that read and write state files with the os package directly rather than going through the
+// Provider interface.
+type stubMountPoint struct {
+	filesystem.Provider
+	mountPath string
+}
+
+func (s stubMountPoint) GetMountPath() string {
+	return s.mountPath
+}
 
 // Use to easily create jobs using proto.Clone():
 var baseTestJob = &beeremote.Job{
@@ -254,4 +272,119 @@ func TestPathStateIsDir(t *testing.T) {
 			assert.Equal(t, tt.want, tt.state.IsDir())
 		})
 	}
+}
+
+// seedFile writes contents to path on a fresh mock filesystem and returns both.
+func seedFile(t *testing.T, path string, contents []byte) filesystem.Provider {
+	t.Helper()
+	mountPoint := filesystem.NewMockFS()
+	require.NoError(t, mountPoint.CreateWriteClose(path, contents, 0644, false))
+	return mountPoint
+}
+
+// readFile returns the full contents of path.
+func readFile(t *testing.T, mountPoint filesystem.Provider, path string) []byte {
+	t.Helper()
+	file, err := mountPoint.Open(path)
+	require.NoError(t, err)
+	defer file.Close()
+	contents, err := io.ReadAll(file)
+	require.NoError(t, err)
+	return contents
+}
+
+// fileSize returns the size stat reports for path.
+func fileSize(t *testing.T, mountPoint filesystem.Provider, path string) int64 {
+	t.Helper()
+	info, err := mountPoint.Stat(path)
+	require.NoError(t, err)
+	return info.Size()
+}
+
+// TestPrepareDownloadExpandFile covers the step that grows an existing file to the remote object's
+// size before a download overwrites it, and the undo that runs when a later step fails.
+//
+// The step must resize in place: a download writes over the existing bytes, and the undo can only
+// restore the original contents by shrinking back to the original size. An implementation that
+// zeroed the file on the way up would leave the undo handing back a file of the right length full
+// of zeros.
+func TestPrepareDownloadExpandFile(t *testing.T) {
+	const path = "/mnt/dest/file"
+	original := bytes.Repeat([]byte("a"), 100)
+
+	newCfg := func(size int64, remoteSize int64) *flex.JobRequestCfg {
+		return &flex.JobRequestCfg{
+			Path:       path,
+			LockedInfo: &flex.JobLockedInfo{Exists: true, Size: size, RemoteSize: remoteSize},
+		}
+	}
+
+	t.Run("expands the file and the undo restores the original contents", func(t *testing.T) {
+		mountPoint := seedFile(t, path, original)
+		cfg := newCfg(100, 500)
+		originalLockedInfo := proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+
+		undo, err := prepareDownloadExpandFile(mountPoint, cfg, true, originalLockedInfo)(context.Background(), &PathState{}, nil)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(500), fileSize(t, mountPoint, path))
+		assert.Equal(t, original, readFile(t, mountPoint, path)[:100], "expanding must not disturb the existing bytes")
+
+		require.NoError(t, undo(context.Background()))
+		assert.Equal(t, original, readFile(t, mountPoint, path), "the undo must hand back the original contents, not a zeroed file of the original length")
+	})
+
+	t.Run("the undo restores the original stub for an offloaded file", func(t *testing.T) {
+		mountPoint := seedFile(t, path, []byte("rst://7:/other-bucket/original-key\n"))
+		cfg := newCfg(35, 500)
+		// Overwrite lets the download source differ from where the file was offloaded to, so the
+		// undo has to rebuild the original url rather than the one being downloaded.
+		cfg.LockedInfo.StubUrlRstId = 7
+		cfg.LockedInfo.StubUrlPath = "/other-bucket/original-key"
+		originalLockedInfo := proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+
+		undo, err := prepareDownloadExpandFile(mountPoint, cfg, true, originalLockedInfo)(context.Background(), &PathState{}, nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(500), fileSize(t, mountPoint, path))
+
+		require.NoError(t, undo(context.Background()))
+		assert.Equal(t, "rst://7:/other-bucket/original-key\n", string(readFile(t, mountPoint, path)))
+	})
+
+	t.Run("the undo leaves a file that was not enlarged at its size", func(t *testing.T) {
+		mountPoint := seedFile(t, path, original)
+		cfg := newCfg(100, 100)
+		originalLockedInfo := proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+
+		undo, err := prepareDownloadExpandFile(mountPoint, cfg, true, originalLockedInfo)(context.Background(), &PathState{}, nil)
+		require.NoError(t, err)
+
+		require.NoError(t, undo(context.Background()))
+		assert.Equal(t, original, readFile(t, mountPoint, path))
+	})
+
+	t.Run("refuses to touch an existing file when overwrite is not allowed", func(t *testing.T) {
+		mountPoint := seedFile(t, path, original)
+		cfg := newCfg(100, 500)
+		originalLockedInfo := proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+
+		_, err := prepareDownloadExpandFile(mountPoint, cfg, false, originalLockedInfo)(context.Background(), &PathState{}, nil)
+
+		require.ErrorIs(t, err, fs.ErrExist)
+		assert.ErrorContains(t, err, "unable to preallocate additional space for file")
+		assert.Equal(t, original, readFile(t, mountPoint, path))
+	})
+
+	t.Run("an error from an earlier step passes through and the file is untouched", func(t *testing.T) {
+		mountPoint := seedFile(t, path, original)
+		cfg := newCfg(100, 500)
+		originalLockedInfo := proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+		earlier := errors.New("an earlier step failed")
+
+		undo, err := prepareDownloadExpandFile(mountPoint, cfg, true, originalLockedInfo)(context.Background(), &PathState{}, earlier)
+
+		assert.ErrorIs(t, err, earlier)
+		assert.Equal(t, original, readFile(t, mountPoint, path))
+		assert.NoError(t, undo(context.Background()))
+	})
 }
