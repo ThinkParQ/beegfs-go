@@ -10,6 +10,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -128,16 +129,14 @@ type worker struct {
 	workQueue            <-chan workAssignment
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
-	workJournal          *kvstore.MapStore[workEntry]
+	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
+	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
 	metrics              managerMetrics
 }
 
-func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func (w *worker) run(ctx context.Context) {
 	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
