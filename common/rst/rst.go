@@ -35,6 +35,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -67,11 +68,32 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
-	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
-	// any new requests into jobSubmissionChan. If building jobs is long running, return
-	// rescheduled==true to reschedule the remaining work for later which allows other work time to
-	// complete.
-	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
+	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Hand
+	// any new requests to submitRequest. Set SchedulingResult.Reschedule when there's more work
+	// (e.g. this round reached its own submission limit and stopped the walk, or a bulk operation
+	// isn't done yet). Use SchedulingResult.Delay to back off before the next round.
+	//
+	// A walk started here belongs to this call for as long as it runs. The implementation decides
+	// when the round is over, ends the walk through the stop function GetWalk returns, and records
+	// where the next round resumes.
+	//
+	// Builder reporting is split across three layers:
+	//
+	//   - Individual job request outcomes should be reported on the generated JobRequest via
+	//     GenerationStatus whenever the builder can continue generating more requests.
+	//   - Builder progress should be persisted on the builder itself via any resume token stored in
+	//     workRequest.ExternalId, so a later call can pick up where this one left off.
+	//   - Builder termination must be reported through SchedulingResult.Err when the builder can no
+	//     longer safely or usefully continue generating additional requests.
+	//
+	// A non-nil SchedulingResult.Err means the builder execution is over. The caller cancels the
+	// builder job's work request and reports the error on it, so the message must explain what
+	// stopped the builder and whether anything was left behind that needs manual attention.
+	// Whatever the implementation still has to clean up or persist must be handled before
+	// returning.
+	//
+	// log is used for per-path problems that must be reported without failing the builder job.
+	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
 	// It blocks until the request is complete, but the caller can cancel workCtx to return early.
 	// It determines and executes the requested operation (if supported) then directly updates the
@@ -138,6 +160,7 @@ type Provider interface {
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
+	//
 	// shutdownCtx is cancelled when the service itself is shutting down. Determining readiness can
 	// cost remote round trips and a request that is not ready has to be rescheduled regardless, so
 	// implementations should stop asking and report the request as not ready once it is cancelled.
@@ -146,6 +169,24 @@ type Provider interface {
 	//
 	// delay is how long to wait before rechecking. A delay of 0 leaves the wait up to the caller.
 	IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
+	// IncludeRequestInBulkOperation indicates whether the request should be included in a provider-defined
+	// bulk operation. operation is an arbitrary provider-defined identifier that groups compatible
+	// requests within provider bulk request.
+	IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string)
+	// OpenBulkOperation opens or creates the provider-defined bulk operation identified by
+	// stateMountPath, operation, and the provider itself, and returns a handle that manages that
+	// operation for the current builder execution.
+	//
+	// The builder calls this once per tracked bulk operation, including when resuming a builder job
+	// that already persisted metadata from an earlier execution. Implementations should therefore
+	// recover any provider-side state needed to continue appending requests, executing, or
+	// cancelling the operation.
+	//
+	// stateMountPath is reserved for provider state that must survive builder reschedules or
+	// retries. It is already unique per builder job, remote storage target and operation, so
+	// implementations must not namespace it further and can write directly beneath it. Return an
+	// error only when the bulk operation cannot be opened in a usable state.
+	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 
 // SubmitRequestFn submits a fully prepared job request to remote and returns the outcome. A nil
@@ -176,6 +217,92 @@ type SchedulingResult struct {
 	// failures: problems with an individual job request are counted on flex.BuilderJob by the
 	// submission itself and surface through the work status message, never here.
 	Err error
+}
+
+// BulkExecuteResult reports how a single bulk operation's execution ended.
+type BulkExecuteResult struct {
+	// Reschedule means nothing is wrong and the operation simply has more to do. The controller
+	// merges it into the parent builder job's SchedulingResult so the job runs again.
+	Reschedule bool
+	// Delay is how long to wait before the rescheduled builder job runs again. It is only
+	// meaningful when Reschedule is set. When several operations reschedule, the smallest delay
+	// wins.
+	Delay time.Duration
+	// Err fails this operation, not the builder job. The controller cancels the operation and marks
+	// it permanently failed. The error message will be added to the builder job. Err wins over
+	// Reschedule. Setting both is allowed here, unlike on SchedulingResult. An operation that has
+	// more to do, but cannot save that fact, is done anyway.
+	//
+	// A cancelled or timed out context is the one case that spares the operation. It is left as it
+	// was, so a later builder job can open it again and pick up where this one stopped.
+	Err error
+}
+
+type BulkExecuteResultFn func() *BulkExecuteResult
+type BulkExecuteFn func(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
+type BulkCancelResultFn func() error
+type BulkCancelFn func(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, getResults BulkCancelResultFn, err error)
+
+// BulkRequestState is used to notify a bulk operation of a state change.
+type BulkRequestState int
+
+const (
+	// BulkRequestSubmitted indicates a bulk request has been successfully submitted.
+	BulkRequestSubmitted BulkRequestState = iota
+	// BulkRequestFailed means no job will ever run the request so the bulk operation should not
+	// wait for it and instead, release any associated resources.
+	BulkRequestFailed
+)
+
+func (s BulkRequestState) String() string {
+	switch s {
+	case BulkRequestSubmitted:
+		return "submitted"
+	case BulkRequestFailed:
+		return "failed"
+	default:
+		return fmt.Sprintf("unknown bulk request state (%d)", int(s))
+	}
+}
+
+type clientBulkOperation interface {
+	// AddRequest adds a single request to the bulk operation state. Calls are serialized by the
+	// caller. The implementation owns request.BulkInfo.JobIndex: it must assign a JobIndex based on
+	// its own persisted state (not on any value already set on the request) so the index stays
+	// correct across builder reschedules that reopen the same bulk operation. Return an error only
+	// for failures that should stop the parent builder job.
+	AddRequest(ctx context.Context, request *beeremote.JobRequest) error
+	// UpdateBulkRequest reports a request's outcome to the bulk operation that staged it. The
+	// notification is delivered once and never repeated, so failing to record it must be treated as
+	// unrecoverable. Return an error only for failures that should stop the parent builder job.
+	UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error
+	// Execute starts a bulk operation for the currently accumulated requests. The returned
+	// getResults function must not return until walkCh has been closed, and it reports the
+	// reschedule details and any error that ends this operation (see BulkExecuteResult). err should
+	// only be returned when the builder job itself should fail. All other errors should be reported
+	// on walkCh with the relevant path so the request can reflect the failure.
+	//
+	// Any paths that are ready may be sent to walkCh immediately so their requests can be
+	// submitted.
+	Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error)
+	// Cancel stops the bulk operation. Any unsent path whose request should still reach a job is
+	// sent to walkCh carrying reason so it is submitted as a failed precondition; paths the
+	// operation drops instead are simply never submitted. Any bulk operation specific errors should
+	// be reported from the returned wait function, which must not return until walkCh has been
+	// closed.
+	//
+	// When a failed builder job is cancelled, walkCh paths are discarded, which is consistent with
+	// normal builder job behavior. So it is the responsibility of the provider to cancel the bulk
+	// operation and handle any cleanup. If any manual cleanup is required, the user must be
+	// notified.
+	Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error)
+	// Close releases any resources that were opened.
+	Close(ctx context.Context) error
+	// Destroy permanently removes this bulk operation's on-disk state. It must only be called once the
+	// operation will never be reopened again (e.g. when the builder job that owns it is being torn down
+	// for good), since AddRequest, Execute, and Cancel all assume these files exist for as long as the
+	// operation is live.
+	Destroy(ctx context.Context) error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be
