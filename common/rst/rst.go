@@ -296,7 +296,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 		// automatically), then report any errors as part of the generated requests for each file.
 		// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
 		// avoid it being silently dropped.
-		if errors.Is(err, ErrGetLockedInfoFatal) || len(rstIds) == 0 {
+		if errors.Is(err, ErrGetPathStateFatal) || len(rstIds) == 0 {
 			return nil, err
 		}
 	} else if len(rstIds) > 1 && (cfg.Download || cfg.StubLocal) {
@@ -660,95 +660,100 @@ func PrepareFileStateForWorkRequests(ctx context.Context, client Provider, mount
 	return nil
 }
 
-// GetLockedInfo acquires the available information for inMountPath. An error will be returned when
-// the lock fails to be acquired unless skipAccessLock is true. cfg is used as a configuration
-// reference for the inMountPath, so cfg.Path will be ignored; this is necessary to avoid making
-// unnecessary cfg clones since the lockedInfo can be used for multiple job requests. writeLockSet
-// will be true when the write lock was set. When skipAccessLock is true the access lock state will
-// not be changed. skipAccessLock is useful when a point in time read-only copy is needed.
-// ErrOffloadFileNotReadable will be returned when the file is offloaded when client is unable to
-// read the file. It returns ErrGetLockedInfoFatal if it is likely subsequent calls for other paths
-// would likely fail due to some external error or misconfiguration.
-func GetLockedInfo(
-	ctx context.Context,
-	mountPoint filesystem.Provider,
-	cfg *flex.JobRequestCfg,
-	inMountPath string,
-	skipAccessLock bool,
-) (lockedInfo *flex.JobLockedInfo, writeLockSet bool, rstIds []uint32, currentRSTCfg msg.RemoteStorageTarget, entryInfoMsg msg.EntryInfo, ownerNode beegfs.Node, err error) {
+type PathStateMode int
 
-	lockedInfo = &flex.JobLockedInfo{}
-	if IsValidRstId(cfg.RemoteStorageTarget) {
-		rstIds = []uint32{cfg.RemoteStorageTarget}
-	}
+const (
+	PathStateWithLock PathStateMode = iota
+	PathStateNoLock
+)
 
-	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{
-		Verbose:        false,
-		IncludeOrigMsg: true,
-	}, inMountPath)
+type PathState struct {
+	LockedInfo   *flex.JobLockedInfo
+	LockAcquired bool
+	EntryInfo    *entry.GetEntryCombinedInfo
+	RstCfg       msg.RemoteStorageTarget
+	OwnerNode    beegfs.Node
+}
+
+func (p PathState) IsDir() bool {
+	return p.EntryInfo != nil && p.EntryInfo.Entry.Type == beegfs.EntryDirectory
+}
+
+// GetPathState collects existing path state for inMountPath and optionally acquires the file
+// access lock. It returns information derived from the current file, stub, and entry metadata for
+// the path.
+//
+// ErrOffloadFileNotReadable is returned when the file is offloaded and the client cannot read the
+// stub file. ErrGetPathStateFatal wraps entry lookup failures that likely indicate an external
+// error or misconfiguration that may also affect other paths.
+//
+// If inMountPath references a directory, no access lock will be acquired.
+func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+	result := PathState{}
+	result.LockedInfo = &flex.JobLockedInfo{}
+
+	entryCfg := entry.GetEntriesCfg{Verbose: false, IncludeOrigMsg: true}
+	entryInfo, err := entry.GetEntry(ctx, nil, entryCfg, inMountPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, nil
+			return result, nil
 		}
-		return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, fmt.Errorf("%w: %w", ErrGetLockedInfoFatal, err)
-	}
-	lockedInfo.Exists = true
-
-	if entryInfo.Entry.Details == nil {
-		return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode,
-			fmt.Errorf("%w: entry details unavailable (%s)", ErrGetLockedInfoFatal, entryInfo.Entry.EntryInfoPopulated)
+		return result, fmt.Errorf("%w: %w", ErrGetPathStateFatal, err)
 	}
 
-	if rstIds == nil {
-		rstIds = entryInfo.Entry.Details.Remote.RSTIDs
+	entryInfoMsg := entryInfo.GetOrigEntryInfo()
+	if entryInfoMsg == nil {
+		return result, fmt.Errorf("original entry info failed to be retrieved: %w", ErrGetPathStateFatal)
 	}
 
-	if !skipAccessLock {
-		if !entryInfo.Entry.Details.FileState.IsReadWriteLocked() {
-			err = entry.SetAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags)
-			if err != nil {
-				return
+	result.EntryInfo = entryInfo
+	result.LockedInfo.Exists = true
+
+	entryDetails := entryInfo.Entry.Details
+	if entryDetails == nil {
+		return result, fmt.Errorf("%w: entry details unavailable (%s)", ErrGetPathStateFatal, entryInfo.Entry.EntryInfoPopulated)
+	}
+
+	result.OwnerNode = entryInfo.Entry.MetaOwnerNode
+	result.RstCfg = entryDetails.Remote.RemoteStorageTarget
+
+	if result.IsDir() {
+		return result, nil
+	}
+
+	isFileLocked := entryDetails.FileState.IsReadWriteLocked()
+	if !isFileLocked && mode == PathStateWithLock {
+		if err = entry.SetAccessFlagsWithEntryInfo(ctx, inMountPath, beegfs.LockedContentAccessFlags, *entryInfoMsg, result.OwnerNode); err != nil {
+			return result, err
+		}
+		isFileLocked = true
+		result.LockAcquired = true
+	}
+	result.LockedInfo.SetReadWriteLocked(isFileLocked)
+
+	if beegfs.IsDataStateOffloaded(entryDetails.FileState.GetDataState()) {
+		stubUrlRstId, stubUrlPath, err := GetOffloadedUrlPartsFromFile(mountPoint, inMountPath)
+		if err != nil {
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				return result, ErrOffloadFileNotReadable
 			}
-			writeLockSet = true
+			return result, fmt.Errorf("unable to retrieve stub file info: %w", err)
 		}
-		lockedInfo.SetReadWriteLocked(true)
+		result.LockedInfo.StubUrlRstId = stubUrlRstId
+		result.LockedInfo.StubUrlPath = stubUrlPath
+		// Override the configured rstIds with the rstId of the stub file rstId.
+		result.RstCfg.RSTIDs = []uint32{result.LockedInfo.StubUrlRstId}
 	}
 
 	stat, err := mountPoint.Lstat(inMountPath)
 	if err != nil {
-		return
+		return result, err
 	}
-	lockedInfo.Size = stat.Size()
-	lockedInfo.Mtime = timestamppb.New(stat.ModTime())
-	lockedInfo.Mode = uint32(stat.Mode())
+	result.LockedInfo.Size = stat.Size()
+	result.LockedInfo.Mtime = timestamppb.New(stat.ModTime())
+	result.LockedInfo.Mode = uint32(stat.Mode())
 
-	if beegfs.IsDataStateOffloaded(entryInfo.Entry.Details.FileState.GetDataState()) {
-		if lockedInfo.StubUrlRstId, lockedInfo.StubUrlPath, err = GetOffloadedUrlPartsFromFile(mountPoint, inMountPath); err != nil {
-			if errors.Is(err, syscall.EWOULDBLOCK) {
-				return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, ErrOffloadFileNotReadable
-			}
-			return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, fmt.Errorf("unable to retrieve stub file info: %w", err)
-		}
-
-		if IsValidRstId(cfg.RemoteStorageTarget) && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return lockedInfo, writeLockSet, nil, currentRSTCfg, entryInfoMsg, ownerNode, fmt.Errorf("supplied --%s does not match stub file", RemoteTargetFlag)
-		}
-		rstIds = []uint32{lockedInfo.StubUrlRstId}
-	}
-
-	currentRSTCfg = entryInfo.Entry.Details.Remote.RemoteStorageTarget
-	origEntryInfoPtr := entryInfo.GetOrigEntryInfo()
-	if origEntryInfoPtr != nil {
-		entryInfoMsg = *origEntryInfoPtr
-	} else {
-		entryInfoMsg = msg.EntryInfo{}
-	}
-	ownerNode = entryInfo.Entry.MetaOwnerNode
-
-	if rstIds == nil {
-		return lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, ErrFileHasNoRSTs
-	}
-	return
+	return result, nil
 }
 
 // restorePolicyToDataState maps a RestorePolicy enum value to the corresponding beegfs.DataState.
