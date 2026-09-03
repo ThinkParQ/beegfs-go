@@ -324,13 +324,15 @@ func GetEntryInfoV2(path string) (msg.EntryInfo, msg.GetEntryInfoResponse, error
 	entryInfoResp := msg.GetEntryInfoResponse{
 		Result: beegfs.OpsErr_SUCCESS,
 		Pattern: msg.StripePattern{
-			Length:            0, // Intentionally unset, see common on the function description.
-			Type:              beegfs.StripePatternType(arg.PatternType),
-			HasPoolID:         true,
-			Chunksize:         arg.ChunkSize,
-			StoragePoolID:     uint16(arg.StoragePoolID),
-			DefaultNumTargets: arg.DefaultNumTargets,
-			TargetIDs:         arg.StripeTargetIDs[0:arg.NumTargets],
+			Length:                0, // Intentionally unset, see common on the function description.
+			Type:                  beegfs.StripePatternType(arg.PatternType),
+			HasPoolID:             true,
+			GroupsParity:          arg.GroupsParity != 0,
+			Chunksize:             arg.ChunkSize,
+			StoragePoolID:         uint16(arg.StoragePoolID),
+			DefaultNumTargets:     arg.DefaultNumTargets,
+			DefaultNumDataTargets: uint32(arg.NumDataTargets),
+			TargetIDs:             arg.StripeTargetIDs[0:arg.NumTargets],
 		},
 		Path: msg.PathInfo{
 			// Flags in the PathInfo set with the GetEntryInfoMsgEx is defined as an int32_t in the

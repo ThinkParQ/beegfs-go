@@ -241,4 +241,9 @@ type getEntryInfoV2Arg struct {
 	// result (only basic entry info valid); value is the FhgfsOpsErr code from the metadata RPC.
 	// Matches the signed 32-bit wire type of FhgfsOpsErr.
 	GetEntryInfoResult int32
+	// EC-specific fields. Zero for non-EC patterns.
+	// numParityTargets = DefaultNumTargets - NumDataTargets.
+	NumDataTargets uint16
+	GroupsParity   uint8
+	_              [1]byte // pad to 4-byte alignment
 }
