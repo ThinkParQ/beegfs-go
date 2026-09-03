@@ -152,6 +152,10 @@ func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequest
 	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
 }
 
+func (r *MockClient) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
+	return nil
+}
+
 func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	return "", ErrUnsupportedOpForRST
 }
