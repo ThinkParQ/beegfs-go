@@ -73,12 +73,22 @@ type Provider interface {
 	// complete.
 	ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (reschedule bool, err error)
 	// ExecuteWorkRequestPart accepts a request and which part of the request it should carry out.
-	// It blocks until the request is complete, but the caller can cancel the provided context to
-	// return early. It determines and executes the requested operation (if supported) then directly
-	// updates the part with the results and marks it as completed. If the context is cancelled it
-	// does not return an error, but rather updates any fields in the part that make sense to allow
-	// the request to be resumed later (if supported), but will not mark the part as completed.
-	ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error
+	// It blocks until the request is complete, but the caller can cancel workCtx to return early.
+	// It determines and executes the requested operation (if supported) then directly updates the
+	// part with the results and marks it as completed. If workCtx is cancelled it does not report
+	// an error, but rather updates any fields in the part that make sense to allow the request to
+	// be resumed later (if supported), but will not mark the part as completed.
+	//
+	// shutdownCtx is cancelled when the service itself is shutting down, allowing implementations
+	// to distinguish a shutdown from a workCtx cancellation that is specific to this request.
+	//
+	// The returned SchedulingResult reports how the part ended. A nil or zero-valued result means
+	// the part was carried out with nothing further to report:
+	//
+	//   - SchedulingResult.Err fails the work request.
+	//   - SchedulingResult.Reschedule asks the caller to run the request again, optionally after
+	//     SchedulingResult.Delay. It is mutually exclusive with Err.
+	ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest, part *flex.Work_Part) *SchedulingResult
 	// CompleteWorkRequests is used to perform any tasks needed to complete or abort the specified
 	// job on the RST.
 	//
@@ -119,7 +129,44 @@ type Provider interface {
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
-	IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
+	// shutdownCtx is cancelled when the service itself is shutting down. Determining readiness can
+	// cost remote round trips and a request that is not ready has to be rescheduled regardless, so
+	// implementations should stop asking and report the request as not ready once it is cancelled.
+	// That reschedules the request without holding the shutdown open, and the request is picked up
+	// again after the restart.
+	//
+	// delay is how long to wait before rechecking. A delay of 0 leaves the wait up to the caller.
+	IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest) (ready bool, delay time.Duration, err error)
+}
+
+// SubmitRequestFn submits a fully prepared job request to remote and returns the outcome. A nil
+// error means remote accepted the request and a job now owns the request. Any other error means no
+// job will ever execute the request.
+//
+// Implementations own retrying transient failures and must only return once the outcome is final.
+//
+// ctx is the builder's context for the path being submitted. It is already detached from the
+// caller's own cancellation and carries a grace period instead, so an attempt in flight when the
+// builder is cancelled is given time to finish rather than being interrupted with its outcome
+// unknown. Implementations must therefore honour ctx to decide how long to keep retrying, and must
+// not substitute a context of their own. Bounding a single attempt on top of ctx is fine and
+// expected, since the grace period only begins once the builder is cancelled.
+//
+// Implementations must be safe to call concurrently.
+type SubmitRequestFn func(ctx context.Context, request *beeremote.JobRequest) error
+
+// SchedulingResult reports how a builder job or a work request part ended.
+type SchedulingResult struct {
+	// Reschedule means nothing is wrong and the work simply has more to do. It is mutually
+	// exclusive with Err: setting both is a bug.
+	Reschedule bool
+	// Delay is how long to wait before the rescheduled work runs again. It is only meaningful when
+	// Reschedule is set.
+	Delay time.Duration
+	// Err means the work cannot proceed at all. For builder jobs it is reserved for systemic
+	// failures: problems with an individual job request are counted on flex.BuilderJob by the
+	// submission itself and surface through the work status message, never here.
+	Err error
 }
 
 // New initializes a provider client based on the provided config. It accepts a context that can be

@@ -84,27 +84,37 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beerem
 	return args.Get(0).([]*flex.WorkRequest), nil
 }
 
-func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
+func (m *MockClient) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest, part *flex.Work_Part) *SchedulingResult {
 
 	if request.GetMock() != nil {
 		if request.GetMock().ShouldFail {
-			return fmt.Errorf("test requested an error")
+			return &SchedulingResult{Err: fmt.Errorf("test requested an error")}
 		}
 		part.Completed = true
 		return nil
 	}
 
-	args := rst.Called(ctx, request, part)
+	args := m.Called(workCtx, request, part)
 	err := args.Error(0)
-	if err == nil {
-		part.Completed = true
+	if err != nil {
+		return &SchedulingResult{Err: err}
 	}
-	return err
+	part.Completed = true
+	return nil
 }
 
-// ExecuteJobBuilderRequest is not implemented and should never be called.
-func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *flex.WorkRequest, jobSubmissionChan chan<- *beeremote.JobRequest) (bool, error) {
-	return false, ErrUnsupportedOpForRST
+func (m *MockClient) ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
+	if !m.hasExpectedCall("ExecuteJobBuilderRequest") {
+		return &SchedulingResult{Err: ErrUnsupportedOpForRST}
+	}
+
+	args := m.Called(workCtx, workRequest, submitRequest)
+	delay, _ := args.Get(1).(time.Duration)
+	return &SchedulingResult{
+		Reschedule: args.Bool(0),
+		Delay:      delay,
+		Err:        args.Error(2),
+	}
 }
 
 func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
@@ -141,7 +151,7 @@ func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobReques
 	return "", ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
-	args := r.Called(request)
+func (m *MockClient) IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	args := m.Called(request)
 	return args.Bool(0), args.Get(1).(time.Duration), args.Error(2)
 }
