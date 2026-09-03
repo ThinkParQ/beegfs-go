@@ -419,6 +419,28 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 	return requests, errors.Join(errs...)
 }
 
+// GetWorkResultsState returns the combined work results state. flex.Work_UNKNOWN is returned when
+// an invalid state is determine which includes situations where one work result differs from
+// another.
+func GetWorkResultsState(workResults []*flex.Work) flex.Work_State {
+	if len(workResults) == 0 {
+		return flex.Work_UNKNOWN
+	}
+	var state flex.Work_State
+	for i, r := range workResults {
+		status := r.GetStatus()
+		if status == nil {
+			return flex.Work_UNKNOWN
+		}
+		if i == 0 {
+			state = status.GetState()
+		} else if state != status.GetState() {
+			return flex.Work_UNKNOWN
+		}
+	}
+	return state
+}
+
 // HasRemotePathInfo indicates whether lockedInfo has been updated with the remote path information.
 func HasRemotePathInfo(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.RemoteMtime != nil && !lockedInfo.RemoteMtime.AsTime().IsZero()
@@ -504,6 +526,15 @@ func IsFileLocked(lockedInfo *flex.JobLockedInfo) bool {
 // FileExists returns whether the file exists.
 func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.Exists
+}
+
+// FileCreatedByJob returns whether the job's plan created the file. Use it on the lockedInfo
+// persisted with a job, after the plan was applied. prepareDownloadNoFile creates the file and
+// records the new file's attributes, but leaves Exists false so an abort knows to remove the file.
+// The lockedInfo of a path that does not exist is left empty, so a set Mtime means the plan
+// created the file.
+func FileCreatedByJob(lockedInfo *flex.JobLockedInfo) bool {
+	return lockedInfo != nil && !lockedInfo.Exists && lockedInfo.GetMtime() != nil
 }
 
 // IsFileAlreadySynced returns whether the file is already synced with remote storage target. A nil
@@ -863,7 +894,8 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 		}
 		info := pathState.LockedInfo
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		lockedInfo.SetExists(info.Exists)
+		// Leave Exists false. An abort reads it through FileCreatedByJob to learn that this job
+		// created the file and must remove it.
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)

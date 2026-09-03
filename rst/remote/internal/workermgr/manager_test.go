@@ -198,8 +198,9 @@ func TestWorkCounterNoPool(t *testing.T) {
 }
 
 // TestWorkCounterSubmitWorkError verifies that a SubmitWork communication failure
-// records the WR as active "created" during assignment, then terminal "unknown" after
-// the cascade fails with ErrWorkerNotInPool (AssignedNode is empty when assignment errors).
+// records the WR as active "created" during assignment, then terminal "cancelled" after
+// the cascade: assignment errored so AssignedNode is empty, and a WR that never reached a
+// node cannot be running anywhere, so cancelling it is definitive.
 //
 // NOTE: this test takes ~4s. assignToLeastBusyWorker retries 4×1s when all workers error.
 func TestWorkCounterSubmitWorkError(t *testing.T) {
@@ -227,22 +228,23 @@ func TestWorkCounterSubmitWorkError(t *testing.T) {
 	require.Error(t, err)
 
 	// Verify the WR entered the SubmitWork-failure path: state=CREATED at assignment (pool
-	// found, node ONLINE, SubmitWork returned error), then cascade sets it to UNKNOWN because
-	// AssignedNode="" is not in the nodeMap (ErrWorkerNotInPool).
-	// Both the SubmitWork-failure path and the ErrNoWorkersConnected path produce identical
-	// metric outcomes (CREATED→UNKNOWN), so the WR state is what distinguishes them.
+	// found, node ONLINE, SubmitWork returned error), then cascade sets it to CANCELLED because
+	// AssignedNode="" proves the request never reached a node. Both the SubmitWork-failure path
+	// and the ErrNoWorkersConnected path produce identical metric outcomes (CREATED→CANCELLED),
+	// so the message from the assignment attempt is what distinguishes them.
 	require.Len(t, workResults, 1)
 	wr := workResults["req-0"]
-	assert.Equal(t, flex.Work_UNKNOWN, wr.Status().GetState())
+	assert.Equal(t, flex.Work_CANCELLED, wr.Status().GetState())
 	assert.Contains(t, wr.Status().GetMessage(), "error communicating to node")
+	assert.Contains(t, wr.Status().GetMessage(), "cancelling because the request is not assigned to a node")
 
 	active := workActiveValues(t, reader)
 	terminal := workTerminalValues(t, reader)
 
 	// WorkActive{created} was +1 in SubmitJob. No decrement on transition to terminal.
-	// Cascade fails with ErrWorkerNotInPool (AssignedNode="" → not in nodeMap) → UNKNOWN terminal.
 	assert.Equal(t, int64(1), active[workCounterKey{"created", 1}])
-	assert.Equal(t, int64(1), terminal[workCounterKey{"unknown", 1}])
+	assert.Equal(t, int64(1), terminal[workCounterKey{"cancelled", 1}])
+	assert.NotContains(t, terminal, workCounterKey{"unknown", 1}, "a WR that never reached a node is cancelled, not unknown")
 }
 
 // TestWorkCounterAllScheduled verifies that successfully scheduled WRs are counted
