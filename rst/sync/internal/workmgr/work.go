@@ -142,7 +142,7 @@ type worker struct {
 func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	for {
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
