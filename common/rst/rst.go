@@ -415,6 +415,28 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 	return requests, errors.Join(errs...)
 }
 
+// GetWorkResultsState returns the combined work results state. flex.Work_UNKNOWN is returned when
+// an invalid state is determine which includes situations where one work result differs from
+// another.
+func GetWorkResultsState(workResults []*flex.Work) flex.Work_State {
+	if len(workResults) == 0 {
+		return flex.Work_UNKNOWN
+	}
+	var state flex.Work_State
+	for i, r := range workResults {
+		status := r.GetStatus()
+		if status == nil {
+			return flex.Work_UNKNOWN
+		}
+		if i == 0 {
+			state = status.GetState()
+		} else if state != status.GetState() {
+			return flex.Work_UNKNOWN
+		}
+	}
+	return state
+}
+
 // HasRemotePathInfo indicates whether lockedInfo has been updated with the remote path information.
 func HasRemotePathInfo(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.RemoteMtime != nil && !lockedInfo.RemoteMtime.AsTime().IsZero()
