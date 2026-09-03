@@ -367,8 +367,13 @@ func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo.Exists
 }
 
-// IsFileAlreadySynced returns whether the file is already synced with remote storage target
+// IsFileAlreadySynced returns whether the file is already synced with remote storage target. A nil
+// Mtime or RemoteMtime means that side does not exist so the file is not synced. The nil check
+// matters because AsTime turns a nil timestamp into the Unix epoch which would compare equal.
 func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
+	if lockedInfo == nil || lockedInfo.Mtime == nil || lockedInfo.RemoteMtime == nil {
+		return false
+	}
 	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
 }
 
@@ -456,9 +461,14 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
 		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
 	}
-	lockedInfo.SetRemoteSize(remoteSize)
-	lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
-	lockedInfo.SetIsArchived(isArchived)
+
+	// Only update remote information when the object exists so lockedInfo.RemoteMtime is nil when
+	// the remote object does not exist.
+	if !errors.Is(err, os.ErrNotExist) {
+		lockedInfo.SetRemoteSize(remoteSize)
+		lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+		lockedInfo.SetIsArchived(isArchived)
+	}
 
 	return client.GetJobRequest(cfg)
 }
