@@ -180,3 +180,10 @@ func generatePartsFromSegment(segment *flex.WorkRequest_Segment) func() (int32, 
 		return partNumber, offsetStart, offsetStop
 	}
 }
+
+func appendMessage(original string, addition string) string {
+	if original == "" {
+		return addition
+	}
+	return original + "; " + addition
+}
