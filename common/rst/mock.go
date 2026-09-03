@@ -3,12 +3,16 @@ package rst
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 // MockClient can be used to mock RST client behavior. This is mostly useful when testing other
@@ -45,15 +49,46 @@ import (
 //   - You CANNOT use `Mock.On` with the `MockJob` request type.
 type MockClient struct {
 	mock.Mock
+	bulkMu             sync.Mutex
+	completedBulkPaths map[string]struct{}
 }
 
 var _ Provider = &MockClient{}
 
-func (r *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
-	return nil
+func (m *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	if m.hasExpectedCall("GetJobRequest") {
+		args := m.Called(cfg)
+		return args.Get(0).(*beeremote.JobRequest)
+	}
+
+	mockJob := &flex.MockJob{
+		NumTestSegments: 1,
+		Cfg:             proto.Clone(cfg).(*flex.JobRequestCfg),
+	}
+	if cfg.LockedInfo != nil {
+		mockJob.LockedInfo = proto.Clone(cfg.LockedInfo).(*flex.JobLockedInfo)
+		if cfg.Download {
+			mockJob.FileSize = cfg.LockedInfo.GetRemoteSize()
+		} else {
+			mockJob.FileSize = cfg.LockedInfo.GetSize()
+		}
+		mockJob.ExternalId = cfg.LockedInfo.GetExternalId()
+	}
+
+	return &beeremote.JobRequest{
+		Path:                cfg.Path,
+		RemoteStorageTarget: cfg.RemoteStorageTarget,
+		StubLocal:           cfg.StubLocal,
+		Priority:            cfg.GetPriority(),
+		Force:               cfg.Force,
+		Type: &beeremote.JobRequest_Mock{
+			Mock: mockJob,
+		},
+		Update: cfg.Update,
+	}
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (m *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
@@ -77,7 +112,7 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beerem
 		return workRequests, nil
 	}
 
-	args := rst.Called(job, availableWorkers)
+	args := m.Called(job, availableWorkers)
 	if args.Error(2) != nil {
 		return nil, args.Error(2)
 	}
@@ -117,6 +152,41 @@ func (m *MockClient) ExecuteJobBuilderRequest(shutdownCtx context.Context, workC
 	}
 }
 
+func (m *MockClient) IncludeRequestInBulkOperation(ctx context.Context, request *beeremote.JobRequest) (include bool, operation string) {
+	if m.hasExpectedCall("IncludeRequestInBulkOperation") {
+		args := m.Called(ctx, request)
+		return args.Bool(0), args.String(1)
+	}
+
+	lockedInfo := getMockRequestLockedInfo(request)
+	if lockedInfo == nil || !lockedInfo.GetIsArchived() {
+		return false, ""
+	}
+
+	operation = "retrieve"
+	if m.isBulkPathCompleted(operation, getMockBulkReplayPath(request)) {
+		return false, ""
+	}
+
+	return true, operation
+}
+
+func (m *MockClient) OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error) {
+	if m.hasExpectedCall("OpenBulkOperation") {
+		args := m.Called(ctx, stateMountPath, operation)
+		if args.Error(1) != nil {
+			return nil, args.Error(1)
+		}
+		return args.Get(0).(clientBulkOperation), nil
+	}
+
+	return &mockBulkOperation{
+		client:         m,
+		stateMountPath: stateMountPath,
+		operation:      operation,
+	}, nil
+}
+
 func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
 	if !abort {
 		switch GetWorkResultsState(workResults) {
@@ -133,12 +203,12 @@ func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Jo
 		return nil
 	}
 
-	args := rst.Called(job, workResults, abort)
+	args := m.Called(job, workResults, abort)
 	return args.Error(0)
 }
 
-func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
-	args := rst.Called()
+func (m *MockClient) GetConfig() *flex.RemoteStorageTarget {
+	args := m.Called()
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
@@ -146,23 +216,180 @@ func (m *MockClient) GetWalk(ctx context.Context, path string, chanSize int, res
 	return nil, func() {}, ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) SanitizeRemotePath(remotePath string) string {
+func (m *MockClient) SanitizeRemotePath(remotePath string) string {
 	return remotePath
 }
 
-func (r *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
-	return 0, time.Time{}, false, false, ErrUnsupportedOpForRST
+func (m *MockClient) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (int64, time.Time, bool, bool, error) {
+	if m.hasExpectedCall("GetRemotePathInfo") {
+		args := m.Called(ctx, cfg)
+		return args.Get(0).(int64), args.Get(1).(time.Time), args.Bool(2), args.Bool(3), args.Error(4)
+	}
+
+	lockedInfo := cfg.GetLockedInfo()
+	if lockedInfo == nil {
+		return 0, time.Time{}, false, false, os.ErrNotExist
+	}
+
+	remoteMtime := time.Time{}
+	if lockedInfo.GetRemoteMtime() != nil {
+		remoteMtime = lockedInfo.GetRemoteMtime().AsTime()
+	}
+
+	return lockedInfo.GetRemoteSize(), remoteMtime, lockedInfo.GetIsArchived(), true, nil
 }
 
-func (r *MockClient) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
+func (m *MockClient) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
+	if m.hasExpectedCall("ReleaseExternalId") {
+		args := m.Called(ctx, cfg, externalId)
+		return args.Error(0)
+	}
 	return nil
 }
 
-func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
-	return "", ErrUnsupportedOpForRST
+func (m *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
+	if m.hasExpectedCall("GenerateExternalId") {
+		args := m.Called(ctx, cfg)
+		return args.String(0), args.Error(1)
+	}
+
+	if cfg.GetLockedInfo() != nil && cfg.GetLockedInfo().GetExternalId() != "" {
+		return cfg.GetLockedInfo().GetExternalId(), nil
+	}
+	if cfg.GetRemotePath() != "" {
+		return cfg.GetRemotePath(), nil
+	}
+	return cfg.GetPath(), nil
 }
 
 func (m *MockClient) IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
 	args := m.Called(request)
 	return args.Bool(0), args.Get(1).(time.Duration), args.Error(2)
+}
+
+func (m *MockClient) hasExpectedCall(method string) bool {
+	for _, call := range m.ExpectedCalls {
+		if call.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *MockClient) isBulkPathCompleted(operation string, path string) bool {
+	m.bulkMu.Lock()
+	defer m.bulkMu.Unlock()
+	_, ok := m.completedBulkPaths[m.getCompletedBulkPathKey(operation, path)]
+	return ok
+}
+
+func (m *MockClient) markBulkPathCompleted(operation string, path string) {
+	m.bulkMu.Lock()
+	defer m.bulkMu.Unlock()
+	if m.completedBulkPaths == nil {
+		m.completedBulkPaths = map[string]struct{}{}
+	}
+	m.completedBulkPaths[m.getCompletedBulkPathKey(operation, path)] = struct{}{}
+}
+
+func (m *MockClient) getCompletedBulkPathKey(operation string, path string) string {
+	return fmt.Sprintf("%s\x00%s", operation, path)
+}
+
+type mockBulkOperation struct {
+	client         *MockClient
+	stateMountPath string
+	operation      string
+	requests       []*beeremote.JobRequest
+	// updateMu guards updatedRequests. Unlike AddRequest, UpdateBulkRequest is called under a read
+	// lock by bulkOperationManager, so every goroutine building a path for the same bulk operation
+	// can report its outcome at once.
+	updateMu sync.Mutex
+	// updatedRequests records the state reported for each request, in the order it was reported.
+	updatedRequests []mockBulkRequestUpdate
+	// updateBulkRequestErr is returned by UpdateBulkRequest so tests can exercise it failing.
+	updateBulkRequestErr error
+}
+
+func (x *mockBulkOperation) Close(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockBulkOperation) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	m.requests = append(m.requests, proto.Clone(request).(*beeremote.JobRequest))
+	return nil
+}
+
+type mockBulkRequestUpdate struct {
+	request *beeremote.JobRequest
+	state   BulkRequestState
+}
+
+func (m *mockBulkOperation) UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+	if m.updateBulkRequestErr != nil {
+		return m.updateBulkRequestErr
+	}
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	m.updatedRequests = append(m.updatedRequests, mockBulkRequestUpdate{
+		request: proto.Clone(request).(*beeremote.JobRequest),
+		state:   state,
+	})
+	return nil
+}
+
+func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
+	walkCh := make(chan *BulkStreamPathResult, len(m.requests))
+	for _, request := range m.requests {
+		path := getMockBulkReplayPath(request)
+		m.client.markBulkPathCompleted(m.operation, path)
+		walkCh <- &BulkStreamPathResult{Path: path}
+	}
+	close(walkCh)
+	return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
+}
+
+func (m *mockBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *BulkStreamPathResult, BulkCancelResultFn, error) {
+	walkCh := make(chan *BulkStreamPathResult)
+	close(walkCh)
+	return walkCh, func() error { return nil }, nil
+}
+
+func (m *mockBulkOperation) Destroy(ctx context.Context) error {
+	return nil
+}
+
+func getMockRequestLockedInfo(request *beeremote.JobRequest) *flex.JobLockedInfo {
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetLockedInfo()
+	case beeremote.JobRequest_Mock_case:
+		if request.GetMock().GetLockedInfo() != nil {
+			return request.GetMock().GetLockedInfo()
+		}
+		if request.GetMock().GetCfg() != nil {
+			return request.GetMock().GetCfg().GetLockedInfo()
+		}
+	}
+	return nil
+}
+
+func getMockBulkReplayPath(request *beeremote.JobRequest) string {
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		if request.GetSync().GetOperation() == flex.SyncJob_DOWNLOAD && request.GetSync().GetRemotePath() != "" {
+			return request.GetSync().GetRemotePath()
+		}
+	case beeremote.JobRequest_Mock_case:
+		cfg := request.GetMock().GetCfg()
+		if cfg != nil {
+			if cfg.GetDownload() && cfg.GetRemotePath() != "" {
+				return cfg.GetRemotePath()
+			}
+			if cfg.GetPath() != "" {
+				return cfg.GetPath()
+			}
+		}
+	}
+	return request.GetPath()
 }
