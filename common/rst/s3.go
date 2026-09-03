@@ -569,6 +569,10 @@ func (r *S3Client) CompleteWorkRequests(ctx context.Context, job *beeremote.Job,
 	}
 }
 
+func (r *S3Client) CompleteJobBuilderRequest(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, cancelRequest CancelRequestFn, abort bool) error {
+	return ErrUnsupportedOpForRST
+}
+
 func (r *S3Client) GetConfig() *flex.RemoteStorageTarget {
 	return proto.Clone(r.config).(*flex.RemoteStorageTarget)
 }
@@ -875,15 +879,14 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 
 	stat, err := r.mountPoint.Lstat(request.Path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		// An abort still has to release what was started at the provider so a missing or unreadable
+		// entry must not stop it here.
+		if !abort {
 			return fmt.Errorf("unable to complete job requests: %w", err)
-		} else if !abort {
-			// Ignore errors when aborting.
-			return fmt.Errorf("unable to set local file mtime as part of completing job requests: %w", err)
 		}
+	} else {
+		job.SetStopMtime(timestamppb.New(stat.ModTime()))
 	}
-	mtime := stat.ModTime()
-	job.SetStopMtime(timestamppb.New(mtime))
 
 	if job.ExternalId != "" {
 		if abort {

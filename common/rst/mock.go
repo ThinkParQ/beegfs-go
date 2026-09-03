@@ -207,6 +207,26 @@ func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Jo
 	return args.Error(0)
 }
 
+// CompleteJobBuilderRequest records the call the way CompleteWorkRequests does, so a test can drive
+// a builder job's completion. cancelRequest is left out of the recorded arguments because testify
+// cannot match a func value; a test that needs to observe it should assert on what the cancelled
+// operation released instead.
+func (m *MockClient) CompleteJobBuilderRequest(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, cancelRequest CancelRequestFn, abort bool) error {
+	// JobBuilderClient.CompleteJobBuilderRequest refuses to complete a builder job whose work did
+	// not end cleanly unless it is being aborted, and callers rely on that refusal. Mirror it here
+	// so a test sees the same rejection rather than a recorded call.
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_COMPLETED, flex.Work_CANCELLED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
+
+	args := m.Called(job, workResults, abort)
+	return args.Error(0)
+}
+
 func (m *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	args := m.Called()
 	return args.Get(0).(*flex.RemoteStorageTarget)

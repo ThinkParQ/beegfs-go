@@ -872,7 +872,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	switch state {
 	case beeremote.Job_FAILED:
 		// All work requests are cancelled so it is safe to cancel the job.
-		if completeErr := job.Complete(m.ctx, rstClient, true); completeErr != nil {
+		// if completeErr := job.Complete(m.ctx, rstClient, true); completeErr != nil {
+		if completeErr := m.completeJob(job, rstClient, true); completeErr != nil {
 			job.Status.SetMessage(appendMessage(message, "error requesting the RST abort this job (cancel the job to try again): "+completeErr.Error()))
 		} else {
 			job.Status.SetState(beeremote.Job_CANCELLED)
@@ -1259,7 +1260,8 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			return false, false, ""
 		}
 
-		err := job.Complete(m.ctx, rstClient, true)
+		// err := job.Complete(m.ctx, rstClient, true)
+		err := m.completeJob(job, rstClient, true)
 		if err != nil {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
@@ -1415,7 +1417,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	// due to some worker nodes having an issue uploading their segments to the RST, or a user
 	// cancelling the job partway through while some WRs are complete and others are still running.
 	if !allSameState {
-		if err := job.Complete(m.ctx, rst, false); err != nil {
+		if err := m.completeJob(job, rst, false); err != nil {
 			status.SetState(beeremote.Job_UNKNOWN)
 			status.SetMessage("all work requests have reached a terminal state, but not all work requests are in the same state (inspect individual work requests to determine possible next steps)")
 		} else {
@@ -1429,7 +1431,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	// If everything has the same state, the state of the entry we just updated will match every other request.
 	switch entryToUpdate.Status().GetState() {
 	case flex.Work_CANCELLED:
-		if err := job.Complete(m.ctx, rst, true); err != nil {
+		if err := m.completeJob(job, rst, true); err != nil {
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage("error cancelling job: " + err.Error())
 		} else if job.Request.HasBuilder() {
@@ -1447,7 +1449,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			attemptToClearLock = true
 		}
 	case flex.Work_COMPLETED:
-		if err := job.Complete(m.ctx, rst, false); err != nil {
+		if err := m.completeJob(job, rst, false); err != nil {
 			status.SetState(beeremote.Job_FAILED)
 			status.SetMessage("error completing job: " + err.Error())
 		} else if status.GetState() == beeremote.Job_OFFLOADED {
@@ -1458,7 +1460,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			attemptToClearLock = true
 		}
 	case flex.Work_FAILED:
-		if err := job.Complete(m.ctx, rst, false); err != nil {
+		if err := m.completeJob(job, rst, false); err != nil {
 			// Something that went wrong that requires user intervention. We don't know what so don't
 			// try to complete or abort the request as it may make it more difficult to recover.
 			status.SetState(beeremote.Job_FAILED)
@@ -1469,7 +1471,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 			attemptToClearLock = true
 		}
 	default:
-		if err := job.Complete(m.ctx, rst, false); err != nil {
+		if err := m.completeJob(job, rst, false); err != nil {
 			status.SetState(beeremote.Job_UNKNOWN)
 			status.SetMessage("all work requests have reached a terminal state, but the state is unknown (this is likely a bug and will cause unexpected behavior)")
 			// We return an error here because this is an internal problem that shouldn't happen and
@@ -1484,6 +1486,67 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 	}
 	m.log.Debug("job result", zap.Any("job", job))
 	return nil
+}
+
+func (m *Manager) completeJob(job *Job, client rst.Provider, abort bool) error {
+	if job.GetRequest().HasBuilder() {
+		return job.CompleteBuilder(m.ctx, client, abort, m.cancelReservedRequest)
+	}
+	return job.Complete(m.ctx, client, abort)
+}
+
+// cancelReservedRequest cancels the job a bulk operation reserved for one path. It is the
+// CancelRequestFn that completeJob hands the provider, and the provider calls it once per entry of
+// a cancelled operation's walk. path and jobId identify that entry.
+//
+// The job it finds is usually not still reserved. A bulk operation keeps its request open until the
+// job submitted for that path reaches a terminal state, so at teardown the job is typically
+// SCHEDULED or RUNNING with work requests already dispatched to sync nodes. Cancelling it means
+// stopping that work on the nodes, not relabelling the job, so the decision is left to
+// updateJobState(). That reports CANCELLED only once every node confirms the stop; an unconfirmed
+// stop leaves the job UNKNOWN and is returned as an error here.
+//
+// It takes the path lock itself, so no caller may hold it. A builder's own path is never absorbed
+// into a bulk operation, so a builder job cannot reach its own path entry through this.
+func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
+	pathEntry, commitAndReleasePath, pathEntryErr := m.pathStore.GetAndLockEntry(path)
+	if pathEntryErr != nil {
+		if errors.Is(pathEntryErr, kvstore.ErrEntryNotInDB) {
+			// Path entry no longer exists so there's nothing left to cancel.
+			return nil
+		}
+		return pathEntryErr
+	}
+
+	defer func() {
+		if commitErr := commitAndReleasePath(); commitErr != nil {
+			err = errors.Join(err, commitErr)
+		}
+	}()
+
+	job, ok := pathEntry.Value[jobId]
+	if !ok {
+		// Job reached a terminal state and was deleted so there is nothing to cancel.
+		return nil
+	}
+
+	// Not forced: a cancel that cannot be confirmed must fail loudly here rather than stamp the job
+	// CANCELLED while a node may still be writing the file.
+	success, _, message := m.updateJobState(job, beeremote.UpdateJobsRequest_CANCELLED, false, true)
+	if !success {
+		if message == "" {
+			// The failure paths report through the job status rather than the return value.
+			message = job.GetStatus().GetMessage()
+		}
+		return fmt.Errorf("unable to cancel reserved job %s for path %s: %s", jobId, path, message)
+	}
+
+	// Release only once the cancel is confirmed. releaseUnusedFileLockFunc only looks for jobs in an
+	// active state, so it would clear the lock on a job left UNKNOWN.
+	if releaseLockErr := m.releaseUnusedFileLockFunc(path, pathEntry.Value); releaseLockErr != nil {
+		err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", releaseLockErr))
+	}
+	return err
 }
 
 // recordJobTerminal records metrics and emits a structured log when a job
