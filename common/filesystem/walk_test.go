@@ -510,7 +510,11 @@ func TestWalkWithDirsDirectoriesDoNotAnchorResume(t *testing.T) {
 		require.NoError(t, resp.Err)
 		secondPass = append(secondPass, resp.Path)
 	}
+	// "/data/b" is re-emitted even though its bare path sorts before the "/data/b.txt" anchor:
+	// directories are filtered by sortName ("data/b/"), matching the order the walk emits in, so
+	// the resumed pass picks up exactly where the first one stopped.
 	require.Equal(t, []string{
+		"/data/b",
 		"/data/b/b.txt",
 		"/data/b/b",
 		"/data/b/b/b.txt",
@@ -531,6 +535,47 @@ func TestWalkWithDirsDirectoriesDoNotAnchorResume(t *testing.T) {
 		}
 		assert.Falsef(t, seenFiles[path], "file %q was sent in both the first and resumed pass", path)
 	}
+}
+
+// TestWalkWithDirsResumeKeepsDirectorySortingBeforeAnchor covers the harder half of the prefix
+// problem the test above describes: here the walk is stopped on a *file*, and the directory that
+// would have come next is the one at risk. With "/data/b.tx", "/data/b.txt" and the "/data/b"
+// directory as siblings, sortName order is b.tx, b.txt, b/ - so stopping on "/data/b.txt" anchors
+// the resume at "/data/b.tx" while "/data/b" has not been emitted yet. Comparing the directory's
+// bare path against that anchor would place it before the anchor and drop it entirely, even though
+// the walk had not reached it. Never stopping on a directory would not help; only comparing by
+// sortName does.
+func TestWalkWithDirsResumeKeepsDirectorySortingBeforeAnchor(t *testing.T) {
+	mountDir := t.TempDir()
+	for _, path := range []string{"/data/b.tx", "/data/b.txt", "/data/b/b.txt"} {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	firstChan, stopWalk, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", "", 0, nil)
+	require.NoError(t, err)
+
+	// Stop on the file "/data/b.txt", leaving the "/data/b" directory unemitted.
+	firstPass, resumeToken := consumeWalkThen(t, firstChan, stopWalk, 2)
+	require.Equal(t, []string{"/data", "/data/b.tx"}, firstPass)
+	require.Equal(t, "data/b.tx", resumeToken)
+
+	secondChan, _, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", resumeToken, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		secondPass = append(secondPass, resp.Path)
+	}
+	require.Equal(t, []string{
+		"/data/b.txt",
+		"/data/b",
+		"/data/b/b.txt",
+	}, secondPass, "the resumed walk must pick up every path after the anchor, including /data/b")
 }
 
 // consumeWalkThen consumes consume results, then stops the walk on the next one and returns the
