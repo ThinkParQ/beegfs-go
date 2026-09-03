@@ -7,11 +7,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
 )
+
+// stubMountPoint fakes a filesystem.Provider that points at a real on-disk directory, for the
+// paths that read and write state files with the os package directly rather than going through the
+// Provider interface.
+type stubMountPoint struct {
+	filesystem.Provider
+	mountPath string
+}
+
+func (s stubMountPoint) GetMountPath() string {
+	return s.mountPath
+}
 
 // Use to easily create jobs using proto.Clone():
 var baseTestJob = &beeremote.Job{
