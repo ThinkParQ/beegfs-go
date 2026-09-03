@@ -415,12 +415,15 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 	if !request.HasSync() {
 		return false, 0, ErrReqAndRSTTypeMismatch
 	}
+	if shutdownCtx.Err() != nil {
+		return false, 0, nil
+	}
 
 	sync := request.GetSync()
 	lockedInfo := sync.GetLockedInfo()
 	if sync.Operation == flex.SyncJob_DOWNLOAD && lockedInfo.IsArchived {
 
-		_, _, archiveStatus, err := r.getObjectMetadata(ctx, sync.RemotePath, true)
+		_, _, archiveStatus, err := r.getObjectMetadata(workCtx, sync.RemotePath, true)
 		if err != nil {
 			return false, 0, err
 		}
@@ -443,7 +446,7 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 				// Multiple workers may attempt to restore the same object concurrently. In that
 				// case, a RestoreAlreadyInProgress error can occur and should be ignored. If the
 				// restore has already completed, subsequent requests will succeed with HTTP 200 OK.
-				if _, err := r.apiClient.RestoreObject(ctx, restoreObjectInput); err != nil {
+				if _, err := r.apiClient.RestoreObject(workCtx, restoreObjectInput); err != nil {
 					if apiErr, ok := errors.AsType[smithy.APIError](err); !ok || apiErr.ErrorCode() != "RestoreAlreadyInProgress" {
 						return false, 0, err
 					}
@@ -457,21 +460,21 @@ func (r *S3Client) IsWorkRequestReady(ctx context.Context, request *flex.WorkReq
 	return true, 0, nil
 }
 
-func (r *S3Client) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
+func (r *S3Client) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest, part *flex.Work_Part) *SchedulingResult {
 	if !request.HasSync() {
-		return ErrReqAndRSTTypeMismatch
+		return &SchedulingResult{Err: ErrReqAndRSTTypeMismatch}
 	}
 	sync := request.GetSync()
 
 	var err error
 	switch sync.Operation {
 	case flex.SyncJob_UPLOAD:
-		err = r.upload(ctx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
+		err = r.upload(workCtx, request.Path, sync.RemotePath, request.ExternalId, part, sync.LockedInfo.Mtime.AsTime(), sync.Metadata, sync.Tagging, sync.StorageClass)
 	case flex.SyncJob_DOWNLOAD:
-		err = r.download(ctx, request.Path, sync.RemotePath, part)
+		err = r.download(workCtx, request.Path, sync.RemotePath, part)
 	}
 	if err != nil {
-		return err
+		return &SchedulingResult{Err: err}
 	}
 
 	part.Completed = true
