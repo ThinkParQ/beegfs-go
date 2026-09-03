@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -107,20 +109,44 @@ func (c *grpcProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 }
 
 func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
-	_, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
+	resp, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
 		Request:      jobRequest,
 		OriginNodeId: c.nodeId,
 	}.Build())
 	if err != nil {
-		if st, ok := status.FromError(err); ok {
+		st, ok := status.FromError(err)
+		if ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
 			// Note this is just a hint to the user, other error conditions may have the same
 			// message so we don't adjust behavior (i.e., treat it as fatal).
 			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				return fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+				err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
 			}
 		}
+
+		// Unavailable and DeadlineExceeded are retried. Canceled is returned as context.Canceled so
+		// the caller can check its own ctx to tell its cancellation from a connection a failed
+		// config update closed.
+		switch st.Code() {
+		case codes.Unavailable, codes.DeadlineExceeded:
+			return fmt.Errorf("%w: %w", ErrUnavailable, err)
+		case codes.Canceled:
+			return fmt.Errorf("%w: %w", context.Canceled, err)
+		}
 		return err
+	}
+
+	switch resp.GetStatus() {
+	case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
+		return rst.ErrJobAlreadyComplete
+	case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
+		return rst.ErrJobAlreadyOffloaded
+	case beeremote.SubmitJobResponse_EXISTING:
+		return rst.ErrJobAlreadyExists
+	case beeremote.SubmitJobResponse_NOT_ALLOWED:
+		return rst.ErrJobNotAllowed
+	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
+		return rst.ErrJobFailedPrecondition
 	}
 
 	return nil
