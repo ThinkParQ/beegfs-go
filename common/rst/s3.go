@@ -991,6 +991,20 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 				return fmt.Errorf("unable to clear offloaded data state: %w", err)
 			}
 		}
+
+		// Reduce the file size if it's larger than the remote object. This situation means the original
+		// file size was larger than needed so no additional space was preallocated. This must happen
+		// before Chtimes below since resizing the file updates its mtime.
+		if sync.LockedInfo.Size > sync.LockedInfo.RemoteSize {
+			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.RemoteSize, true); err != nil {
+				return fmt.Errorf("failed to reduce downloaded file to the remote object's size: %w", err)
+			}
+		}
+	}
+
+	// Update the downloaded file's access and modification times so they accurately reflect the beegfs-mtime.
+	if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
+		return fmt.Errorf("failed to update download's mtime: %w", err)
 	}
 
 	return nil
