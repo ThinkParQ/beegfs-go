@@ -303,10 +303,13 @@ func TestUpdateRequests(t *testing.T) {
 	// Simulate a request that isn't completed due to an error from the RST (note if an error
 	// happens the state is always failed). Force the the request to stay active because it can't
 	// send a response to BeeRemote.
+	failedSent := make(chan struct{})
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(fmt.Errorf("test wants an error")).Times(1)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).
+		Run(func(args mock.Arguments) { close(failedSent) }).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2.SetJobId("1")
 	testRequest2.SetRequestId("2")
@@ -314,8 +317,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow the request enough time to get to an error state:
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failed work result")
+	}
 
 	// Now try to cancel the request:
 	updateRequest := flex.UpdateWorkRequest_builder{
@@ -332,10 +338,13 @@ func TestUpdateRequests(t *testing.T) {
 
 	// Resubmit the same job ID and request. This time there is no error on the RST.
 	// Force the the request to stay active because it can't send a response to BeeRemote.
+	failedSent = make(chan struct{})
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).
+		Run(func(args mock.Arguments) { close(failedSent) }).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2_2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2_2.SetJobId("1")
 	testRequest2_2.SetRequestId("2")
@@ -343,8 +352,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow the request enough time to get to an error state:
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for completed work result")
+	}
 
 	// We should not be able to cancel completed requests:
 	resp, err = mgr.UpdateWork(updateRequest)
@@ -358,10 +370,13 @@ func TestUpdateRequests(t *testing.T) {
 	// worker should no longer be trying to send the request to BeeRemote making it available for
 	// another request. Force the the request to stay active (tying up the worker) because it can't
 	// send a response to BeeRemote.
+	failedSent = make(chan struct{})
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "3"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "3")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).
+		Run(func(args mock.Arguments) { close(failedSent) }).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest3 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest3.SetJobId("1")
 	testRequest3.SetRequestId("3")
@@ -369,8 +384,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow enough time for the request to get picked up and become active
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for third completed work result")
+	}
 
 	// Now submit another request for the same job:
 	testRequest4 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
