@@ -115,6 +115,29 @@ func TestRecreateWorkRequests(t *testing.T) {
 	assert.Nil(t, invalidRequests[0].Type)
 }
 
+// TestRecreateWorkRequestsPropagatesBulkInfo guards against the WorkRequest.BulkInfo field silently
+// staying unset: a bulk generated JobRequest carries BulkInfo, and providers read it off the
+// *flex.WorkRequest RecreateWorkRequests builds, not off the JobRequest it was built from.
+func TestRecreateWorkRequestsPropagatesBulkInfo(t *testing.T) {
+	jobBulk := proto.Clone(baseTestJob).(*beeremote.Job)
+	jobBulk.Request.Type = &beeremote.JobRequest_Sync{
+		Sync: &flex.SyncJob{Operation: flex.SyncJob_DOWNLOAD},
+	}
+	jobBulk.Request.BulkInfo = &flex.BulkJobRequestInfo{
+		StateMountPath: "state",
+		Operation:      "bulk-retrieve",
+		JobIndex:       7,
+	}
+
+	requests := RecreateWorkRequests(jobBulk, getNewTestSegments(baseTestSegments))
+	require.Len(t, requests, len(baseTestSegments))
+	for _, req := range requests {
+		require.True(t, req.HasBulkInfo())
+		assert.True(t, proto.Equal(jobBulk.Request.BulkInfo, req.GetBulkInfo()))
+		assert.NotSame(t, jobBulk.Request.BulkInfo, req.GetBulkInfo(), "each WorkRequest must get its own clone, not a shared pointer")
+	}
+}
+
 func TestGenerateSegments(t *testing.T) {
 	type expectation struct {
 		offsetStart int64

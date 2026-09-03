@@ -394,6 +394,10 @@ func RecreateWorkRequests(job *beeremote.Job, segments []*flex.WorkRequest_Segme
 			Priority:            new(request.GetPriority()),
 		}
 
+		if request.HasBulkInfo() {
+			wr.BulkInfo = proto.Clone(request.GetBulkInfo()).(*flex.BulkJobRequestInfo)
+		}
+
 		switch request.WhichType() {
 		case beeremote.JobRequest_Sync_case:
 			wr.Type = &flex.WorkRequest_Sync{
@@ -449,100 +453,6 @@ func generateSegments(fileSize int64, segCount int64, partsPerSegment int32) []*
 		segments = append(segments, segment)
 	}
 	return segments
-}
-
-// BuildJobRequests returns a list of job requests, one for each remote target. Unless
-// skipPrepareJob=true then remote resource information will be added to the request's lockedInfo
-// and common checks and tasks will be preformed.
-//
-// A returned error indicates that one or more job request were not able to be built. However, if
-// a request was able to be built, the error will be specified in the request's GenerationStatus.
-func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, inMountPath string, remotePath string, cfg *flex.JobRequestCfg) ([]*beeremote.JobRequest, error) {
-	keepLock := false
-	lockedInfo, writeLockSet, rstIds, currentRSTCfg, entryInfoMsg, ownerNode, err := GetLockedInfo(ctx, mountPoint, cfg, inMountPath, false)
-
-	defer func() {
-		if !keepLock && writeLockSet {
-			if clearWriteLockErr := entry.ClearAccessFlags(ctx, inMountPath, beegfs.LockedContentAccessFlags); clearWriteLockErr != nil {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearWriteLockErr))
-			}
-		}
-	}()
-
-	if err != nil {
-		// If the user didn't specify any RSTs and the entry doesn't have any RSTs configured, just
-		// silently ignore it. Otherwise pushing a subset of files based on their configured RST IDs
-		// would always fail, whenever there is a file with no RSTs set on its entry info.
-		if errors.Is(err, ErrFileHasNoRSTs) {
-			return nil, nil
-		}
-		// If this function returns an error but it will also abort the entire builder job, which we
-		// generally want to avoid outside fatal errors. Outside fatal errors, if there are any RST
-		// IDs available for this inMountPath (either specified by the user, or determined
-		// automatically), then report any errors as part of the generated requests for each file.
-		// For non-fatal errors on paths that have no RSTs we must just return the error anyway to
-		// avoid it being silently dropped.
-		if errors.Is(err, ErrGetPathStateFatal) || len(rstIds) == 0 {
-			return nil, err
-		}
-	} else if len(rstIds) > 1 && (cfg.Download || cfg.StubLocal) {
-		err = errors.Join(err, ErrFileHasAmbiguousRSTs)
-	}
-
-	var errs []error
-	var requests []*beeremote.JobRequest
-	for _, rstId := range rstIds {
-		client, ok := rstMap[rstId]
-		if !ok {
-			errs = append(errs, errors.Join(err, fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, rstId)))
-			continue
-		}
-
-		requestCfg := proto.Clone(cfg).(*flex.JobRequestCfg)
-		requestCfg.SetPath(inMountPath)
-		requestCfg.SetRemotePath(client.SanitizeRemotePath(remotePath))
-		requestCfg.SetRemoteStorageTarget(rstId)
-		requestLockedInfo := proto.Clone(lockedInfo).(*flex.JobLockedInfo)
-		requestCfg.SetLockedInfo(requestLockedInfo)
-
-		if err != nil {
-			request := client.GetJobRequest(requestCfg)
-			status := &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to build job request: %s", err.Error()),
-			}
-			request.SetGenerationStatus(status)
-			requests = append(requests, request)
-			continue
-		}
-
-		request := BuildJobRequest(ctx, client, requestCfg)
-		if request.GetGenerationStatus() == nil {
-			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, requestCfg); err != nil {
-				if errors.Is(err, ErrJobAlreadyComplete) {
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
-						Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
-					}
-				} else if errors.Is(err, ErrJobAlreadyOffloaded) {
-					keepLock = true
-					request.GenerationStatus = &beeremote.JobRequest_GenerationStatus{State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED}
-				} else {
-					request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-						State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-						Message: fmt.Sprintf("failed to prepare file state: %s", err.Error()),
-					})
-				}
-			} else {
-				// This request will execute so ensure the lock is kept.
-				keepLock = true
-			}
-		} // If we couldn't build a runnable job request, there would be no active job to drive the normal unlock path so don't keep the lock.
-
-		requests = append(requests, request)
-	}
-
-	return requests, errors.Join(errs...)
 }
 
 // GetWorkResultsState returns the combined work results state. flex.Work_UNKNOWN is returned when
@@ -751,6 +661,20 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 	return
 }
 
+// createWithParentDir runs create and, when it fails only because a parent directory is missing,
+// creates that directory and tries once more.
+func createWithParentDir(mountPoint filesystem.Provider, path string, create func() error) error {
+	err := create()
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	if dirErr := mountPoint.CreateDir(filepath.Dir(path), 0755); dirErr != nil {
+		return fmt.Errorf("unable to create parent directory: %w", dirErr)
+	}
+	return create()
+}
+
 type undoFn func(ctx context.Context) error
 type applyPlanFn func(ctx context.Context, pathState *PathState) (applied bool, undo undoFn, err error)
 type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error)
@@ -857,11 +781,9 @@ func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobReques
 				return nil
 			}
 
-			// Overwrites via O_TRUNC, which leaves a narrow window where a crash could zero the file. We
-			// intentionally keep this over atomic-rename: a new inode drops the BeeGFS per-file metadata
-			// (RST IDs, locks) and silently breaks stub-then-re-push and `--update --remote-target`. Any
-			// future fix for the O_TRUNC window must reapply that metadata to the new inode.
-			err := mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, false)
+			err := createWithParentDir(mountPoint, cfg.Path, func() error {
+				return mountPoint.CreateWriteClose(cfg.Path, rstUrl, 0644, false)
+			})
 			if err != nil {
 				if errors.Is(err, fs.ErrExist) {
 					return noopUndo, fmt.Errorf("unable to create stub file: %w", err)
@@ -987,7 +909,9 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 			return nil
 		}
 
-		err := mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+		err := createWithParentDir(mountPoint, cfg.Path, func() error {
+			return mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+		})
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return noopUndo, fmt.Errorf("unable to preallocate space for file: %w", err)
