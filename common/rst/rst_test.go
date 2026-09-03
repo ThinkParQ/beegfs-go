@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -214,5 +216,42 @@ func TestGenerateSegments(t *testing.T) {
 			assert.Equal(t, e.partsStart, s.PartsStart, test.name)
 			assert.Equal(t, e.partsStop, s.PartsStop, test.name)
 		}
+	}
+}
+
+// TestPathStateIsDir covers the guard that keeps callers from dereferencing EntryInfo. GetPathState
+// leaves it nil for a path that does not exist, which is the normal case for a download
+// destination, so a missing path must report false rather than panic.
+func TestPathStateIsDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		state PathState
+		want  bool
+	}{
+		{
+			name:  "path does not exist",
+			state: PathState{LockedInfo: &flex.JobLockedInfo{}},
+			want:  false,
+		},
+		{
+			name: "path is a directory",
+			state: PathState{
+				EntryInfo: &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntryDirectory}},
+			},
+			want: true,
+		},
+		{
+			name: "path is a regular file",
+			state: PathState{
+				EntryInfo: &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntryRegularFile}},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.state.IsDir())
+		})
 	}
 }

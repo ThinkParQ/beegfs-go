@@ -942,6 +942,28 @@ func (r *S3Client) prepareJobRequest(ctx context.Context, cfg *flex.JobRequestCf
 	return
 }
 
+func (r *S3Client) getLockedInfo(ctx context.Context, cfg *flex.JobRequestCfg) (*PathState, error) {
+	pathState, err := GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock)
+	if err != nil {
+		return &pathState, fmt.Errorf("failed to get path state information: %w", err)
+	}
+
+	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := r.GetRemotePathInfo(ctx, cfg)
+	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
+		return &pathState, fmt.Errorf("unable to retrieve remote path information: %w", err)
+	}
+	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
+		return &pathState, fmt.Errorf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag)
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		pathState.LockedInfo.SetRemoteSize(remoteSize)
+		pathState.LockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
+		pathState.LockedInfo.SetIsArchived(isArchived)
+	}
+	return &pathState, nil
+}
+
 type s3ArchiveInfo struct {
 	IsArchived        bool
 	RestoreInProgress bool
