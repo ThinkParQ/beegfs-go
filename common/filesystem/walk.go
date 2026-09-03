@@ -268,11 +268,17 @@ func streamPathsLexicographically(
 
 				if entry.IsDir() {
 					if includeDirs {
+						// Compare using the directory's sortName (see readDir), not its bare path.
+						// startAfter is always a file path, and the walk emits in sortName order, so
+						// the bare path disagrees with the emission order exactly when the directory
+						// is a strict prefix of the anchor file - a directory "b" sitting next to a
+						// sibling file "b.txt". Without the trailing '/', "b" <= "b.txt" and the
+						// directory is skipped on resume even though it is emitted after that file.
 						shouldEmitDir := false
 						if !isGlob {
-							shouldEmitDir = path > startAfter
+							shouldEmitDir = path+"/" > startAfter
 						} else if match := doublestar.MatchUnvalidated(pattern, path); match {
-							shouldEmitDir = path > startAfter
+							shouldEmitDir = path+"/" > startAfter
 						}
 
 						if shouldEmitDir {
@@ -316,7 +322,8 @@ func streamPathsLexicographically(
 		}
 
 		if includeDirs && !isGlob && root != "" {
-			emitRoot := root > startAfter
+			// Same sortName comparison as the directory entries above.
+			emitRoot := root+"/" > startAfter
 			if emitRoot {
 				inMountPath := "/" + root
 				if keep, err := ApplyFilter(inMountPath, filter, mountPoint); err != nil {
