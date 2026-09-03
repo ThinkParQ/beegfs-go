@@ -116,7 +116,7 @@ type Manager struct {
 	// entry while its being processed because it would be better to block another goroutine than
 	// risk two goroutines acting on the same entry concurrently. This should only ever happen if
 	// there is a bug.
-	workJournal *kvstore.MapStore[workEntry]
+	workJournal *kvstore.MapStore[*workEntry]
 	// The jobStore keeps a mapping of job IDs to submission IDs in the journal for each of their
 	// work requests. The inner map is a map of work request IDs to their submission ID in the
 	// workJournal. This allows the worker node to handle multiple work request for a single job.
@@ -200,7 +200,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
 	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
-	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
+	workJournal, closeWorkJournal, err := kvstore.NewMapStore[*workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
 	}
@@ -329,8 +329,9 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			rescheduleWork:       m.scheduler.AddRescheduleWorkToken,
 			metrics:              m.metrics,
 		}
-		m.workerWG.Add(1)
-		go w.run(m.workerCtx, m.workerWG)
+		m.workerWG.Go(func() {
+			w.run(m.workerCtx)
+		})
 	}
 	m.log.Info("finished startup")
 
@@ -752,7 +753,7 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	}
 
 	submissionId, priority := scheduler.CreateSubmissionId(key, wr.GetPriority())
-	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId)
+	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId, kvstore.WithValue(&workEntry{}))
 	if err != nil {
 		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}

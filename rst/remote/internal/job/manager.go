@@ -736,8 +736,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 				status.State = beeremote.Job_COMPLETED
 				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
 
-				var mtimeErr *rst.MtimeErr
-				if errors.As(err, &mtimeErr) {
+				if mtimeErr, ok := errors.AsType[*rst.MtimeErr](err); ok {
 					pbMtime := timestamppb.New(mtimeErr.Mtime())
 					job.SetStartMtime(pbMtime)
 					job.SetStopMtime(pbMtime)
