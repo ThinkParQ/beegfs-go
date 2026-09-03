@@ -133,6 +133,7 @@ type worker struct {
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
+	workerSaturation     []func() float64
 	metrics              managerMetrics
 }
 
