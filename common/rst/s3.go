@@ -385,6 +385,14 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 	if writeLockSet, err = r.prepareJobRequest(ctx, r.getJobRequestCfg(request), sync); err != nil {
 		return nil, err
 	}
+	// Reject a caller-supplied key that isn't already in provider-normal form rather than
+	// silently rewriting it: the object would land under a key the caller never asked for,
+	// and a mismatch here is what made slash-prefixed keys unreachable by any walk.
+	if r.SanitizeRemotePath(sync.RemotePath) != sync.RemotePath {
+		err = fmt.Errorf("invalid remote path %q: s3 keys must not begin with '/'", sync.RemotePath)
+		return
+	}
+
 	job.SetExternalId(sync.LockedInfo.ExternalId)
 
 	switch sync.Operation {
