@@ -97,9 +97,6 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	cfg.SetPath(pathInfo.Path)
-	if !cfg.Download && cfg.RemotePath == "" {
-		cfg.SetRemotePath(pathInfo.Path)
-	}
 
 	if cfg.Priority == nil {
 		cfg.Priority = new(int32(scheduler.DefaultPriority))
