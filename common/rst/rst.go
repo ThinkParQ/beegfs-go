@@ -90,16 +90,22 @@ type Provider interface {
 	CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error
 	// GetConfig returns a deep copy of the remote storage target configuration.
 	GetConfig() *flex.RemoteStorageTarget
-	// GetWalk returns a channel that streams *WalkResponse entries for matching files or objects.
-	// If the provided path includes a file glob pattern, only matching entries will be return.
-	// maxRequests should trigger a WalkStoppedWithMoreError to signal to job builder to
-	// reschedule the remaining work.
+	// GetWalk returns a channel that streams *StreamPathResult entries for matching files or
+	// objects. If the provided path includes a file glob pattern, only matching entries will be
+	// returned. Provide resumeToken to continue a previous walk; an empty string starts fresh.
 	//
-	// GetWalk must generate an externalId that can be used to resume the walk from a previous
-	// point. Pass the externalId back to job builder using WalkStoppedWithMoreError{resumeToken:
-	// externalId}; this signals job builder to schedule the job again later and allows workers to
-	// start processing any already-streamed requests.
-	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error)
+	// The caller decides when the walk ends, so each result must carry a ResumeToken that restarts
+	// the walk from that same result when it is handed back as resumeToken. That lets the caller
+	// stop a walk at any point and schedule the job again later while workers process what was
+	// already streamed.
+	//
+	// stopWalk ends the walk. The caller always calls it once it is done with the walk, whether it
+	// is stopping early or the walk already ran to completion, so it must never block and must be
+	// safe to call more than once and after the channel is closed. The caller keeps draining the
+	// channel until it is closed, possibly from another goroutine, so the walk can observe the stop
+	// and finish. Implementations must always close the channel, including when the walk is stopped
+	// or ctx is cancelled.
+	GetWalk(ctx context.Context, path string, chanSize int, resumeToken string) (walk <-chan *filesystem.StreamPathResult, stopWalk func(), err error)
 	// SanitizeRemotePath normalizes the remote path format for the provider.
 	SanitizeRemotePath(remotePath string) string
 	// GetRemotePathInfo must return the remote file or object's size, last beegfs-mtime.

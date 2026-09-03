@@ -125,8 +125,8 @@ func (rst *MockClient) GetConfig() *flex.RemoteStorageTarget {
 	return args.Get(0).(*flex.RemoteStorageTarget)
 }
 
-func (r *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string, maxRequests int) (<-chan *filesystem.StreamPathResult, error) {
-	return nil, ErrUnsupportedOpForRST
+func (m *MockClient) GetWalk(ctx context.Context, path string, chanSize int, resumeToken string) (walk <-chan *filesystem.StreamPathResult, stopWalk func(), err error) {
+	return nil, func() {}, ErrUnsupportedOpForRST
 }
 
 func (r *MockClient) SanitizeRemotePath(remotePath string) string {
