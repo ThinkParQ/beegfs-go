@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -2130,8 +2131,8 @@ func TestJobCounterGC(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/file", make([]byte, 10), 0644, false)
 
-	// MinJobEntriesPerRST=1, MaxJobEntriesPerRST=2: GC triggers when len>2,
-	// deletes jobsForRST[:MinJobEntriesPerRST+1] = 2 oldest entries.
+	// MinJobEntriesPerRST=1, MaxJobEntriesPerRST=2: GC triggers when len>2 and keeps the newest
+	// entry, so the 2 oldest are deleted.
 	cfg := Config{MinJobEntriesPerRST: 1, MaxJobEntriesPerRST: 2}
 	m, reader, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, mountPoint, cfg)
 	defer cleanup()
@@ -2178,6 +2179,179 @@ func TestJobCounterGC(t *testing.T) {
 	assert.NotContains(t, storedEntry.Value, "0", "oldest job (id=0) must have been GC'd")
 	assert.NotContains(t, storedEntry.Value, "1", "second oldest job (id=1) must have been GC'd")
 	assert.Contains(t, storedEntry.Value, "2", "newest historical job (id=2) must be retained")
+}
+
+// TestSelectJobHistory checks which jobs a submit takes from a path's history and which jobs GC
+// removes. Each job's ID is its age: job "0" is the newest.
+func TestSelectJobHistory(t *testing.T) {
+	newJob := func(id int, state beeremote.Job_State) *Job {
+		return &Job{Job: beeremote.Job_builder{
+			Id:      strconv.Itoa(id),
+			Status:  beeremote.Job_Status_builder{State: state}.Build(),
+			Created: &timestamppb.Timestamp{Seconds: int64(100 - id)},
+		}.Build()}
+	}
+	ids := func(jobs []*Job) []string {
+		out := []string{}
+		for _, j := range jobs {
+			out = append(out, j.GetId())
+		}
+		slices.Sort(out)
+		return out
+	}
+	idOf := func(j *Job) string {
+		if j == nil {
+			return ""
+		}
+		return j.GetId()
+	}
+
+	const failed = beeremote.Job_FAILED
+	const completed = beeremote.Job_COMPLETED
+	const offloaded = beeremote.Job_OFFLOADED
+
+	tests := []struct {
+		name              string
+		states            []beeremote.Job_State // index is the job's age, newest first
+		force             bool
+		wantLastJob       string
+		wantLastSyncedJob string
+		wantExpired       []string
+	}{
+		{
+			name:        "no history selects and expires nothing",
+			wantExpired: []string{},
+		},
+		{
+			name:              "at max nothing expires",
+			states:            []beeremote.Job_State{completed, completed, completed, completed},
+			wantLastJob:       "0",
+			wantLastSyncedJob: "0",
+			wantExpired:       []string{},
+		},
+		{
+			name:              "above max only the newest min are kept",
+			states:            []beeremote.Job_State{completed, completed, completed, completed, completed},
+			wantLastJob:       "0",
+			wantLastSyncedJob: "0",
+			wantExpired:       []string{"2", "3", "4"},
+		},
+		{
+			name:              "a newer failed job does not displace the last synced job",
+			states:            []beeremote.Job_State{failed, completed, failed},
+			wantLastJob:       "0",
+			wantLastSyncedJob: "1",
+			wantExpired:       []string{},
+		},
+		{
+			name:              "an offloaded job counts as synced",
+			states:            []beeremote.Job_State{failed, offloaded},
+			wantLastJob:       "0",
+			wantLastSyncedJob: "1",
+			wantExpired:       []string{},
+		},
+		{
+			name:              "the last synced job survives GC past min",
+			states:            []beeremote.Job_State{failed, failed, failed, failed, completed, completed},
+			wantLastJob:       "0",
+			wantLastSyncedJob: "4",
+			wantExpired:       []string{"2", "3", "5"},
+		},
+		{
+			name:              "a forced request gets the last synced job but no last job",
+			states:            []beeremote.Job_State{failed, completed},
+			force:             true,
+			wantLastSyncedJob: "1",
+			wantExpired:       []string{},
+		},
+		{
+			name:        "no synced job leaves it nil",
+			states:      []beeremote.Job_State{failed, failed},
+			wantLastJob: "0",
+			wantExpired: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terminalJobs := []*Job{}
+			// Insert oldest first so the function has to sort.
+			for id := len(tt.states) - 1; id >= 0; id-- {
+				terminalJobs = append(terminalJobs, newJob(id, tt.states[id]))
+			}
+
+			lastJob, lastSyncedJob, expired := selectJobHistory(terminalJobs, tt.force, 2, 4)
+			assert.Equal(t, tt.wantLastJob, idOf(lastJob), "lastJob")
+			assert.Equal(t, tt.wantLastSyncedJob, idOf(lastSyncedJob), "lastSyncedJob")
+			assert.Equal(t, tt.wantExpired, ids(expired), "expired jobs")
+		})
+	}
+}
+
+// TestSubmitJobRequestGCOnlyTouchesRequestRST submits to RST 1 on a path whose history belongs to
+// RST 2 alone. GC runs only for the RST being submitted to, because only a submit to an RST adds
+// terminal jobs for it. So RST 2's history must be left alone even though it is above the max.
+// The submit must also succeed when the requested RST has no history at all.
+func TestSubmitJobRequestGCOnlyTouchesRequestRST(t *testing.T) {
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{
+					MethodName: "SubmitWork",
+					Args:       []any{mock.Anything},
+					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
+				},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}}
+	remoteStorageTargets := []*flex.RemoteStorageTarget{
+		flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(),
+		flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build(),
+	}
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/file", make([]byte, 10), 0644, false)
+
+	cfg := Config{MinJobEntriesPerRST: 1, MaxJobEntriesPerRST: 2}
+	m, _, cleanup := newFullCountingManager(t, workerConfigs, remoteStorageTargets, mountPoint, cfg)
+	defer cleanup()
+
+	_, entry, commit, err := m.pathStore.CreateAndLockEntry("/test/file")
+	require.NoError(t, err)
+	entry.Value = map[string]*Job{}
+	for i := range 4 {
+		id := "rst2-" + strconv.Itoa(i)
+		entry.Value[id] = &Job{
+			Job: beeremote.Job_builder{
+				Id:      id,
+				Request: beeremote.JobRequest_builder{Path: "/test/file", RemoteStorageTarget: 2}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_COMPLETED}.Build(),
+				Created: &timestamppb.Timestamp{Seconds: int64(i)},
+			}.Build(),
+		}
+	}
+	require.NoError(t, commit())
+
+	jr := beeremote.JobRequest_builder{
+		Path:                "/test/file",
+		Name:                "new job",
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		RemoteStorageTarget: 1,
+	}.Build()
+	_, err = m.SubmitJobRequest(jr)
+	require.NoError(t, err)
+
+	storedEntry, releaseFn, err := m.pathStore.GetAndLockEntry("/test/file")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, releaseFn()) }()
+	for i := range 4 {
+		assert.Contains(t, storedEntry.Value, "rst2-"+strconv.Itoa(i), "a submit to RST 1 must not GC RST 2's history")
+	}
 }
 
 // TestJobCounterOnSubmitWorkError verifies that when the worker returns an error

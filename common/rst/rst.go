@@ -63,10 +63,13 @@ type Provider interface {
 	// GenerateWorkRequest performs any necessary operations required before the work requests are
 	// executed which includes determining the current state and then doing any preliminary actions.
 	//
+	// lastSyncedJob is only provided for historical reference and should never be trusted for
+	// current state.
+	//
 	// ErrJobAlreadyComplete and ErrJobAlreadyOffloaded should be returned to indicate synced and
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
-	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
+	GenerateWorkRequests(ctx context.Context, lastSyncedJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
 	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Stream
 	// any new requests into jobSubmissionChan. If building jobs is long running, return
 	// rescheduled==true to reschedule the remaining work for later which allows other work time to
@@ -426,13 +429,13 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
 		}
 
-		// Attempt to retrieve remote path from a previously completed job request.
-		if lastJob, err := GetLastCompletedJobFromRst(ctx, cfg.Path, cfg.RemoteStorageTarget); err != nil {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
-		} else if lastJob != nil {
-			switch lastJob.Request.WhichType() {
+		// Attempt to retrieve remote path from the last synced job request.
+		if lastSyncedJob, err := GetLastSyncedJobFromRst(ctx, cfg.Path, cfg.RemoteStorageTarget); err != nil {
+			return getRequestWithFailedPrecondition(fmt.Sprintf("failed to determine last synced job request to determine remote path: %s", err.Error()))
+		} else if lastSyncedJob != nil {
+			switch lastSyncedJob.Request.WhichType() {
 			case beeremote.JobRequest_Sync_case:
-				cfg.SetRemotePath(client.SanitizeRemotePath(lastJob.Request.GetSync().RemotePath))
+				cfg.SetRemotePath(client.SanitizeRemotePath(lastSyncedJob.Request.GetSync().RemotePath))
 			default:
 				return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
 			}
@@ -869,8 +872,9 @@ func NormalizePath(path string) string {
 	return "/" + strings.TrimLeft(path, "/")
 }
 
-// Retrieve the last complete job for the BeeGFS path.
-func GetLastCompletedJobFromRst(ctx context.Context, inMountPath string, rstId uint32) (*beeremote.Job, error) {
+// Retrieve the last synced job for the path and rstId. The returned job should only be used as
+// reference and never to indicate current state.
+func GetLastSyncedJobFromRst(ctx context.Context, inMountPath string, rstId uint32) (*beeremote.Job, error) {
 	beeRemote, err := config.BeeRemoteClient()
 	if err != nil {
 		return nil, err
@@ -892,21 +896,22 @@ func GetLastCompletedJobFromRst(ctx context.Context, inMountPath string, rstId u
 		return nil, err
 	}
 
-	var lastCompletedJob *beeremote.Job
+	var lastJob *beeremote.Job
 	for _, result := range resp.Results {
 		job := result.GetJob()
-		if job.Request.RemoteStorageTarget != rstId {
+		if job.GetRequest().GetRemoteStorageTarget() != rstId {
 			continue
 		}
 
-		if job != nil && job.Status.State == beeremote.Job_COMPLETED {
-			if lastCompletedJob == nil || job.Created.Seconds > lastCompletedJob.Created.Seconds {
-				lastCompletedJob = job
+		state := job.GetStatus().GetState()
+		if state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED {
+			if job.GetCreated().GetSeconds() > lastJob.GetCreated().GetSeconds() {
+				lastJob = job
 			}
 		}
 	}
 
-	return lastCompletedJob, nil
+	return lastJob, nil
 }
 
 func GetRstMap(ctx context.Context, mountPoint filesystem.Provider, rstConfigMap map[uint32]*flex.RemoteStorageTarget) (map[uint32]Provider, error) {
