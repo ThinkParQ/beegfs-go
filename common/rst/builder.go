@@ -54,7 +54,7 @@ func (c *JobBuilderClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.Job
 }
 
 // GenerateWorkRequests for JobBuilderClient should simply pass a single
-func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (c *JobBuilderClient) GenerateWorkRequests(ctx context.Context, lastSyncedJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	if !job.Request.HasBuilder() {
 		return nil, ErrReqAndRSTTypeMismatch
 	}

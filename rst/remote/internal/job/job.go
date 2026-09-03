@@ -99,13 +99,13 @@ func (j *Job) InActiveState() bool {
 // function as a method to determine if a file has changed and it is safe to resume a job or if it
 // should be cancelled. It also ensures even if the file changes the original job submission can be
 // recreated for troubleshooting.
-func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider, availableWorkers int) (workermgr.JobSubmission, error) {
+func (j *Job) GenerateSubmission(ctx context.Context, lastSyncedJob *Job, rstClient rst.Provider, availableWorkers int) (workermgr.JobSubmission, error) {
 
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
 		var err error
-		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), availableWorkers)
+		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastSyncedJob.Get(), j.Get(), availableWorkers)
 		if err != nil {
 			return workermgr.JobSubmission{}, err
 		}

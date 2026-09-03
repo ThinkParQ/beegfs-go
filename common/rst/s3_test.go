@@ -86,6 +86,88 @@ func TestGenerateWorkRequests(t *testing.T) {
 	assert.ErrorIs(t, err, ErrJobAlreadyHasExternalID)
 }
 
+// TestGenerateWorkRequestsDefaultRemotePath checks the key GenerateWorkRequests picks when the
+// request names none. A download reuses the key of the last synced job, because that is where the
+// object was last written or read. An upload always uses the in-mount path, so a push can never
+// overwrite an object that an earlier pull named with --remote-path.
+//
+// The key is set on the request before the client takes the content lock. The mock file system
+// has no file, so the call fails after that point and the test reads the key the call left behind.
+func TestGenerateWorkRequestsDefaultRemotePath(t *testing.T) {
+	syncedJob := func(remotePath string) *beeremote.Job {
+		return &beeremote.Job{
+			Request: &beeremote.JobRequest{
+				Path: "/foo/bar",
+				Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+					Operation:  flex.SyncJob_DOWNLOAD,
+					RemotePath: remotePath,
+				}},
+			},
+			Status: &beeremote.Job_Status{State: beeremote.Job_COMPLETED},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		operation     flex.SyncJob_Operation
+		remotePath    string
+		lastSyncedJob *beeremote.Job
+		want          string
+	}{
+		{
+			name:          "upload without a key ignores the last synced key",
+			operation:     flex.SyncJob_UPLOAD,
+			lastSyncedJob: syncedJob("helloworld"),
+			want:          "foo/bar",
+		},
+		{
+			name:          "upload keeps the caller's key",
+			operation:     flex.SyncJob_UPLOAD,
+			remotePath:    "custom",
+			lastSyncedJob: syncedJob("helloworld"),
+			want:          "custom",
+		},
+		{
+			name:          "download without a key reuses the last synced key",
+			operation:     flex.SyncJob_DOWNLOAD,
+			lastSyncedJob: syncedJob("helloworld"),
+			want:          "helloworld",
+		},
+		{
+			name:      "download without a key or history uses the in-mount path",
+			operation: flex.SyncJob_DOWNLOAD,
+			want:      "foo/bar",
+		},
+		{
+			name:          "download keeps the caller's key",
+			operation:     flex.SyncJob_DOWNLOAD,
+			remotePath:    "custom",
+			lastSyncedJob: syncedJob("helloworld"),
+			want:          "custom",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &S3Client{
+				config:     &flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
+				s3Config:   &flex.RemoteStorageTarget_S3{Bucket: "test-bucket"},
+				mountPoint: filesystem.NewMockFS(),
+			}
+			job := proto.Clone(baseTestJob).(*beeremote.Job)
+			job.ExternalId = ""
+			job.Request.Type = &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+				Operation:  tt.operation,
+				RemotePath: tt.remotePath,
+			}}
+
+			_, err := client.GenerateWorkRequests(context.Background(), tt.lastSyncedJob, job, 1)
+			require.Error(t, err, "the mock file system has no file, so the call must fail after choosing the key")
+			assert.Equal(t, tt.want, job.GetRequest().GetSync().GetRemotePath())
+		})
+	}
+}
+
 // More complex testing around completing requests is not possible without mocking.
 // For now just verify errors are returned when job type or op is not supported.
 func TestCompleteRequests(t *testing.T) {

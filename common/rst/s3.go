@@ -350,7 +350,7 @@ func (r *S3Client) getJobRequestCfg(request *beeremote.JobRequest) *flex.JobRequ
 	}
 }
 
-func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastSyncedJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 	request := job.GetRequest()
 	if !request.HasSync() {
 		return nil, ErrReqAndRSTTypeMismatch
@@ -362,11 +362,18 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 
 	sync := request.GetSync()
 	if sync.RemotePath == "" {
-		if lastJob != nil {
-			sync.SetRemotePath(lastJob.Request.GetSync().RemotePath)
-		} else {
-			sync.SetRemotePath(r.SanitizeRemotePath(request.Path))
+		var remotePath string
+		inMountPath := request.Path
+		if sync.Operation == flex.SyncJob_DOWNLOAD {
+			// Attempt to get the last successful job's remote path since one was not specified.
+			// This should only be done for a download operation when a previous sync job was
+			// successful to avoid using an unintended failed job request.
+			remotePath = r.getRemotePathFromLastSyncedJob(lastSyncedJob)
 		}
+		if remotePath == "" {
+			remotePath = r.SanitizeRemotePath(inMountPath)
+		}
+		sync.SetRemotePath(remotePath)
 	}
 
 	var writeLockSet bool
@@ -397,6 +404,20 @@ func (r *S3Client) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.
 		err = ErrUnsupportedOpForRST
 	}
 	return
+}
+
+// getRemotePathFromLastSyncedJob returns the remote path from last successfully synced job.
+// Unsuccessful jobs may have unintended paths and will not be returned.
+func (r *S3Client) getRemotePathFromLastSyncedJob(lastSyncedJob *beeremote.Job) string {
+	if lastSyncedJob == nil {
+		return ""
+	}
+
+	state := lastSyncedJob.GetStatus().GetState()
+	if state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED {
+		return lastSyncedJob.GetRequest().GetSync().GetRemotePath()
+	}
+	return ""
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.

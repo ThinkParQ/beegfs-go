@@ -532,6 +532,36 @@ func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest
 	return fmt.Errorf("no query parameters provided (to get all jobs use '/' with the prefix path query type)")
 }
 
+// selectJobHistory picks lastJob, lastSyncedJob and the expired jobs from terminalJobs, the
+// terminal jobs for one path and RST. It sorts terminalJobs newest first, in place.
+//   - lastJob is the newest job, or nil when force is set.
+//   - lastSyncedJob is the newest COMPLETED or OFFLOADED job and never expires.
+//   - Above maxEntries jobs, all but the newest minEntries expire.
+func selectJobHistory(terminalJobs []*Job, force bool, minEntries int, maxEntries int) (lastJob *Job, lastSyncedJob *Job, expiredJobs []*Job) {
+	sort.Slice(terminalJobs, func(i, j int) bool {
+		return terminalJobs[i].GetCreated().GetSeconds() > terminalJobs[j].GetCreated().GetSeconds()
+	})
+
+	expire := len(terminalJobs) > maxEntries
+	for i, terminalJob := range terminalJobs {
+		if i == 0 && !force {
+			lastJob = terminalJob
+		}
+
+		if lastSyncedJob == nil {
+			if state := terminalJob.GetStatus().GetState(); state == beeremote.Job_COMPLETED || state == beeremote.Job_OFFLOADED {
+				lastSyncedJob = terminalJob
+				continue
+			}
+		}
+
+		if expire && i >= minEntries {
+			expiredJobs = append(expiredJobs, terminalJob)
+		}
+	}
+	return lastJob, lastSyncedJob, expiredJobs
+}
+
 // Takes a single job request and attempts to create and schedule a job for it. Returns an error if
 // the job could not be created or there was a scheduling error. There are two main reasons we may
 // not be able to create a job:
@@ -584,21 +614,23 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	// that are idempotent it is used to check if the current request is needed. Note this is NOT
 	// set if there is a conflictingJob.
 	var lastJob *Job
+	// lastSyncedJob is only a reference for the RST client such as the key a download reuses.
+	var lastSyncedJob *Job
 	if len(pathEntry.Value) != 0 {
 
 		// Set if we can't start a new job due to a conflict.
 		var conflictingJob *Job
-		// Add jobs in a terminal state to a map based on their RST ID.
-		// We limit the number of historical jobs kept for each RST.
-		terminalJobsByRST := make(map[uint32][]*Job, 0)
+		// Collect the terminal jobs for the request's remote target for garbage collection.
+		terminalJobs := []*Job{}
 
 		for _, existingJob := range pathEntry.Value {
 			if existingJob.Request.GetRemoteStorageTarget() == job.Request.GetRemoteStorageTarget() && !existingJob.InTerminalState() {
 				// We found an active job for this RST. We shouldn't try to start a new job but we also shouldn't clean up the active job.
 				conflictingJob = existingJob
 			} else if existingJob.InTerminalState() {
-				// Found a job in a terminal state, add it to the list to check if it should be cleaned up:
-				terminalJobsByRST[existingJob.Request.GetRemoteStorageTarget()] = append(terminalJobsByRST[existingJob.Request.GetRemoteStorageTarget()], existingJob)
+				if existingJob.Request.GetRemoteStorageTarget() == job.GetRequest().GetRemoteStorageTarget() {
+					terminalJobs = append(terminalJobs, existingJob)
+				}
 			} else if existingJob.Job.GetId() == job.Id {
 				// We use a randomly generated UUID as the job ID. A collision is highly unlikely so
 				// most likely something changed and we have a bug somewhere.
@@ -607,37 +639,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			// Otherwise we found a job for a different RST not in a terminal state. Don't touch it.
 		}
 
-		for rst, jobsForRST := range terminalJobsByRST {
-			// Sorting is expensive so we only sort when we need to and ensure to only sort once.
-			sorted := false
-			sortFunc := func() {
-				if !sorted {
-					// Sort the slice so we can determine the most recently created job.
-					sort.Slice(jobsForRST, func(i, j int) bool {
-						return jobsForRST[i].GetCreated().GetSeconds() < jobsForRST[j].GetCreated().GetSeconds()
-					})
-					sorted = true
-				}
-			}
-
-			// It would be inefficient if we only cleaned up one entry at a time so we set a max
-			// number of entries before we start GC.
-			if len(jobsForRST) > m.config.MaxJobEntriesPerRST {
-				// Delete the oldest MinJobEntriesPerRST+1 entries. The +1 accounts for the
-				// new job about to be added, so that after insertion the RST has at most
-				// len(jobsForRST)-MinJobEntriesPerRST entries remaining.
-				sortFunc()
-				for _, gcJob := range jobsForRST[:m.config.MinJobEntriesPerRST+1] {
-					delete(pathEntry.Value, gcJob.GetId())
-				}
-			}
-			// No reason to get the lastJob if the request was forced.
-			if !job.GetRequest().GetForce() && rst == job.GetRequest().GetRemoteStorageTarget() {
-				sortFunc()
-				if len(jobsForRST) != 0 {
-					lastJob = jobsForRST[len(jobsForRST)-1]
-				}
-			}
+		var expiredJobs []*Job
+		lastJob, lastSyncedJob, expiredJobs = selectJobHistory(terminalJobs, job.GetRequest().GetForce(), m.config.MinJobEntriesPerRST, m.config.MaxJobEntriesPerRST)
+		for _, expiredJob := range expiredJobs {
+			delete(pathEntry.Value, expiredJob.GetId())
 		}
 
 		if conflictingJob != nil {
@@ -700,7 +705,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 
 		nodeType := workermgr.NodeTypeForJobRequest(job.Request)
 		availableWorkers := m.workerManager.AvailableWorkers(nodeType)
-		jobSubmission, err = job.GenerateSubmission(m.ctx, lastJob, rstClient, availableWorkers)
+		jobSubmission, err = job.GenerateSubmission(m.ctx, lastSyncedJob, rstClient, availableWorkers)
 	}
 
 	if err != nil {

@@ -53,7 +53,7 @@ func (r *MockClient) GetJobRequest(cfg *flex.JobRequestCfg) *beeremote.JobReques
 	return nil
 }
 
-func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
+func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastSyncedJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
