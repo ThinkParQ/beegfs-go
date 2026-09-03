@@ -1106,7 +1106,9 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 
 	jobID := jobResponse.GetJob().GetId()
 	const failedMessage = "job builder failed to complete bulk operation(s): bulk restore session failed"
-	mockRST.On("CompleteWorkRequests", mock.MatchedBy(func(job *beeremote.Job) bool {
+	// A builder job is completed through CompleteJobBuilderRequest, not CompleteWorkRequests, so
+	// the provider also gets the callback that releases the jobs its bulk operations reserved.
+	mockRST.On("CompleteJobBuilderRequest", mock.MatchedBy(func(job *beeremote.Job) bool {
 		return job.GetId() == jobID && job.GetRequest().HasBuilder()
 	}), mock.MatchedBy(func(workResults []*flex.Work) bool {
 		return len(workResults) == 1 &&
@@ -1274,6 +1276,18 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.Equal(t, result.Job.Status.State, beeremote.Job_CANCELLED)
 	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
 	require.NotNil(t, result)
+
+	// A builder that has no provider for a path, because the file has no rstIds or names one that
+	// does not exist, builds the request without a client. Remote must record it as a job carrying
+	// the error rather than reject it, so the user can see why the path was not synced.
+	noClientCfg := flex.JobRequestCfg_builder{Path: "/test/no-rst", RemotePath: "key"}.Build()
+	testNoClientJobRequest := rst.BuildJobRequestWithFailedPrecondition(nil, noClientCfg, "stub file is not readable")
+	result, err = jobManager.SubmitJobRequest(testNoClientJobRequest, "")
+	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+	require.NotNil(t, result)
+	require.Equal(t, beeremote.Job_CANCELLED, result.Job.Status.State)
+	require.Contains(t, result.Job.Status.GetMessage(), "stub file is not readable")
+	require.Zero(t, result.Job.Request.GetRemoteStorageTarget())
 
 	// Test an error is creating job request that is not a failed-precondition.
 	testFailedJobRequest := proto.Clone(baseTestJobRequest).(*beeremote.JobRequest)
@@ -3016,5 +3030,90 @@ func TestSubmitJobRequestReservations(t *testing.T) {
 		// The job still exists, so the error must not say there is no record of it.
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, rst.ErrReservationMissing, "a job that exists must never look like one that was never recorded")
+	})
+}
+
+// getReservationTestJob reads one job back from m by path and ID.
+func getReservationTestJob(t *testing.T, m *Manager, jobId string) *beeremote.Job {
+	t.Helper()
+	request := beeremote.GetJobsRequest_builder{
+		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+			JobId: jobId,
+			Path:  newReservationRequest(false, "").GetPath(),
+		}.Build(),
+	}.Build()
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	require.NoError(t, m.GetJobs(context.Background(), request, responses))
+	response := <-responses
+	require.Len(t, response.GetResults(), 1)
+	return response.GetResults()[0].GetJob()
+}
+
+// TestCancelReservedJob pins how a job still in RESERVED is cancelled. A reserved job has no work
+// requests and the RST has not touched the file, so a cancel must never reach the RST abort. That
+// abort rolls back a download, and for a file that did not exist when it was reserved it removes
+// the path. Who may cancel differs:
+//
+//   - Bulk teardown always may, through cancelReservedRequest.
+//   - A user needs the force flag.
+func TestCancelReservedJob(t *testing.T) {
+	// The message is set only by the reserved short-circuit. The full cancel path overwrites it with
+	// a message about worker nodes and the RST abort, so finding it proves the abort never ran.
+	const shortCircuitMessage = "reservation cancelled before it was claimed"
+
+	t.Run("bulk teardown cancels a reservation and releases its lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		var lockReleases int
+		m.releaseUnusedFileLockFunc = func(string, map[string]*Job) error {
+			lockReleases++
+			return nil
+		}
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		err = m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), reservedJobId)
+
+		require.NoError(t, err)
+		job := getReservationTestJob(t, m, reservedJobId)
+		assert.Equal(t, beeremote.Job_CANCELLED, job.GetStatus().GetState(), "teardown must not leave the reservation blocking the path")
+		assert.Equal(t, shortCircuitMessage, job.GetStatus().GetMessage())
+		assert.Equal(t, 1, lockReleases, "the lock must be released together with the reservation")
+	})
+
+	t.Run("a user cancel without force leaves a reservation in place", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		response, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:     newReservationRequest(false, "").GetPath(),
+			JobId:    new(reservedJobId),
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build())
+
+		require.NoError(t, err)
+		assert.Contains(t, response.GetMessage(), "rejecting cancel for reserved job")
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+	})
+
+	t.Run("a forced user cancel releases a reservation without aborting it", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:        newReservationRequest(false, "").GetPath(),
+			JobId:       new(reservedJobId),
+			NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+			ForceUpdate: true,
+		}.Build())
+
+		require.NoError(t, err)
+		job := getReservationTestJob(t, m, reservedJobId)
+		assert.Equal(t, beeremote.Job_CANCELLED, job.GetStatus().GetState())
+		assert.Equal(t, shortCircuitMessage, job.GetStatus().GetMessage(), "force must not send a reservation through the RST abort")
 	})
 }
