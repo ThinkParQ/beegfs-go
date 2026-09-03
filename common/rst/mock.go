@@ -122,7 +122,14 @@ func (r *MockClient) ExecuteJobBuilderRequest(ctx context.Context, workRequest *
 	return false, ErrUnsupportedOpForRST
 }
 
-func (rst *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+func (m *MockClient) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if !abort {
+		switch GetWorkResultsState(workResults) {
+		case flex.Work_CANCELLED, flex.Work_COMPLETED:
+		default:
+			return fmt.Errorf("unable to resolve failure")
+		}
+	}
 
 	if job.Request.GetMock() != nil {
 		if job.Request.GetMock().ShouldFail {
