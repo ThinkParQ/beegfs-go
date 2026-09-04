@@ -1,18 +1,24 @@
 package quota
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"os/user"
 	"strconv"
+	"sync"
+	"syscall"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/build"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/pool"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
@@ -21,6 +27,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/quota"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
+	"go.uber.org/zap"
 )
 
 const (
@@ -209,13 +216,13 @@ func runSetLimitsCmd(cmd *cobra.Command, args []string, cfg setLimitsCmdConfig) 
 	return quota.SetLimits(cmd.Context(), &pm.SetQuotaLimitsRequest{
 		Limits: limits,
 	})
-
 }
 
 type listLimitsConfig struct {
 	userIds  []string
 	groupIds []string
 	pool     beegfs.EntityId
+	nss      bool
 }
 
 func newListLimitsCmd() *cobra.Command {
@@ -235,6 +242,7 @@ func newListLimitsCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
@@ -311,7 +319,7 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			return err
 		}
 
-		name, err := idToName(*limits.QuotaId, idTypeStr)
+		name, err := idToName(*limits.QuotaId, idTypeStr, cfg.nss)
 		if err != nil {
 			return err
 		}
@@ -321,7 +329,6 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		} else {
 			tbl.AddItem(name, *limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
-
 	}
 
 	tbl.PrintRemaining()
@@ -338,6 +345,7 @@ type listUsageConfig struct {
 	groupIds []string
 	pool     beegfs.EntityId
 	exceeded bool
+	nss      bool
 }
 
 func newListUsageCmd() *cobra.Command {
@@ -358,6 +366,7 @@ func newListUsageCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit.")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
@@ -484,7 +493,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 			return err
 		}
 
-		name, err := idToName(*entry.QuotaId, idTypeStr)
+		name, err := idToName(*entry.QuotaId, idTypeStr, cfg.nss)
 		if err != nil {
 			return err
 		}
@@ -507,7 +516,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 }
 
 func parseLimit(s string) (*int64, error) {
-	var res = new(int64)
+	res := new(int64)
 	if s == "unlimited" {
 		*res = math.MaxInt64
 	} else if s == "reset" {
@@ -642,9 +651,174 @@ func getCurrentGroupIds() ([]uint32, error) {
 	return gids, nil
 }
 
+const nssFlag = "nss"
+
+// addNSSFlag defines nssFlag for the commands that resolve IDs to names.
+func addNSSFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVar(target, nssFlag, false, `Resolve UIDs and GIDs using the system's name service (NSS), which includes LDAP, SSSD and AD.
+	By default only local /etc/passwd and /etc/group entries are resolved and other IDs are printed numerically.`)
+	if build.CGO {
+		// A CGO enabled build already resolves through NSS in os/user, so the flag does nothing.
+		// It stays defined rather than omitted so command lines that pass it keep working against
+		// both builds.
+		cmd.Flags().MarkHidden(nssFlag)
+	}
+}
+
+// beegfs-nss-resolver is built with CGO enabled, so it resolves IDs through NSS. The path is fixed
+// and deliberately never looked up in $PATH: the beegfs binary is installed setgid, so letting a
+// caller choose the program executed here would run their code with the beegfs group's privileges.
+const nssResolverPath = "/opt/beegfs/lib/beegfs-nss-resolver"
+
+const nssResolverProtocolVersion = 1
+
+// nssResolver resolves IDs by way of beegfs-nss-resolver, which is built with CGO enabled and so
+// resolves through NSS. It is started on the first lookup and reused for the rest of the process.
+// Nothing shuts it down: the helper reads EOF and exits on its own once the CLI terminates and its
+// stdin pipe closes.
+type nssResolver struct {
+	mu      sync.Mutex
+	started bool
+	// Sticky, so a helper that cannot be started is not re-execed once per row of output.
+	err error
+	enc *json.Encoder
+	dec *json.Decoder
+	seq uint64
+}
+
+var resolver nssResolver
+
+func (r *nssResolver) start() error {
+	proc := exec.Command(nssResolverPath)
+	// Name resolution needs no BeeGFS privilege. The CLI is installed setgid beegfs so it can read
+	// the group-beegfs auth secret, which would otherwise leave this child running with
+	// egid=beegfs. Mirrors index.CallerSysProcAttr, which does the same for the GUFI subprocesses.
+	proc.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:         uint32(os.Getuid()),
+			Gid:         uint32(os.Getgid()),
+			NoSetGroups: true,
+		},
+	}
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := proc.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := proc.Start(); err != nil {
+		return fmt.Errorf("unable to start %s: %w", nssResolverPath, err)
+	}
+
+	// Route the helper's diagnostics through the logger so they don't interleave with table output.
+	go func() {
+		log, _ := config.GetLogger()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Warn("NSS resolver", zap.String("path", nssResolverPath),
+				zap.String("message", scanner.Text()))
+		}
+	}()
+	r.enc = json.NewEncoder(stdin)
+	r.dec = json.NewDecoder(stdout)
+
+	var greeting struct {
+		Hello   string `json:"hello"`
+		Version int    `json:"version"`
+	}
+	if err := r.dec.Decode(&greeting); err != nil || greeting.Hello != "beegfs-nss-resolver" {
+		stdin.Close()
+		return fmt.Errorf(
+			"unexpected greeting from NSS resolver (%s), increase log level for more detail",
+			nssResolverPath)
+	}
+	if greeting.Version != nssResolverProtocolVersion {
+		stdin.Close()
+		return fmt.Errorf("%s speaks protocol version %d, expected %d", nssResolverPath,
+			greeting.Version, nssResolverProtocolVersion)
+	}
+	return nil
+}
+
+// resolve returns the name for the given ID, starting the helper on first use. An ID that does not
+// exist is returned as a string, matching idToName; an ID whose lookup failed is an error.
+func (r *nssResolver) resolve(id uint32, idType string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.started {
+		r.started = true
+		r.err = r.start()
+	}
+	if r.err != nil {
+		return "", r.err
+	}
+
+	r.seq++
+	req := struct {
+		Seq  uint64   `json:"seq"`
+		UIDs []uint32 `json:"uids,omitempty"`
+		GIDs []uint32 `json:"gids,omitempty"`
+	}{Seq: r.seq}
+	if idType == "user" {
+		req.UIDs = []uint32{id}
+	} else {
+		req.GIDs = []uint32{id}
+	}
+	if err := r.enc.Encode(&req); err != nil {
+		return "", fmt.Errorf("unable to send request to %s: %w", nssResolverPath, err)
+	}
+
+	var resp struct {
+		Seq       uint64            `json:"seq"`
+		Users     map[uint32]string `json:"users"`
+		Groups    map[uint32]string `json:"groups"`
+		UIDErrors map[uint32]string `json:"uid_errors"`
+		GIDErrors map[uint32]string `json:"gid_errors"`
+	}
+	if err := r.dec.Decode(&resp); err != nil {
+		return "", fmt.Errorf("unable to read response from %s: %w", nssResolverPath, err)
+	}
+	if resp.Seq != r.seq {
+		return "", fmt.Errorf("%s responded out of sequence (got %d, want %d)", nssResolverPath, resp.Seq, r.seq)
+	}
+
+	names, failed := resp.Users, resp.UIDErrors
+	if idType == "group" {
+		names, failed = resp.Groups, resp.GIDErrors
+	}
+	if name, ok := names[id]; ok {
+		return name, nil
+	}
+	// Absent means the ID definitively does not exist, which falls through to returning it
+	// numerically below. An entry in the error map means the lookup itself failed, which must not
+	// be reported as if it had succeeded.
+	if msg := failed[id]; msg != "" {
+		return "", fmt.Errorf("unable to look up %s %d: %s", idType, id, msg)
+	}
+	return fmt.Sprintf("%d", id), nil
+}
+
 // converts a user or group ID to its corresponding username or groupname
-// Fetched from the operating system's user and group database. If not found returns the ID as string.
-func idToName(id uint32, idType string) (string, error) {
+// Fetched from the operating system's user and group database, or from beegfs-nss-resolver when
+// nssFlag is given. If not found returns the ID as string.
+func idToName(id uint32, idType string, nss bool) (string, error) {
+	if idType != "user" && idType != "group" {
+		return "", fmt.Errorf("invalid idType: %s", idType)
+	}
+
+	// A CGO enabled build already resolves through NSS in os/user below, so the helper would only
+	// add a process without changing the result.
+	if nss && !build.CGO {
+		return resolver.resolve(id, idType)
+	}
+
 	switch idType {
 	case "user":
 		userName, err := user.LookupId(strconv.Itoa(int(id)))
@@ -656,8 +830,6 @@ func idToName(id uint32, idType string) (string, error) {
 		if err == nil {
 			return groupName.Name, nil
 		}
-	default:
-		return "", fmt.Errorf("invalid idType: %s", idType)
 	}
 
 	return fmt.Sprintf("%d", id), nil
