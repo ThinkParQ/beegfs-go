@@ -70,6 +70,34 @@ builds:
       - amd64
       - arm64
     main: watch/cmd/beegfs-watch/main.go
+  - id: beegfs_nss_resolver
+    env:
+      # Built with cgo on purpose. This helper exists so that os/user resolves UIDs and GIDs
+      # through NSS (LDAP, SSSD, AD), which the pure Go implementation used by every other binary
+      # here cannot do.
+      - CGO_ENABLED=1
+      # zig cc supplies the cross toolchain and pins the glibc floor. This is the only
+      # dynamically linked binary we ship (it must dlopen libnss_*), so it would otherwise
+      # inherit the build host's glibc and fail on RHEL/Rocky with GLIBC_2.3x not found.
+      - CC=zig cc -target {{ if eq .Arch "arm64" }}aarch64{{ else }}x86_64{{ end }}-linux-gnu.2.27
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.binaryName=beegfs-nss-resolver
+      - -X main.commit={{ .Commit }}
+      - -X main.buildTime={{ .Date }}
+    # Unlike the binaries above this one is not listed in any nfpm "ids", because everything listed
+    # there is installed into that package's single bindir. It is added to beegfs-tools through
+    # "contents" instead, which needs a path it can predict: hence opting out of the unique per
+    # target dist directory and disambiguating by file name instead.
+    binary: "beegfs-nss-resolver_{{ .Arch }}"
+    no_unique_dist_dir: true
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: ctl/cmd/beegfs-nss-resolver/main.go
 
 nfpms:
   - id: beegfs_tools
@@ -97,6 +125,12 @@ nfpms:
       - src: /opt/beegfs/sbin/beegfs
         dst: /usr/sbin/beegfs
         type: "symlink"
+      # Invoked by absolute path and not a user command, so it goes to lib rather than sbin,
+      # matching beeond-lib and beegfs-ondemand-stoplocal in beegfs-core.
+      - src: ./dist/beegfs-nss-resolver_{{ .Arch }}
+        dst: /opt/beegfs/lib/beegfs-nss-resolver
+        file_info:
+          mode: 0755
       - src: ./dist/beegfs_bashcomp
         dst: /etc/bash_completion.d/beegfs
       - src: ctl/NOTICE.md

@@ -58,6 +58,14 @@ jobs:
           echo "GORELEASER_CURRENT_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
           previous_tag=$(git tag | tr - \~ | sort -Vr | tr \~ - | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$' | grep -v "${{ github.ref_name }}" | head -n 1)
           echo "GORELEASER_PREVIOUS_TAG=${previous_tag}" >> $GITHUB_ENV
+      - name: Set up Zig (cross toolchain for the cgo NSS helper)
+        shell: bash
+        run: |
+          # Pinned to 0.13 to match beegfs-rust, which found newer releases unreliable.
+          wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -qO zig.tar.xz
+          mkdir -p ${HOME}/zig
+          tar -xJ -C ${HOME}/zig --strip-components=1 -f zig.tar.xz
+          echo ${HOME}/zig >> ${GITHUB_PATH}
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@286f3b13b1b49da4ac219696163fb8c1c93e1200 # v6
         with:
