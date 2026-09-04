@@ -16,6 +16,10 @@
 //	> {"seq":1,"uids":[1000,1001,4242],"gids":[100]}
 //	< {"seq":1,"users":{"1000":"alice","1001":"bob"},"groups":{"100":"users"},"uid_errors":{"4242":"connection refused"},"gid_errors":{}}
 //
+// Requests may also carry users/groups arrays of names, in which case the reply carries user_ids
+// and group_ids mapping each name back to its ID, with failures reported in name_errors under the
+// same convention as below.
+//
 // An ID missing from the users/groups map was definitively not found and the caller may cache that
 // negative result. An ID reported in uid_errors/gid_errors failed to resolve because the lookup
 // itself failed (the NSS backend is down, timed out, ...) and must be retried later rather than
@@ -37,9 +41,11 @@ import (
 const protocolVersion = 1
 
 type request struct {
-	Seq  uint64   `json:"seq"`
-	UIDs []uint32 `json:"uids,omitempty"`
-	GIDs []uint32 `json:"gids,omitempty"`
+	Seq    uint64   `json:"seq"`
+	UIDs   []uint32 `json:"uids,omitempty"`
+	GIDs   []uint32 `json:"gids,omitempty"`
+	Users  []string `json:"users,omitempty"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 type response struct {
@@ -48,6 +54,10 @@ type response struct {
 	Groups    map[uint32]string `json:"groups"`
 	UIDErrors map[uint32]string `json:"uid_errors"`
 	GIDErrors map[uint32]string `json:"gid_errors"`
+
+	UserIDs    map[string]uint32 `json:"user_ids"`
+	GroupIDs   map[string]uint32 `json:"group_ids"`
+	NameErrors map[string]string `json:"name_errors"`
 }
 
 // handle resolves every ID in the request. Lookups are serial: a warm NSS lookup is a round trip
@@ -63,6 +73,10 @@ func handle(req request) response {
 		Groups:    map[uint32]string{},
 		UIDErrors: map[uint32]string{},
 		GIDErrors: map[uint32]string{},
+
+		UserIDs:    map[string]uint32{},
+		GroupIDs:   map[string]uint32{},
+		NameErrors: map[string]string{},
 	}
 
 	for _, uid := range req.UIDs {
@@ -86,6 +100,38 @@ func handle(req request) response {
 			resp.GIDErrors[gid] = err.Error()
 		default:
 			resp.Groups[gid] = g.Name
+		}
+	}
+
+	for _, name := range req.Users {
+		u, err := user.Lookup(name)
+		var unknown user.UnknownUserError
+		switch {
+		case errors.As(err, &unknown):
+		case err != nil:
+			resp.NameErrors[name] = err.Error()
+		default:
+			if id, err := strconv.ParseUint(u.Uid, 10, 32); err != nil {
+				resp.NameErrors[name] = err.Error()
+			} else {
+				resp.UserIDs[name] = uint32(id)
+			}
+		}
+	}
+
+	for _, name := range req.Groups {
+		g, err := user.LookupGroup(name)
+		var unknown user.UnknownGroupError
+		switch {
+		case errors.As(err, &unknown):
+		case err != nil:
+			resp.NameErrors[name] = err.Error()
+		default:
+			if id, err := strconv.ParseUint(g.Gid, 10, 32); err != nil {
+				resp.NameErrors[name] = err.Error()
+			} else {
+				resp.GroupIDs[name] = uint32(id)
+			}
 		}
 	}
 
