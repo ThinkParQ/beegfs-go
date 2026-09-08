@@ -1,0 +1,36 @@
+name: "Set up Go build environment"
+description: "Checks out beegfs-go and installs the Go and Zig toolchains goreleaser needs"
+
+inputs:
+  ref:
+    description: "beegfs-go ref to check out (defaults to the triggering ref)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        # Named explicitly so this still works when a workflow using this action is called from
+        # another repository: there the github context belongs to the caller, so an unqualified
+        # checkout would fetch that repo instead of this one.
+        repository: ThinkParQ/beegfs-go
+        ref: ${{ inputs.ref || github.ref }}
+        # goreleaser derives the version from tags.
+        fetch-depth: 0
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Set up Zig
+      # Supplies the cross toolchain for the cgo NSS helper and pins its glibc floor; see the
+      # beegfs_nss_resolver build in .goreleaser.yml. Pinned to 0.13 to match beegfs-rust,
+      # which found newer releases unreliable.
+      shell: bash
+      run: |
+        wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -qO zig.tar.xz
+        mkdir -p ${HOME}/zig
+        tar -xJ -C ${HOME}/zig --strip-components=1 -f zig.tar.xz
+        echo ${HOME}/zig >> ${GITHUB_PATH}

@@ -1,0 +1,67 @@
+name: Test package build
+run-name: Package build for ${{ inputs.ref || github.ref_name }} by @${{ github.actor }}
+
+# Builds the OS packages without releasing them, so a branch can be verified before tagging.
+# Isolated from release.yml: it cannot publish (contents: read), takes no part in tagging, needs
+# no secrets, and runs goreleaser in snapshot mode. Also callable from beegfs-core's
+# package-build.yml so that repo does not need its own copy of the Go build (and its zig
+# cross toolchain).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "beegfs-go ref to build (defaults to the selected branch)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        # Required, unlike for workflow_dispatch: in a called workflow github.ref is the
+        # caller's ref, so there is no safe value to fall back to here. A same-named branch or
+        # tag existing in both repos would otherwise silently build the wrong commit.
+        description: "beegfs-go ref to build"
+        required: true
+        type: string
+
+permissions:
+  # Deliberately read-only: this workflow must never be able to create a release.
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up build environment
+        uses: ./.github/actions/setup-build
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@286f3b13b1b49da4ac219696163fb8c1c93e1200 # v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          # Snapshot so no tag is required. Signing is skipped: these packages are only ever
+          # run artifacts, so a signature adds nothing, and taking the GPG key would expose it
+          # to anyone who can push a branch (workflow_dispatch runs the branch's own workflow).
+          args: release --clean --snapshot --skip=publish,archive,sign
+        env:
+          GOPRIVATE: github.com/thinkparq/*
+      - name: Separate deb and rpm by arch
+        run: |
+          mkdir -p dist/amd64 dist/arm64
+          cp dist/*.amd64.* dist/amd64/
+          cp dist/*.arm64.* dist/arm64/
+      # Names match what beegfs-core's package-build.yml already downloads, and github.sha /
+      # github.run_number resolve to the caller's values when this runs as a called workflow.
+      - name: Upload x86_64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86_64_go_${{ github.sha }}_${{ github.run_number }}
+          path: dist/amd64
+          retention-days: 7
+      - name: Upload aarch64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64_go_${{ github.sha }}_${{ github.run_number }}
+          path: dist/arm64
+          retention-days: 7
