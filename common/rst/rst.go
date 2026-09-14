@@ -5,7 +5,7 @@
 // needed when adding new RSTs:
 //
 //   - Expand the map of SupportedRSTTypes to include the new RST.
-//   - Add a new type for the RST that implements the Client interface.
+//   - Add a new type for the RST that implements the Provider interface.
 //   - Add the RST type to the New function().
 //
 // Note once a new RST type is added, changes to its fields largely should not require changes to
@@ -75,6 +75,10 @@ type Provider interface {
 	// ErrJobAlreadyComplete and ErrJobAlreadyOffloaded should be returned to indicate synced and
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
+	//
+	// availableWorkers is how many work requests the cluster can run concurrently as of this call,
+	// so implementations that split a job should use it to avoid generating far more requests than
+	// can ever run at once. A value of 0 or less means the count is unknown and imposes no bound.
 	GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error)
 	// ExecuteJobBuilderRequest is for providers that need to submit additional job requests. Hand
 	// any new requests to submitRequest. Set SchedulingResult.Reschedule when there's more work
