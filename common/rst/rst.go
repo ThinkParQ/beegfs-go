@@ -386,7 +386,7 @@ func BuildJobRequests(ctx context.Context, rstMap map[uint32]Provider, mountPoin
 			continue
 		}
 
-		request := BuildJobRequest(ctx, client, mountPoint, requestCfg)
+		request := BuildJobRequest(ctx, client, requestCfg)
 		if request.GetGenerationStatus() == nil {
 			if err = PrepareFileStateForWorkRequests(ctx, client, mountPoint, currentRSTCfg, entryInfoMsg, ownerNode, requestCfg); err != nil {
 				if errors.Is(err, ErrJobAlreadyComplete) {
@@ -437,31 +437,24 @@ func GetWorkResultsState(workResults []*flex.Work) flex.Work_State {
 	return state
 }
 
-// HasRemotePathInfo indicates whether lockedInfo has been updated with the remote path information.
-func HasRemotePathInfo(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo.RemoteMtime != nil && !lockedInfo.RemoteMtime.AsTime().IsZero()
+// BuildJobRequestWithFailedPrecondition returns a job request with failed precondition
+// GenerationStatus with the specified message.
+func BuildJobRequestWithFailedPrecondition(client Provider, cfg *flex.JobRequestCfg, message string) *beeremote.JobRequest {
+	request := client.GetJobRequest(cfg)
+	status := &beeremote.JobRequest_GenerationStatus{
+		State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+		Message: message,
+	}
+	request.SetGenerationStatus(status)
+	return request
 }
 
-// BuildJobRequest adds remote resource information to lockedInfo, performs common checks and
-// operations, and then returns the job request. It is the responsibility of the caller to ensure
-// lockedInfo is already locked.
-//
-// Be aware that cfg's remote information will be updated.
-func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
-	getRequestWithFailedPrecondition := func(message string) *beeremote.JobRequest {
-		request := client.GetJobRequest(cfg)
-		status := &beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: message,
-		}
-		request.SetGenerationStatus(status)
-		return request
-	}
-
-	lockedInfo := cfg.LockedInfo
+// BuildJobRequest creates a provider-specific job request for cfg if the request is valid;
+// otherwise, the request will be returned with a failed precondition status for the issue.
+func BuildJobRequest(ctx context.Context, client Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
+	lockedInfo := cfg.GetLockedInfo()
 	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
-		return getRequestWithFailedPrecondition("path lock has not been acquired")
-
+		return BuildJobRequestWithFailedPrecondition(client, cfg, "path lock has not been acquired")
 	}
 
 	cfg.SetRemotePath(client.SanitizeRemotePath(cfg.RemotePath))
@@ -470,37 +463,38 @@ func BuildJobRequest(ctx context.Context, client Provider, mountPoint filesystem
 		if cfg.RemotePath == "" {
 			cfg.SetRemotePath(client.SanitizeRemotePath(lockedInfo.StubUrlPath))
 		} else if !cfg.Overwrite && cfg.RemotePath != lockedInfo.StubUrlPath {
-			return getRequestWithFailedPrecondition("unexpected stub file path")
+			return BuildJobRequestWithFailedPrecondition(client, cfg, "unexpected stub file path")
 		}
+
 		if !cfg.Overwrite && cfg.RemoteStorageTarget != lockedInfo.StubUrlRstId {
-			return getRequestWithFailedPrecondition("unexpected stub file rst id")
+			return BuildJobRequestWithFailedPrecondition(client, cfg, "unexpected stub file rst id")
 		}
 	}
 
 	if cfg.Download && cfg.RemotePath == "" {
 		if !FileExists(lockedInfo) {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
+			return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to determine remote path: %s", fs.ErrNotExist.Error()))
 		}
 
 		// Attempt to retrieve remote path from a previously completed job request.
 		if lastJob, err := GetLastCompletedJobFromRst(ctx, cfg.Path, cfg.RemoteStorageTarget); err != nil {
-			return getRequestWithFailedPrecondition(fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
+			return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("failed to determine last completed job request to determine remote path: %s", err.Error()))
 		} else if lastJob != nil {
 			switch lastJob.Request.WhichType() {
 			case beeremote.JobRequest_Sync_case:
 				cfg.SetRemotePath(client.SanitizeRemotePath(lastJob.Request.GetSync().RemotePath))
 			default:
-				return getRequestWithFailedPrecondition(fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
+				return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to determine remote path: %s", ErrConfigRSTTypeIsUnknown.Error()))
 			}
 		}
 	}
 
 	remoteSize, remoteMtime, isArchived, isArchiveRestoreAllowed, err := client.GetRemotePathInfo(ctx, cfg)
 	if err != nil && (cfg.Download || !errors.Is(err, os.ErrNotExist)) {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
+		return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("unable to retrieve remote path information: %s", err.Error()))
 	}
 	if cfg.Download && isArchived && !isArchiveRestoreAllowed {
-		return getRequestWithFailedPrecondition(fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
+		return BuildJobRequestWithFailedPrecondition(client, cfg, fmt.Sprintf("remote object is archived and restore is not permitted; rerun with --%s to continue", AllowRestoreFlag))
 	}
 
 	// Only update remote information when the object exists so lockedInfo.RemoteMtime is nil when
