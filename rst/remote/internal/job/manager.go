@@ -114,6 +114,7 @@ func init() {
 
 type Config struct {
 	PathDBPath          string `mapstructure:"path-db"`
+	PathDBBlockCache    int64  `mapstructure:"path-db-block-cache"`
 	RequestQueueDepth   int    `mapstructure:"request-queue-depth"`
 	MinJobEntriesPerRST int    `mapstructure:"min-job-entries-per-rst"`
 	MaxJobEntriesPerRST int    `mapstructure:"max-job-entries-per-rst"`
@@ -312,6 +313,9 @@ func (m *Manager) Start() error {
 	// We initialize databases in Manage() so we can ensure the DBs are closed properly when shutting down.
 	pathDBOpts := badger.DefaultOptions(m.config.PathDBPath)
 	pathDBOpts = pathDBOpts.WithLogger(logger.NewBadgerLoggerBridge("pathDB", m.log.Logger))
+	if m.config.PathDBBlockCache > 0 {
+		pathDBOpts = pathDBOpts.WithBlockCacheSize(m.config.PathDBBlockCache)
+	}
 	pathStore, closePathDB, err := kvstore.NewMapStore[map[string]*Job](pathDBOpts)
 	if err != nil {
 		return fmt.Errorf("unable to setup paths DB: %w", err)
