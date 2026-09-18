@@ -110,9 +110,11 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		}
 
 		retrievalTier := types.Tier(archive.GetRetrievalTier())
-		retentionsDays := archive.GetRetentionDays()
-		if retentionsDays < 1 {
-			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionsDays)
+		retentionDays := archive.GetRetentionDays()
+		if retentionDays == 0 {
+			retentionDays = 1
+		} else if retentionDays < 1 {
+			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionDays)
 		}
 		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
 		if err != nil {
@@ -130,7 +132,7 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 		s3Client.storageClasses[name] = S3StorageClass{
 			retrievalTier: retrievalTier,
 			archival:      true,
-			retentionDays: retentionsDays,
+			retentionDays: retentionDays,
 			checkTime:     checkTime,
 			recheckTime:   recheckTime,
 			autoRestore:   archive.GetAutoRestore(),
