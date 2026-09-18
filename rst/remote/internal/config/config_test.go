@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"github.com/thinkparq/protobuf/go/flex"
 )
 
 func TestValidateServiceName(t *testing.T) {
@@ -110,5 +111,76 @@ max-job-entries-per-rst = 4
 	t.Run("an unknown key in the same section is still rejected", func(t *testing.T) {
 		_, err := loadCfg(t, baseCfg+"not-a-real-setting = 1\n")
 		require.Error(t, err)
+	})
+}
+
+// Protobuf enums decode to their numeric value by default, which would force operators to look up
+// what an operation is numbered rather than naming it the way the proto does.
+func TestProtoEnumsInRSTConfigParseByName(t *testing.T) {
+	const baseCfg = `
+[job]
+path-db = "/var/lib/beegfs/remote/path.badger"
+min-job-entries-per-rst = 2
+max-job-entries-per-rst = 4
+
+[[remote-storage-target]]
+id = "1"
+name = "xtreemstore"
+
+  [remote-storage-target.xtreemstore.s3]
+  endpoint-url = "https://xtreemstore:9000"
+  bucket = "my-bucket"
+
+  [[remote-storage-target.xtreemstore.bulk-operations]]
+  retryDelay = "45s"
+`
+
+	loadCfg := func(t *testing.T, body string) (*AppConfig, error) {
+		t.Helper()
+		cfgFile := filepath.Join(t.TempDir(), "beegfs-remote.toml")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(body), 0644))
+		flags := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+		flags.String(configmgr.FlagConfigFile, cfgFile, "")
+
+		cfgMgr, err := configmgr.New(flags, "BEEREMOTE_", &AppConfig{}, SetRSTTypeHook())
+		if err != nil {
+			return nil, err
+		}
+		cfg, ok := cfgMgr.Get().(*AppConfig)
+		require.True(t, ok, "expected the config manager to return an *AppConfig")
+		return cfg, nil
+	}
+
+	getOperation := func(t *testing.T, cfg *AppConfig) flex.RemoteStorageTarget_XtreemStore_BulkOperation_Operation {
+		t.Helper()
+		require.Len(t, cfg.RemoteStorageTargets, 1)
+		bulkOperations := cfg.RemoteStorageTargets[0].GetXtreemstore().GetBulkOperations()
+		require.Len(t, bulkOperations, 1)
+		return bulkOperations[0].GetOperation()
+	}
+
+	t.Run("an enum value name decodes to that value", func(t *testing.T) {
+		cfg, err := loadCfg(t, baseCfg+`  operation = "EFFICIENT_RETRIEVE"`+"\n")
+		require.NoError(t, err)
+		assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, getOperation(t, cfg))
+	})
+
+	// Keys elsewhere in the RST configuration are matched ignoring case and "-", so values are too.
+	t.Run("an enum value name is matched ignoring case and separators", func(t *testing.T) {
+		cfg, err := loadCfg(t, baseCfg+`  operation = "efficient-retrieve"`+"\n")
+		require.NoError(t, err)
+		assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, getOperation(t, cfg))
+	})
+
+	t.Run("a numeric enum value still decodes", func(t *testing.T) {
+		cfg, err := loadCfg(t, baseCfg+"  operation = 1\n")
+		require.NoError(t, err)
+		assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, getOperation(t, cfg))
+	})
+
+	t.Run("a name that is not an enum value is rejected and lists the valid names", func(t *testing.T) {
+		_, err := loadCfg(t, baseCfg+`  operation = "not-an-operation"`+"\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "EFFICIENT_RETRIEVE")
 	})
 }
