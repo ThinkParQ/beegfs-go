@@ -584,10 +584,11 @@ rate-limit-event-types = ["*"]
 # DEEP_ARCHIVE, or STANDARD_IA).
 
 # archival.retrievalTier: Retrieval tier to request when restoring an archived object. AWS examples
-# include Standard, Bulk, or Expedited depending on what the storage class supports.
+# include Standard, Bulk, or Expedited depending on what the storage class supports. Defaults to
+# Standard when not specified.
 
 # archival.retentionDays: Number of days a restored object remains available before it is archived
-# again. Must be at least 1.
+# again. Must be at least 1. Defaults to 1 when not specified.
 
 # archival.checkTime: How long to wait after initiating a restore before checking status again.
 # Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
