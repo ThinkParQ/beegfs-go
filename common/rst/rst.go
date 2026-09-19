@@ -1098,6 +1098,17 @@ func (p PathState) IsDir() bool {
 	return p.EntryInfo != nil && p.EntryInfo.Entry.Type == beegfs.EntryDirectory
 }
 
+func (p PathState) IsRegular() bool {
+	return p.EntryInfo != nil && p.EntryInfo.Entry.Type == beegfs.EntryRegularFile
+}
+
+func (p PathState) EntryType() beegfs.EntryType {
+	if p.EntryInfo == nil {
+		return beegfs.EntryUnknown
+	}
+	return p.EntryInfo.Entry.Type
+}
+
 // GetPathState collects existing path state for inMountPath and optionally acquires the file
 // access lock. It returns information derived from the current file, stub, and entry metadata for
 // the path.

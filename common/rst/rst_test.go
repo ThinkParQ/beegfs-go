@@ -411,3 +411,30 @@ func TestPrepareDownloadExpandFile(t *testing.T) {
 		assert.NoError(t, undo(context.Background()))
 	})
 }
+
+// TestPathStateEntryHelpers covers the entry type helpers callers use instead of the file mode.
+// The mode is only set once GetPathState reaches its Lstat call, so it is zero for an entry whose
+// stub file could not be read, while the entry type is known as soon as the entry lookup succeeds.
+func TestPathStateEntryHelpers(t *testing.T) {
+	regular := PathState{EntryInfo: &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntryRegularFile}}}
+	assert.True(t, regular.IsRegular())
+	assert.False(t, regular.IsDir())
+	assert.Equal(t, beegfs.EntryRegularFile, regular.EntryType())
+
+	dir := PathState{EntryInfo: &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntryDirectory}}}
+	assert.True(t, dir.IsDir())
+	assert.False(t, dir.IsRegular())
+
+	symlink := PathState{EntryInfo: &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntrySymlink}}}
+	assert.False(t, symlink.IsDir())
+	assert.False(t, symlink.IsRegular())
+	assert.Equal(t, beegfs.EntrySymlink, symlink.EntryType())
+
+	// GetPathState leaves EntryInfo nil when the entry lookup failed or found nothing. Note
+	// EntryUnknown renders as "invalid", not "unknown": EntryType.String() has no case for the
+	// zero value. Nothing reaches that rendering today, so this pins the value, not the wording.
+	noEntry := PathState{}
+	assert.False(t, noEntry.IsDir())
+	assert.False(t, noEntry.IsRegular())
+	assert.Equal(t, beegfs.EntryUnknown, noEntry.EntryType())
+}
