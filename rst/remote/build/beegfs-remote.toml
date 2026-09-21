@@ -50,6 +50,7 @@ tls-disable = false
 
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
+state-root = ".beegfs-rst"
 
 #
 # --- Section 1.2: [Worker Settings] ---
@@ -121,6 +122,29 @@ path-db = "/var/lib/beegfs/remote/path.badger"
 #   bucket = "<BUCKET>"
 #   access-key = "<ACCESS_KEY>"
 #   secret-key = "<SECRET_KEY>"
+
+# [[remote-storage-target]]
+# id = "4"
+# name = "xtreemstore"
+# policies = { FastStartMaxSize = 104857600 }
+#
+#   [remote-storage-target.xtreemstore.s3]
+#   endpoint-url = "https://<XTREEMSTORE_ENDPOINT>:<PORT>"
+#   region = "<REGION>"
+#   bucket = "<BUCKET>"
+#   access-key = "<ACCESS_KEY>"
+#   secret-key = "<SECRET_KEY>"
+#
+#   [[remote-storage-target.xtreemstore.s3.storage-class]]
+#   name = "GLACIER"
+#   archival.checkTime = "5h"
+#   archival.recheckTime = "30m"
+#   archival.autoRestore = true
+#
+#   [[remote-storage-target.xtreemstore.bulk-operations]]
+#   operation = "EFFICIENT_RETRIEVE"
+#   retryDelay = "45s"
+#   pollDelay = "15s"
 
 #
 # --- Section 1.4: [Telemetry Settings] ---
@@ -273,7 +297,6 @@ rate-limit-event-types = ["*"]
 # tls-disable: Set to disable TLS encryption and send all gRPC messages in clear text over the
 # network. Discouraged for production as it exposes data to potential interception and tampering.
 
-
 #
 # --- Section 3.4: [Job Settings] ---
 #
@@ -283,8 +306,14 @@ rate-limit-event-types = ["*"]
 
 # path-db: Path where the database tracking jobs for each path will be created/maintained.
 
-# request-queue-depth: Number of requests that can be made to before new requests are blocked until
-# the existing requests have been assigned to worker nodes.
+# state-root: Directory where persistent state information may be stored and is available to and
+# shared among all sync workers. The directory's path must be relative inside the BeeGFS mount. It
+# is currently used to maintain bulk operation state information but may have other uses in the
+# future. WARNING, only change if there are not job requests that are inflight or have been
+# rescheduled; otherwise, bulk operations may be orphaned.
+
+# request-queue-depth: Deprecated and no longer used. It is still accepted so existing configuration
+# files continue to work, but the value is ignored. It will be removed in a future release.
 
 # min-job-entries-per-rst: This many jobs for each RST configured for a particular path is
 # guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync
@@ -524,6 +553,17 @@ rate-limit-event-types = ["*"]
 # an S3 bucket, Amazon generally recommends as object sizes approach 100MB, a multipart upload
 # should be used instead of uploading the object in a single operation, thus 104857600 is a
 # reasonable policy to set (https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html).
+# Leaving this unset (or zero) disables splitting entirely, so each file is transferred by a single
+# worker as one operation.
+#
+# There is no universally correct value; it depends on the remote target, network, and available
+# worker. What it controls is how much data a worker is handed at a time, so setting it too low
+# splits a transfer into many small pieces that each cost a separate request to the remote target
+# plus their own scheduling and bookkeeping on the worker. Past a certain point that overhead
+# dominates and throughput drops, even though more workers are involved. Error on the high side when
+# unsure, and use whatever the target recommends as a starting point (for S3, the 100MB above).
+# Remote storage targets may impose a lower bound where required or appropriate, in which case a
+# value below it has no further effect.
 
 
 #
@@ -573,10 +613,11 @@ rate-limit-event-types = ["*"]
 # DEEP_ARCHIVE, or STANDARD_IA).
 
 # archival.retrievalTier: Retrieval tier to request when restoring an archived object. AWS examples
-# include Standard, Bulk, or Expedited depending on what the storage class supports.
+# include Standard, Bulk, or Expedited depending on what the storage class supports. Defaults to
+# Standard when not specified.
 
 # archival.retentionDays: Number of days a restored object remains available before it is archived
-# again. Must be at least 1.
+# again. Must be at least 1. Defaults to 1 when not specified.
 
 # archival.checkTime: How long to wait after initiating a restore before checking status again.
 # Must be positive number with a valid time unit (ms, s, m, h). Must be at least 1s.
@@ -586,3 +627,35 @@ rate-limit-event-types = ["*"]
 
 # archival.autoRestore: Whether Remote can automatically request a restore when downloading an
 # archived object if allow-restore is not explicitly set on the job request.
+
+
+#
+# --- Section 5.2: [XtreemStore Remote Storage Target Settings] ---
+#
+
+# XtreemStore is S3 compatible, so an RST backed by XtreemStore is configured with the same keys as
+# an S3 RST, specified as "xtreemstore.s3.<key-name>" under a [[remote-storage-target]] section.
+# Storage classes are configured the same way under
+# [[remote-storage-target.xtreemstore.s3.storage-class]].
+
+#
+# --- Section 5.2.1: [XtreemStore Bulk Operation Settings] ---
+#
+
+# XtreemStore can service some requests more efficiently in bulk than one object at a time. Each bulk
+# operation Remote should use must be enabled by adding a
+# [[remote-storage-target.xtreemstore.bulk-operations]] section for it. Requests that could belong to
+# an operation that was not configured are handled individually instead, exactly as they would be for
+# a plain S3 target.
+
+# operation: Which bulk operation the section configures. Currently the only supported operation is
+# EFFICIENT_RETRIEVE, which restores the archived objects a set of downloads needs as one request to
+# XtreemStore rather than restoring each object separately.
+
+# retryDelay: How long to wait before retrying when the bulk operation cannot be started yet, for
+# example because another retrieve session is already active. Must be a positive number with a valid
+# time unit (ms, s, m, h) and at least 1s. Defaults to 45s when not specified.
+
+# pollDelay: How long to wait between checks while the bulk operation is running and waiting on
+# XtreemStore to complete the request. Must be a positive number with a valid time unit (ms, s, m, h)
+# and at least 1s. Defaults to 15s when not specified.

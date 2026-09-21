@@ -27,7 +27,7 @@ func TestUpdateConfig(t *testing.T) {
 	}
 
 	// No change to the config should not return an error:
-	assert.NoError(t, clientStore.UpdateConfig(context.Background(), rstConfigs))
+	assert.NoError(t, clientStore.UpdateConfig(context.Background(), rstConfigs, DefaultStateRoot))
 
 	// Updating an existing RST is not allowed:
 	notEqualRSTConfig := []*flex.RemoteStorageTarget{
@@ -41,13 +41,13 @@ func TestUpdateConfig(t *testing.T) {
 			},
 		},
 	}
-	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig), ErrConfigUpdateNotAllowed)
+	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig, DefaultStateRoot), ErrConfigUpdateNotAllowed)
 
 	// Adding an RST is not allowed:
 	notEqualRSTConfig = append(notEqualRSTConfig, &flex.RemoteStorageTarget{Id: 1})
-	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig), ErrConfigUpdateNotAllowed)
+	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig, DefaultStateRoot), ErrConfigUpdateNotAllowed)
 
 	// Removing an RST is not allowed:
 	notEqualRSTConfig = []*flex.RemoteStorageTarget{}
-	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig), ErrConfigUpdateNotAllowed)
+	assert.ErrorIs(t, clientStore.UpdateConfig(context.Background(), notEqualRSTConfig, DefaultStateRoot), ErrConfigUpdateNotAllowed)
 }

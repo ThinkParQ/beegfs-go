@@ -91,6 +91,10 @@ func main() {
 	pflag.CommandLine.MarkHidden("remote.use-http-proxy")
 	pflag.Int("developer.perf-profiling-port", 0, "Specify a port where performance profiles will be made available on the localhost via pprof (0 disables performance profiling).")
 	pflag.CommandLine.MarkHidden("developer.perf-profiling-port")
+	pflag.Int("developer.block-profile-rate", 0, "Sample one goroutine blocking event per this many nanoseconds spent blocked and make the results available via pprof (0 disables block profiling). Requires developer.perf-profiling-port to read the results. Try 10000 to start.")
+	pflag.CommandLine.MarkHidden("developer.block-profile-rate")
+	pflag.Int("developer.mutex-profile-fraction", 0, "Report one out of this many mutex contention events and make the results available via pprof (0 disables mutex profiling). Requires developer.perf-profiling-port to read the results. Try 100 to start.")
+	pflag.CommandLine.MarkHidden("developer.mutex-profile-fraction")
 	pflag.Bool("developer.dump-config", false, "Dump the full configuration and immediately exit.")
 	pflag.CommandLine.MarkHidden("developer.dump-config")
 
@@ -145,6 +149,12 @@ Using environment variables:
 		go func() {
 			http.ListenAndServe(fmt.Sprintf(":%d", initialCfg.Developer.PerfProfilingPort), nil)
 		}()
+	}
+	if initialCfg.Developer.BlockProfileRate != 0 {
+		runtime.SetBlockProfileRate(initialCfg.Developer.BlockProfileRate)
+	}
+	if initialCfg.Developer.MutexProfileFraction != 0 {
+		runtime.SetMutexProfileFraction(initialCfg.Developer.MutexProfileFraction)
 	}
 
 	logger, err := logger.New(initialCfg.Log, &initialCfg.Telemetry,
@@ -240,9 +250,16 @@ Using environment variables:
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
-	jobServer.Stop()
+
+	// Shutdown is ordered so this node is never unreachable while it still has work to finish.
+	// Draining stops Remote from assigning new work but leaves the server listening, so Remote can
+	// still cancel or update what is already assigned here and is told this node is draining rather
+	// than inferring it from a refused connection. Only once the work manager has drained is the
+	// server actually stopped, and the Remote client is closed last because workers use it to report
+	// results and submit job requests right up until they return.
+	jobServer.Drain()
 	workMgr.Stop()
+	jobServer.Stop()
 	beeRemoteClient.Disconnect()
 	logger.Info("shutdown all components, exiting")
-
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"sort"
 	"strconv"
@@ -417,9 +416,8 @@ func worker(
 	}
 }
 
-// getPathStatusFromTarget retrieves the lockedInfo for the path from GetLockedInfo(). The
-// lockedInfo is compared with the remote size and mtime from the remote storage target(s) for sync
-// statuses.
+// getPathStatusFromTarget retrieves the lockedInfo for the path from GetPathState. The lockedInfo
+// is compared with the remote size and mtime from the remote storage target(s) for sync statuses.
 func getPathStatusFromTarget(
 	ctx context.Context,
 	cfg GetStatusCfg,
@@ -427,67 +425,116 @@ func getPathStatusFromTarget(
 	rstMap map[uint32]rst.Provider,
 	fsPath string,
 ) (*GetStatusResult, error) {
-	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
-	// from GetLockedInfo.
-	lockedInfo, _, rstIds, _, _, _, err := rst.GetLockedInfo(ctx, mountPoint, &flex.JobRequestCfg{}, fsPath, true)
+	pathState, err := rst.GetPathState(ctx, mountPoint, fsPath, rst.PathStateNoLock)
+	return pathStatusFromState(ctx, cfg, mountPoint, rstMap, fsPath, pathState, err)
+}
+
+// pathStatusFromState decides the sync status for fsPath from the state GetPathState collected.
+// It runs once per path, after GetPathState returns, and is split out from getPathStatusFromTarget
+// so tests can supply a path state without a mounted file system.
+//
+// Inputs:
+//   - lockedInfoResult and stateErr are what GetPathState returned for fsPath.
+//   - cfg.RemoteTargets are the targets the user asked for. They replace the targets configured on
+//     the entry.
+//   - rstMap holds a client per configured remote target id.
+//
+// Rules, applied in this order:
+//   - Any error other than ErrOffloadFileNotReadable ends the check. That sentinel only means the
+//     client could not read the stub file, and the contents are fetched from Remote instead.
+//   - An entry GetPathState did not find reports an error. Paths reach here from a walk of the
+//     file system, so the entry existed a moment ago.
+//   - Directories and entries that are not regular files report their own status. Neither has
+//     contents to compare against a remote target.
+//   - Without targets, on the entry or from the user, there is nothing to compare against.
+//   - An offloaded file has no contents in BeeGFS, so only the location of the contents is
+//     reported.
+//   - Otherwise every target is asked for the size and mtime it holds, and the file is synced only
+//     when all of them match the file in BeeGFS.
+func pathStatusFromState(
+	ctx context.Context,
+	cfg GetStatusCfg,
+	mountPoint filesystem.Provider,
+	rstMap map[uint32]rst.Provider,
+	fsPath string,
+	lockedInfoResult rst.PathState,
+	stateErr error,
+) (*GetStatusResult, error) {
+	lockedInfo := lockedInfoResult.LockedInfo
+	rstIds := lockedInfoResult.RstCfg.RSTIDs
 	if len(cfg.RemoteTargets) != 0 {
 		rstIds = cfg.RemoteTargets
 	}
-	// GetLockedInfo returns any known information along with the defaults. So, if lockedInfo.Mode
-	// is non-zero then it is valid to check the file type and is safe to do so before checking the
-	// GetLockedInfo error.
-	fileMode := fs.FileMode(lockedInfo.Mode)
-	if fileMode.IsDir() {
+
+	if stateErr != nil && !errors.Is(stateErr, rst.ErrOffloadFileNotReadable) {
+		return nil, fmt.Errorf("unable to get file info: %w", stateErr)
+	}
+
+	if !rst.FileExists(lockedInfo) {
+		return nil, fmt.Errorf("file does not exist (probably a bug)")
+	}
+
+	if lockedInfoResult.IsDir() {
 		return &GetStatusResult{
 			Path:       fsPath,
 			SyncStatus: Directory,
 			SyncReason: "Synchronization state must be checked on individual files.",
 		}, nil
-	} else if !fileMode.IsRegular() {
+	} else if !lockedInfoResult.IsRegular() {
 		return &GetStatusResult{
 			Path:       fsPath,
 			SyncStatus: NotSupported,
-			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(fileMode)),
+			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry type: %s).", lockedInfoResult.EntryType().String()),
 		}, nil
-	} else if err != nil {
-		if len(rstIds) == 0 {
-			return &GetStatusResult{
-				Path:       fsPath,
-				SyncStatus: NoTargets,
-				SyncReason: "No remote targets were specified or configured on this entry.",
-			}, nil
-		} else if errors.Is(err, rst.ErrOffloadFileNotReadable) {
-			// File is offloaded and clients cannot read stub files so request its contents
-			// from remote and update lockedInfo.
-			inMountPath, err := mountPoint.GetRelativePathWithinMount(fsPath)
-			if err != nil {
-				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
-			}
-			resp, err := GetStubContents(ctx, inMountPath)
-			if err != nil {
-				if st, ok := status.FromError(err); ok {
-					switch st.Code() {
-					case codes.Unimplemented:
-						result := &GetStatusResult{Path: fsPath, SyncStatus: Offloaded, Warning: true}
-						syncReason := strings.Builder{}
-						for _, tgt := range rstIds {
-							syncReason.WriteString(fmt.Sprintf("Target %d: unable to verify the file is correctly offloaded as the remote service is missing a required rpc (please update your remote service to at least the same version as ctl)\n", tgt))
-						}
-						result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
-						return result, nil
-					}
-				}
-				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
-			}
-			lockedInfo.SetStubUrlRstId(*resp.RstId)
-			lockedInfo.SetStubUrlPath(*resp.Url)
-		} else if !errors.Is(err, rst.ErrFileHasNoRSTs) {
-			// Ignore ErrFileHasNoRSTs since rstIds has already been checked. The rstIds returned
-			// from GetLockedInfo does not account for cfg.RemoteTargets.
-			return nil, fmt.Errorf("unable to get file info: %w", err)
+	} else if len(rstIds) == 0 {
+		return &GetStatusResult{
+			Path:       fsPath,
+			SyncStatus: NoTargets,
+			SyncReason: "No remote targets were specified or configured on this entry.",
+		}, nil
+	} else if errors.Is(stateErr, rst.ErrOffloadFileNotReadable) {
+		// File is offloaded and clients cannot read stub files so request its contents
+		// from remote and update lockedInfo.
+		inMountPath, err := mountPoint.GetRelativePathWithinMount(fsPath)
+		if err != nil {
+			return nil, fmt.Errorf("unable to determine stub file target: %w", err)
 		}
-	} else if !rst.FileExists(lockedInfo) {
-		return nil, fmt.Errorf("file does not exist (probably a bug)")
+		resp, err := GetStubContents(ctx, inMountPath)
+		if err != nil {
+			if st, ok := status.FromError(err); ok {
+				switch st.Code() {
+				case codes.Unimplemented:
+					result := &GetStatusResult{Path: fsPath, SyncStatus: Offloaded, Warning: true}
+					syncReason := strings.Builder{}
+					for _, tgt := range rstIds {
+						fmt.Fprintf(&syncReason, "Target %d: unable to verify the file is correctly offloaded as the remote service is missing a required rpc (please update your remote service to at least the same version as ctl)\n", tgt)
+					}
+					result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
+					return result, nil
+				}
+			}
+			return nil, fmt.Errorf("unable to determine stub file target: %w", err)
+		}
+		lockedInfo.SetStubUrlRstId(*resp.RstId)
+		lockedInfo.SetStubUrlPath(*resp.Url)
+	}
+
+	// An offloaded file has no contents in BeeGFS to compare against the remote, so report where
+	// the contents live and skip the size and mtime checks.
+	if rst.IsFileOffloaded(lockedInfo) {
+		syncReason := strings.Builder{}
+		for _, tgt := range rstIds {
+			if tgt == lockedInfo.GetStubUrlRstId() {
+				fmt.Fprintf(&syncReason, "Target %d: File contents are offloaded to this target.\n", tgt)
+			} else {
+				fmt.Fprintf(&syncReason, "Target %d: File contents are not offloaded to this target.\n", tgt)
+			}
+		}
+		return &GetStatusResult{
+			Path:       fsPath,
+			SyncStatus: Offloaded,
+			SyncReason: strings.TrimRight(syncReason.String(), "\n"),
+		}, nil
 	}
 
 	syncReason := strings.Builder{}
@@ -495,24 +542,14 @@ func getPathStatusFromTarget(
 	for _, tgt := range rstIds {
 		client, ok := rstMap[tgt]
 		if !ok {
-			return nil, fmt.Errorf("unable to get client for remote target id %d: %w", tgt, err)
-		}
-
-		if rst.IsFileOffloaded(lockedInfo) {
-			result.SyncStatus = Offloaded
-			if tgt == lockedInfo.GetStubUrlRstId() {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
-			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are not offloaded to this target.\n", tgt))
-			}
-			continue
+			return nil, fmt.Errorf("unable to get client for remote target id %d", tgt)
 		}
 
 		remoteSize, remoteMtime, _, _, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				result.SyncStatus = NotAttempted
-				syncReason.WriteString(fmt.Sprintf("Target %d: Path has not been synchronized with this targets yet.\n", tgt))
+				fmt.Fprintf(&syncReason, "Target %d: Path has not been synchronized with this targets yet.\n", tgt)
 				continue
 			}
 			return nil, fmt.Errorf("unable to get remote resource info: %w", err)
@@ -521,10 +558,10 @@ func getPathStatusFromTarget(
 		lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
 
 		if rst.IsFileAlreadySynced(lockedInfo) {
-			syncReason.WriteString(fmt.Sprintf("Target %d: File is synced based on the remote storage target.\n", tgt))
+			fmt.Fprintf(&syncReason, "Target %d: File is synced based on the remote storage target.\n", tgt)
 		} else {
 			result.SyncStatus = Unsynchronized
-			syncReason.WriteString(fmt.Sprintf("Target %d: File is not synced with remote storage target.\n", tgt))
+			fmt.Fprintf(&syncReason, "Target %d: File is not synced with remote storage target.\n", tgt)
 		}
 	}
 

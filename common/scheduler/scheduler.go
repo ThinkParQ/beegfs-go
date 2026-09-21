@@ -318,6 +318,8 @@ func (s *Scheduler) SetNextRescheduledTime(ExecuteAfter time.Time, priority int)
 	}
 }
 
+type AddRescheduleWorkTokenFn func(submissionId string, ExecuteAfter time.Time)
+
 // AddRescheduleWorkToken adds a rescheduleWorkToken and sets the next
 // check time if needed.
 func (s *Scheduler) AddRescheduleWorkToken(submissionId string, ExecuteAfter time.Time) {

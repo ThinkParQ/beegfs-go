@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
@@ -160,8 +161,6 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		pattern       string
 		startAfter    string
 		expectedPaths []string
-		maxPaths      int
-		expectMore    bool
 	}
 
 	commonTestPaths := []string{
@@ -201,9 +200,8 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 	provider := BeeGFS{MountPoint: mountDir}
 	tests := []testCase{
 		{
-			name:     "basic-directory-walk",
-			pattern:  "/data",
-			maxPaths: -1,
+			name:    "basic-directory-walk",
+			pattern: "/data",
 			expectedPaths: []string{
 				"/data/a/a.txt",
 				"/data/a/z.txt",
@@ -220,13 +218,11 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		{
 			name:          "glob-no-matching-target",
 			pattern:       "/data/**/target.txt",
-			maxPaths:      -1,
 			expectedPaths: []string{},
 		},
 		{
-			name:     "glob-all-data-text-files",
-			pattern:  "/data/**/*.txt",
-			maxPaths: -1,
+			name:    "glob-all-data-text-files",
+			pattern: "/data/**/*.txt",
 			expectedPaths: []string{
 				"/data/a/a.txt",
 				"/data/a/z.txt",
@@ -243,9 +239,8 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			// '?' matches exactly one non-separator character. The full pattern
 			// must reach the file depth; /data? alone only matches the sibling
 			// directories themselves.
-			name:     "single-character-wildcard-data-siblings",
-			pattern:  "/data?/a/a.txt",
-			maxPaths: -1,
+			name:    "single-character-wildcard-data-siblings",
+			pattern: "/data?/a/a.txt",
 			expectedPaths: []string{
 				"/data1/a/a.txt",
 				"/data2/a/a.txt",
@@ -255,9 +250,8 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			// '*' matches zero or more non-separator characters, so /data*
 			// covers /data, /data1, /data2. A deeper pattern is required to
 			// reach files inside those directories.
-			name:     "root-directory-with-wildcard",
-			pattern:  "/data*/a/a.txt",
-			maxPaths: -1,
+			name:    "root-directory-with-wildcard",
+			pattern: "/data*/a/a.txt",
 			expectedPaths: []string{
 				"/data/a/a.txt",
 				"/data1/a/a.txt",
@@ -267,18 +261,16 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		{
 			// The trailing '*' does not cross '/': /data/b/b/b.txt requires two
 			// path components after /b/ and is no longer matched.
-			name:     "files-from-common-directories-in-root-directories",
-			pattern:  "/data*/b/*",
-			maxPaths: -1,
+			name:    "files-from-common-directories-in-root-directories",
+			pattern: "/data*/b/*",
 			expectedPaths: []string{
 				"/data/b/b.txt",
 				"/data/b/y.txt",
 			},
 		},
 		{
-			name:     "single file",
-			pattern:  "/data/a/a.txt",
-			maxPaths: -1,
+			name:    "single file",
+			pattern: "/data/a/a.txt",
 			expectedPaths: []string{
 				"/data/a/a.txt",
 			},
@@ -286,9 +278,8 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		{
 			// An invalid glob pattern (unclosed bracket) is not a glob: it is
 			// treated as a literal file path and streamed back if the file exists.
-			name:     "invalid-glob-treated-as-literal-path",
-			pattern:  "/brackets/file[abc",
-			maxPaths: -1,
+			name:    "invalid-glob-treated-as-literal-path",
+			pattern: "/brackets/file[abc",
 			expectedPaths: []string{
 				"/brackets/file[abc",
 			},
@@ -297,31 +288,19 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			name:       "resume-directory-walk",
 			pattern:    "/data",
 			startAfter: "/data/b/b.txt",
-			maxPaths:   4,
-			expectMore: true,
 			expectedPaths: []string{
 				"/data/b/b/b.txt",
 				"/data/b/y.txt",
 				"/data/b0.txt",
 				"/data/c/c.txt",
+				"/data/c/c.txt2",
+				"/data/c/x.txt",
 			},
-		},
-		{
-			name:     "directory-walk-limited-results",
-			pattern:  "/data",
-			maxPaths: 2,
-			expectedPaths: []string{
-				"/data/a/a.txt",
-				"/data/a/z.txt",
-			},
-			expectMore: true,
 		},
 		{
 			name:       "complete-directory-walk-after-resume",
 			pattern:    "/data",
 			startAfter: "/data/a/z.txt",
-			expectMore: false,
-			maxPaths:   -1,
 			expectedPaths: []string{
 				"/data/b.txt",
 				"/data/b/b.txt",
@@ -337,15 +316,13 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			name:       "glob-range-excludes-start-after-match",
 			pattern:    "/data/c/[a-c]*",
 			startAfter: "/data/c/c.txt",
-			maxPaths:   -1,
 			expectedPaths: []string{
 				"/data/c/c.txt2",
 			},
 		},
 		{
-			name:     "doublestar-to-grab-all-txt-files",
-			pattern:  "/data/**/*.txt",
-			maxPaths: -1,
+			name:    "doublestar-to-grab-all-txt-files",
+			pattern: "/data/**/*.txt",
 			expectedPaths: []string{
 				"/data/a/a.txt",
 				"/data/a/z.txt",
@@ -362,7 +339,6 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			name:       "doublestar-to-grab-all-txt-files-after-resume",
 			pattern:    "/**/*.txt",
 			startAfter: "/data/b/y.txt",
-			maxPaths:   -1,
 			expectedPaths: []string{
 				"/data/b0.txt",
 				"/data/c/c.txt",
@@ -380,18 +356,16 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 		{
 			// '*' does not cross path separators: deep/a/* matches only the
 			// direct file children of deep/a/, not files in deeper subdirs.
-			name:     "deeply-nested-glob-pattern",
-			pattern:  "deep/a/*",
-			maxPaths: -1,
+			name:    "deeply-nested-glob-pattern",
+			pattern: "deep/a/*",
 			expectedPaths: []string{
 				"/deep/a/b0",
 				"/deep/a/b.txt",
 			},
 		},
 		{
-			name:     "deeply-nested-glob-pattern-with-doublestar",
-			pattern:  "deep/**/*0",
-			maxPaths: -1,
+			name:    "deeply-nested-glob-pattern-with-doublestar",
+			pattern: "deep/**/*0",
 			expectedPaths: []string{
 				"/deep/a/b0",
 				"/deep/a/b/c0",
@@ -406,24 +380,14 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 	for _, test := range tests {
 
 		t.Run(test.name, func(t *testing.T) {
-			maxPaths := test.maxPaths
-			if maxPaths == -1 {
-				maxPaths = len(commonTestPaths)
-			}
-
-			responseChan, err := StreamPathsLexicographically(ctx, provider, test.pattern, test.startAfter, maxPaths, 0, nil)
+			responseChan, _, err := StreamPathsLexicographically(ctx, provider, test.pattern, test.startAfter, 0, nil)
 			require.NoError(t, err)
 
 			paths := []string{}
-			moreWork := false
 			for resp := range responseChan {
-				if resp.ResumeToken != "" {
-					moreWork = true
-					break
-				}
+				require.NoError(t, resp.Err)
 				paths = append(paths, resp.Path)
 			}
-			assert.Equal(t, test.expectMore, moreWork)
 
 			slices.Sort(test.expectedPaths)
 			if test.expectedPaths != nil {
@@ -433,6 +397,211 @@ func TestWalkSortedPathFileAndDirectory(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWalkResumeAcrossNestedDirectory reproduces a bug where the resume token emitted when a walk
+// is cut off can point earlier than the last path actually sent. This happens when the cutoff
+// lands on a directory entry's sibling immediately after a nested subdirectory: the parent
+// directory's resume token only advances when it emits a file directly, so it does not account for
+// paths already sent from within the subdirectory. Resuming from that stale token causes the
+// subdirectory to be walked again and its already-sent paths to be duplicated.
+func TestWalkResumeAcrossNestedDirectory(t *testing.T) {
+	mountDir := t.TempDir()
+	paths := []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}
+	for _, path := range paths {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	// Cut the walk off right after /data/b/b/b.txt, which is sent from within the nested "b/b"
+	// subdirectory rather than directly from "b". This is the boundary that triggers the stale
+	// resume token.
+	firstChan, stopWalk, err := StreamPathsLexicographically(ctx, provider, "/data", "", 0, nil)
+	require.NoError(t, err)
+
+	firstPass, resumeToken := consumeWalkThen(t, firstChan, stopWalk, 5)
+	require.Equal(t, []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+	}, firstPass)
+	require.Equal(t, "data/b/b/b.txt", resumeToken, "the resume token must name the last path actually sent, not an earlier one from the parent directory")
+
+	secondChan, _, err := StreamPathsLexicographically(ctx, provider, "/data", resumeToken, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		secondPass = append(secondPass, resp.Path)
+	}
+
+	seen := make(map[string]bool, len(firstPass))
+	for _, path := range firstPass {
+		seen[path] = true
+	}
+	for _, path := range secondPass {
+		assert.Falsef(t, seen[path], "path %q was sent in both the first and resumed pass", path)
+	}
+}
+
+// TestWalkWithDirsDirectoriesDoNotAnchorResume guards against a bug specific to
+// StreamPathsLexicographicallyWithDirs: a directory can be a prefix of a sibling file's name (e.g.
+// directory "b" next to file "b.txt"), and under this package's directory-aware ordering (a period
+// sorts before a slash) the file sorts before the directory. If the directory's own bare path were
+// ever used as the resume anchor, plain string comparison of that sibling file's full path against
+// it would disagree with the true walk order and the file could be resent. Directories never produce
+// a job request on their own (see jobRequestBuilder.Process) and are idempotent to reprocess, so
+// they're emitted for free without ever becoming the resume anchor - this confirms the resume token
+// always lands on a file even when a directory sits directly at the cutoff boundary, and that the
+// directory is still picked up by the resumed walk.
+func TestWalkWithDirsDirectoriesDoNotAnchorResume(t *testing.T) {
+	mountDir := t.TempDir()
+	paths := []string{
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+		"/data/b/b.txt",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}
+	for _, path := range paths {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	// Stop the walk on the "/data/b" directory itself, which follows the file "/data/b.txt"
+	// directly in directory-aware sort order - so a directory sits exactly at the cutoff boundary.
+	firstChan, stopWalk, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", "", 0, nil)
+	require.NoError(t, err)
+
+	firstPass, resumeToken := consumeWalkThen(t, firstChan, stopWalk, 5)
+	require.Equal(t, []string{
+		"/data",
+		"/data/a",
+		"/data/a/a.txt",
+		"/data/a/z.txt",
+		"/data/b.txt",
+	}, firstPass)
+	require.Equal(t, "data/b.txt", resumeToken, "the resume token should anchor on the last file sent, not the directory sitting at the cutoff")
+
+	secondChan, _, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", resumeToken, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		secondPass = append(secondPass, resp.Path)
+	}
+	// "/data/b" is re-emitted even though its bare path sorts before the "/data/b.txt" anchor:
+	// directories are filtered by sortName ("data/b/"), matching the order the walk emits in, so
+	// the resumed pass picks up exactly where the first one stopped.
+	require.Equal(t, []string{
+		"/data/b",
+		"/data/b/b.txt",
+		"/data/b/b",
+		"/data/b/b/b.txt",
+		"/data/b/y.txt",
+		"/data/b0.txt",
+	}, secondPass)
+
+	seenFiles := map[string]bool{}
+	for _, path := range firstPass {
+		if !strings.HasSuffix(path, ".txt") {
+			continue
+		}
+		seenFiles[path] = true
+	}
+	for _, path := range secondPass {
+		if !strings.HasSuffix(path, ".txt") {
+			continue
+		}
+		assert.Falsef(t, seenFiles[path], "file %q was sent in both the first and resumed pass", path)
+	}
+}
+
+// TestWalkWithDirsResumeKeepsDirectorySortingBeforeAnchor covers the harder half of the prefix
+// problem the test above describes: here the walk is stopped on a *file*, and the directory that
+// would have come next is the one at risk. With "/data/b.tx", "/data/b.txt" and the "/data/b"
+// directory as siblings, sortName order is b.tx, b.txt, b/ - so stopping on "/data/b.txt" anchors
+// the resume at "/data/b.tx" while "/data/b" has not been emitted yet. Comparing the directory's
+// bare path against that anchor would place it before the anchor and drop it entirely, even though
+// the walk had not reached it. Never stopping on a directory would not help; only comparing by
+// sortName does.
+func TestWalkWithDirsResumeKeepsDirectorySortingBeforeAnchor(t *testing.T) {
+	mountDir := t.TempDir()
+	for _, path := range []string{"/data/b.tx", "/data/b.txt", "/data/b/b.txt"} {
+		path := filepath.Join(mountDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(""), 0o644))
+	}
+	provider := BeeGFS{MountPoint: mountDir}
+	ctx := context.Background()
+
+	firstChan, stopWalk, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", "", 0, nil)
+	require.NoError(t, err)
+
+	// Stop on the file "/data/b.txt", leaving the "/data/b" directory unemitted.
+	firstPass, resumeToken := consumeWalkThen(t, firstChan, stopWalk, 2)
+	require.Equal(t, []string{"/data", "/data/b.tx"}, firstPass)
+	require.Equal(t, "data/b.tx", resumeToken)
+
+	secondChan, _, err := StreamPathsLexicographicallyWithDirs(ctx, provider, "/data", resumeToken, 0, nil)
+	require.NoError(t, err)
+
+	var secondPass []string
+	for resp := range secondChan {
+		require.NoError(t, resp.Err)
+		secondPass = append(secondPass, resp.Path)
+	}
+	require.Equal(t, []string{
+		"/data/b.txt",
+		"/data/b",
+		"/data/b/b.txt",
+	}, secondPass, "the resumed walk must pick up every path after the anchor, including /data/b")
+}
+
+// consumeWalkThen consumes consume results, then stops the walk on the next one and returns the
+// consumed paths along with that result's ResumeToken. This mirrors how requestBuildController
+// drives a walk: the result it stops on is deliberately left unconsumed, and its ResumeToken names
+// the last file sent before it so resuming from the token re-emits that result. The remainder is
+// drained in the background because a walk parked mid-send can only observe the stop once it makes
+// progress.
+func consumeWalkThen(t *testing.T, walk <-chan *StreamPathResult, stopWalk func(), consume int) (paths []string, resumeToken string) {
+	t.Helper()
+
+	for resp := range walk {
+		require.NoError(t, resp.Err)
+		if len(paths) == consume {
+			resumeToken = resp.ResumeToken
+			stopWalk()
+			go func() {
+				for range walk { //nolint:revive // Drain so the walk can observe the stop and finish.
+				}
+			}()
+			return paths, resumeToken
+		}
+		paths = append(paths, resp.Path)
+	}
+	t.Fatalf("walk ended after %d results before reaching the %d needed to stop on", len(paths), consume+1)
+	return nil, ""
 }
 
 func TestIsGlobPattern(t *testing.T) {

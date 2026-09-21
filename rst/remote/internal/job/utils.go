@@ -18,3 +18,10 @@ func getProtoWorkResults(workResults map[string]worker.WorkResult) []*beeremote.
 	}
 	return workResultsForResponse
 }
+
+func appendMessage(original string, addition string) string {
+	if original == "" {
+		return addition
+	}
+	return original + "; " + addition
+}
