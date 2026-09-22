@@ -182,7 +182,6 @@ func cmdRun(args []string) {
 	// /proc/fs/beegfs/<client>/config and its build_config sibling.
 	var envFiles stringList
 	fs.Var(&envFiles, "env-file", "key=value file whose contents are recorded in the results file (repeatable)")
-	var ()
 	fs.Usage = func() {
 		w := fs.Output()
 		fmt.Fprintln(w, "Usage: iotest-posixbench run -path <dir> [flags]")
