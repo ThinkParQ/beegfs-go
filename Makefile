@@ -116,9 +116,12 @@ check-vulnerabilities:
 	go tool govulncheck ./...
 
 # Run the unit tests
+# Test each package the way it is built for release: everything ships CGO_ENABLED=0 except
+# beegfs-nss-resolver, whose whole purpose is to be the one binary built with cgo.
 .PHONY: test-unit
-test-unit: 
-	@go test ./...
+test-unit:
+	@CGO_ENABLED=0 go test $$(go list ./... | grep -v /ctl/cmd/beegfs-nss-resolver)
+	@CGO_ENABLED=1 go test ./ctl/cmd/beegfs-nss-resolver/...
 
 # Verify that go mod tidy has been run.
 .PHONY: check-go-tidy
