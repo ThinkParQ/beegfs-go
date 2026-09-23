@@ -24,9 +24,9 @@ func newMockNode(baseNode *baseNode) Worker {
 	return mockNode
 }
 
-func (n *MockNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
+func (n *MockNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	args := n.Called()
-	return args.Bool(0), args.Error(1)
+	return args.Error(0)
 }
 
 func (n *MockNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {

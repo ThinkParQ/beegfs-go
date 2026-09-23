@@ -111,23 +111,23 @@ func newWorkerNodeFromConfig(log *zap.Logger, config Config) (Worker, error) {
 	// default values (which should be set using flags). For now just ensure these are not set to
 	// zero here, otherwise weird things can happen.
 
-	if config.MaxReconnectBackOff == 0 {
+	if config.MaxReconnectBackOff <= 0 {
 		config.MaxReconnectBackOff = 60
 	}
 
-	if config.DisconnectTimeout == 0 {
+	if config.DisconnectTimeout <= 0 {
 		config.DisconnectTimeout = 30
 	}
 
-	if config.SendRetries == 0 {
+	if config.SendRetries <= 0 {
 		config.SendRetries = 10
 	}
 
-	if config.RetryInterval == 0 {
+	if config.RetryInterval <= 0 {
 		config.RetryInterval = 1
 	}
 
-	if config.HeartbeatInterval == 0 {
+	if config.HeartbeatInterval <= 0 {
 		config.HeartbeatInterval = 10
 	}
 
