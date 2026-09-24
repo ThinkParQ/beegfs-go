@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up build environment
-        uses: ./.github/actions/setup-build
+        uses: $/.github/actions/setup-build
       - name: Log into the GitHub Container Registry
         uses: docker/login-action@49ed152c8eca782a232dede0303416e8f356c37b # v2
         with:
