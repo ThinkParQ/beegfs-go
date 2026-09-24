@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up build environment
-        uses: ./.github/actions/setup-build
+        uses: $/.github/actions/setup-build
         with:
           ref: ${{ inputs.ref }}
       - name: Run GoReleaser
