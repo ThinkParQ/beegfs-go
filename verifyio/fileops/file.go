@@ -106,13 +106,11 @@ func Open(path string, flags int, perm fs.FileMode) (*File, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("fileops.Open: stat %s: %w", path, err)
+		return nil, errors.Join(fmt.Errorf("fileops.Open: stat %s: %w", path, err), f.Close())
 	}
 	if !info.Mode().IsRegular() {
-		f.Close()
-		return nil, fmt.Errorf("fileops.Open: %s is not a regular file (mode=%s)",
-			path, info.Mode())
+		return nil, errors.Join(fmt.Errorf("fileops.Open: %s is not a regular file (mode=%s)",
+			path, info.Mode()), f.Close())
 	}
 	return &File{
 		path:  path,

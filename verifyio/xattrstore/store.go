@@ -258,13 +258,11 @@ func OpenStore(targetPath string, lockTimeout time.Duration) (*Store, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("xattrstore.OpenStore: stat %s: %w", targetPath, err)
+		return nil, errors.Join(fmt.Errorf("xattrstore.OpenStore: stat %s: %w", targetPath, err), f.Close())
 	}
 	if !info.Mode().IsRegular() {
-		f.Close()
-		return nil, fmt.Errorf("xattrstore.OpenStore: %s is not a regular file (mode=%s)",
-			targetPath, info.Mode())
+		return nil, errors.Join(fmt.Errorf("xattrstore.OpenStore: %s is not a regular file (mode=%s)",
+			targetPath, info.Mode()), f.Close())
 	}
 	return &Store{target: targetPath, file: f, lockTimeout: lockTimeout}, nil
 }
