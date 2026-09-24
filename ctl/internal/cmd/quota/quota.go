@@ -1,18 +1,24 @@
 package quota
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"os/user"
 	"strconv"
+	"sync"
+	"syscall"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/build"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/pool"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
@@ -21,6 +27,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/quota"
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 	pm "github.com/thinkparq/protobuf/go/management"
+	"go.uber.org/zap"
 )
 
 const (
@@ -209,13 +216,15 @@ func runSetLimitsCmd(cmd *cobra.Command, args []string, cfg setLimitsCmdConfig) 
 	return quota.SetLimits(cmd.Context(), &pm.SetQuotaLimitsRequest{
 		Limits: limits,
 	})
-
 }
 
 type listLimitsConfig struct {
 	userIds  []string
 	groupIds []string
 	pool     beegfs.EntityId
+	users    []string
+	groups   []string
+	nss      bool
 }
 
 func newListLimitsCmd() *cobra.Command {
@@ -235,12 +244,19 @@ func newListLimitsCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
+	cmd.Flags().StringSliceVar(&cfg.users, "users", []string{}, "User names to query. Resolved to IDs and added to --uids.")
+	cmd.Flags().StringSliceVar(&cfg.groups, "groups", []string{}, "Group names to query. Resolved to IDs and added to --gids.")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
 
 func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 	req := pm.GetQuotaLimitsRequest_builder{}.Build()
+
+	if err := appendNames(&cfg.userIds, cfg.users, &cfg.groupIds, cfg.groups, cfg.nss); err != nil {
+		return err
+	}
 
 	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
 		cfg.userIds = append(cfg.userIds, "current")
@@ -311,7 +327,7 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			return err
 		}
 
-		name, err := idToName(*limits.QuotaId, idTypeStr)
+		name, err := idToName(*limits.QuotaId, idTypeStr, cfg.nss)
 		if err != nil {
 			return err
 		}
@@ -321,7 +337,6 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		} else {
 			tbl.AddItem(name, *limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
-
 	}
 
 	tbl.PrintRemaining()
@@ -338,6 +353,9 @@ type listUsageConfig struct {
 	groupIds []string
 	pool     beegfs.EntityId
 	exceeded bool
+	users    []string
+	groups   []string
+	nss      bool
 }
 
 func newListUsageCmd() *cobra.Command {
@@ -358,12 +376,19 @@ func newListUsageCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit.")
+	cmd.Flags().StringSliceVar(&cfg.users, "users", []string{}, "User names to query. Resolved to IDs and added to --uids.")
+	cmd.Flags().StringSliceVar(&cfg.groups, "groups", []string{}, "Group names to query. Resolved to IDs and added to --gids.")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
 
 func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	req := pm.GetQuotaUsageRequest_builder{}.Build()
+
+	if err := appendNames(&cfg.userIds, cfg.users, &cfg.groupIds, cfg.groups, cfg.nss); err != nil {
+		return err
+	}
 
 	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
 		cfg.userIds = append(cfg.userIds, "current")
@@ -484,7 +509,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 			return err
 		}
 
-		name, err := idToName(*entry.QuotaId, idTypeStr)
+		name, err := idToName(*entry.QuotaId, idTypeStr, cfg.nss)
 		if err != nil {
 			return err
 		}
@@ -507,7 +532,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 }
 
 func parseLimit(s string) (*int64, error) {
-	var res = new(int64)
+	res := new(int64)
 	if s == "unlimited" {
 		*res = math.MaxInt64
 	} else if s == "reset" {
@@ -642,9 +667,190 @@ func getCurrentGroupIds() ([]uint32, error) {
 	return gids, nil
 }
 
+const nssFlag = "nss"
+
+// addNSSFlag defines nssFlag for the commands that resolve IDs to names.
+func addNSSFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVar(target, nssFlag, false, `Resolve UIDs and GIDs using the system's name service (NSS), which includes LDAP, SSSD and AD.
+	By default only local /etc/passwd and /etc/group entries are resolved and other IDs are printed numerically.`)
+	if build.CGO {
+		// A CGO enabled build already resolves through NSS in os/user, so the flag does nothing.
+		// It stays defined rather than omitted so command lines that pass it keep working against
+		// both builds.
+		cmd.Flags().MarkHidden(nssFlag)
+	}
+}
+
+// beegfs-nss-resolver is built with CGO enabled, so it resolves IDs through NSS. The path is fixed
+// and deliberately never looked up in $PATH: the beegfs binary is installed setgid, so letting a
+// caller choose the program executed here would run their code with the beegfs group's privileges.
+const nssResolverPath = "/opt/beegfs/lib/beegfs-nss-resolver"
+
+const nssResolverProtocolVersion = 1
+
+// idRequest and idResponse cover the parts of the beegfs-nss-resolver protocol the CLI uses. An ID
+// or name missing from the response maps was not found, one present in an error map didn't resolve.
+type idRequest struct {
+	Seq    uint64   `json:"seq"`
+	UIDs   []uint32 `json:"uids,omitempty"`
+	GIDs   []uint32 `json:"gids,omitempty"`
+	Users  []string `json:"users,omitempty"`
+	Groups []string `json:"groups,omitempty"`
+}
+
+type idResponse struct {
+	Seq        uint64            `json:"seq"`
+	Users      map[uint32]string `json:"users"`
+	Groups     map[uint32]string `json:"groups"`
+	UIDErrors  map[uint32]string `json:"uid_errors"`
+	GIDErrors  map[uint32]string `json:"gid_errors"`
+	UserIDs    map[string]uint32 `json:"user_ids"`
+	GroupIDs   map[string]uint32 `json:"group_ids"`
+	NameErrors map[string]string `json:"name_errors"`
+}
+
+// nssResolver resolves IDs by way of beegfs-nss-resolver, which is built with CGO enabled and so
+// resolves through NSS. It is started on the first lookup and reused for the rest of the process.
+// Nothing shuts it down: the helper reads EOF and exits on its own once the CLI terminates and its
+// stdin pipe closes.
+type nssResolver struct {
+	mu      sync.Mutex
+	started bool
+	// Sticky, so a helper that cannot be started is not re-execed once per row of output.
+	err error
+	enc *json.Encoder
+	dec *json.Decoder
+	seq uint64
+}
+
+var resolver nssResolver
+
+func (r *nssResolver) start() error {
+	proc := exec.Command(nssResolverPath)
+	// Name resolution needs no BeeGFS privilege. The CLI is installed setgid beegfs so it can read
+	// the group-beegfs auth secret, which would otherwise leave this child running with
+	// egid=beegfs. Mirrors index.CallerSysProcAttr, which does the same for the GUFI subprocesses.
+	proc.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:         uint32(os.Getuid()),
+			Gid:         uint32(os.Getgid()),
+			NoSetGroups: true,
+		},
+	}
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := proc.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := proc.Start(); err != nil {
+		return fmt.Errorf("unable to start %s: %w", nssResolverPath, err)
+	}
+
+	// Route the helper's diagnostics through the logger so they don't interleave with table output.
+	go func() {
+		log, _ := config.GetLogger()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Warn("NSS resolver", zap.String("path", nssResolverPath),
+				zap.String("message", scanner.Text()))
+		}
+	}()
+	r.enc = json.NewEncoder(stdin)
+	r.dec = json.NewDecoder(stdout)
+
+	var greeting struct {
+		Hello   string `json:"hello"`
+		Version int    `json:"version"`
+	}
+	if err := r.dec.Decode(&greeting); err != nil || greeting.Hello != "beegfs-nss-resolver" {
+		stdin.Close()
+		return fmt.Errorf(
+			"unexpected greeting from NSS resolver (%s), increase log level for more detail",
+			nssResolverPath)
+	}
+	if greeting.Version != nssResolverProtocolVersion {
+		stdin.Close()
+		return fmt.Errorf("%s speaks protocol version %d, expected %d", nssResolverPath,
+			greeting.Version, nssResolverProtocolVersion)
+	}
+	return nil
+}
+
+// resolve sends one request to the helper and returns its response, starting the helper on first
+// use. Callers build the request and read whichever maps they asked to be filled.
+func (r *nssResolver) resolve(req idRequest) (idResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.started {
+		r.started = true
+		r.err = r.start()
+	}
+	if r.err != nil {
+		return idResponse{}, r.err
+	}
+
+	r.seq++
+	req.Seq = r.seq
+	if err := r.enc.Encode(&req); err != nil {
+		return idResponse{}, fmt.Errorf("unable to send request to %s: %w", nssResolverPath, err)
+	}
+
+	var resp idResponse
+	if err := r.dec.Decode(&resp); err != nil {
+		return idResponse{}, fmt.Errorf("unable to read response from %s: %w", nssResolverPath, err)
+	}
+	if resp.Seq != r.seq {
+		return idResponse{}, fmt.Errorf("%s responded out of sequence (got %d, want %d)",
+			nssResolverPath, resp.Seq, r.seq)
+	}
+	return resp, nil
+}
+
 // converts a user or group ID to its corresponding username or groupname
-// Fetched from the operating system's user and group database. If not found returns the ID as string.
-func idToName(id uint32, idType string) (string, error) {
+// Fetched from the operating system's user and group database, or from beegfs-nss-resolver when
+// nssFlag is given. If not found returns the ID as string.
+func idToName(id uint32, idType string, nss bool) (string, error) {
+	if idType != "user" && idType != "group" {
+		return "", fmt.Errorf("invalid idType: %s", idType)
+	}
+
+	// A CGO enabled build already resolves through NSS in os/user below, so the helper would only
+	// add a process without changing the result.
+	if nss && !build.CGO {
+		req := idRequest{}
+		if idType == "user" {
+			req.UIDs = []uint32{id}
+		} else {
+			req.GIDs = []uint32{id}
+		}
+		resp, err := resolver.resolve(req)
+		if err != nil {
+			return "", err
+		}
+		names, failed := resp.Users, resp.UIDErrors
+		if idType == "group" {
+			names, failed = resp.Groups, resp.GIDErrors
+		}
+		if name, ok := names[id]; ok {
+			return name, nil
+		}
+		// Absent means the ID definitively does not exist, which falls through to printing it
+		// numerically below. An entry in the error map means the lookup itself failed, which must
+		// not be reported as if it had succeeded.
+		if msg := failed[id]; msg != "" {
+			return "", fmt.Errorf("unable to look up %s %d: %s", idType, id, msg)
+		}
+		return fmt.Sprintf("%d", id), nil
+	}
+
 	switch idType {
 	case "user":
 		userName, err := user.LookupId(strconv.Itoa(int(id)))
@@ -656,9 +862,104 @@ func idToName(id uint32, idType string) (string, error) {
 		if err == nil {
 			return groupName.Name, nil
 		}
-	default:
-		return "", fmt.Errorf("invalid idType: %s", idType)
 	}
 
 	return fmt.Sprintf("%d", id), nil
+}
+
+// appendNames resolves the --users and --groups values and appends them to the numeric ID lists,
+// so that parseUserIdsInto and parseGroupIdsInto need no knowledge of names. It must run before
+// the callers default an empty selection to "current".
+func appendNames(userIds *[]string, users []string, groupIds *[]string, groups []string, nss bool) error {
+	if err := rejectUnmergeableIds("uids", *userIds, users); err != nil {
+		return err
+	}
+	if err := rejectUnmergeableIds("gids", *groupIds, groups); err != nil {
+		return err
+	}
+
+	ids, err := namesToIds(users, "user", nss)
+	if err != nil {
+		return err
+	}
+	*userIds = append(*userIds, ids...)
+
+	ids, err = namesToIds(groups, "group", nss)
+	if err != nil {
+		return err
+	}
+	*groupIds = append(*groupIds, ids...)
+
+	return nil
+}
+
+// rejectUnmergeableIds errors when names are combined with anything but plain numeric IDs.
+// Appending resolved names makes parseUserIdsInto take its list branch, which accepts only plain
+// IDs, so keywords like "all" or "current" and ranges like 1000-2000 would otherwise fail with a
+// confusing message further down.
+func rejectUnmergeableIds(idFlag string, ids []string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		if _, err := strconv.ParseUint(id, 10, 32); err != nil {
+			return fmt.Errorf("--%s %q cannot be combined with names", idFlag, id)
+		}
+	}
+	return nil
+}
+
+// namesToIds resolves names to IDs, returned as decimal strings so they can be appended to the
+// --uids and --gids values. An unresolvable name is an error: unlike printing, silently dropping
+// an ID the user asked for would be wrong.
+func namesToIds(names []string, idType string, nss bool) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(names))
+
+	if nss && !build.CGO {
+		req := idRequest{}
+		if idType == "user" {
+			req.Users = names
+		} else {
+			req.Groups = names
+		}
+		resp, err := resolver.resolve(req)
+		if err != nil {
+			return nil, err
+		}
+		found := resp.UserIDs
+		if idType == "group" {
+			found = resp.GroupIDs
+		}
+		for _, name := range names {
+			id, ok := found[name]
+			if !ok {
+				if msg := resp.NameErrors[name]; msg != "" {
+					return nil, fmt.Errorf("unable to look up %s %q: %s", idType, name, msg)
+				}
+				return nil, fmt.Errorf("unknown %s %q", idType, name)
+			}
+			ids = append(ids, strconv.FormatUint(uint64(id), 10))
+		}
+		return ids, nil
+	}
+
+	for _, name := range names {
+		if idType == "user" {
+			u, err := user.Lookup(name)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, u.Uid)
+		} else {
+			g, err := user.LookupGroup(name)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, g.Gid)
+		}
+	}
+	return ids, nil
 }
