@@ -24,3 +24,9 @@ runs:
       uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
+    - name: Set up Zig
+      # Needed for CGO-enabled beegfs-nss-resolver
+      shell: bash
+      run: |
+        make install-zig
+        echo "${HOME}/zig" >> "${GITHUB_PATH}"
