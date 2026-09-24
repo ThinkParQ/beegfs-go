@@ -19,7 +19,7 @@ install-$(1):
 	@echo "Installing $(2) from $(3) to $(INSTALL_DIR)"
 	go install $(3)
 	@echo 'Installation complete! Note you may need to add $(INSTALL_DIR) to your $$$$PATH.'
-endef 
+endef
 # Note: The $$$$ is needed because it's first evaluated by Make as $$, then passed to the shell as
 # $$PATH, which is finally evaluated as the literal $PATH.
 
@@ -64,7 +64,7 @@ package-all:
 generate-notices:
 	@go tool go-licenses report ./ctl/... --template ctl/build/notice.tpl > ctl/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 	@go tool go-licenses report ./rst/remote/... --template rst/remote/build/notice.tpl > rst/remote/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
-	@go tool go-licenses report ./rst/sync/... --template rst/sync/build/notice.tpl > rst/sync/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq	
+	@go tool go-licenses report ./rst/sync/... --template rst/sync/build/notice.tpl > rst/sync/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 	@go tool go-licenses report ./watch/... --template watch/build/notice.tpl > watch/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 
 # Test targets:
@@ -92,7 +92,7 @@ check-go-version:
 	} || { echo >&2 "ERROR: determining version of Go failed"; exit 1; }
 
 
-# Verify that the code is formatted using gofmt: 
+# Verify that the code is formatted using gofmt:
 # Don't run on the vendor directory to avoid false positives.
 .PHONY: check-gofmt
 check-gofmt:
@@ -133,15 +133,15 @@ check-go-tidy: tidy
 	fi
 
 # For details on what licenses are disallowed see
-# https://github.com/google/go-licenses#check 
+# https://github.com/google/go-licenses#check
 #
 # IMPORTANT: Any exceptions (using --ignore) such as the one for HCL must be
 # manually added AFTER the NOTICE file has been updated and/or other appropriate
-# steps have been taken based on the license requirements also ensure to add 
+# steps have been taken based on the license requirements also ensure to add
 # justification below.
-# 
-# === Justification for Ignored Licenses === 
-# 
+#
+# === Justification for Ignored Licenses ===
+#
 # github.com/hashicorp/hcl: Distributed under MPL 2.0 which is a copyleft (reciprocal) license.
 #   By default we consider reciprocal licenses a disallowed type because we need
 #   to manually verify our use doesn't violate the license terms. Here our use
@@ -190,3 +190,18 @@ install-go:
 	rm -rf /usr/local/go; \
 	curl -fSL "https://go.dev/dl/go$$GO_VERSION.$$OS-$$ARCH.tar.gz" | tar -C /usr/local -xz; \
 	echo 'Done. Ensure /usr/local/go/bin is on your PATH, e.g.: export PATH=$$PATH:/usr/local/go/bin'
+
+# Download and install the pinned Zig toolchain to ~/zig. Zig supplies the cross compiler for the
+# cgo NSS helper and pins its glibc floor; see the beegfs_nss_resolver build in .goreleaser.yml.
+# Pinned to 0.13 to match beegfs-rust, which found newer releases unreliable.
+ZIG_VERSION := 0.13.0
+
+.PHONY: install-zig
+install-zig:
+	@set -eo pipefail; \
+	ARCH=$$(uname -m); \
+	echo "Installing Zig $(ZIG_VERSION) ($$ARCH) to $$HOME/zig"; \
+	mkdir -p $$HOME/zig; \
+	curl -fSL "https://ziglang.org/download/$(ZIG_VERSION)/zig-linux-$$ARCH-$(ZIG_VERSION).tar.xz" \
+		| tar -xJ -C $$HOME/zig --strip-components=1; \
+	echo 'Done. Ensure $$HOME/zig is on your PATH, e.g.: export PATH=$$PATH:$$HOME/zig'
