@@ -36,29 +36,8 @@ import (
 	"strconv"
 
 	"github.com/thinkparq/beegfs-go/common/build"
+	"github.com/thinkparq/beegfs-go/ctl/internal/nssresolver"
 )
-
-const protocolVersion = 1
-
-type request struct {
-	Seq    uint64   `json:"seq"`
-	UIDs   []uint32 `json:"uids,omitempty"`
-	GIDs   []uint32 `json:"gids,omitempty"`
-	Users  []string `json:"users,omitempty"`
-	Groups []string `json:"groups,omitempty"`
-}
-
-type response struct {
-	Seq       uint64            `json:"seq"`
-	Users     map[uint32]string `json:"users"`
-	Groups    map[uint32]string `json:"groups"`
-	UIDErrors map[uint32]string `json:"uid_errors"`
-	GIDErrors map[uint32]string `json:"gid_errors"`
-
-	UserIDs    map[string]uint32 `json:"user_ids"`
-	GroupIDs   map[string]uint32 `json:"group_ids"`
-	NameErrors map[string]string `json:"name_errors"`
-}
 
 // handle resolves every ID in the request. Lookups are serial: a warm NSS lookup is a round trip
 // to a local daemon, and callers resolve one ID per row of output they are already streaming.
@@ -66,8 +45,8 @@ type response struct {
 // An ID that is absent from every NSS source is simply left out of the response. An ID whose
 // lookup failed is reported in one of the error maps instead, so the caller can tell "no such
 // user" apart from "ask again later".
-func handle(req request) response {
-	resp := response{
+func handle(req nssresolver.Request) nssresolver.Response {
+	resp := nssresolver.Response{
 		Seq:       req.Seq,
 		Users:     map[uint32]string{},
 		Groups:    map[uint32]string{},
@@ -148,18 +127,18 @@ func main() {
 
 	out := bufio.NewWriter(os.Stdout)
 	enc := json.NewEncoder(out)
-	if err := enc.Encode(map[string]any{"hello": "beegfs-nss-resolver", "version": protocolVersion}); err != nil {
+	if err := enc.Encode(nssresolver.Greeting{Hello: nssresolver.Name, Version: nssresolver.Version}); err != nil {
 		fmt.Fprintln(os.Stderr, "beegfs-nss-resolver: unable to write greeting:", err)
 		os.Exit(1)
 	}
 	if err := out.Flush(); err != nil {
-		fmt.Fprintln(os.Stderr, "beegfs-nss-resolver: unable to write greeting:", err)
+		fmt.Fprintln(os.Stderr, "beegfs-nss-resolver: unable to flush greeting:", err)
 		os.Exit(1)
 	}
 
 	dec := json.NewDecoder(bufio.NewReader(os.Stdin))
 	for {
-		var req request
+		var req nssresolver.Request
 		if err := dec.Decode(&req); err != nil {
 			// Either the CLI closed the pipe or the stream contains something we cannot resync
 			// from. Both mean this process has no further work to do.
@@ -171,7 +150,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := out.Flush(); err != nil {
-			fmt.Fprintln(os.Stderr, "beegfs-nss-resolver: unable to write response:", err)
+			fmt.Fprintln(os.Stderr, "beegfs-nss-resolver: unable to flush response:", err)
 			os.Exit(1)
 		}
 	}
