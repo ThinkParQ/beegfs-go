@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"fmt"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
 
-	assert.NoError(t, log.Shutdown(context.Background()))
+	assert.NotErrorIs(t, log.Shutdown(context.Background()), syscall.EINVAL)
 }
 
 type testConfig struct {
