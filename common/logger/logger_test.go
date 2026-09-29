@@ -2,7 +2,6 @@ package logger
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"syscall"
 	"testing"
@@ -93,11 +92,7 @@ func TestShutdownWithTelemetry(t *testing.T) {
 	}, telemetry.WithServiceName("shutdown-test"))
 	require.NoError(t, err)
 
-	// zap.Logger.Sync() returns EINVAL on stdout sinks; allow that specific error.
-	err = log.Shutdown(context.Background())
-	if err != nil && !errors.Is(err, syscall.EINVAL) {
-		t.Errorf("unexpected shutdown error: %v", err)
-	}
+	assert.NotErrorIs(t, log.Shutdown(context.Background()), syscall.EINVAL)
 }
 
 type testConfig struct {
