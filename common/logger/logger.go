@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
@@ -232,7 +233,10 @@ func (lm *Logger) Shutdown(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
-	if err := lm.Sync(); err != nil {
+	// For stdout and stderr, Sync calls fsync(2). Linux returns EINVAL when the
+	// output is a terminal, pipe or journald socket, because those can't be
+	// synced. Console writes are not buffered, so ignoring EINVAL loses nothing.
+	if err := lm.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
