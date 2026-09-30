@@ -20,16 +20,16 @@ import (
 	"google.golang.org/grpc/peer"
 )
 
-// QueuedReqsDegradedThreshold and QueuedReqsCriticalThreshold are the queued-request counts at which
-// a node is considered degraded or critical. They are exported so the frontend and the structured
-// output can reference them; they may become configurable later.
+// DefaultQueuedReqsDegradedThreshold and DefaultQueuedReqsCriticalThreshold are the default
+// queued-request counts at which a node is considered degraded or critical. They are exported so
+// the frontend can use them as flag defaults.
 const (
-	QueuedReqsDegradedThreshold = 16
-	QueuedReqsCriticalThreshold = 512
+	DefaultQueuedReqsDegradedThreshold uint32 = 16
+	DefaultQueuedReqsCriticalThreshold uint32 = 512
 )
 
-// CollectConfig controls how the connection checks are performed. It only carries options that
-// affect collection; how much detail is displayed is a rendering concern owned by the frontend.
+// CollectConfig controls how the checks are performed. It only carries options that affect
+// collection; how much detail is displayed is a rendering concern owned by the frontend.
 type CollectConfig struct {
 	// ConnectionTimeout bounds establishing new client/server connections for the connection check.
 	ConnectionTimeout time.Duration
@@ -39,6 +39,26 @@ type CollectConfig struct {
 	// FilterByMounts limits the connection check to specific client mount paths (empty means all
 	// mounts of the managed file system).
 	FilterByMounts []string
+	// QueuedReqsDegradedThreshold and QueuedReqsCriticalThreshold are the queued-request counts a
+	// server node must exceed to be considered degraded or critical by the busy nodes check.
+	// Callers that don't have a reason to use different values should set them from
+	// DefaultQueuedReqsDegradedThreshold and DefaultQueuedReqsCriticalThreshold. The degraded
+	// threshold must be less than the critical one (see Validate). The zero value of CollectConfig
+	// does not meet this rule, so Collect rejects it.
+	QueuedReqsDegradedThreshold uint32
+	QueuedReqsCriticalThreshold uint32
+}
+
+// Validate returns an error if cfg breaks a rule Collect relies on. Collect calls it before it
+// contacts any service. The rules:
+//   - The degraded threshold must be less than the critical threshold. The busy nodes check tests
+//     the critical threshold first. With equal or inverted thresholds, every node past the degraded
+//     threshold is also past the critical one, so the check could never report degraded.
+func (cfg CollectConfig) Validate() error {
+	if cfg.QueuedReqsDegradedThreshold >= cfg.QueuedReqsCriticalThreshold {
+		return fmt.Errorf("queued requests degraded threshold (%d) must be less than the critical threshold (%d)", cfg.QueuedReqsDegradedThreshold, cfg.QueuedReqsCriticalThreshold)
+	}
+	return nil
 }
 
 // Collect runs all health checks and returns the results as a Report. It performs no output; the
@@ -46,6 +66,10 @@ type CollectConfig struct {
 //
 // When updating this function consider if QuickChecks (in the frontend) needs to be updated as well.
 func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	log, _ := config.GetLogger()
 
 	mgmtd, err := config.ManagementClient()
@@ -98,10 +122,11 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 		return nil, err
 	}
 	busy := Section{Title: SectionBusyNodes}
-	metaBusy := checkForBusyNodes(metaNodes)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: busySummary(metaBusy), Detail: newBusyDetail(metaNodes)})
-	storageBusy := checkForBusyNodes(storageNodes)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: busySummary(storageBusy), Detail: newBusyDetail(storageNodes)})
+	degraded, critical := cfg.QueuedReqsDegradedThreshold, cfg.QueuedReqsCriticalThreshold
+	metaBusy := checkForBusyNodes(metaNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: busySummary(metaBusy, degraded, critical), Detail: newBusyDetail(metaNodes, degraded, critical)})
+	storageBusy := checkForBusyNodes(storageNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: busySummary(storageBusy, degraded, critical), Detail: newBusyDetail(storageNodes, degraded, critical)})
 	report.Sections = append(report.Sections, busy)
 
 	// Targets.
@@ -170,11 +195,11 @@ func healthyOr(s Status, healthyMsg, unhealthyMsg string) string {
 	return unhealthyMsg
 }
 
-func busySummary(s Status) string {
+func busySummary(s Status, degradedThreshold, criticalThreshold uint32) string {
 	if s == Healthy {
-		return fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", QueuedReqsDegradedThreshold, QueuedReqsCriticalThreshold)
+		return fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
 	}
-	return fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", QueuedReqsDegradedThreshold, QueuedReqsCriticalThreshold)
+	return fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
 }
 
 // checkLicense maps a license check result to a status and human-readable summary.
@@ -258,12 +283,12 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 
 // checkForBusyNodes returns the overall busy status across nodes, reflecting the node in the worst
 // condition.
-func checkForBusyNodes(nodes []stats.NodeStats) Status {
+func checkForBusyNodes(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) Status {
 	busy := Healthy
 	for _, node := range nodes {
-		if node.Stats.QueuedRequests > QueuedReqsCriticalThreshold {
+		if node.Stats.QueuedRequests > criticalThreshold {
 			busy.updateStatusIfWorse(Critical)
-		} else if node.Stats.QueuedRequests > QueuedReqsDegradedThreshold {
+		} else if node.Stats.QueuedRequests > degradedThreshold {
 			busy.updateStatusIfWorse(Degraded)
 		}
 	}
