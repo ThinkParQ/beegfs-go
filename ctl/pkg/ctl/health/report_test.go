@@ -108,6 +108,8 @@ func TestReportJSONSchema(t *testing.T) {
 	assert.JSONEq(t, `812`, string(busyNodes[0]["queuedRequests"]))
 	assert.NotContains(t, busyNodes[0], "degradedThreshold")
 	assert.NotContains(t, busyNodes[0], "criticalThreshold")
+	// A node whose stats were read has no error key.
+	assert.NotContains(t, busyNodes[0], "error")
 
 	// Targets detail is serialized.
 	assert.Contains(t, s, `"targets":`)

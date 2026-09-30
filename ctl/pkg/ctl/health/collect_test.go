@@ -3,12 +3,15 @@ package health
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
+	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 )
 
 func TestCollectConfigValidate(t *testing.T) {
@@ -75,6 +78,7 @@ func TestCheckForBusyNodes(t *testing.T) {
 		}
 		return ns
 	}
+	unreadable := stats.NodeStats{Err: errors.New("connection refused")}
 
 	tests := []struct {
 		name           string
@@ -139,18 +143,106 @@ func TestCheckForBusyNodes(t *testing.T) {
 			critical:       DefaultQueuedReqsCriticalThreshold,
 			expectedStatus: Degraded,
 		},
+		{
+			name:           "unreadable node is critical, not healthy",
+			nodes:          append(nodesWith(0), unreadable),
+			degraded:       DefaultQueuedReqsDegradedThreshold,
+			critical:       DefaultQueuedReqsCriticalThreshold,
+			expectedStatus: Critical,
+		},
+		{
+			name:           "unreadable node is critical overriding a degraded node",
+			nodes:          append(nodesWith(DefaultQueuedReqsDegradedThreshold+1), unreadable),
+			degraded:       DefaultQueuedReqsDegradedThreshold,
+			critical:       DefaultQueuedReqsCriticalThreshold,
+			expectedStatus: Critical,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expectedStatus, checkForBusyNodes(tc.nodes, tc.degraded, tc.critical))
+			status, _ := checkForBusyNodes(tc.nodes, tc.degraded, tc.critical)
+			assert.Equal(t, tc.expectedStatus, status)
 		})
 	}
 }
 
-func TestBusySummaryReportsConfiguredThresholds(t *testing.T) {
-	assert.Equal(t, "Number of queued requests does not exceed the degraded (2) or critical (8) thresholds.", busySummary(Healthy, 2, 8))
-	assert.Equal(t, "Number of queued requests exceeds the degraded (2) or critical (8) thresholds.", busySummary(Critical, 2, 8))
+func TestBusySummary(t *testing.T) {
+	_, summary := checkForBusyNodes([]stats.NodeStats{{}}, 2, 8)
+	assert.Equal(t, "Number of queued requests does not exceed the degraded (2) or critical (8) thresholds.", summary)
+
+	_, summary = checkForBusyNodes([]stats.NodeStats{{Stats: stats.Stats{QueuedRequests: 9}}}, 2, 8)
+	assert.Equal(t, "Number of queued requests exceeds the degraded (2) or critical (8) thresholds.", summary)
+
+	_, summary = checkForBusyNodes([]stats.NodeStats{{}, {Err: errors.New("connection refused")}}, 2, 8)
+	assert.Equal(t, "Unable to read stats from 1 of 2 nodes. Number of queued requests does not exceed the degraded (2) or critical (8) thresholds.", summary)
+}
+
+func TestCheckTargets(t *testing.T) {
+	healthy := tgtBackend.GetTargets_Result{
+		ReachabilityState: tgtBackend.ReachabilityOnline,
+		ConsistencyState:  tgtBackend.ConsistencyGood,
+		CapacityPool:      tgtBackend.CapacityNormal,
+		Node:              &beegfs.EntityIdSet{},
+	}
+	with := func(modify func(*tgtBackend.GetTargets_Result)) tgtBackend.GetTargets_Result {
+		t := healthy
+		modify(&t)
+		return t
+	}
+
+	tests := []struct {
+		name         string
+		target       tgtBackend.GetTargets_Result
+		reachability Status
+		consistency  Status
+		capacity     Status
+		mapping      Status
+	}{
+		{
+			name:         "healthy target",
+			target:       healthy,
+			reachability: Healthy, consistency: Healthy, capacity: Healthy, mapping: Healthy,
+		},
+		{
+			name:         "capacity pool not reported yet is degraded",
+			target:       with(func(t *tgtBackend.GetTargets_Result) { t.CapacityPool = "" }),
+			reachability: Healthy, consistency: Healthy, capacity: Degraded, mapping: Healthy,
+		},
+		{
+			name:         "unknown reachability is degraded",
+			target:       with(func(t *tgtBackend.GetTargets_Result) { t.ReachabilityState = "" }),
+			reachability: Degraded, consistency: Healthy, capacity: Healthy, mapping: Healthy,
+		},
+		{
+			name:         "unknown consistency is degraded",
+			target:       with(func(t *tgtBackend.GetTargets_Result) { t.ConsistencyState = "" }),
+			reachability: Healthy, consistency: Degraded, capacity: Healthy, mapping: Healthy,
+		},
+		{
+			name: "known bad states are still critical",
+			target: with(func(t *tgtBackend.GetTargets_Result) {
+				t.ReachabilityState = tgtBackend.ReachabilityOffline
+				t.CapacityPool = tgtBackend.CapacityEmergency
+			}),
+			reachability: Critical, consistency: Healthy, capacity: Critical, mapping: Healthy,
+		},
+		{
+			name:         "unmapped target",
+			target:       with(func(t *tgtBackend.GetTargets_Result) { t.Node = nil }),
+			reachability: Healthy, consistency: Healthy, capacity: Healthy, mapping: Degraded,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reachability, consistency, capacity, mapping := CheckTargets([]tgtBackend.GetTargets_Result{tc.target})
+			assert.Equal(t, tc.reachability, reachability, "reachability")
+			assert.Equal(t, tc.consistency, consistency, "consistency")
+			assert.Equal(t, tc.capacity, capacity, "capacity")
+			assert.Equal(t, tc.mapping, mapping, "mapping")
+		})
+	}
 }
 
 func TestTLSCertExpirationStatus(t *testing.T) {

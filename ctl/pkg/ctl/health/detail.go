@@ -12,12 +12,14 @@ import (
 // table printer) a Raw field that is not serialized. Both are built from the same collected data.
 
 // BusyNode reports a single server node's queued requests. The degraded/critical thresholds all
-// nodes are evaluated against are reported once per check (see BusyDetail).
+// nodes are evaluated against are reported once per check (see BusyDetail). Error is set when the
+// node's stats could not be read. QueuedRequests is then 0 and does not mean the node is idle.
 type BusyNode struct {
 	Alias          string `json:"alias"`
 	NumID          uint64 `json:"numID"`
 	NodeType       string `json:"nodeType"`
 	QueuedRequests uint32 `json:"queuedRequests"`
+	Error          string `json:"error,omitempty"`
 }
 
 // BusyDetail is the detail for a busy-nodes check: every node of that type, not only the busy ones,
@@ -33,12 +35,16 @@ type BusyDetail struct {
 func newBusyDetail(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) BusyDetail {
 	projected := make([]BusyNode, 0, len(nodes))
 	for _, n := range nodes {
-		projected = append(projected, BusyNode{
+		bn := BusyNode{
 			Alias:          string(n.Node.Alias),
 			NumID:          uint64(n.Node.Id.NumId),
 			NodeType:       n.Node.Id.NodeType.String(),
 			QueuedRequests: n.Stats.QueuedRequests,
-		})
+		}
+		if n.Err != nil {
+			bn.Error = n.Err.Error()
+		}
+		projected = append(projected, bn)
 	}
 	return BusyDetail{
 		DegradedThreshold: degradedThreshold,
