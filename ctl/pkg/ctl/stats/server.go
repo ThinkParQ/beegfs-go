@@ -119,7 +119,9 @@ func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, err
 }
 
 // Queries and sums the stats for multiple nodes. The returned slice is chronologically sorted in ascending order.
-// The second return value is the number of nodes used for the sum.
+// The second return value is the number of nodes used for the sum. A node that returns no entries
+// beyond the 2 newest ones is left out of the sum and the count. If the stats of any node cannot be
+// read, an error is returned.
 func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stats, int, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
@@ -133,18 +135,23 @@ func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stat
 
 	// This map maps a timestamp to stats entry. It is used to sum up stat entries with the same timestamp.
 	var m = make(map[uint64]Stats)
+	summedNodes := 0
 	for _, c := range channels {
 		sRes := <-c
 
 		if sRes.err != nil {
-			return []Stats{}, 0, err
+			return []Stats{}, 0, fmt.Errorf("reading stats from node %s: %w", sRes.node.Alias, sRes.err)
 		}
 
 		// The old ctl cuts off the latest 2 values. Its called "inaccuracy time". We are not sure if that makes sense but implement it
 		// here as well for the time being.
+		if len(sRes.stats) <= 2 {
+			continue
+		}
 		for _, s := range sRes.stats[2:] {
 			m[s.StatsTime] = m[s.StatsTime].add(s)
 		}
+		summedNodes++
 	}
 
 	var result = make([]Stats, 0)
@@ -156,7 +163,7 @@ func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stat
 		return int(a.StatsTime) - int(b.StatsTime)
 	})
 
-	return result, len(nodes), nil
+	return result, summedNodes, nil
 }
 
 // Fetches the list of nodes from nodestore filter by the given node type
