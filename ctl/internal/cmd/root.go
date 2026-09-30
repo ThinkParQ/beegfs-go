@@ -47,17 +47,18 @@ var (
 	paragraphRegex  = regexp.MustCompile("\n\n+")
 )
 
-// Main entry point of the tool
-func Execute() int {
-	// This is the first line of the root help message. This is generated/stored here to allow the
-	// number of characters separating the header with the rest of the help text to be determined
-	// dynamically since the version width may vary.
-	longHelpHeader := fmt.Sprintf("BeeGFS Command Line Tool: %s", Version)
-	// The root command.
-	cmd := &cobra.Command{
-		Use:   BinaryName,
-		Short: "The BeeGFS command line control tool",
-		Long: fmt.Sprintf(`%s\
+// rootLongHelp builds the long help text for the root command. It runs each time the root help is
+// printed, not when the command is built. Viper only sees --disable-emojis after cobra parses the
+// flags, so reading the setting any earlier would always return the default.
+func rootLongHelp() string {
+	// This is the first line of the root help message. The line of "=" below it is sized to match,
+	// since the version width may vary.
+	header := fmt.Sprintf("BeeGFS Command Line Tool: %s", Version)
+	heart, bee := "💛", "🐝"
+	if viper.GetBool(config.DisableEmojisKey) {
+		heart, bee = "<3", ""
+	}
+	return fmt.Sprintf(`%s\
 %s
 This tool allows you to inspect, configure, and monitor BeeGFS.
 
@@ -67,9 +68,17 @@ This tool allows you to inspect, configure, and monitor BeeGFS.
   - If you have an active support contract, please visit: https://www.beegfs.io/c/enterprise/
   - For community support, check out: https://github.com/ThinkParQ/beegfs/blob/master/SUPPORT.md
 
-BeeGFS is crafted with 💛 by contributors worldwide.
-Thank you for using BeeGFS and supporting its ongoing development! 🐝
-		`, longHelpHeader, strings.Repeat("=", len(longHelpHeader))),
+BeeGFS is crafted with %s by contributors worldwide.
+Thank you for using BeeGFS and supporting its ongoing development! %s
+		`, header, strings.Repeat("=", len(header)), heart, bee)
+}
+
+// Main entry point of the tool
+func Execute() int {
+	// The root command. Long is set by the help func below.
+	cmd := &cobra.Command{
+		Use:           BinaryName,
+		Short:         "The BeeGFS command line control tool",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// These are inherited by ALL commands even if they also define there own PersistentPreRunE
@@ -123,6 +132,14 @@ Thank you for using BeeGFS and supporting its ongoing development! 🐝
 	cobra.AddTemplateFunc("wrapFlagUsages", wrapFlagUsages)
 	cobra.AddTemplateFunc("wrapHelpText", wrapHelpText)
 	cmd.SetHelpTemplate(helpTemplate)
+	// Subcommands inherit this help func, ensure only the root command gets the rootLongHelp().
+	defaultHelpFunc := cmd.HelpFunc()
+	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c == cmd {
+			c.Long = rootLongHelp()
+		}
+		defaultHelpFunc(c, args)
+	})
 
 	// By default there is no explicit signal handler and the Go runtime will immediately terminate
 	// on a interrupt signal (Ctrl+C). To allow for more graceful handling/cleanup including the
