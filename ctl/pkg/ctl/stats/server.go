@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -13,6 +14,9 @@ import (
 type NodeStats struct {
 	Node  beegfs.Node
 	Stats Stats
+	// Err is set when the stats for Node could not be read. Stats is then the zero value and must
+	// not be read as the node being idle.
+	Err error
 }
 
 type Stats struct {
@@ -73,7 +77,13 @@ func SingleServerNode(ctx context.Context, id beegfs.EntityId) (beegfs.Node, []S
 	return n, sRes.stats, nil
 }
 
-// Queries latest stat entry for multiple nodes separately
+// Queries latest stat entry for multiple nodes separately. The returned error is only set when the
+// node list cannot be read. A node whose stats cannot be read is still returned, with its Err set, so
+// callers can tell an unreachable node from an idle one.
+//
+// A node returns its entries newest first. The newest entry is skipped and the second newest is
+// used, like MultiServerNodesAggregated skips the newest entries. A node that returns fewer than two
+// entries is treated as unreadable.
 func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
@@ -93,10 +103,13 @@ func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, err
 			Node: sRes.node,
 		}
 
-		if sRes.err == nil {
-			if len(sRes.stats) >= 2 {
-				serverStatResult.Stats = sRes.stats[1]
-			}
+		switch {
+		case sRes.err != nil:
+			serverStatResult.Err = sRes.err
+		case len(sRes.stats) < 2:
+			serverStatResult.Err = fmt.Errorf("node returned %d stats entries, at least 2 are required", len(sRes.stats))
+		default:
+			serverStatResult.Stats = sRes.stats[1]
 		}
 
 		stats = append(stats, serverStatResult)

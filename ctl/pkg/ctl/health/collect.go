@@ -123,19 +123,19 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 	}
 	busy := Section{Title: SectionBusyNodes}
 	degraded, critical := cfg.QueuedReqsDegradedThreshold, cfg.QueuedReqsCriticalThreshold
-	metaBusy := checkForBusyNodes(metaNodes, degraded, critical)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: busySummary(metaBusy, degraded, critical), Detail: newBusyDetail(metaNodes, degraded, critical)})
-	storageBusy := checkForBusyNodes(storageNodes, degraded, critical)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: busySummary(storageBusy, degraded, critical), Detail: newBusyDetail(storageNodes, degraded, critical)})
+	metaBusy, metaSummary := checkForBusyNodes(metaNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: metaSummary, Detail: newBusyDetail(metaNodes, degraded, critical)})
+	storageBusy, storageSummary := checkForBusyNodes(storageNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: storageSummary, Detail: newBusyDetail(storageNodes, degraded, critical)})
 	report.Sections = append(report.Sections, busy)
 
 	// Targets.
 	reachability, consistency, capacity, mapping := CheckTargets(targets)
 	targetsSection := Section{Title: SectionTargets, Detail: newTargetsDetail(targets)}
 	targetsSection.Checks = append(targetsSection.Checks,
-		Check{Name: "Reachability", Status: reachability, Summary: healthyOr(reachability, "All targets are responding.", "Not all targets are responding.")},
-		Check{Name: "Consistency", Status: consistency, Summary: healthyOr(consistency, "All mirrors are synchronized.", "Not all mirrors are synchronized.")},
-		Check{Name: "Available Capacity", Status: capacity, Summary: healthyOr(capacity, "All targets have sufficient free space based on the thresholds defined by the management service's configuration.", "Not all targets have sufficient free space based on the thresholds defined by the management service's configuration.")},
+		Check{Name: "Reachability", Status: reachability, Summary: healthyOr(reachability, "All targets are responding.", "Not all targets are responding, or the state of some targets is unknown.")},
+		Check{Name: "Consistency", Status: consistency, Summary: healthyOr(consistency, "All mirrors are synchronized.", "Not all mirrors are synchronized, or the state of some targets is unknown.")},
+		Check{Name: "Available Capacity", Status: capacity, Summary: healthyOr(capacity, "All targets have sufficient free space based on the thresholds defined by the management service's configuration.", "Not all targets have sufficient free space based on the thresholds defined by the management service's configuration, or some targets have not reported their free space yet.")},
 		Check{Name: "Mapping Status", Status: mapping, Summary: healthyOr(mapping, "All targets are mapped to a storage node.", "Not all targets are mapped to a storage node.")},
 	)
 	report.Sections = append(report.Sections, targetsSection)
@@ -195,11 +195,18 @@ func healthyOr(s Status, healthyMsg, unhealthyMsg string) string {
 	return unhealthyMsg
 }
 
-func busySummary(s Status, degradedThreshold, criticalThreshold uint32) string {
-	if s == Healthy {
-		return fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
+// busySummary describes the outcome of the busy nodes check. queueStatus is the status from the
+// queued request counts alone. unreadable is the number of nodes, out of total, whose stats could not
+// be read.
+func busySummary(queueStatus Status, unreadable, total int, degradedThreshold, criticalThreshold uint32) string {
+	summary := fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
+	if queueStatus == Healthy {
+		summary = fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
 	}
-	return fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
+	if unreadable > 0 {
+		summary = fmt.Sprintf("Unable to read stats from %d of %d nodes. ", unreadable, total) + summary
+	}
+	return summary
 }
 
 // checkLicense maps a license check result to a status and human-readable summary.
@@ -243,7 +250,10 @@ func checkForFallbacks(client procfs.Client) Status {
 }
 
 // CheckTargets returns the reachability, consistency, capacity, and mapping status across all
-// targets, each reflecting the target in the worst condition.
+// targets, each reflecting the target in the worst condition. A state that is empty or not known to
+// this function counts as degraded, because the check cannot tell whether the target is healthy.
+// The management service leaves the capacity pool empty for a target that has not reported its free
+// space and inodes yet.
 func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consistency, capacity, mapping Status) {
 	reachability, consistency, capacity, mapping = Healthy, Healthy, Healthy, Healthy
 	for _, t := range targets {
@@ -254,6 +264,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			reachability.updateStatusIfWorse(Degraded)
 		case tgtBackend.ReachabilityOffline:
 			reachability.updateStatusIfWorse(Critical)
+		default:
+			reachability.updateStatusIfWorse(Degraded)
 		}
 
 		switch t.ConsistencyState {
@@ -263,6 +275,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			consistency.updateStatusIfWorse(Degraded)
 		case tgtBackend.ConsistencyBad:
 			consistency.updateStatusIfWorse(Critical)
+		default:
+			consistency.updateStatusIfWorse(Degraded)
 		}
 
 		switch t.CapacityPool {
@@ -272,6 +286,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			capacity.updateStatusIfWorse(Degraded)
 		case tgtBackend.CapacityEmergency:
 			capacity.updateStatusIfWorse(Critical)
+		default:
+			capacity.updateStatusIfWorse(Degraded)
 		}
 
 		if t.Node == nil {
@@ -282,17 +298,26 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 }
 
 // checkForBusyNodes returns the overall busy status across nodes, reflecting the node in the worst
-// condition.
-func checkForBusyNodes(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) Status {
-	busy := Healthy
+// condition, and a summary of the result. A node whose stats could not be read is critical. A node
+// that does not answer is likely not serving requests at all, which is worse than being busy.
+func checkForBusyNodes(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) (Status, string) {
+	queueStatus := Healthy
+	unreadable := 0
 	for _, node := range nodes {
-		if node.Stats.QueuedRequests > criticalThreshold {
-			busy.updateStatusIfWorse(Critical)
-		} else if node.Stats.QueuedRequests > degradedThreshold {
-			busy.updateStatusIfWorse(Degraded)
+		switch {
+		case node.Err != nil:
+			unreadable++
+		case node.Stats.QueuedRequests > criticalThreshold:
+			queueStatus.updateStatusIfWorse(Critical)
+		case node.Stats.QueuedRequests > degradedThreshold:
+			queueStatus.updateStatusIfWorse(Degraded)
 		}
 	}
-	return busy
+	busy := queueStatus
+	if unreadable > 0 {
+		busy.updateStatusIfWorse(Critical)
+	}
+	return busy, busySummary(queueStatus, unreadable, len(nodes), degradedThreshold, criticalThreshold)
 }
 
 // CheckTLSCertificates checks the TLS certificates presented by a peer service and returns a health

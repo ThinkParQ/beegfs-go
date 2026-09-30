@@ -39,7 +39,7 @@ If there are multiple BeeGFS mount points, connections will be displayed for eac
 BeeGFS clients establish connections on demand, and periodically drop idle connections.
 Thus the lack of connections (<none>) to a particular server does not indicate any issues.
 By default this command will first use "df" to force the client module to establish connections to storage nodes.
-This can cause the command to block if any storage nodes are unreachable (use --skip-df if needed).
+This can cause the command to block if any storage nodes are unreachable (use --force-connections=false if needed).
 		`,
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
