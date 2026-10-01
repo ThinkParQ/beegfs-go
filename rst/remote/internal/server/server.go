@@ -127,6 +127,12 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 			status = beeremote.SubmitJobResponse_FAILED_PRECONDITION
 		} else if errors.Is(err, rst.ErrJobNotAllowed) {
 			status = beeremote.SubmitJobResponse_NOT_ALLOWED
+		} else if errors.Is(err, rst.ErrReservationMissing) {
+			// Checked before ErrJobNotReserved, which it unwraps to, so a missing reservation is not
+			// reported as one that exists and cannot be claimed. Neither is retried by the caller.
+			status = beeremote.SubmitJobResponse_RESERVATION_MISSING
+		} else if errors.Is(err, rst.ErrJobNotReserved) {
+			status = beeremote.SubmitJobResponse_NOT_RESERVED
 		} else {
 			return nil, err
 		}

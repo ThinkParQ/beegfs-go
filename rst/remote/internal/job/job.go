@@ -67,9 +67,141 @@ func (j *Job) InTerminalState() bool {
 	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_OFFLOADED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
 }
 
+// InReservedState returns true when the job has been reserved but not scheduled.
+func (j *Job) InReservedState() bool {
+	return j.GetStatus().GetState() == beeremote.Job_RESERVED
+}
+
 // InActiveState() returns true if the job is active and not in a failed or terminal state.
 func (j *Job) InActiveState() bool {
 	return j.GetStatus().GetState() == beeremote.Job_SCHEDULED || j.GetStatus().GetState() == beeremote.Job_RUNNING
+}
+
+// IsReadOnly reports whether the job leaves the BeeGFS file at the job's path untouched.
+// Unrecognized request types are treated as a write to be safe.
+func (j *Job) IsReadOnly() bool {
+	request := j.GetRequest()
+
+	var cfg *flex.JobRequestCfg
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		cfg = &flex.JobRequestCfg{
+			Download:  request.GetSync().GetOperation() == flex.SyncJob_DOWNLOAD,
+			StubLocal: request.StubLocal,
+		}
+	case beeremote.JobRequest_Builder_case:
+		cfg = request.GetBuilder().GetCfg()
+	case beeremote.JobRequest_Mock_case:
+		cfg = request.GetMock().GetCfg()
+	}
+
+	return cfg != nil && !(cfg.GetDownload() || cfg.GetStubLocal())
+}
+
+// effectiveRST returns the remote storage target the job moves data to or from.
+func (j *Job) effectiveRST() uint32 {
+	request := j.GetRequest()
+	if request.HasBuilder() {
+		return request.GetBuilder().GetCfg().GetRemoteStorageTarget()
+	}
+	return request.GetRemoteStorageTarget()
+}
+
+// remotePath returns the remote path regardless of the job type.
+func (j *Job) remotePath() string {
+	request := j.GetRequest()
+	switch request.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return request.GetBuilder().GetCfg().RemotePath
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetRemotePath()
+	case beeremote.JobRequest_Mock_case:
+		return request.GetMock().GetCfg().GetRemotePath()
+	default:
+		return ""
+	}
+}
+
+// ConflictsWith reports whether existingJob prevents job from starting. This assumes both jobs are
+// for the same path and existingJob is not in a terminal state.
+func (j *Job) ConflictsWith(existingJob *Job) bool {
+	existingRequest := existingJob.GetRequest()
+	request := j.GetRequest()
+	if request.Path != existingRequest.Path {
+		return false
+	}
+
+	// A builder job does not take the access lock for it's own path and also does not perform
+	// and writes to it. So a builder job must conflict with existing builder jobs.
+	if existingRequest.HasBuilder() {
+		// A running builder must not block other job types on its path. The requests it produces
+		// may write to that path. For example, a download of a file that does not exist locally yet
+		// targets the builder's own path, because the builder cannot tell yet whether the path is a
+		// key or a prefix.
+		return request.HasBuilder()
+	}
+
+	// Any job that modifies the file must conflict with all other jobs. Whereas, read-only
+	// operations can safely co-exist.
+	if !j.IsReadOnly() || !existingJob.IsReadOnly() {
+		return true
+	}
+
+	return existingJob.effectiveRST() == j.effectiveRST()
+}
+
+type selectedConflict struct {
+	job         *Job
+	isReserved  bool // is the job in the reserved state
+	isActive    bool // true means active, false means blocking
+	jobsMatch   bool
+	rstIdsMatch bool
+}
+
+// selectConflict returns details about the conflicting job if any. The returned conflicting job
+// will be selected from the same remote target first. This assumes the job and all conflictingJobs
+// are for the same path.
+func (j *Job) selectConflict(conflictingJobs []*Job) *selectedConflict {
+	var sameTarget, otherTarget *selectedConflict
+
+	for _, existing := range conflictingJobs {
+		isActive := false
+		switch existing.GetStatus().GetState() {
+		case beeremote.Job_COMPLETED, beeremote.Job_OFFLOADED, beeremote.Job_CANCELLED:
+			continue
+		case beeremote.Job_UNASSIGNED, beeremote.Job_RESERVED, beeremote.Job_SCHEDULED, beeremote.Job_RUNNING, beeremote.Job_ERROR:
+			isActive = true
+		}
+		rstIdsMatch := existing.effectiveRST() == j.effectiveRST()
+		remotePathsMatch := existing.remotePath() == j.remotePath()
+
+		conflictingJob := &selectedConflict{
+			job:         existing,
+			isReserved:  existing.InReservedState(),
+			isActive:    isActive,
+			rstIdsMatch: rstIdsMatch,
+			jobsMatch:   rstIdsMatch && remotePathsMatch,
+		}
+		if conflictingJob.jobsMatch {
+			return conflictingJob
+		}
+
+		if conflictingJob.rstIdsMatch {
+			if sameTarget == nil || (!sameTarget.isActive && conflictingJob.isActive) {
+				sameTarget = conflictingJob
+			}
+		} else if otherTarget == nil || (!otherTarget.isActive && conflictingJob.isActive) {
+			otherTarget = conflictingJob
+		}
+	}
+
+	if sameTarget != nil {
+		return sameTarget
+	}
+	if otherTarget != nil {
+		return otherTarget
+	}
+	return nil
 }
 
 // GenerateSubmission creates a JobSubmission containing one or more work requests that can be
@@ -134,7 +266,6 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 // largely just a wrapper around the rst.Client CompleteRequests method to handle converting between
 // data types used by the Job and the RST packages.
 func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) error {
-
 	workResults := make([]*flex.Work, 0, len(j.WorkResults))
 	for _, r := range j.WorkResults {
 		workResults = append(workResults, r.WorkResult)
@@ -163,15 +294,16 @@ func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 		jobRequest.SetPath("/" + jobRequest.GetPath())
 	}
 
+	timestamp := timestamppb.Now()
 	newJob := &Job{
 		Job: beeremote.Job_builder{
 			Id:      fmt.Sprint(jobID),
 			Request: jobRequest,
-			Created: timestamppb.Now(),
+			Created: timestamp,
 			Status: beeremote.Job_Status_builder{
 				State:   beeremote.Job_UNASSIGNED,
 				Message: "created",
-				Updated: timestamppb.Now(),
+				Updated: timestamp,
 			}.Build(),
 		}.Build(),
 		WorkResults: make(map[string]worker.WorkResult),

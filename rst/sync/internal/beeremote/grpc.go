@@ -135,7 +135,17 @@ func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobR
 		return rst.ErrJobNotAllowed
 	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
 		return rst.ErrJobFailedPrecondition
+	case beeremote.SubmitJobResponse_NOT_RESERVED:
+		return rst.ErrJobNotReserved
+	case beeremote.SubmitJobResponse_RESERVATION_MISSING:
+		return rst.ErrReservationMissing
 	}
 
+	// A job request remote accepted always names the job that now owns it. Remote reporting no job
+	// means the request is neither refused nor running, so report it rather than letting the
+	// builder count it as submitted.
+	if resp.GetResult().GetJob() == nil {
+		return fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
+	}
 	return nil
 }

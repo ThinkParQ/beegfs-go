@@ -16,6 +16,7 @@ import (
 
 	smithytime "github.com/aws/smithy-go/time"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -79,6 +80,7 @@ const (
 	reasonFileInUse          dispatchReason = "file_in_use"
 	reasonAlreadyHandled     dispatchReason = "already_handled"
 	reasonBlockedByFailedJob dispatchReason = "blocked_by_failed_job"
+	reasonBlockedByActiveJob dispatchReason = "blocked_by_active_job"
 	// Shared / generic reasons. path_not_exists is recorded both when the file is already gone at
 	// dispatch time (LAST_WRITER_CLOSED) and when it is deleted before the deferred upload runs.
 	reasonPathNotExists dispatchReason = "path_not_exists"
@@ -580,31 +582,60 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		}
 	}()
 
+	var reservedJobId string
+	if jr.HasReserveJobId() {
+		jobId, err := uuid.Parse(jr.GetReserveJobId())
+		if err != nil {
+			return nil, fmt.Errorf("unable to claim reserved job: %w", err)
+		}
+		reservedJobId = fmt.Sprint(jobId)
+	}
+
+	if !jr.GetReserve() && jr.HasReserveJobId() {
+		reserved, ok := pathEntry.Value[reservedJobId]
+		if !ok {
+			// Distinct from the state check below only so the message says there is no record. Both
+			// are final, because a missing ID may belong to a job that was cancelled and deleted.
+			return nil, fmt.Errorf("%w: no job %s exists for path %s", rst.ErrReservationMissing, reservedJobId, jr.GetPath())
+		} else if !reserved.InReservedState() {
+			return nil, fmt.Errorf("%w: job %s for path %s is %s", rst.ErrJobNotReserved, reservedJobId, jr.GetPath(), reserved.GetStatus().GetState())
+		} else if reserved.Request.GetRemoteStorageTarget() != jr.GetRemoteStorageTarget() {
+			return nil, fmt.Errorf("rejecting claim of job %s because it is reserved for RST %d but the claim is for RST %d (this is probably a bug)", reservedJobId, reserved.Request.GetRemoteStorageTarget(), jr.GetRemoteStorageTarget())
+		}
+		job = reserved
+		job.Request = jr
+		job.Segments = nil
+	}
+
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
 	// that are idempotent it is used to check if the current request is needed. Note this is NOT
 	// set if there is a conflictingJob.
 	var lastJob *Job
 	if len(pathEntry.Value) != 0 {
 
-		// Set if we can't start a new job due to a conflict.
-		var conflictingJob *Job
 		// Add jobs in a terminal state to a map based on their RST ID.
 		// We limit the number of historical jobs kept for each RST.
 		terminalJobsByRST := make(map[uint32][]*Job, 0)
 
+		var conflictingJobs []*Job
 		for _, existingJob := range pathEntry.Value {
-			if existingJob.Request.GetRemoteStorageTarget() == job.Request.GetRemoteStorageTarget() && !existingJob.InTerminalState() {
-				// We found an active job for this RST. We shouldn't try to start a new job but we also shouldn't clean up the active job.
-				conflictingJob = existingJob
-			} else if existingJob.InTerminalState() {
-				// Found a job in a terminal state, add it to the list to check if it should be cleaned up:
+			if existingJob == job {
+				// Ignore reserved jobs that are being claimed and submitted.
+				continue
+			}
+
+			if existingJob.InTerminalState() {
+				// Found a job in a terminal state, add it to the list to check if it should be cleaned up.
 				terminalJobsByRST[existingJob.Request.GetRemoteStorageTarget()] = append(terminalJobsByRST[existingJob.Request.GetRemoteStorageTarget()], existingJob)
-			} else if existingJob.Job.GetId() == job.Id {
+			} else if job.ConflictsWith(existingJob) {
+				conflictingJobs = append(conflictingJobs, existingJob)
+			}
+
+			if existingJob.Job.GetId() == job.GetId() {
 				// We use a randomly generated UUID as the job ID. A collision is highly unlikely so
 				// most likely something changed and we have a bug somewhere.
 				return nil, fmt.Errorf("rejecting job request because the generated job ID (%s) is the same as a existing job ID (%s) (probably there is a bug somewhere)", job.Id, existingJob.Job.GetId())
 			}
-			// Otherwise we found a job for a different RST not in a terminal state. Don't touch it.
 		}
 
 		for rst, jobsForRST := range terminalJobsByRST {
@@ -640,27 +671,67 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}
 		}
 
-		if conflictingJob != nil {
-			// When job creation was forced, return an error if there is a conflictingJob.
-			if job.GetRequest().GetForce() {
-				return nil, fmt.Errorf("rejecting forced job request because the specified path entry %s already has an active job for RST %d (cancel or wait for it to complete first)", job.Request.GetPath(), job.Request.GetRemoteStorageTarget())
-			}
-			// Otherwise depending on the state return the conflictingJob along with a specific error.
-			var err error
-			if conflictingJob.InActiveState() {
-				m.log.Debug("an equivalent active job already exists for the requested job, returning that job instead of creating a new one", zap.Any("conflictingJob", conflictingJob))
-				err = rst.ErrJobAlreadyExists
-			} else {
-				m.log.Debug("an equivalent failed job already exists for the requested job, returning that job instead of creating a new one", zap.Any("conflictingJob", conflictingJob))
-				err = rst.ErrJobNotAllowed
-			}
-			return beeremote.JobResult_builder{
-				Job:          conflictingJob.Get(),
-				WorkRequests: rst.RecreateWorkRequests(conflictingJob.Get(), conflictingJob.GetSegments()),
-				WorkResults:  getProtoWorkResults(conflictingJob.WorkResults),
-			}.Build(), err
-		}
+		var conflictErr error
+		conflict := job.selectConflict(conflictingJobs)
+		if conflict != nil {
 
+			if conflict.isReserved {
+				if conflict.rstIdsMatch {
+					m.log.Debug("a reserved job for this RST is blocking the request, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+					return &beeremote.JobResult{Job: conflict.job.Get()}, rst.ErrJobNotAllowed
+				}
+				m.log.Debug("a reserved job for another RST is blocking the request, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+				return &beeremote.JobResult{Job: conflict.job.Get()}, rst.ErrJobBlockedByActiveJob
+			} else if conflict.jobsMatch {
+				if conflict.isActive {
+					request := job.GetRequest()
+					// Force asks for a new transfer. Reporting the active job as already existing
+					// would hide that no new transfer started, so refuse the request instead.
+					if request.GetForce() {
+						m.log.Debug("rejecting forced job request because an equivalent active job already exists", zap.Any("conflictingJob", conflict.job))
+						conflictErr = fmt.Errorf("%w: a job for RST %d is already active for %s (cancel or wait for it to complete first)", rst.ErrJobNotAllowed, conflict.job.effectiveRST(), request.GetPath())
+					} else {
+						m.log.Debug("an equivalent active job already exists for the requested job, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+						conflictErr = rst.ErrJobAlreadyExists
+					}
+				} else {
+					m.log.Debug("an equivalent inactive job already exists for the requested job, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+					conflictErr = rst.ErrJobNotAllowed
+				}
+			} else {
+				conflictErr = rst.ErrJobNotAllowed
+				if conflict.rstIdsMatch {
+					if conflict.isActive {
+						m.log.Debug("an active job for this RST is blocking the requested path, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+						conflictErr = rst.ErrJobBlockedByActiveJob
+					} else {
+						m.log.Debug("an inactive job for this RST is blocking the requested path, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+					}
+				} else if conflict.isActive {
+					m.log.Debug("an active job for another RST is blocking the requested path, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+					conflictErr = rst.ErrJobBlockedByActiveJob
+				} else {
+					m.log.Debug("an inactive job for another RST is blocking the requested path, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
+				}
+			}
+
+			return beeremote.JobResult_builder{
+				Job:          conflict.job.Get(),
+				WorkRequests: rst.RecreateWorkRequests(conflict.job.Get(), conflict.job.GetSegments()),
+				WorkResults:  getProtoWorkResults(conflict.job.WorkResults),
+			}.Build(), conflictErr
+		}
+	}
+
+	if jr.GetReserve() {
+		if !jr.HasReserveJobId() {
+			return nil, fmt.Errorf("unable to reserve job from job request: reserveJobId must be specified")
+		}
+		job.Job.SetId(reservedJobId)
+		job.Job.GetStatus().SetState(beeremote.Job_RESERVED)
+		job.Job.GetStatus().SetMessage("reserved")
+		pathEntry.Value[reservedJobId] = job
+		return &beeremote.JobResult{Job: job.Get()}, nil
 	}
 
 	var rstClient rst.Provider
@@ -975,7 +1046,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	// potentially be made into a standalone function if it ever needs to be reused elsewhere.
 	applyUpdate := func(job *Job) {
 		// Attempt to apply the requested update.
-		success, safeToDelete, newMessage := m.updateJobState(job, jobUpdate.GetNewState(), jobUpdate.GetForceUpdate())
+		success, safeToDelete, newMessage := m.updateJobState(job, jobUpdate.GetNewState(), jobUpdate.GetForceUpdate(), false)
 		// If anything goes wrong the overall response should be !ok. If the response is already !ok
 		// from some other job, don't overwrite it:
 		response.SetOk(success && response.GetOk())
@@ -1089,7 +1160,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 // IMPORTANT: This should only be used when the state of a job's work requests need to be modified
 // on the assigned worker nodes. To update the job state in reaction to job results returned by a
 // worker node use updateJobResults().
-func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool) (success bool, safeToDelete bool, message string) {
+func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_NewState, forceUpdate bool, releaseReservation bool) (success bool, safeToDelete bool, message string) {
 	status := job.GetStatus()
 	state := status.GetState()
 	initialState := state
@@ -1136,6 +1207,18 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if state == beeremote.Job_CANCELLED && !forceUpdate {
 			return true, true, fmt.Sprintf("ignoring update for already cancelled job ID %s (use the force update flag to attempt anyway)", job.GetId())
 		}
+		if state == beeremote.Job_RESERVED {
+			if !forceUpdate && !releaseReservation {
+				return true, false, fmt.Sprintf("rejecting cancel for reserved job ID %s (use the force update flag to attempt anyway)", job.GetId())
+			}
+			// A reserved job has no work requests and the RST has not touched the file. There is
+			// nothing to stop on worker nodes and nothing to roll back, whoever asked.
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("reservation cancelled before it was claimed")
+			status.SetUpdated(timestamppb.Now())
+			return true, true, ""
+		}
+
 		// When returning ensure the timestamp on the job state is updated.
 		defer func() {
 			status.SetUpdated(timestamppb.Now())
@@ -1156,9 +1239,8 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 					status.SetState(beeremote.Job_UNKNOWN)
 					status.SetMessage("unable to cancel job: unable to confirm work request(s) are no longer running on worker nodes (review work results for details and try again later)")
 					return false, false, ""
-				} else {
-					status.SetMessage("canceling job: unable to confirm work request(s) are no longer running on worker nodes (cancelling anyway because this is a forced update)")
 				}
+				status.SetMessage("canceling job: unable to confirm work request(s) are no longer running on worker nodes (cancelling anyway because this is a forced update)")
 			} else {
 				status.SetState(beeremote.Job_CANCELLED)
 				status.SetMessage("verified work requests are cancelled on all worker nodes")
@@ -1434,18 +1516,21 @@ func (m *Manager) recordJobTerminal(job *Job, terminalState string) {
 	}
 }
 
-// isTerminalState reports whether state is a terminal job state for metrics and
-// logging purposes. This is broader than Job.InTerminalState(), which covers
-// only COMPLETED, OFFLOADED, and CANCELLED — the "clean" states where a job
-// can be deleted without orphaned requests. FAILED and UNKNOWN are terminal
-// here because no further work is running, but they require user intervention
-// before deletion.
+// isTerminalState reports whether state is a terminal job state for metrics and logging purposes.
+// This is broader than Job.InTerminalState(), which covers only COMPLETED, OFFLOADED, and CANCELLED
+// — the "clean" states where a job can be deleted without orphaned requests. FAILED and UNKNOWN are
+// terminal here because no further work is running, but they require user intervention before
+// deletion.
+//
+// RESERVED is also counted because it has not been in an active state yet and has not been counted
+// as a job.
 func isTerminalState(state beeremote.Job_State) bool {
 	switch state {
 	case beeremote.Job_COMPLETED,
 		beeremote.Job_CANCELLED,
 		beeremote.Job_FAILED,
 		beeremote.Job_OFFLOADED,
+		beeremote.Job_RESERVED,
 		beeremote.Job_UNKNOWN:
 		return true
 	}
