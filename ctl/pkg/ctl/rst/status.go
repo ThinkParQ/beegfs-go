@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"sort"
 	"strconv"
@@ -45,8 +44,46 @@ type GetStatusCfg struct {
 type GetStatusResult struct {
 	Path       string
 	SyncStatus PathStatus
-	SyncReason string
-	Warning    bool
+	// UnsyncedCause says why an Unsynchronized path is out of sync. It is UnsyncedNone for
+	// every other status. It is also UnsyncedNone when the status is verified against the
+	// remote targets, because that mode does not read jobs.
+	UnsyncedCause UnsyncedCause
+	SyncReason    string
+	Warning       bool
+}
+
+// UnsyncedCause splits Unsynchronized paths by what the user has to do about them. The cause is
+// decided from the most recent job for each target the path is out of sync with.
+type UnsyncedCause int
+
+const (
+	UnsyncedNone UnsyncedCause = iota
+	UnsyncedStale
+	// UnsyncedInProgress means every unsynchronized target has an active job.
+	UnsyncedInProgress
+	// UnsyncedNeedsAttention means at least one target's job has a message that needs attention.
+	// Usually means the job is failed or has been cancelled. The job's status message is in
+	// SyncReason.
+	UnsyncedNeedsAttention
+)
+
+func (c UnsyncedCause) String() string {
+	switch c {
+	case UnsyncedNone:
+		return "none"
+	case UnsyncedStale:
+		return "stale"
+	case UnsyncedInProgress:
+		return "in-progress"
+	case UnsyncedNeedsAttention:
+		return "needs-attention"
+	default:
+		return "unknown(" + strconv.Itoa(int(c)) + ")"
+	}
+}
+
+func (c UnsyncedCause) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.String())
 }
 
 type PathStatus int
@@ -417,9 +454,9 @@ func worker(
 	}
 }
 
-// getPathStatusFromTarget retrieves the lockedInfo for the path from GetLockedInfo(). The
-// lockedInfo is compared with the remote size and mtime from the remote storage target(s) for sync
-// statuses.
+// getPathStatusFromTarget retrieves the lockedInfo for the path from GetPathState without the
+// acquiring the file access lock. The lockedInfo is compared with the remote size and mtime from
+// the remote storage target(s) for sync statuses.
 func getPathStatusFromTarget(
 	ctx context.Context,
 	cfg GetStatusCfg,
@@ -427,70 +464,95 @@ func getPathStatusFromTarget(
 	rstMap map[uint32]rst.Provider,
 	fsPath string,
 ) (*GetStatusResult, error) {
-	// Default to any specified targets specified in cfg otherwise attempt to use rstIds returned
-	// from GetLockedInfo.
-	lockedInfoResult, err := rst.GetPathState(ctx, mountPoint, fsPath, rst.PathStateNoLock)
-	lockedInfo := lockedInfoResult.LockedInfo
-	rstIds := lockedInfoResult.RstCfg.RSTIDs
+	pathState, err := rst.GetPathState(ctx, mountPoint, fsPath, rst.PathStateNoLock)
+	return pathStatusFromState(ctx, cfg, mountPoint, rstMap, fsPath, pathState, err)
+}
+
+// pathStatusFromState decides the sync status for fsPath from the state GetPathState collected.
+func pathStatusFromState(
+	ctx context.Context,
+	cfg GetStatusCfg,
+	mountPoint filesystem.Provider,
+	rstMap map[uint32]rst.Provider,
+	fsPath string,
+	pathState rst.PathState,
+	stateErr error,
+) (*GetStatusResult, error) {
+	lockedInfo := pathState.LockedInfo
+	rstIds := pathState.RstCfg.RSTIDs
 	if len(cfg.RemoteTargets) != 0 {
 		rstIds = cfg.RemoteTargets
 	}
 
-	// GetLockedInfo returns any known information along with the defaults. So, if lockedInfo.Mode
-	// is non-zero then it is valid to check the file type and is safe to do so before checking the
-	// GetLockedInfo error.
-	fileMode := fs.FileMode(lockedInfo.Mode)
-	if fileMode.IsDir() {
+	if stateErr != nil && !errors.Is(stateErr, rst.ErrOffloadFileNotReadable) {
+		return nil, fmt.Errorf("unable to get file info: %w", stateErr)
+	}
+
+	if !rst.FileExists(lockedInfo) {
+		return nil, fmt.Errorf("file does not exist (probably a bug)")
+	}
+
+	if pathState.IsDir() {
 		return &GetStatusResult{
 			Path:       fsPath,
 			SyncStatus: Directory,
 			SyncReason: "Synchronization state must be checked on individual files.",
 		}, nil
-	} else if !fileMode.IsRegular() {
+	} else if !pathState.IsRegular() {
 		return &GetStatusResult{
 			Path:       fsPath,
 			SyncStatus: NotSupported,
-			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry mode: %s).", filesystem.FileTypeToString(fileMode)),
+			SyncReason: fmt.Sprintf("Only regular files are currently supported (entry type: %s).", pathState.EntryType().String()),
 		}, nil
-	} else if err != nil {
-		if len(rstIds) == 0 {
-			return &GetStatusResult{
-				Path:       fsPath,
-				SyncStatus: NoTargets,
-				SyncReason: "No remote targets were specified or configured on this entry.",
-			}, nil
-		} else if errors.Is(err, rst.ErrOffloadFileNotReadable) {
-			// File is offloaded and clients cannot read stub files so request its contents
-			// from remote and update lockedInfo.
-			inMountPath, err := mountPoint.GetRelativePathWithinMount(fsPath)
-			if err != nil {
-				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
-			}
-			resp, err := GetStubContents(ctx, inMountPath)
-			if err != nil {
-				if st, ok := status.FromError(err); ok {
-					switch st.Code() {
-					case codes.Unimplemented:
-						result := &GetStatusResult{Path: fsPath, SyncStatus: Offloaded, Warning: true}
-						syncReason := strings.Builder{}
-						for _, tgt := range rstIds {
-							syncReason.WriteString(fmt.Sprintf("Target %d: unable to verify the file is correctly offloaded as the remote service is missing a required rpc (please update your remote service to at least the same version as ctl)\n", tgt))
-						}
-						result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
-						return result, nil
-					}
-				}
-				return nil, fmt.Errorf("unable to determine stub file target: %w", err)
-			}
-			lockedInfo.SetStubUrlRstId(*resp.RstId)
-			lockedInfo.SetStubUrlPath(*resp.Url)
-		} else if !errors.Is(err, rst.ErrFileHasNoRSTs) {
-			// Ignore ErrFileHasNoRSTs since rstIds has already been checked. The rstIds returned
-			// from GetLockedInfo does not account for cfg.RemoteTargets.
-			return nil, fmt.Errorf("unable to get file info: %w", err)
+	} else if len(rstIds) == 0 {
+		return &GetStatusResult{
+			Path:       fsPath,
+			SyncStatus: NoTargets,
+			SyncReason: "No remote targets were specified or configured on this entry.",
+		}, nil
+	} else if errors.Is(stateErr, rst.ErrOffloadFileNotReadable) {
+		// File is offloaded and clients cannot read stub files so request its contents from remote
+		// and update lockedInfo.
+		inMountPath, err := mountPoint.GetRelativePathWithinMount(fsPath)
+		if err != nil {
+			return nil, fmt.Errorf("unable to determine stub file target: %w", err)
 		}
-	} else if !rst.FileExists(lockedInfo) {
-		return nil, fmt.Errorf("file does not exist (probably a bug)")
+		resp, err := GetStubContents(ctx, inMountPath)
+		if err != nil {
+			if st, ok := status.FromError(err); ok {
+				switch st.Code() {
+				case codes.Unimplemented:
+					result := &GetStatusResult{Path: fsPath, SyncStatus: Offloaded, Warning: true}
+					syncReason := strings.Builder{}
+					for _, tgt := range rstIds {
+						fmt.Fprintf(&syncReason, "Target %d: unable to verify the file is correctly offloaded as the remote service is missing a required rpc (please update your remote service to at least the same version as ctl)\n", tgt)
+					}
+					result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
+					return result, nil
+				}
+			}
+			return nil, fmt.Errorf("unable to determine stub file target: %w", err)
+		}
+		lockedInfo.SetStubUrlRstId(*resp.RstId)
+		lockedInfo.SetStubUrlPath(*resp.Url)
+	}
+
+	// An offloaded file has no contents in BeeGFS to compare against the remote, so report where
+	// the contents live and skip the size and mtime checks.
+	if rst.IsFileOffloaded(lockedInfo) {
+		syncReason := strings.Builder{}
+		for _, tgt := range rstIds {
+			if tgt == lockedInfo.GetStubUrlRstId() {
+				fmt.Fprintf(&syncReason, "Target %d: File contents are offloaded to this target.\n", tgt)
+			} else {
+				fmt.Fprintf(&syncReason, "Target %d: File contents are not offloaded to this target.\n", tgt)
+			}
+		}
+		return &GetStatusResult{
+			Path:       fsPath,
+			SyncStatus: Offloaded,
+			SyncReason: strings.TrimRight(syncReason.String(), "\n"),
+		}, nil
 	}
 
 	syncReason := strings.Builder{}
@@ -498,24 +560,14 @@ func getPathStatusFromTarget(
 	for _, tgt := range rstIds {
 		client, ok := rstMap[tgt]
 		if !ok {
-			return nil, fmt.Errorf("unable to get client for remote target id %d: %w", tgt, err)
-		}
-
-		if rst.IsFileOffloaded(lockedInfo) {
-			result.SyncStatus = Offloaded
-			if tgt == lockedInfo.GetStubUrlRstId() {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
-			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File contents are not offloaded to this target.\n", tgt))
-			}
-			continue
+			return nil, fmt.Errorf("unable to get client for remote target id %d", tgt)
 		}
 
 		remoteSize, remoteMtime, _, _, err := client.GetRemotePathInfo(ctx, &flex.JobRequestCfg{Path: fsPath, RemotePath: client.SanitizeRemotePath(fsPath)})
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				result.SyncStatus = NotAttempted
-				syncReason.WriteString(fmt.Sprintf("Target %d: Path has not been synchronized with this targets yet.\n", tgt))
+				fmt.Fprintf(&syncReason, "Target %d: Path has not been synchronized with this targets yet.\n", tgt)
 				continue
 			}
 			return nil, fmt.Errorf("unable to get remote resource info: %w", err)
@@ -524,10 +576,10 @@ func getPathStatusFromTarget(
 		lockedInfo.SetRemoteMtime(timestamppb.New(remoteMtime))
 
 		if rst.IsFileAlreadySynced(lockedInfo) {
-			syncReason.WriteString(fmt.Sprintf("Target %d: File is synced based on the remote storage target.\n", tgt))
+			fmt.Fprintf(&syncReason, "Target %d: File is synced based on the remote storage target.\n", tgt)
 		} else {
 			result.SyncStatus = Unsynchronized
-			syncReason.WriteString(fmt.Sprintf("Target %d: File is not synced with remote storage target.\n", tgt))
+			fmt.Fprintf(&syncReason, "Target %d: File is not synced with remote storage target.\n", tgt)
 		}
 	}
 
@@ -641,49 +693,119 @@ func getPathStatusFromDatabase(
 		}
 	}
 
-	// Lastly assemble the results for each of the requested targets:
+	// Lastly assemble the results for each of the requested targets. Each target only adds to the
+	// counts here, so the outcome does not depend on the order the map is walked in.
+	// statusFromTargetCounts decides the path's status and cause from the counts.
 	syncReason := strings.Builder{}
-	result := &GetStatusResult{Path: fsPath, SyncStatus: Synchronized}
+	var counts targetCounts
 	for tgt, jobResult := range remoteTargets {
 		job := jobResult.GetJob()
 		state := job.GetStatus().GetState()
 
 		if job == nil {
-			result.SyncStatus = Unsynchronized
-			syncReason.WriteString(fmt.Sprintf("Target %d: Path has no jobs for this target.\n", tgt))
+			counts.unsynced++
+			fmt.Fprintf(&syncReason, "Target %d: Path has no jobs for this target.\n", tgt)
 		} else if state == beeremote.Job_OFFLOADED {
-			result.SyncStatus = Offloaded
-			syncReason.WriteString(fmt.Sprintf("Target %d: File contents are offloaded to this target.\n", tgt))
-		} else if state != beeremote.Job_COMPLETED {
-			result.SyncStatus = Unsynchronized
+			counts.offloaded++
+			fmt.Fprintf(&syncReason, "Target %d: File contents are offloaded to this target.\n", tgt)
+		} else if isJobInProgress(state) {
+			counts.unsynced++
+			counts.unsyncedInProgress++
 			if cfg.Debug {
-				syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job %s is not completed (state: %s).\n", tgt, job.GetId(), state))
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job %s is still in progress (state: %s).\n", tgt, job.GetId(), state)
 			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: Most recent job is not completed.\n", tgt))
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job is still in progress.\n", tgt)
+			}
+		} else if isJobNeedsAttention(state) {
+			counts.unsynced++
+			counts.unsyncedNeedsAttention++
+			// The status message is where remote explains the state, for example that a failed
+			// transfer was cancelled. It is part of the job, so showing it costs no extra request.
+			message := job.GetStatus().GetMessage()
+			if message == "" {
+				message = "no status message."
+			}
+			if cfg.Debug {
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job %s needs attention (state: %s): %s\n", tgt, job.GetId(), state, message)
+			} else {
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job needs attention (state: %s): %s\n", tgt, state, message)
+			}
+		} else if state != beeremote.Job_COMPLETED {
+			// Only UNSPECIFIED, or a state this version of ctl does not know, reaches here.
+			counts.unsynced++
+			if cfg.Debug {
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job %s is not completed (state: %s).\n", tgt, job.GetId(), state)
+			} else {
+				fmt.Fprintf(&syncReason, "Target %d: Most recent job is not completed.\n", tgt)
 			}
 		} else if !lStat.ModTime().Equal(job.GetStopMtime().AsTime()) {
-			result.SyncStatus = Unsynchronized
+			counts.unsynced++
 			if cfg.Debug {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File has been modified since the most recent job (file mtime %s / job %s mtime %s).\n",
-					tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339)))
+				fmt.Fprintf(&syncReason, "Target %d: File has been modified since the most recent job (file mtime %s / job %s mtime %s).\n",
+					tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339))
 			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File has been modified since the most recent job.\n", tgt))
+				fmt.Fprintf(&syncReason, "Target %d: File has been modified since the most recent job.\n", tgt)
 			}
 		} else {
-			// Don't update SyncStatus here to ensure if a path is not synchronized with all
-			// targets it is always marked unsynchronized.
+			// Nothing is counted for a target that is in sync. The path is only synchronized when no
+			// target added to the other counts.
 			if cfg.Debug {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File is in sync based on the most recent job (file mtime %s / job %s mtime %s).\n",
-					tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339)))
+				fmt.Fprintf(&syncReason, "Target %d: File is in sync based on the most recent job (file mtime %s / job %s mtime %s).\n",
+					tgt, lStat.ModTime().Format(time.RFC3339), job.GetId(), job.GetStartMtime().AsTime().Format(time.RFC3339))
 			} else {
-				syncReason.WriteString(fmt.Sprintf("Target %d: File is in sync based on the most recent job.\n", tgt))
+				fmt.Fprintf(&syncReason, "Target %d: File is in sync based on the most recent job.\n", tgt)
 			}
 		}
 	}
+
+	result := &GetStatusResult{Path: fsPath}
+	result.SyncStatus, result.UnsyncedCause = statusFromTargetCounts(counts)
 
 	// Drop the final newline.
 	if syncReason.Len() != 0 {
 		result.SyncReason = strings.TrimRight(syncReason.String(), "\n")
 	}
 	return result, nil
+}
+
+type targetCounts struct {
+	offloaded              int
+	unsynced               int // includes unsyncedInProgress and unsyncedNeedsAttention
+	unsyncedInProgress     int
+	unsyncedNeedsAttention int
+}
+
+// statusFromTargetCounts decides the status of a path with cause if unsynchronized from counts.
+func statusFromTargetCounts(counts targetCounts) (PathStatus, UnsyncedCause) {
+	if counts.offloaded > 0 {
+		return Offloaded, UnsyncedNone
+	}
+	if counts.unsynced == 0 {
+		return Synchronized, UnsyncedNone
+	}
+	if counts.unsyncedNeedsAttention > 0 {
+		return Unsynchronized, UnsyncedNeedsAttention
+	}
+	if counts.unsyncedInProgress == counts.unsynced {
+		return Unsynchronized, UnsyncedInProgress
+	}
+	return Unsynchronized, UnsyncedStale
+}
+
+// isJobInProgress indicates a job is still in open and may result in synchronization.
+func isJobInProgress(state beeremote.Job_State) bool {
+	switch state {
+	case beeremote.Job_UNASSIGNED, beeremote.Job_RESERVED, beeremote.Job_SCHEDULED, beeremote.Job_RUNNING, beeremote.Job_ERROR:
+		return true
+	}
+	return false
+}
+
+// isJobNeedsAttention reports whether a job for a path needs attentions.
+func isJobNeedsAttention(state beeremote.Job_State) bool {
+	switch state {
+	case beeremote.Job_FAILED, beeremote.Job_UNKNOWN, beeremote.Job_CANCELLED:
+		return true
+	}
+	return false
 }
