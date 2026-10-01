@@ -77,7 +77,7 @@ func TestManage(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -243,7 +243,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -553,7 +553,7 @@ func TestManageErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -716,7 +716,7 @@ func TestUpdateJobResults(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -907,7 +907,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -1038,7 +1038,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -1303,7 +1303,7 @@ func TestUpdateJobStateDeferFiresOnTerminalTransition(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -1654,7 +1654,7 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 				MaxReconnectBackOff: 5,
 				MockConfig: worker.MockConfig{
 					Expectations: []worker.MockExpectation{
-						{MethodName: "connect", ReturnArgs: []any{false, nil}},
+						{MethodName: "connect", ReturnArgs: []any{nil}},
 						{
 							MethodName: "SubmitWork",
 							Args:       []any{mock.Anything},
@@ -1735,7 +1735,7 @@ func TestJobCounterMixedWorkResults(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -1789,7 +1789,7 @@ func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -1947,7 +1947,7 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -2046,7 +2046,7 @@ func TestJobCounterForceCancelUnknown(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "UpdateWork",
 					Args:       []any{mock.Anything},
@@ -2114,7 +2114,7 @@ func TestJobCounterGC(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2194,7 +2194,7 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2241,7 +2241,7 @@ func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -2385,7 +2385,7 @@ func scheduledWorkerConfigs() []worker.Config {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
