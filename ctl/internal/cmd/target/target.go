@@ -16,6 +16,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newSetAliasCmd())
 	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newSetStateCmd())
+	cmd.AddCommand(newResetRegistrationTokenCmd())
 
 	return cmd
 }
