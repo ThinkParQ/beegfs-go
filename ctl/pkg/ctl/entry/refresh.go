@@ -21,6 +21,11 @@ type RefreshEntryResult struct {
 
 func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan *RefreshEntryResult, func() error, error) {
 	log, _ := config.GetLogger()
+	// Resolve the mount before anything contacts the management node, so the path selects the
+	// filesystem. See ResolveMountFromFirstPath().
+	if err := paths.ResolveMountFromFirstPath(); err != nil {
+		return nil, nil, err
+	}
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("accessing the node store: %w", err)

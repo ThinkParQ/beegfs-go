@@ -563,10 +563,20 @@ func beeRemoteRegistryClient() (*registry.RegistryGetter, error) {
 //   - If BeeGFSMountPoint is set to "none", then all paths are considered relative to the BeeGFS root directory.
 //   - If BeeGFSMountPoint is NOT specified, users can only use relative paths when the cwd is somewhere in BeeGFS.
 //
+// IMPORTANT: A command that takes path arguments should call this before anything contacts the
+// management node, so path(s) specified as command arguments can automatically select the
+// filesystem. The management node is contacted by ManagementClient(), but callers often call it
+// indirectly using NodeStore(), BeeRemoteClient(), util.GetMappings(), etc.
+//
+// Without a resolved mount, --mgmtd-addr auto fails when several filesystems are mounted. A backend
+// that takes a util.PathInputMethod calls its ResolveMountFromFirstPath() method instead of this
+// function. When authoring or updating operations that use BeeGFSClient() make sure you call this
+// or ResolveMountFromFirstPath() before calling anything else that might contact the management.
+//
 // If ManagementClient() already ran, a resolved BeeGFS mount must belong to the filesystem that
-// management node serves. ManagementClient() could not check a mount it did not know about yet.
-// The check is as strict as ManagementClient()'s check of a mount, including the
-// --allow-unverified-mount escape hatch.
+// management node serves. ManagementClient() could not check a mount it did not know about yet. The
+// check is as strict as ManagementClient() check of a mount, including the --allow-unverified-mount
+// escape hatch if the user specified the mgmtd-addr manually.
 func BeeGFSClient(path string) (filesystem.Provider, error) {
 	if globalMount == nil {
 		var resolved filesystem.Provider
