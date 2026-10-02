@@ -74,23 +74,15 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return nil, err
+		// ManagementClient() contacts the management node when it checks an auto-configured
+		// address, so it can fail with the same TLS errors as GetFsUUID() below.
+		return nil, withTLSHint(err)
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)
 	// If the mgmtd is not available other checks cannot proceed and fail in confusing ways.
 	if err != nil {
-		// TLS errors are vague, offer some hints for common misconfigurations:
-		if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
-		}
-		if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
-		}
-		if strings.Contains(err.Error(), "failed to verify certificate") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
-		}
-		return nil, fmt.Errorf("unable to proceed without a working management node: %w", err)
+		return nil, withTLSHint(fmt.Errorf("unable to proceed without a working management node: %w", err))
 	}
 
 	report := &Report{
@@ -185,6 +177,22 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 
 	report.Status = report.worst()
 	return report, nil
+}
+
+// withTLSHint adds a hint to an error from contacting the management node when the error matches
+// a common TLS misconfiguration. The gRPC errors for these are vague. Other errors are returned
+// unchanged.
+func withTLSHint(err error) error {
+	if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
+		return fmt.Errorf("%w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
+	}
+	if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
+		return fmt.Errorf("%w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
+	}
+	if strings.Contains(err.Error(), "failed to verify certificate") {
+		return fmt.Errorf("%w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
+	}
+	return err
 }
 
 // healthyOr returns healthyMsg when s is Healthy and unhealthyMsg otherwise.

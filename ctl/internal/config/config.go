@@ -23,18 +23,24 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().Bool(config.RawKey, false, "Print raw values without SI or IEC prefixed units (except durations).")
 
-	cmd.PersistentFlags().String(config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, `The network address and gRPC port of the management node.
-	By default determined automatically when BeeGFS is mounted and all mount points are for the same file system.`)
+	cmd.PersistentFlags().String(config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, fmt.Sprintf(`The network address and gRPC port of the management node.
+	By default determined automatically from the BeeGFS mount points on this machine.
+	If more than one file system is mounted, specify --%s to select one.`, config.BeeGFSMountPointKey))
 
 	cmd.PersistentFlags().String(config.BeeRemoteAddrKey, "127.0.0.1:9010", "The gRPC network address and port of the BeeRemote node.")
 
 	cmd.PersistentFlags().String(config.BeeGFSMountPointKey, "auto", fmt.Sprintf(`Generally the path where BeeGFS is mounted is determined automatically from the provided path(s).
 	Both absolute and relative paths inside BeeGFS are supported (e.g., "./myfile" if the cwd is somewhere in BeeGFS or "/mnt/beegfs/myfile").
 	Optionally specify the absolute path where BeeGFS is mounted to also be able to use paths relative to the BeeGFS root directory.
+	This also selects the file system to manage: an automatic --%s is taken from that mount, and an explicit one must serve the same file system.
 	Alternatively set this option to %q if BeeGFS is not mounted locally or you want to interact with BeeGFS directly.
 	This will skip all local path resolution logic and require paths to be specified relative to the BeeGFS root directory.
 	Not all modes (such as migrate) and functionality (such as path recursion) is available using option %q.
-	Some modes require specifying %q, for example to interact with paths that no longer exist in BeeGFS.`, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
+	Some modes require specifying %q, for example to interact with paths that no longer exist in BeeGFS.`, config.ManagementAddrKey, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone, config.BeeGFSMountPointNone))
+
+	cmd.PersistentFlags().Bool(config.AllowUnverifiedMountKey, false, fmt.Sprintf(`Use a BeeGFS mount even when CTL cannot verify which file system it belongs to, for example where CTL cannot read /proc/fs/beegfs.
+	CTL then uses an explicit --%s without checking that it serves the file system of the mount. A mount of another file system is still an error.`, config.ManagementAddrKey))
+	cmd.PersistentFlags().MarkHidden(config.AllowUnverifiedMountKey)
 
 	cmd.PersistentFlags().Bool(config.DisableEmojisKey, false, "If emojis should be omitted throughout various output.")
 
