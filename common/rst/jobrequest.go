@@ -39,6 +39,11 @@ type JobResponse struct {
 // all outstanding goroutines will be immediately cancelled. In all cases the channel is closed once
 // there are no more responses to receive.
 func SubmitJobRequest(ctx context.Context, cfg *flex.JobRequestCfg, chanSize int) (<-chan *JobResponse, error) {
+	// Resolve the mount before BeeRemoteClient() contacts the management node, so the path selects
+	// the filesystem. prepareJobRequests() then gets the same mount.
+	if _, err := config.BeeGFSClient(cfg.Path); err != nil {
+		return nil, fmt.Errorf("unable to acquire BeeGFS client: %w", err)
+	}
 	remote, err := config.BeeRemoteClient()
 	if err != nil {
 		return nil, err

@@ -95,6 +95,12 @@ func SetEntries(ctx context.Context, pm util.PathInputMethod, cfg SetEntryCfg) (
 		return nil, nil, err
 	}
 
+	// Resolve the mount before anything contacts the management node, so the path selects the
+	// filesystem. See ResolveMountFromFirstPath().
+	if err := pm.ResolveMountFromFirstPath(); err != nil {
+		return nil, nil, err
+	}
+
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
 		if !errors.Is(err, util.ErrMappingRSTs) {

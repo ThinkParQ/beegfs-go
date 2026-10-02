@@ -277,6 +277,12 @@ func newVerbose(pathInfo msg.PathInfo, entry Entry, parent Entry) Verbose {
 func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg) (<-chan *GetEntryCombinedInfo, func() error, error) {
 	log, _ := config.GetLogger()
 
+	// Resolve the mount before anything contacts the management node, so the path selects the
+	// filesystem. See ResolveMountFromFirstPath().
+	if err := pm.ResolveMountFromFirstPath(); err != nil {
+		return nil, nil, err
+	}
+
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
 		if !errors.Is(err, util.ErrMappingRSTs) {
