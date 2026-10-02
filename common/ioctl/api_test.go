@@ -5,6 +5,7 @@ package ioctl
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,6 +45,31 @@ func TestBeeGFSGetConfigFile(t *testing.T) {
 	path, err := GetConfigFile(testMountPoint)
 	require.NoError(t, err)
 	assert.Equal(t, expectedClientPath, path)
+}
+
+func TestBeeGFSGetMountID(t *testing.T) {
+	mountID, err := GetMountID(testMountPoint)
+	require.NoError(t, err)
+	require.NotEmpty(t, mountID)
+	// The client names its procfs directory after the mount ID.
+	_, err = os.Stat(filepath.Join("/proc/fs/beegfs", mountID, "config"))
+	assert.NoError(t, err)
+
+	testDir, cleanup, err := getTempBeeGFSPathForTesting()
+	require.NoError(t, err, "error during test setup")
+	defer cleanup(t)
+
+	// Any directory in the mount returns the ID of that mount.
+	dirMountID, err := GetMountID(testDir)
+	require.NoError(t, err)
+	assert.Equal(t, mountID, dirMountID)
+
+	// A regular file is never opened.
+	file, err := os.Create(testDir + "file1")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	_, err = GetMountID(testDir + "file1")
+	assert.ErrorIs(t, err, syscall.ENOTDIR)
 }
 
 // We mostly indirectly test GetEntryInfo because if it returns invalid results other tests will

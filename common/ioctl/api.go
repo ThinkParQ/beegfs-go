@@ -45,6 +45,32 @@ func GetConfigFile(mountPoint string) (string, error) {
 	return string(path[:cStringLen(path)]), nil
 }
 
+// GetMountID returns the mount ID of the BeeGFS client instance that serves dirPath. Each mount
+// runs its own client instance, even when several mounts use the same file system or config file.
+// The client names its procfs directory after the mount ID (/proc/fs/beegfs/<mountID>), so the ID
+// ties a path to that directory. A bind mount shares the ID of the mount it was made from.
+//
+// dirPath must be a directory inside BeeGFS, usually the mount point. It is opened with O_DIRECTORY
+// so a regular file is never opened. Opening a file in BeeGFS contacts the metadata server, and may
+// emit a file event. The ioctl itself only reads local client state.
+func GetMountID(dirPath string) (string, error) {
+	dir, err := os.OpenFile(dirPath, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+
+	var arg getMountIDArg
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, dir.Fd(), uintptr(iocGetMountID), uintptr(unsafe.Pointer(&arg)))
+	if errno != 0 {
+		err := syscall.Errno(errno)
+		return "", fmt.Errorf("error getting mount ID: %w (errno: %d)", err, errno)
+	}
+
+	id := arg.ID[:]
+	return string(id[:cStringLen(id)]), nil
+}
+
 type getEntryInfoCfg struct {
 	trimNullBytes bool
 }

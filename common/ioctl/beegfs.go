@@ -14,6 +14,7 @@ import (
 // Constants used for arguments to various BeeGFS ioctls.
 const (
 	cfgMaxPath         = 4096
+	mountIDBufLen      = 256
 	filenameMaxLen     = 256
 	entryIDMaxLen      = 26
 	nodeTypeBufLen     = 16
@@ -84,6 +85,7 @@ const (
 // are ever weird segmentation fault issues this may be one area to look at.
 var (
 	iocGetCfgFile        = _ior(beegfsIOCTypeID, ioctlNumGetCfgFile, uintptr(unsafe.Sizeof(getCfgFileArg{})))
+	iocGetMountID        = _ior(beegfsIOCTypeID, ioctlNumGetMountID, uintptr(unsafe.Sizeof(getMountIDArg{})))
 	iocCreateFileV3      = _iow(beegfsIOCTypeID, ioctlNumCreateFileV3, uintptr(unsafe.Sizeof(mkFileV3Arg{})))
 	iocMkFileStripeHints = _iow(beegfsIOCTypeID, ioctlNumMkFileStripeHints, uintptr(unsafe.Sizeof(makeFileStripeHintsArg{})))
 	iocGetEntryInfo      = _ior(beegfsIOCTypeID, ioctlNumGetEntryInfo, uintptr(unsafe.Sizeof(getEntryInfoArg{})))
@@ -114,6 +116,14 @@ type getCfgFileArg struct {
 	// Length of the path buffer. This is unused because its after a fixed-size
 	// path buffer (in-value).
 	Length int32
+}
+
+// The C header declares this argument as a bare char[BEEGFS_IOCTL_MOUNTID_BUFLEN]. A struct holding
+// only that array has the same size and layout.
+type getMountIDArg struct {
+	_ structs.HostLayout // Mark the struct as using the host memory layout.
+	// Where the null-terminated mount ID will be stored (out value).
+	ID [mountIDBufLen]byte
 }
 
 type mkFileV3Arg struct {
