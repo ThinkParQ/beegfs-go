@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -19,6 +20,7 @@ import (
 type grpcProvider struct {
 	conn   *grpc.ClientConn
 	client beeremote.BeeRemoteClient
+	nodeId string
 }
 
 var _ Provider = &grpcProvider{}
@@ -50,6 +52,7 @@ func (c *grpcProvider) init(cfg Config) error {
 
 	c.conn = conn
 	c.client = beeremote.NewBeeRemoteClient(c.conn)
+	c.nodeId = cfg.nodeId
 
 	if !cfg.dynamic.MgmtdTlsDisable && len(cfg.dynamic.MgmtdTlsCert) > 0 {
 		if err := os.WriteFile(syncMgmtdTLSCertFile, cfg.dynamic.MgmtdTlsCert, 0600); err != nil {
@@ -105,18 +108,44 @@ func (c *grpcProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 }
 
 func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
-	_, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{Request: jobRequest}.Build())
+	resp, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
+		Request:      jobRequest,
+		OriginNodeId: c.nodeId,
+	}.Build())
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
 			// Note this is just a hint to the user, other error conditions may have the same
 			// message so we don't adjust behavior (i.e., treat it as fatal).
 			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				return fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+				err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
 			}
 		}
-		return err
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 
+	switch resp.GetStatus() {
+	case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
+		return rst.ErrJobAlreadyComplete
+	case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
+		return rst.ErrJobAlreadyOffloaded
+	case beeremote.SubmitJobResponse_EXISTING:
+		return rst.ErrJobAlreadyExists
+	case beeremote.SubmitJobResponse_NOT_ALLOWED:
+		return rst.ErrJobNotAllowed
+	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
+		return rst.ErrJobFailedPrecondition
+	case beeremote.SubmitJobResponse_NOT_RESERVED:
+		return rst.ErrJobNotReserved
+	case beeremote.SubmitJobResponse_RESERVATION_MISSING:
+		return rst.ErrReservationMissing
+	}
+
+	// A job request remote accepted always names the job that now owns it. Remote reporting no job
+	// means the request is neither refused nor running, so report it rather than letting the
+	// builder count it as submitted.
+	if resp.GetResult().GetJob() == nil {
+		return fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
+	}
 	return nil
 }

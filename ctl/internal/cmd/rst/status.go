@@ -20,6 +20,7 @@ type statusConfig struct {
 	recurse        bool
 	verbose        bool
 	summarize      bool
+	attention      bool
 }
 
 func newStatusCmd() *cobra.Command {
@@ -65,9 +66,13 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&frontendCfg.recurse, "recurse", false, "When <path> is a single directory recursively print information about all entries beneath the path (this may return large amounts of output, for example if the BeeGFS root is the provided path).")
 	cmd.Flags().BoolVar(&frontendCfg.verbose, "verbose", false, fmt.Sprintf("Print all paths, not just ones that are unsynchronized. Use %s to print additional details for debugging.", config.DebugKey))
 	cmd.Flags().BoolVar(&frontendCfg.summarize, "summarize", false, "Don't print results for individual paths and only print a summary.")
+	cmd.Flags().BoolVar(&frontendCfg.attention, "attention", false, "Only print results for the unsynchronized files that need attention.")
 	cmd.Flags().StringVar(&backendCfg.FilterExpr, "filter-files", "", filesystem.FilterFilesHelp)
 	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
+	cmd.MarkFlagsMutuallyExclusive("summarize", "attention")
+	// --verify-remote does not read jobs, so no path would ever need attention.
+	cmd.MarkFlagsMutuallyExclusive("verify-remote", "attention")
 	return cmd
 }
 
@@ -102,6 +107,11 @@ func runStatusCmd(cmd *cobra.Command, frontendCfg statusConfig, backendCfg rst.G
 
 	totalEntries := 0
 	unsyncedFiles := 0
+	// inProgressFiles and needsAttentionFiles are parts of unsyncedFiles, split by
+	// GetStatusResult.UnsyncedCause. They are reported inside the unsynchronized count rather than
+	// beside it, so the exit status still reports these files as not synchronized.
+	inProgressFiles := 0
+	needsAttentionFiles := 0
 	offloadedFiles := 0
 	syncedFiles := 0
 	notAttemptedFiles := 0
@@ -129,6 +139,12 @@ run:
 				printRowByDefault = false
 			case rst.Unsynchronized:
 				unsyncedFiles++
+				switch path.UnsyncedCause {
+				case rst.UnsyncedInProgress:
+					inProgressFiles++
+				case rst.UnsyncedNeedsAttention:
+					needsAttentionFiles++
+				}
 				printRowByDefault = true
 			case rst.NotAttempted:
 				notAttemptedFiles++
@@ -147,7 +163,11 @@ run:
 				return fmt.Errorf("unknown sync status %d for path %s", path.SyncStatus, path.Path)
 			}
 
-			if !frontendCfg.summarize && (frontendCfg.verbose || printRowByDefault || path.Warning) {
+			printRow := frontendCfg.verbose || printRowByDefault || path.Warning
+			if frontendCfg.attention {
+				printRow = path.UnsyncedCause == rst.UnsyncedNeedsAttention || path.Warning
+			}
+			if !frontendCfg.summarize && printRow {
 				tbl.AddItem(path.SyncStatus, path.Path, path.SyncReason)
 			}
 		}
@@ -157,11 +177,11 @@ run:
 	tbl.PrintRemaining()
 
 	if viper.GetBool(config.DisableEmojisKey) {
-		cmdfmt.Printf("Summary: found %d entries | %d synchronized | %d offloaded | %d unsynchronized | %d not attempted | %d without remote targets | %d not supported | %d directories\n",
-			totalEntries, syncedFiles, offloadedFiles, unsyncedFiles, notAttemptedFiles, noTargetFiles, notSupportedFiles, directories)
+		cmdfmt.Printf("Summary: found %d entries | %d synchronized | %d offloaded | %d unsynchronized (%d in progress, %d need attention) | %d not attempted | %d without remote targets | %d not supported | %d directories\n",
+			totalEntries, syncedFiles, offloadedFiles, unsyncedFiles, inProgressFiles, needsAttentionFiles, notAttemptedFiles, noTargetFiles, notSupportedFiles, directories)
 	} else {
-		cmdfmt.Printf("Summary: found %d entries | %s %d synchronized | %s %d offloaded | %s %d unsynchronized | %s %d not attempted | %s %d without remote targets | %s %d not supported | %s %d directories\n",
-			totalEntries, rst.Synchronized, syncedFiles, rst.Offloaded, offloadedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
+		cmdfmt.Printf("Summary: found %d entries | %s %d synchronized | %s %d offloaded | %s %d unsynchronized (🔄 %d in progress, ❗ %d need attention) | %s %d not attempted | %s %d without remote targets | %s %d not supported | %s %d directories\n",
+			totalEntries, rst.Synchronized, syncedFiles, rst.Offloaded, offloadedFiles, rst.Unsynchronized, unsyncedFiles, inProgressFiles, needsAttentionFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
 	}
 	if noTargetFiles != 0 {
 		cmdfmt.Printf("Note: not all files have remote targets configured.\n")

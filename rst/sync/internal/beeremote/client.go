@@ -15,7 +15,12 @@ import (
 
 type Config struct {
 	// Dynamic configuration is typically set by BeeRemote through the gRPC server.
-	dynamic                *flex.BeeRemoteNode
+	dynamic *flex.BeeRemoteNode
+	// nodeId is the ID BeeRemote knows this node by, learned from the configuration BeeRemote
+	// pushes. It is reported with each job request this node submits so BeeRemote can tell the
+	// request originated here. Empty when talking to a BeeRemote that does not report it, in which
+	// case submissions carry no origin and BeeRemote assigns them as it always has.
+	nodeId                 string
 	TlsCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"tls-disable"`
@@ -51,7 +56,7 @@ func New(initialCfg Config) (*Client, error) {
 	}
 
 	c.config = initialCfg
-	err := c.UpdateConfig(initialCfg.dynamic)
+	err := c.UpdateConfig(initialCfg.dynamic, "")
 	if errors.Is(err, ErrNilConfiguration) {
 		return c, nil
 	} else if err != nil {
@@ -71,12 +76,13 @@ func (c *Client) CompareConfig(newConfig *flex.BeeRemoteNode) bool {
 // should not be a problem because worker goroutines will get an error if there is some
 // misconfiguration that would prevent ever sending a response, then wait some time before trying to
 // resend the result, which gives enough time for the configuration to be updated.
-func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode) error {
+func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode, nodeId string) error {
 	c.readyMu.Lock()
 	defer c.readyMu.Unlock()
 	if newCfg == nil {
 		return ErrNilConfiguration
 	}
+	c.config.nodeId = nodeId
 
 	// Cleanup the old provider before swapping it out.
 	if c.Provider != nil {
@@ -147,13 +153,7 @@ func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.Job
 		return fmt.Errorf("BeeRemote client is not ready")
 	}
 
-	if err := c.submitJob(ctx, jobRequest); err != nil {
-		if _, ok := status.FromError(err); !ok {
-			return fmt.Errorf("received an unknown error (no gRPC status), most likely this is a bug: %w", err)
-		}
-		return err
-	}
-	return nil
+	return c.submitJob(ctx, jobRequest)
 }
 
 func (c *Client) Disconnect() error {

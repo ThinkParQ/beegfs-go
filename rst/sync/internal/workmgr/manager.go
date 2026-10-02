@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -70,7 +72,12 @@ type Config struct {
 type Manager struct {
 	ready   bool
 	readyMu sync.RWMutex
-	log     *logger.Logger
+	// stopping is set once Stop() has finished with the workers and starts tearing down the manager
+	// itself, after which the work journal is closing and no new request can be accepted. It is
+	// separate from ready because a draining node is still ready to record work, and separate from
+	// the worker context because workers are cancelled well before the journal closes.
+	stopping atomic.Bool
+	log      *logger.Logger
 	// When shutting down workers must be shutdown first so the manager can handle their results and
 	// store them in the database.
 	workerCtx    context.Context
@@ -84,6 +91,9 @@ type Manager struct {
 	config               Config
 	remoteStorageTargets *rst.ClientStore
 	beeRemoteClient      *beeremote.Client
+	// warnDefaultStateRoot logs once that Remote sent no state root. UpdateConfig runs on every
+	// reconnect, so warning each time would repeat for as long as that Remote stays in service.
+	warnDefaultStateRoot sync.Once
 	// The workJournal has a work entry for each work request and its result. It uses an
 	// automatically incremented submission ID as the key for each entry, allowing it to be used as
 	// a journal to recreate the work queue(s) after a restart. This ensures requests are always
@@ -110,7 +120,7 @@ type Manager struct {
 	// entry while its being processed because it would be better to block another goroutine than
 	// risk two goroutines acting on the same entry concurrently. This should only ever happen if
 	// there is a bug.
-	workJournal *kvstore.MapStore[workEntry]
+	workJournal *kvstore.MapStore[*workEntry]
 	// The jobStore keeps a mapping of job IDs to submission IDs in the journal for each of their
 	// work requests. The inner map is a map of work request IDs to their submission ID in the
 	// workJournal. This allows the worker node to handle multiple work request for a single job.
@@ -194,7 +204,7 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
 	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
-	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
+	workJournal, closeWorkJournal, err := kvstore.NewMapStore[*workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
 	}
@@ -240,6 +250,12 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	return m, nil
 }
 
+// NumWorkers returns how many work requests this node processes concurrently. Remote reports it
+// when sizing jobs so a transfer is not split into more segments than the cluster can run at once.
+func (m *Manager) NumWorkers() int {
+	return m.config.NumWorkers
+}
+
 func (m *Manager) IsReady() bool {
 	m.readyMu.RLock()
 	defer m.readyMu.RUnlock()
@@ -253,19 +269,33 @@ func (m *Manager) IsReady() bool {
 // an error if the configuration update is invalid/not allowed.
 //
 // IMPORTANT: Currently once the initial RST config is set, it cannot be dynamically updated without
-// first restarting BeeSync.
+// first restarting BeeSync. The same is true of stateRoot, which is where bulk operations persist
+// the state a builder job needs to resume.
 //
 // TODO: https://github.com/ThinkParQ/bee-remote/issues/29
 // Allow RST configuration to be updated dynamically.
-func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode) error {
+func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
 
-	err := m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs)
+	// A Remote predating the setting sends nothing, so fall back to the same default it would have
+	// used. Revalidating what Remote already validated costs nothing and keeps a malformed value
+	// from reaching the paths built from it.
+	if stateRoot == "" {
+		m.warnDefaultStateRoot.Do(func() {
+			m.log.Warn("remote did not provide a state root for bulk operations, assuming the default", zap.String("stateRoot", rst.DefaultStateRoot))
+		})
+	}
+	stateRoot, err := rst.ValidateStateRoot(stateRoot)
+	if err != nil {
+		return fmt.Errorf("remote provided an invalid state root: %w", err)
+	}
+
+	err = m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs, stateRoot)
 	if err != nil {
 		return err
 	}
 
 	// If there are existing RSTs, verify the configuration did not change:
-	err = m.beeRemoteClient.UpdateConfig(beeRemoteConfig)
+	err = m.beeRemoteClient.UpdateConfig(beeRemoteConfig, nodeID)
 	if err != nil {
 		return err
 	}
@@ -274,6 +304,16 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 	defer m.readyMu.Unlock()
 	m.ready = true
 	return nil
+}
+
+// Accepting reports whether new work requests can still be recorded. It stays true for as long as
+// the work journal is open, which includes the drain that precedes shutdown: a request accepted then
+// cannot run in this process, but it is journaled and replayed when the node restarts, which is
+// better than rejecting work that has nowhere else to go. It goes false once Stop() begins tearing
+// the manager down, because past that point the journal is closing and an accepted request would be
+// lost rather than replayed.
+func (m *Manager) Accepting() bool {
+	return !m.stopping.Load()
 }
 
 // Once manage is started it will not exit until the context is cancelled. If an error happens it
@@ -288,6 +328,8 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 		}
 		m.mgrWG.Done()
 	}()
+
+	workerSaturation := m.startUpdateWorkerSaturation(time.Second, 60*time.Second)
 
 	// completedWork is how workers signal when they are no longer working on a request. It may have
 	// been completed successfully or cancelled, but either way it should be removed from the active
@@ -305,10 +347,12 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
 			rescheduleWork:       m.scheduler.AddRescheduleWorkToken,
+			workerSaturation:     workerSaturation,
 			metrics:              m.metrics,
 		}
-		m.workerWG.Add(1)
-		go w.run(m.workerCtx, m.workerWG)
+		m.workerWG.Go(func() {
+			w.run(m.workerCtx)
+		})
 	}
 	m.log.Info("finished startup")
 
@@ -323,7 +367,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	}
 
 	nextPriorityTokensChan := m.scheduler.GetNextPriorityTokenChan()
-	for {
+	for m.mgrCtx.Err() == nil {
 		select {
 		case <-m.mgrCtx.Done():
 			return
@@ -383,6 +427,92 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 	}
 }
 
+// startUpdateWorkerSaturation starts a go routine that every second recomputes decayed worker
+// saturation averages for the given windows (e.g. 1s, 60s) from the activeWork map's occupancy
+// relative to NumWorkers, so workers can read current saturation through the returned pointers
+// without needing direct access to the manager. Saturation is expressed as a percentage of
+// NumWorkers: 100 means as many work items are in flight as there are workers (roughly "every
+// worker has work"), and it is intentionally allowed to exceed 100 when a backlog builds up beyond
+// worker capacity. Note activeWorkQueue's occupancy is not used here: workers pull off it almost
+// immediately, so its length stays near zero regardless of how busy the workers actually are,
+// against a capacity (ActiveWorkQueueSize) sized in the tens of thousands. activeWork instead
+// counts every work item that is queued or actively being processed, which is a meaningful
+// fraction of NumWorkers. Only one goroutine may ever drive a given set of returned pointers this
+// way.
+
+// startUpdateWorkerSaturation returns a list of getter functions for worker saturation over each
+// window duration. The worker saturation is the moving average of active-work per workers expressed
+// as a percentage. where samples are updated every second. 100% means there is a job for every
+// worker.
+func (m *Manager) startUpdateWorkerSaturation(windows ...time.Duration) []func() float64 {
+	tick := time.Second
+	tickSeconds := tick.Seconds()
+	decay := make([]float64, len(windows))
+	for i, window := range windows {
+		decay[i] = math.Exp(-tickSeconds / window.Seconds())
+	}
+
+	saturation := make([]atomic.Uint64, len(windows))
+	statFns := make([]func() float64, len(windows))
+	for i := range saturation {
+		statFns[i] = func() float64 {
+			return math.Float64frombits(saturation[i].Load())
+		}
+	}
+
+	m.mgrWG.Go(func() {
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-m.mgrCtx.Done():
+				return
+			case <-ticker.C:
+				numWorkers := m.config.NumWorkers
+				if numWorkers <= 0 {
+					for i := range windows {
+						saturation[i].Store(0)
+					}
+					continue
+				}
+
+				current := float64(m.activeWorkLen()) / float64(numWorkers) * 100
+				for i := range windows {
+					average := math.Float64frombits(saturation[i].Load())*decay[i] + current*(1-decay[i])
+					saturation[i].Store(math.Float64bits(average))
+				}
+			}
+		}
+	})
+
+	return statFns
+}
+
+// queueActiveWork hands activeWork off to the workers, blocking while the activeWorkQueue is full.
+// Callers must hold activeWorkMu and have already added activeWork to the activeWork map. It returns
+// true once the work is queued. If the workers shut down first it cancels the work's context,
+// removes it from the activeWork map, and returns false to tell the caller to stop pulling in work.
+func (m *Manager) queueActiveWork(activeWork workAssignment, cancel context.CancelFunc) bool {
+	if m.workerCtx.Err() == nil {
+		select {
+		case m.activeWorkQueue <- activeWork:
+			return true
+		case <-m.workerCtx.Done():
+		}
+	}
+	cancel()
+	delete(m.activeWork, activeWork.workIdentifier)
+	return false
+}
+
+// activeWorkLen returns the current number of in-flight work items (queued or being processed).
+func (m *Manager) activeWorkLen() int {
+	m.activeWorkMu.RLock()
+	defer m.activeWorkMu.RUnlock()
+	return len(m.activeWork)
+}
+
 // pullInWork moves ready work from the priority range to the activeWork map.
 func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (nextSubmissionId string, err error) {
 	nextSubmissionId = start
@@ -434,7 +564,11 @@ func (m *Manager) pullInWork(start string, stop string, availableTokens *int) (n
 			workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
 			activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 			m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
-			m.activeWorkQueue <- activeWork
+			if !m.queueActiveWork(activeWork, workCtxCancel) {
+				// Shutting down. The returned nextSubmissionId is moot because it is only ever kept
+				// in memory and the journal is replayed from the start on the next startup.
+				return lastSubmissionId, nil
+			}
 			*availableTokens -= 1
 			m.scheduler.RemoveWorkToken(submissionId)
 			m.metrics.workRequests.Add(context.Background(), 1,
@@ -513,7 +647,10 @@ func (m *Manager) pullInRescheduledWork(start string, stop string, availableToke
 					workCtx, workCtxCancel := context.WithCancel(m.workerCtx)
 					activeWork := workAssignment{ctx: workCtx, workIdentifier: workId}
 					m.activeWork[activeWork.workIdentifier] = workContext{ctx: workCtx, cancel: workCtxCancel}
-					m.activeWorkQueue <- activeWork
+					if !m.queueActiveWork(activeWork, workCtxCancel) {
+						// Shutting down, so the next reschedule time no longer matters.
+						return
+					}
 					*availableTokens -= 1
 					m.scheduler.RemoveRescheduledWorkToken(submissionId)
 					m.metrics.workRequests.Add(context.Background(), 1,
@@ -564,8 +701,10 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		return
 	}
 
-	var rescheduledCount int
 	var scheduledCount int
+	var rescheduledCount int
+	var replayCount int
+	var unrecoverableCount int
 	var submissionId string
 	isNextSubmissionIdSet := false
 	workRequestPriority := priorityIdMap[int32(priority+1)]
@@ -573,7 +712,16 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		submissionId = submission.Key
 		entry := submission.Entry.Value
 
-		if entry.ExecuteAfter.IsZero() {
+		var status *flex.Work_Status
+		var state flex.Work_State
+		if entry.WorkResult != nil {
+			if status = entry.WorkResult.GetStatus(); status != nil {
+				state = status.GetState()
+			}
+		}
+
+		switch state {
+		case flex.Work_SCHEDULED:
 			m.scheduler.AddWorkToken(submissionId)
 			if !isNextSubmissionIdSet {
 				m.scheduler.SetNextSubmissionId(submissionId, priority)
@@ -586,7 +734,7 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		} else {
+		case flex.Work_RESCHEDULED:
 			m.scheduler.AddRescheduleWorkToken(submissionId, entry.ExecuteAfter)
 			rescheduledCount++
 			m.metrics.workRequests.Add(context.Background(), 1,
@@ -595,9 +743,27 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 					attrPriority.Int(priority+1),
 				),
 			)
-		}
-		entriesFound++
 
+		case flex.Work_RUNNING, flex.Work_COMPLETED:
+			// Submission has already been scheduled and executed so treat it as rescheduled work
+			// since this preserves the next submissionId priority scheduler boundary.
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			replayCount++
+		default:
+			m.log.Warn("skipping unrecoverable work journal entry during scheduler init",
+				zap.String("submissionId", submissionId),
+				zap.String("jobId", entry.WorkRequest.GetJobId()),
+				zap.String("requestId", entry.WorkRequest.GetRequestId()),
+				zap.String("state", state.String()),
+				zap.Time("executeAfter", entry.ExecuteAfter),
+				zap.Bool("hasWorkResult", entry.WorkResult != nil),
+				zap.Bool("hasStatus", status != nil),
+			)
+			m.scheduler.AddRescheduleWorkToken(submissionId, time.Time{})
+			unrecoverableCount++
+		}
+
+		entriesFound++
 		submission, err = nextItem()
 		if err != nil {
 			err = fmt.Errorf("unable to get work journal entry: %w", err)
@@ -605,7 +771,8 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount == 0 && rescheduledCount > 0 {
+	allRescheduledCount := rescheduledCount + replayCount
+	if scheduledCount == 0 && allRescheduledCount > 0 {
 		// All recovered were rescheduled work request so increment the last known rescheduled
 		// submissionId to get the nextExpectedSubmissionId.
 		nextExpectedSubmissionId, _, err := scheduler.IncrementSubmissionId(submissionId)
@@ -616,8 +783,14 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	if scheduledCount > 0 || rescheduledCount > 0 {
-		m.log.Info("  recovered work requests", zap.String("priority", workRequestPriority), zap.Int("scheduled", scheduledCount), zap.Int("rescheduled", rescheduledCount))
+	if scheduledCount > 0 || rescheduledCount > 0 || replayCount > 0 || unrecoverableCount > 0 {
+		m.log.Info("  recovered work requests",
+			zap.String("priority", workRequestPriority),
+			zap.Int("scheduled", scheduledCount),
+			zap.Int("rescheduled", rescheduledCount),
+			zap.Int("replayed", replayCount),
+			zap.Int("unrecoverable", unrecoverableCount),
+		)
 	}
 	return
 }
@@ -663,7 +836,7 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 	}
 
 	submissionId, priority := scheduler.CreateSubmissionId(key, wr.GetPriority())
-	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId)
+	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId, kvstore.WithValue(&workEntry{}))
 	if err != nil {
 		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}
@@ -867,13 +1040,114 @@ func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error)
 	return workResult, nil
 }
 
+// shutdownProgressInterval keeps a quick shutdown quiet without letting a slow one look hung.
+const shutdownProgressInterval = 2 * time.Second
+
+// reportShutdownProgress logs what is still holding the shutdown open until the returned function is
+// called. Cancelling the workers does not stop work already underway - each path in flight keeps a
+// grace period, and extends it while it makes progress - so a stop can sit for a while with nothing
+// to show for it. It keeps reporting after the paths drain, since a worker's own teardown can block
+// too and silence there is indistinguishable from a hang.
+func (m *Manager) reportShutdownProgress() func() {
+	startedAt := time.Now()
+	initial := rst.GetCollectiveCancellationDelayStat()
+	if initial.InFlight == 0 {
+		return func() {}
+	}
+	m.log.Info("waiting for in flight work to wind down", zap.Int("pathsInFlight", initial.InFlight))
+
+	// Only the reporting goroutine writes drainedAt; waiting on it is what publishes it.
+	var drainedAt time.Time
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		ticker := time.NewTicker(shutdownProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+
+			stat := rst.GetCollectiveCancellationDelayStat()
+			if stat.InFlight == 0 {
+				// The paths are done but the stop is not, so say so rather than going quiet.
+				if drainedAt.IsZero() {
+					drainedAt = time.Now()
+					m.log.Info("in flight work drained, waiting for workers to stop",
+						zap.Int("pathsDrained", initial.InFlight),
+						zap.Duration("drainTook", drainedAt.Sub(startedAt).Round(time.Millisecond)))
+					continue
+				}
+				m.log.Info("waiting for workers to stop",
+					zap.Duration("sincePathsDrained", time.Since(drainedAt).Round(time.Second)))
+				continue
+			}
+
+			fields := []zap.Field{
+				zap.Int("pathsDone", max(0, initial.InFlight-stat.InFlight)),
+				zap.Int("pathsInFlight", stat.InFlight),
+				zap.Int("pathsWindingDown", stat.InGrace),
+				zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)),
+			}
+			if stat.AverageCheckpointDuration > 0 {
+				fields = append(fields, zap.Duration("pacePerStep", stat.AverageCheckpointDuration.Round(time.Millisecond)))
+			}
+			if stat.AverageGraceDuration > 0 {
+				fields = append(fields, zap.Duration("windDownPerPath", stat.AverageGraceDuration.Round(time.Millisecond)))
+			}
+			if stat.AverageCompletionInterval > 0 {
+				// Paths left over how fast they are actually finishing, so whatever parallelism the
+				// drain achieves is already in it. This is the figure to watch: the deadline below
+				// only says how long they are permitted to take.
+				fields = append(fields,
+					zap.Duration("perPathCompletion", stat.AverageCompletionInterval.Round(time.Millisecond)),
+					zap.Duration("expectedIn", max(0, time.Until(stat.EstimatedTime)).Round(time.Second)))
+			}
+			if !stat.LatestDeadline.IsZero() {
+				// When the paths would be let go if none made further progress. It receding says
+				// steps are still finishing; it sitting still is the sign to investigate.
+				fields = append(fields,
+					zap.Duration("deadlineIn", max(0, time.Until(stat.LatestDeadline)).Round(time.Second)))
+			}
+			m.log.Info("waiting for in flight work to wind down", fields...)
+		}
+	})
+
+	return func() {
+		close(done)
+		wg.Wait()
+		fields := []zap.Field{
+			zap.Int("pathsDrained", initial.InFlight),
+			zap.Duration("took", time.Since(startedAt).Round(time.Millisecond)),
+		}
+		if !drainedAt.IsZero() {
+			// Separating the two says whether the time went into letting work finish or the
+			// teardown after it.
+			fields = append(fields, zap.Duration("pathDrainTook", drainedAt.Sub(startedAt).Round(time.Millisecond)))
+		}
+		m.log.Info("workers stopped", fields...)
+	}
+}
+
 func (m *Manager) Stop() {
 	m.log.Info("stopping workers")
 	m.workerCancel()
+	// Workers are cancelled but the journal stays open until the manager itself is torn down below,
+	// so requests are still accepted while in-flight work winds down. Notably this node's own
+	// builders may still be submitting job requests that come back to it, and those must be
+	// journaled rather than refused.
+	// Cancelling the workers starts the grace periods, so reporting begins here.
+	stopProgressReports := m.reportShutdownProgress()
 	// Wait until all workers are stopped before shutting down the manager which will automatically
 	// cleanup all shared resources (DB, RST/BeeRemote clients, etc).
 	m.workerWG.Wait()
+	stopProgressReports()
 	m.log.Info("stopped all workers, attempting stop manager")
+	// Past this point the journal and shared clients are being closed, so nothing more can be
+	// accepted. Reject before touching the manager rather than surfacing errors from a closing DB.
+	m.stopping.Store(true)
 	m.mgrCancel()
 	m.mgrWG.Wait()
 	m.log.Info("stopped manager")
