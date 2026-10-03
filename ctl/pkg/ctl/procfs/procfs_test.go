@@ -1,11 +1,13 @@
 package procfs
 
 import (
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"go.uber.org/zap"
@@ -161,6 +163,22 @@ func TestParseMounts(t *testing.T) {
 				{Path: "/mnt/beegfs1", Opts: map[string]string{"rw": "", "cfgFile": "/etc/beegfs/beegfs-client.conf"}},
 				{Path: "/mnt/beegfs2", Opts: map[string]string{"rw": "", "cfgFile": "/etc/beegfs/beegfs-client.conf"}},
 				{Path: "/mnt/beegfs3", Opts: map[string]string{"rw": "", "sysMgmtdHost": "192.168.1.100"}},
+			},
+			expFsPaths: []string{"beegfs"},
+		},
+		{
+			// The kernel escapes a space, tab, newline and backslash in a mount point.
+			input: `
+	beegfs_nodev /mnt/my\040beegfs beegfs rw 0 0
+	beegfs_nodev /mnt/tab\011new\012line\134slash beegfs rw 0 0
+	beegfs_nodev /mnt/literal\134040 beegfs rw 0 0
+			`,
+			expected: []MountPoint{
+				{Path: "/mnt/my beegfs", Opts: map[string]string{"rw": ""}},
+				{Path: "/mnt/tab\tnew\nline\\slash", Opts: map[string]string{"rw": ""}},
+				// A backslash followed by "040" in the name. The decoded backslash is not decoded
+				// again together with the digits after it.
+				{Path: `/mnt/literal\040`, Opts: map[string]string{"rw": ""}},
 			},
 			expFsPaths: []string{"beegfs"},
 		},
@@ -345,4 +363,124 @@ func TestParseClientFsUUID(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, test.want, got)
 	}
+}
+
+func TestParseMountInfo(t *testing.T) {
+	input := `
+43 1 0:36 /root / rw,relatime shared:1 - btrfs /dev/mapper/root rw,seclabel
+32 43 0:69 / /mnt/beegfs rw,relatime shared:617 master:2 - beegfs beegfs_nodev rw,cfgFile=/etc/beegfs/beegfs-client.conf
+
+1097 43 0:81 / /mnt/tmp\040beegfs rw,relatime - beegfs beegfs_nodev rw
+`
+	table, err := parseMountInfo(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, []mountInfo{
+		{id: 43, dev: "0:36", mountPoint: "/", fsType: "btrfs"},
+		{id: 32, dev: "0:69", mountPoint: "/mnt/beegfs", fsType: "beegfs"},
+		{id: 1097, dev: "0:81", mountPoint: "/mnt/tmp beegfs", fsType: "beegfs"},
+	}, table)
+
+	for _, malformed := range []string{
+		"43 1 0:36 / / rw shared:1 btrfs /dev/root rw",
+		"43 1 0:36 / / rw -",
+		"x 1 0:36 / / rw - btrfs /dev/root rw",
+	} {
+		_, err := parseMountInfo(strings.NewReader(malformed))
+		assert.Error(t, err, malformed)
+	}
+}
+
+func TestParseFdinfoMountID(t *testing.T) {
+	id, err := parseFdinfoMountID(strings.NewReader("pos:\t0\nflags:\t012200000\nmnt_id:\t42\nino:\t1\n"))
+	require.NoError(t, err)
+	assert.Equal(t, 42, id)
+
+	_, err = parseFdinfoMountID(strings.NewReader("pos:\t0\nflags:\t012200000\n"))
+	assert.ErrorContains(t, err, "no mnt_id")
+
+	_, err = parseFdinfoMountID(strings.NewReader("mnt_id:\tx\n"))
+	assert.Error(t, err)
+}
+
+func TestClientOfMount(t *testing.T) {
+	// A root filesystem, two BeeGFS mounts, and bind mounts:
+	//   - /mnt/beegfs/scratch bound at /scratch.
+	//   - The local /opt/sbin bound at /mnt/beegfs/shared-software.
+	//   - /mnt/old-beegfs bound at /mnt/beegfs/archived.
+	table := []mountInfo{
+		{id: 10, dev: "253:0", mountPoint: "/", fsType: "xfs"},
+		{id: 20, dev: "0:69", mountPoint: "/mnt/beegfs", fsType: "beegfs"},
+		{id: 21, dev: "0:70", mountPoint: "/mnt/old-beegfs", fsType: "beegfs"},
+		{id: 30, dev: "0:69", mountPoint: "/scratch", fsType: "beegfs"},
+		{id: 31, dev: "253:0", mountPoint: "/mnt/beegfs/shared-software", fsType: "xfs"},
+		{id: 32, dev: "0:70", mountPoint: "/mnt/beegfs/archived", fsType: "beegfs"},
+	}
+	current := Client{ID: "c-cur", Mount: MountPoint{Path: "/mnt/beegfs"}}
+	old := Client{ID: "c-old", Mount: MountPoint{Path: "/mnt/old-beegfs"}}
+	clients := []Client{current, old}
+
+	tests := []struct {
+		name    string
+		mountID int
+		wantID  string
+	}{
+		{name: "the BeeGFS mount", mountID: 20, wantID: "c-cur"},
+		{name: "a bind mount of BeeGFS", mountID: 30, wantID: "c-cur"},
+		{name: "a local filesystem bound inside BeeGFS", mountID: 31, wantID: ""},
+		{name: "another BeeGFS bound inside BeeGFS", mountID: 32, wantID: "c-old"},
+		{name: "the root filesystem", mountID: 10, wantID: ""},
+		{name: "a mount ID not in the table", mountID: 99, wantID: ""},
+	}
+	for _, test := range tests {
+		c, ok := clientOfMount(clients, table, test.mountID)
+		assert.Equal(t, test.wantID != "", ok, test.name)
+		assert.Equal(t, test.wantID, c.ID, test.name)
+	}
+
+	// NFS stacked on /mnt/beegfs hides it. A directory on the NFS mount selects nothing. A shell
+	// that was in /mnt/beegfs before NFS was mounted still has a directory on BeeGFS.
+	nfsOnTop := append(slices.Clone(table), mountInfo{id: 41, dev: "0:50", mountPoint: "/mnt/beegfs", fsType: "nfs4"})
+	_, ok := clientOfMount(clients, nfsOnTop, 41)
+	assert.False(t, ok, "NFS on top of BeeGFS")
+	c, ok := clientOfMount(clients, nfsOnTop, 20)
+	assert.True(t, ok, "BeeGFS below NFS")
+	assert.Equal(t, "c-cur", c.ID)
+
+	// BeeGFS mounted on top of NFS at the same mount point. The NFS mount does not count.
+	beegfsOnTop := []mountInfo{
+		{id: 10, dev: "253:0", mountPoint: "/", fsType: "xfs"},
+		{id: 50, dev: "0:50", mountPoint: "/mnt/beegfs", fsType: "nfs4"},
+		{id: 51, dev: "0:69", mountPoint: "/mnt/beegfs", fsType: "beegfs"},
+	}
+	c, ok = clientOfMount(clients, beegfsOnTop, 51)
+	assert.True(t, ok, "BeeGFS on top of NFS")
+	assert.Equal(t, "c-cur", c.ID)
+
+	// fs-top is stacked on /mnt/beegfs. The mount point cannot tell the two clients apart.
+	stacked := append(slices.Clone(table), mountInfo{id: 40, dev: "0:71", mountPoint: "/mnt/beegfs", fsType: "beegfs"})
+	top := Client{ID: "c-top", Mount: MountPoint{Path: "/mnt/beegfs"}}
+	_, ok = clientOfMount([]Client{current, top}, stacked, 40)
+	assert.False(t, ok, "stacked BeeGFS mounts match nothing")
+}
+
+func TestBeeGFSDevsAt(t *testing.T) {
+	table := []mountInfo{
+		{id: 20, dev: "0:69", mountPoint: "/mnt/beegfs", fsType: "beegfs"},
+		{id: 21, dev: "0:69", mountPoint: "/mnt/beegfs", fsType: "beegfs"},
+		{id: 22, dev: "0:90", mountPoint: "/mnt/beegfs", fsType: "tmpfs"},
+		{id: 23, dev: "0:70", mountPoint: "/mnt/stacked", fsType: "beegfs"},
+		{id: 24, dev: "0:71", mountPoint: "/mnt/stacked", fsType: "beegfs"},
+	}
+	assert.Equal(t, []string{"0:69"}, beegfsDevsAt(table, "/mnt/beegfs"), "duplicates and other filesystems are left out")
+	assert.Equal(t, []string{"0:70", "0:71"}, beegfsDevsAt(table, "/mnt/stacked"))
+	assert.Empty(t, beegfsDevsAt(table, "/mnt/none"))
+}
+
+// TestClientOfWorkingDir runs against the real kernel files. A temporary directory is not in a
+// BeeGFS mount, so no client matches, but the fdinfo and mountinfo of this kernel must parse.
+func TestClientOfWorkingDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+	_, ok, err := ClientOfWorkingDir([]Client{{ID: "c", Mount: MountPoint{Path: "/mnt/beegfs"}}})
+	require.NoError(t, err)
+	assert.False(t, ok)
 }

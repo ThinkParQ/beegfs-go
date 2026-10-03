@@ -10,16 +10,20 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/ioctl"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 const (
-	mountProcDir = "/proc/mounts"
+	mountProcDir      = "/proc/mounts"
+	mountInfoProcFile = "/proc/self/mountinfo"
 	// The client prints this as its filesystem UUID until it has registered with the management
 	// node, because the UUID comes from the registration response.
 	unregisteredFsUUID = "(null)"
@@ -407,6 +411,188 @@ func getBeeGFSMounts() ([]MountPoint, []string, error) {
 	return parseMounts(file)
 }
 
+// mountPointUnescaper undoes the escapes the kernel writes in mount points in /proc/mounts and
+// /proc/self/mountinfo. Fields in those files are separated by whitespace. So the kernel writes a
+// space, tab, newline or backslash in a mount point as a backslash and three octal digits, in
+// show_vfsmnt() and show_mountinfo() in fs/proc_namespace.c. getmntent(3) documents the same
+// escapes: https://man7.org/linux/man-pages/man3/getmntent.3.html
+var mountPointUnescaper = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+
+// ClientOfWorkingDir returns the client whose filesystem holds the current directory. It returns
+// false when that filesystem is not a BeeGFS mount of one of the clients. clients come from
+// GetBeeGFSClients(). It does not check that the client is registered.
+//
+// It never calls into the filesystem of the directory. A stat or open inside a BeeGFS mount can
+// wait on the metadata server, and callers use this while a mount may be stuck.
+//   - It opens "." with O_PATH. Resolving "." looks up no name, and an O_PATH descriptor does not
+//     open the file, so the BeeGFS client is not called.
+//   - The kernel reports the mount of that descriptor as mnt_id in /proc/self/fdinfo, see
+//     proc_pid_fdinfo(5). The mount ID is the same as the first field of /proc/self/mountinfo.
+//   - The descriptor stays open while mountinfo is read. It pins the mount, so the kernel cannot
+//     give its ID to another mount in between.
+//
+// See clientOfMount() for how the mount is matched to a client.
+func ClientOfWorkingDir(clients []Client) (Client, bool, error) {
+	fd, err := unix.Open(".", unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return Client{}, false, fmt.Errorf("opening the current directory with O_PATH: %w", err)
+	}
+	defer unix.Close(fd)
+
+	fdinfo, err := os.Open(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return Client{}, false, err
+	}
+	defer fdinfo.Close()
+	mountID, err := parseFdinfoMountID(fdinfo)
+	if err != nil {
+		return Client{}, false, err
+	}
+
+	mountInfo, err := os.Open(mountInfoProcFile)
+	if err != nil {
+		return Client{}, false, err
+	}
+	defer mountInfo.Close()
+	table, err := parseMountInfo(mountInfo)
+	if err != nil {
+		return Client{}, false, err
+	}
+
+	c, ok := clientOfMount(clients, table, mountID)
+	return c, ok, nil
+}
+
+// parseFdinfoMountID returns the mnt_id field of a /proc/self/fdinfo file. The file has one
+// "key:<tab>value" pair per line, and mnt_id exists since Linux 3.15. Other keys are ignored.
+func parseFdinfoMountID(input io.Reader) (int, error) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		key, value, ok := strings.Cut(scanner.Text(), ":")
+		if !ok || key != "mnt_id" {
+			continue
+		}
+		id, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return 0, fmt.Errorf("unexpected fdinfo mnt_id %q: %w", value, err)
+		}
+		return id, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("unexpected error while scanning fdinfo: %w", err)
+	}
+	return 0, errors.New("fdinfo has no mnt_id field")
+}
+
+// clientOfMount returns the client of the mount with mountID. It returns false when there is none.
+//
+// Inputs:
+//   - clients each have the mount point from /proc/mounts.
+//   - table is the mount table, which has the device number of each mount.
+//   - mountID is the ID of the mount, as in the first field of the mount table.
+//
+// Rules:
+//   - The mount must be BeeGFS. Any other filesystem selects nothing, even one mounted inside a
+//     BeeGFS mount.
+//   - The device number of the client's mount must equal the device number of the mount. A bind
+//     mount has the device number of the mount it was made from, so a bind mount of BeeGFS
+//     matches the client of the original mount.
+//   - A client whose mount point has more than one BeeGFS device number matches nothing, see
+//     beegfsDevsAt().
+func clientOfMount(clients []Client, table []mountInfo, mountID int) (Client, bool) {
+	i := slices.IndexFunc(table, func(m mountInfo) bool { return m.id == mountID })
+	if i < 0 || !table[i].isBeeGFS() {
+		return Client{}, false
+	}
+	for _, c := range clients {
+		if devs := beegfsDevsAt(table, c.Mount.Path); len(devs) == 1 && devs[0] == table[i].dev {
+			return c, true
+		}
+	}
+	return Client{}, false
+}
+
+// mountInfo is one line of /proc/self/mountinfo, see proc_pid_mountinfo(5). It keeps only the
+// fields clientOfMount() needs.
+type mountInfo struct {
+	// id is the mount ID. The kernel reuses an ID after an unmount, so an ID only names a mount
+	// within one read of the table.
+	id int
+	// dev is the device number of the mounted filesystem, as "major:minor". A bind mount has the
+	// device number of the mount it was made from. Each BeeGFS mount gets its own device number,
+	// so the device number names one client instance.
+	dev string
+	// mountPoint has its escapes undone, see mountPointUnescaper.
+	mountPoint string
+	fsType     string
+}
+
+// isBeeGFS returns true for a BeeGFS mount, using the same filesystem type test as parseMounts().
+func (m mountInfo) isBeeGFS() bool {
+	return strings.HasPrefix(m.fsType, "beegfs")
+}
+
+// parseMountInfo parses a mount table in the format of /proc/self/mountinfo. Each line has six
+// fixed fields: the mount ID, the parent ID, major:minor, the root, the mount point and the mount
+// options. Zero or more optional fields follow, then a "-" separator and the filesystem type. The
+// man page says parsers should ignore optional fields they do not know, so all of them are
+// skipped. A line that does not match is an error, because a missing mount could change which
+// client matches.
+func parseMountInfo(input io.Reader) ([]mountInfo, error) {
+	table := []mountInfo{}
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// The separator comes after the six fixed fields and any optional fields.
+		sep := -1
+		if len(fields) > 6 {
+			if i := slices.Index(fields[6:], "-"); i >= 0 {
+				sep = 6 + i
+			}
+		}
+		if sep < 0 || sep+1 >= len(fields) {
+			return nil, fmt.Errorf("unexpected mountinfo line (no filesystem type after a %q separator): %q", "-", line)
+		}
+		id, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("unexpected mountinfo line (invalid mount ID): %q: %w", line, err)
+		}
+		table = append(table, mountInfo{
+			id:         id,
+			dev:        fields[2],
+			mountPoint: path.Clean(mountPointUnescaper.Replace(fields[4])),
+			fsType:     fields[sep+1],
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("unexpected error while scanning mountinfo: %w", err)
+	}
+	return table, nil
+}
+
+// beegfsDevsAt returns the device numbers of the BeeGFS mounts at mountPoint, without duplicates.
+// It usually returns one. It returns more when BeeGFS mounts of different clients are stacked at
+// mountPoint. For example, fs-a is mounted at /mnt/beegfs, then fs-b is mounted at /mnt/beegfs too.
+// fs-b then sits on top and hides fs-a, and procfs shows /mnt/beegfs as the mount point of both
+// clients. A mount point alone cannot tell such clients apart.
+//
+// Only BeeGFS mounts count. Another filesystem at mountPoint, below or on top of one BeeGFS mount,
+// leaves one device number, so the client still matches. For example, NFS is mounted at
+// /mnt/beegfs and fs-a is mounted on top, so a directory in /mnt/beegfs is on fs-a and selects it.
+func beegfsDevsAt(table []mountInfo, mountPoint string) []string {
+	devs := []string{}
+	for _, m := range table {
+		if m.mountPoint == mountPoint && m.isBeeGFS() && !slices.Contains(devs, m.dev) {
+			devs = append(devs, m.dev)
+		}
+	}
+	return devs
+}
+
 // parseMounts returns the BeeGFS mounts in the order /proc/mounts lists them, and the BeeGFS file
 // system types in use.
 func parseMounts(input io.Reader) ([]MountPoint, []string, error) {
@@ -439,8 +625,9 @@ func parseMounts(input io.Reader) ([]MountPoint, []string, error) {
 			}
 			// A mount without a cfgFile option is valid. The client then uses its defaults plus
 			// the mount options. Such a mount can still be matched to its client by mount ID.
+			// The mount point is unescaped, so it can be opened and compared with user paths.
 			mounts = append(mounts, MountPoint{
-				Path: path.Clean(fields[1]),
+				Path: path.Clean(mountPointUnescaper.Replace(fields[1])),
 				Opts: opts,
 			})
 			// Record this BeeGFS type

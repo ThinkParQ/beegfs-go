@@ -25,7 +25,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 
 	cmd.PersistentFlags().String(config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, fmt.Sprintf(`The network address and gRPC port of the management node.
 	By default determined automatically from the BeeGFS mount points on this machine.
-	If more than one file system is mounted, specify --%s to select one.`, config.BeeGFSMountPointKey))
+	If more than one file system is mounted, the mount of a path argument or of the current directory selects one, or specify --%s.`, config.BeeGFSMountPointKey))
 
 	cmd.PersistentFlags().String(config.BeeRemoteAddrKey, "127.0.0.1:9010", "The gRPC network address and port of the BeeRemote node.")
 

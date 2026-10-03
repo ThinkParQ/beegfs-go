@@ -4,7 +4,8 @@ package config
 // fetches or checks one fact. ManagementClient() applies the rules.
 //
 // The user can set the address with --mgmtd-addr, or leave it at "auto" to take it from the BeeGFS
-// clients mounted on this machine. --mount selects which client to take it from.
+// clients mounted on this machine. --mount selects which client to take it from. Without --mount,
+// the mount of a path argument selects it, or else the mount that holds the current directory.
 //
 // Facts about the BeeGFS client that the rules rely on:
 //
@@ -185,6 +186,29 @@ func firstRegisteredClient(clients []procfs.Client) (procfs.Client, bool) {
 		}
 	}
 	return procfs.Client{}, false
+}
+
+// registeredClientOfWorkingDir runs in ManagementClient() when the address is automatic and
+// nothing selects a mount. It returns the registered client whose filesystem holds the current
+// directory, so a user can pick a filesystem by working inside it. procfs.ClientOfWorkingDir()
+// finds the client without calling into the filesystem. It is best effort. It returns false when
+// the directory is not in a mount of a registered client, or on any error, and the caller then
+// uses all clients.
+func registeredClientOfWorkingDir(clients []procfs.Client, log *logger.Logger) (procfs.Client, bool) {
+	c, ok, err := procfs.ClientOfWorkingDir(clients)
+	switch {
+	case err != nil:
+		log.Debug("unable to find the mount of the current directory, so it does not select a filesystem", zap.Error(err))
+		return procfs.Client{}, false
+	case !ok:
+		log.Debug("the current directory is not in a mount of a BeeGFS client, so it does not select a filesystem")
+		return procfs.Client{}, false
+	case c.FsUUID == "":
+		log.Debug("the BeeGFS client of the current directory has not registered, so it does not select a filesystem", zap.String("mountPoint", c.Mount.Path))
+		return procfs.Client{}, false
+	}
+	log.Debug("the current directory selects the filesystem", zap.String("mountPoint", c.Mount.Path), zap.String("fsUUID", c.FsUUID))
+	return c, true
 }
 
 // kernelMgmtdAddr returns the host and gRPC port of the kernel address of a client. procfs always
