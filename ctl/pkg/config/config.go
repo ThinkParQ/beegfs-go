@@ -266,6 +266,10 @@ var mgmtClientFsUUID string
 //   - The client of a selecting mount must be found and registered, with any --mgmtd-addr.
 //     Otherwise it is an error. The hidden --allow-unverified-mount flag lets an explicit
 //     --mgmtd-addr skip this, for places where CTL cannot read /proc/fs/beegfs.
+//   - Without --mount or a resolved path, an automatic --mgmtd-addr takes the filesystem from the
+//     current directory, when a registered client serves the mount that holds it. This is best
+//     effort, so a directory elsewhere changes nothing. An explicit --mgmtd-addr ignores the
+//     directory, so a user can manage another filesystem from inside a mount.
 //   - Without a mount, an automatic --mgmtd-addr needs the registered clients to belong to one
 //     filesystem. The first registered client selects it and supplies the address, so the user
 //     sets --mgmtd-addr to use another.
@@ -317,6 +321,19 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 		// not. Unreadable procfs shows up as missing clients, which the checks below handle.
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// The current directory may pick the filesystem, but only as a last resort. It applies when
+	// the address is automatic and the user gave no hint of their own:
+	//   - mount is "", so neither --mount nor a path argument names a mount.
+	//   - --mount was not given at all. selectedMount() also returns "" for --mount none, so the
+	//     flag is checked here. --mount none says the command uses no mount, so the directory
+	//     must not pick one.
+	// When the directory is not in a registered BeeGFS mount, every client still counts.
+	if autoConfigured && mount == "" && !viper.IsSet(BeeGFSMountPointKey) {
+		if c, ok := registeredClientOfWorkingDir(clients, log); ok {
+			clients = []procfs.Client{c}
 		}
 	}
 
