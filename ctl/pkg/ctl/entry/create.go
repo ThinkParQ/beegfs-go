@@ -315,24 +315,25 @@ func CreateEntry(ctx context.Context, cfg CreateEntryCfg) ([]CreateEntryResult, 
 	if len(cfg.Paths) == 0 {
 		return results, fmt.Errorf("unable to create entry (no path specified)")
 	}
+	// Sort the slice so when creating multiple entries we can get the parent info and generate the
+	// base request once for all files created in a specific directory.
+	sort.StringSlice(cfg.Paths).Sort()
+
+	// Initialize the BeeGFS client from the parent directory of the first path provided. This runs
+	// before anything contacts the management node, so the path selects the filesystem.
+	client, err := config.BeeGFSClient(filepath.Dir(cfg.Paths[0]))
+	if err != nil {
+		if !errors.Is(err, filesystem.ErrUnmounted) {
+			return results, err
+		}
+	}
+
 	mappings, err := util.GetMappings(ctx)
 	if err != nil {
 		if !errors.Is(err, util.ErrMappingRSTs) {
 			return results, fmt.Errorf("unable to proceed without entity mappings: %w", err)
 		}
 		// RSTs are not configured on all BeeGFS instances, silently ignore.
-	}
-
-	// Sort the slice so when creating multiple entries we can get the parent info and generate the
-	// base request once for all files created in a specific directory.
-	sort.StringSlice(cfg.Paths).Sort()
-
-	// Initialize the BeeGFS client from the parent directory of the first path provided.
-	client, err := config.BeeGFSClient(filepath.Dir(cfg.Paths[0]))
-	if err != nil {
-		if !errors.Is(err, filesystem.ErrUnmounted) {
-			return results, err
-		}
 	}
 
 	nodeStore, err := config.NodeStore(ctx)

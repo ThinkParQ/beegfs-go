@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -13,6 +14,9 @@ import (
 type NodeStats struct {
 	Node  beegfs.Node
 	Stats Stats
+	// Err is set when the stats for Node could not be read. Stats is then the zero value and must
+	// not be read as the node being idle.
+	Err error
 }
 
 type Stats struct {
@@ -73,7 +77,13 @@ func SingleServerNode(ctx context.Context, id beegfs.EntityId) (beegfs.Node, []S
 	return n, sRes.stats, nil
 }
 
-// Queries latest stat entry for multiple nodes separately
+// Queries latest stat entry for multiple nodes separately. The returned error is only set when the
+// node list cannot be read. A node whose stats cannot be read is still returned, with its Err set, so
+// callers can tell an unreachable node from an idle one.
+//
+// A node returns its entries newest first. The newest entry is skipped and the second newest is
+// used, like MultiServerNodesAggregated skips the newest entries. A node that returns fewer than two
+// entries is treated as unreadable.
 func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
@@ -93,10 +103,13 @@ func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, err
 			Node: sRes.node,
 		}
 
-		if sRes.err == nil {
-			if len(sRes.stats) >= 2 {
-				serverStatResult.Stats = sRes.stats[1]
-			}
+		switch {
+		case sRes.err != nil:
+			serverStatResult.Err = sRes.err
+		case len(sRes.stats) < 2:
+			serverStatResult.Err = fmt.Errorf("node returned %d stats entries, at least 2 are required", len(sRes.stats))
+		default:
+			serverStatResult.Stats = sRes.stats[1]
 		}
 
 		stats = append(stats, serverStatResult)
@@ -106,7 +119,9 @@ func MultiServerNodes(ctx context.Context, nt beegfs.NodeType) ([]NodeStats, err
 }
 
 // Queries and sums the stats for multiple nodes. The returned slice is chronologically sorted in ascending order.
-// The second return value is the number of nodes used for the sum.
+// The second return value is the number of nodes used for the sum. A node that returns no entries
+// beyond the 2 newest ones is left out of the sum and the count. If the stats of any node cannot be
+// read, an error is returned.
 func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stats, int, error) {
 	nodes, err := getNodeList(ctx, nt)
 	if err != nil {
@@ -120,18 +135,23 @@ func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stat
 
 	// This map maps a timestamp to stats entry. It is used to sum up stat entries with the same timestamp.
 	var m = make(map[uint64]Stats)
+	summedNodes := 0
 	for _, c := range channels {
 		sRes := <-c
 
 		if sRes.err != nil {
-			return []Stats{}, 0, err
+			return []Stats{}, 0, fmt.Errorf("reading stats from node %s: %w", sRes.node.Alias, sRes.err)
 		}
 
 		// The old ctl cuts off the latest 2 values. Its called "inaccuracy time". We are not sure if that makes sense but implement it
 		// here as well for the time being.
+		if len(sRes.stats) <= 2 {
+			continue
+		}
 		for _, s := range sRes.stats[2:] {
 			m[s.StatsTime] = m[s.StatsTime].add(s)
 		}
+		summedNodes++
 	}
 
 	var result = make([]Stats, 0)
@@ -143,7 +163,7 @@ func MultiServerNodesAggregated(ctx context.Context, nt beegfs.NodeType) ([]Stat
 		return int(a.StatsTime) - int(b.StatsTime)
 	})
 
-	return result, len(nodes), nil
+	return result, summedNodes, nil
 }
 
 // Fetches the list of nodes from nodestore filter by the given node type

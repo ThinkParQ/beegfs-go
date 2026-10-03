@@ -11,33 +11,47 @@ import (
 // carries a clean, JSON-serialized projection plus (where the human renderer reuses an existing
 // table printer) a Raw field that is not serialized. Both are built from the same collected data.
 
-// BusyNode reports a single server node's queued requests. The degraded/critical thresholds it is
-// evaluated against are reported once in the check summary (see QueuedReqsDegradedThreshold /
-// QueuedReqsCriticalThreshold); per-node thresholds can be added here if they become configurable.
+// BusyNode reports a single server node's queued requests. The degraded/critical thresholds all
+// nodes are evaluated against are reported once per check (see BusyDetail). Error is set when the
+// node's stats could not be read. QueuedRequests is then 0 and does not mean the node is idle.
 type BusyNode struct {
 	Alias          string `json:"alias"`
 	NumID          uint64 `json:"numID"`
 	NodeType       string `json:"nodeType"`
 	QueuedRequests uint32 `json:"queuedRequests"`
+	Error          string `json:"error,omitempty"`
 }
 
-// BusyDetail is the detail for a busy-nodes check: every node of that type, not only the busy ones.
+// BusyDetail is the detail for a busy-nodes check: every node of that type, not only the busy ones,
+// along with the thresholds they were evaluated against. The thresholds are included because they
+// are configurable, so consumers cannot infer them from the queued request counts alone.
 type BusyDetail struct {
-	Nodes []BusyNode        `json:"nodes"`
-	Raw   []stats.NodeStats `json:"-"`
+	DegradedThreshold uint32            `json:"degradedThreshold"`
+	CriticalThreshold uint32            `json:"criticalThreshold"`
+	Nodes             []BusyNode        `json:"nodes"`
+	Raw               []stats.NodeStats `json:"-"`
 }
 
-func newBusyDetail(nodes []stats.NodeStats) BusyDetail {
+func newBusyDetail(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) BusyDetail {
 	projected := make([]BusyNode, 0, len(nodes))
 	for _, n := range nodes {
-		projected = append(projected, BusyNode{
+		bn := BusyNode{
 			Alias:          string(n.Node.Alias),
 			NumID:          uint64(n.Node.Id.NumId),
 			NodeType:       n.Node.Id.NodeType.String(),
 			QueuedRequests: n.Stats.QueuedRequests,
-		})
+		}
+		if n.Err != nil {
+			bn.Error = n.Err.Error()
+		}
+		projected = append(projected, bn)
 	}
-	return BusyDetail{Nodes: projected, Raw: nodes}
+	return BusyDetail{
+		DegradedThreshold: degradedThreshold,
+		CriticalThreshold: criticalThreshold,
+		Nodes:             projected,
+		Raw:               nodes,
+	}
 }
 
 // TargetCapacity is the per-target capacity/state projection shown by the target/df table.
