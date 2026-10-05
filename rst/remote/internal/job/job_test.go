@@ -2,11 +2,13 @@ package job
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestInTerminalState(t *testing.T) {
@@ -322,4 +324,121 @@ func TestSelectConflict(t *testing.T) {
 			})
 		}
 	})
+}
+
+// completedSyncJob builds a terminal sync job for outcomeRecordedBy. remotePath and stopMtime are
+// the fields the rule compares besides the operation.
+func completedSyncJob(operation flex.SyncJob_Operation, state beeremote.Job_State, remotePath string, stopMtime time.Time) *Job {
+	job := syncJob(1, operation, false)
+	job.GetRequest().GetSync().SetRemotePath(remotePath)
+	job.GetStatus().SetState(state)
+	job.SetStopMtime(timestamppb.New(stopMtime))
+	return job
+}
+
+func TestOutcomeRecordedBy(t *testing.T) {
+	mtime := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	push := completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_COMPLETED, "test/myfile", mtime)
+
+	tests := []struct {
+		name      string
+		request   *Job
+		lastJob   *Job
+		wantState beeremote.Job_State
+		mtime     time.Time
+		want      bool
+	}{
+		{
+			name:      "no last job",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   nil,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      false,
+		},
+		{
+			name:      "same push again",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      true,
+		},
+		{
+			name:      "mtime fraction is ignored because the builder sends whole seconds",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_COMPLETED, "test/myfile", mtime.Add(500*time.Millisecond)),
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      true,
+		},
+		{
+			name:      "pull after push is not recorded by the push",
+			request:   completedSyncJob(flex.SyncJob_DOWNLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      false,
+		},
+		{
+			name:      "different remote path",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "other-key", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      false,
+		},
+		{
+			name:      "empty remote path inherits the last job's key",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      true,
+		},
+		{
+			name:      "last job stopped at an older mtime",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime.Add(time.Second),
+			want:      false,
+		},
+		{
+			name:      "unknown mtime is not compared",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   push,
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     time.Time{},
+			want:      true,
+		},
+		{
+			name:      "last job is not in the wanted state",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_CANCELLED, "test/myfile", mtime),
+			wantState: beeremote.Job_COMPLETED,
+			mtime:     mtime,
+			want:      false,
+		},
+		{
+			name:      "offloaded by the same operation",
+			request:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_OFFLOADED, "test/myfile", mtime),
+			wantState: beeremote.Job_OFFLOADED,
+			want:      true,
+		},
+		{
+			name:      "offloaded by a different operation",
+			request:   completedSyncJob(flex.SyncJob_DOWNLOAD, beeremote.Job_UNASSIGNED, "test/myfile", time.Time{}),
+			lastJob:   completedSyncJob(flex.SyncJob_UPLOAD, beeremote.Job_OFFLOADED, "test/myfile", mtime),
+			wantState: beeremote.Job_OFFLOADED,
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.request.outcomeRecordedBy(tt.lastJob, tt.wantState, tt.mtime))
+		})
+	}
 }

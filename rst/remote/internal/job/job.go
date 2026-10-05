@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/rst"
@@ -120,6 +121,40 @@ func (j *Job) remotePath() string {
 	default:
 		return ""
 	}
+}
+
+// isDownload reports whether the job was a download. Unrecognized request types report false.
+func (j *Job) isDownload() bool {
+	request := j.GetRequest()
+	switch request.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return request.GetBuilder().GetCfg().GetDownload()
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetOperation() == flex.SyncJob_DOWNLOAD
+	case beeremote.JobRequest_Mock_case:
+		return request.GetMock().GetCfg().GetDownload()
+	default:
+		return false
+	}
+}
+
+// outcomeRecordedBy reports whether the lastJob already records the outcome resolved by this job.
+func (j *Job) outcomeRecordedBy(lastJob *Job, wantState beeremote.Job_State, mtime time.Time) bool {
+	// A claimed reservation is this request's own record. It must take the outcome so it leaves
+	// reserved, because a reserved job blocks every later job for its path and RST.
+	if j.InReservedState() || lastJob == nil || lastJob.GetStatus().GetState() != wantState {
+		return false
+	}
+	if j.GetRequest().WhichType() != lastJob.GetRequest().WhichType() || j.isDownload() != lastJob.isDownload() {
+		return false
+	}
+	if remotePath := j.remotePath(); remotePath != "" && remotePath != lastJob.remotePath() {
+		return false
+	}
+	if !mtime.IsZero() && mtime.Unix() != lastJob.GetStopMtime().GetSeconds() {
+		return false
+	}
+	return true
 }
 
 // ConflictsWith reports whether existingJob prevents job from starting. This assumes both jobs are
