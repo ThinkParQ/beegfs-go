@@ -702,6 +702,7 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 		addStep(prepareDownloadNoFile(mountPoint, cfg))
 		if lockedInfo.RemoteSize == 0 {
 			addStep(prepareDownloadEmptyObject(mountPoint, cfg, cfg.Overwrite, originalLockedInfo))
+			return
 		}
 	} else {
 		failedPrecondition = fmt.Errorf("unable to upload file: %w", fs.ErrNotExist)
