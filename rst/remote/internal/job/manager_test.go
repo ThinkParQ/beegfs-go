@@ -2845,6 +2845,68 @@ func TestSubmitJobRequestReservations(t *testing.T) {
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, rst.ErrReservationMissing, "a job that exists must never look like one that was never recorded")
 	})
+
+	// A claim that resolves without work must record the outcome on the reserved job, even when an
+	// earlier job already records the same outcome. Returning the earlier job instead would leave
+	// the reserved job RESERVED, and a RESERVED job blocks every later job for its path and RST.
+	t.Run("a claim that is already complete moves the reserved job out of RESERVED", func(t *testing.T) {
+		m := newReservationManager(t)
+		// Keep finished jobs so the earlier job is still the claim's last job. The default of zero
+		// would delete it when the reservation is submitted.
+		m.config.MaxJobEntriesPerRST = 10
+		mtime := "2026-10-01T12:00:00Z"
+		alreadyComplete := &beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+			Message: mtime,
+		}
+		earlier := newReservationRequest(false, "")
+		earlier.SetGenerationStatus(alreadyComplete)
+		earlierResult, err := m.SubmitJobRequest(earlier, "")
+		require.ErrorIs(t, err, rst.ErrJobAlreadyComplete)
+
+		reservedJobId := uuid.NewString()
+		_, err = m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		claim := newReservationRequest(false, reservedJobId)
+		claim.SetGenerationStatus(alreadyComplete)
+		claimed, err := m.SubmitJobRequest(claim, "")
+
+		require.ErrorIs(t, err, rst.ErrJobAlreadyComplete)
+		assert.Equal(t, reservedJobId, claimed.GetJob().GetId(), "the claim must report its own job, not the earlier one")
+		assert.NotEqual(t, earlierResult.GetJob().GetId(), claimed.GetJob().GetId())
+		assert.Equal(t, beeremote.Job_COMPLETED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+	})
+
+	// The RST can be removed from remote's configuration between the reservation and the claim. The
+	// claim is refused either way, but the reserved job must not be left blocking the path.
+	for _, tc := range []struct {
+		name             string
+		generationStatus *beeremote.JobRequest_GenerationStatus
+	}{
+		{"a direct claim", nil},
+		{"a builder claim", &beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+			Message: "2026-10-01T12:00:00Z",
+		}},
+	} {
+		t.Run(tc.name+" for an RST that no longer exists cancels the reserved job", func(t *testing.T) {
+			m := newReservationManager(t)
+			reservedJobId := uuid.NewString()
+			_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+			require.NoError(t, err)
+			delete(m.workerManager.RemoteStorageTargets, 1)
+
+			claim := newReservationRequest(false, reservedJobId)
+			if tc.generationStatus != nil {
+				claim.SetGenerationStatus(tc.generationStatus)
+			}
+			_, err = m.SubmitJobRequest(claim, "")
+
+			require.ErrorContains(t, err, "requested RST does not exist")
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+		})
+	}
 }
 
 // getReservationTestJob reads one job back from m by path and ID.

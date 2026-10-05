@@ -594,7 +594,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		reservedJobId = fmt.Sprint(jobId)
 	}
 
-	if !jr.GetReserve() && jr.HasReserveJobId() {
+	isClaimedReservation := !jr.GetReserve() && jr.HasReserveJobId()
+	if isClaimedReservation {
 		reserved, ok := pathEntry.Value[reservedJobId]
 		if !ok {
 			// Distinct from the state check below only so the message says there is no record. Both
@@ -677,15 +678,27 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		var conflictErr error
 		conflict := job.selectConflict(conflictingJobs)
 		if conflict != nil {
+			if isClaimedReservation {
+				// A reservation refuses every later conflicting job and any conflicting job that
+				// existed first would have refused the reservation. So a claim that finds a
+				// conflict means the path entry is inconsistent.
+				err := fmt.Errorf("%w: claim of reserved job %s conflicts with job %s in state %s (this is probably a bug)", rst.ErrJobNotAllowed, job.GetId(), conflict.job.GetId(), conflict.job.GetStatus().GetState())
+				cancelClaimedReservation(job, err)
+				return &beeremote.JobResult{Job: job.Get()}, err
+			}
 
 			if conflict.isReserved {
+				conflictErr = rst.ErrJobBlockedByActiveJob
 				if conflict.rstIdsMatch {
+					conflictErr = rst.ErrJobNotAllowed
 					m.log.Debug("a reserved job for this RST is blocking the request, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
-					return &beeremote.JobResult{Job: conflict.job.Get()}, rst.ErrJobNotAllowed
+				} else {
+					m.log.Debug("a reserved job for another RST is blocking the request, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
 				}
-				m.log.Debug("a reserved job for another RST is blocking the request, returning that job instead of creating a new one", zap.Any("conflictingJob", conflict.job))
-				return &beeremote.JobResult{Job: conflict.job.Get()}, rst.ErrJobBlockedByActiveJob
-			} else if conflict.jobsMatch {
+				return &beeremote.JobResult{Job: conflict.job.Get()}, conflictErr
+			}
+
+			if conflict.jobsMatch {
 				if conflict.isActive {
 					request := job.GetRequest()
 					// Force asks for a new transfer. Reporting the active job as already existing
@@ -748,7 +761,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			if status.GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
 				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
 			} else {
-				return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+				err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+				if isClaimedReservation {
+					cancelClaimedReservation(job, err)
+					return &beeremote.JobResult{Job: job.Get()}, err
+				}
+				return nil, err
 			}
 		} else {
 			switch status.GetState() {
@@ -770,7 +788,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	} else {
 		var ok bool
 		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
-			return nil, fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+			err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+			if isClaimedReservation {
+				cancelClaimedReservation(job, err)
+				return &beeremote.JobResult{Job: job.Get()}, err
+			}
+			return nil, err
 		}
 
 		nodeType := workermgr.NodeTypeForJobRequest(job.Request)
@@ -781,11 +804,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
 			m.log.Debug("Offload is already complete", zap.Any("job", lastJob), zap.Any("err", err))
-			// Update the database if the last recorded status does not accurately reflect
-			// offloaded. Discrepancies can occur due to preemptive handling by the job builder
-			// (resulting in no-op job requests), or from database issues such as corruption,
-			// deletion, forced cancellations, or manual cleanup.
-			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_OFFLOADED {
+
+			if !job.outcomeRecordedBy(lastJob, beeremote.Job_OFFLOADED, stdtime.Time{}) {
 				status := job.GetStatus()
 				status.State = beeremote.Job_OFFLOADED
 				status.Message = "job already offloaded (detailed work requests/results are not available)"
@@ -796,6 +816,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 					WorkResults:  []*beeremote.JobResult_WorkResult{},
 				}.Build(), err
 			}
+
 			return beeremote.JobResult_builder{
 				Job:          lastJob.Get(),
 				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
@@ -803,16 +824,20 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}.Build(), err
 		} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
 			m.log.Debug("requested job is already complete", zap.Any("job", lastJob), zap.Any("err", err))
-			// Update the database if the last recorded status does not accurately reflect complete.
-			// Discrepancies can occur due to database issues such as corruption, deletion, forced
-			// cancellations, or manual cleanup.
-			if lastJob == nil || lastJob.GetStatus().GetState() != beeremote.Job_COMPLETED {
+
+			mtimeErr, hasMtime := errors.AsType[*rst.MtimeErr](err)
+			var mtime stdtime.Time
+			if hasMtime {
+				mtime = mtimeErr.Mtime()
+			}
+
+			if !job.outcomeRecordedBy(lastJob, beeremote.Job_COMPLETED, mtime) {
 				status := job.GetStatus()
 				status.State = beeremote.Job_COMPLETED
-				status.Message = "missing job recreated based on actual local and remote state of this entry (detailed work requests/results are not available)"
+				status.Message = "completed without a data transfer because the local and remote state of this entry match (detailed work requests/results are not available)"
 
-				if mtimeErr, ok := errors.AsType[*rst.MtimeErr](err); ok {
-					pbMtime := timestamppb.New(mtimeErr.Mtime())
+				if hasMtime {
+					pbMtime := timestamppb.New(mtime)
 					job.SetStartMtime(pbMtime)
 					job.SetStopMtime(pbMtime)
 				} else {
@@ -826,6 +851,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 					WorkResults:  []*beeremote.JobResult_WorkResult{},
 				}.Build(), err
 			}
+
 			return beeremote.JobResult_builder{
 				Job:          lastJob.Get(),
 				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
@@ -1496,6 +1522,20 @@ func (m *Manager) completeJob(job *Job, client rst.Provider, abort bool) error {
 		return job.CompleteBuilder(m.ctx, client, abort, m.cancelReservedRequest)
 	}
 	return job.Complete(m.ctx, client, abort)
+}
+
+// cancelClaimedReservation moves a claimed reservation to CANCELLED. SubmitJobRequest calls it
+// when it refuses a claim and returns before the job is scheduled or recorded with an outcome. job
+// is the reserved job the claim selected. It is already in the path entry, so the change is
+// committed with that entry. reason is the refusal SubmitJobRequest returns.
+//
+// The state is CANCELLED, not FAILED, because no work ran, so nothing needs cleanup. A CANCELLED
+// job does not block later jobs for the path. The builder undoes its plan and releases the access
+// lock when the claim is refused.
+func cancelClaimedReservation(job *Job, reason error) {
+	status := job.GetStatus()
+	status.SetState(beeremote.Job_CANCELLED)
+	status.SetMessage(reason.Error())
 }
 
 // cancelReservedRequest cancels the job a bulk operation reserved for one path. It is the
