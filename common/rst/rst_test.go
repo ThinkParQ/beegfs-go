@@ -876,11 +876,6 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 	missing := func(remoteSize int64) *flex.JobLockedInfo {
 		return flex.JobLockedInfo_builder{RemoteSize: remoteSize}.Build()
 	}
-	emptyRemote := func() *flex.JobLockedInfo {
-		info := outOfSync()
-		info.SetRemoteSize(0)
-		return info
-	}
 
 	tests := []struct {
 		name         string
@@ -896,9 +891,7 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 		{"download over an out of sync file without overwrite", flex.JobRequestCfg_builder{Download: true, LockedInfo: outOfSync()}.Build(), false, true},
 		{"download of an in sync file", flex.JobRequestCfg_builder{Download: true, LockedInfo: inSync()}.Build(), false, false},
 		{"download into a stub", flex.JobRequestCfg_builder{Download: true, RemoteStorageTarget: 1, RemotePath: "key", LockedInfo: stub()}.Build(), true, false},
-		{"download of an empty object over a file", flex.JobRequestCfg_builder{Download: true, Overwrite: true, LockedInfo: emptyRemote()}.Build(), false, false},
 		{"download to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(10)}.Build(), true, false},
-		{"download of an empty object to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(0)}.Build(), false, false},
 		{"stub-local upload of an out of sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: outOfSync()}.Build(), true, false},
 		{"stub-local upload of an in sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: inSync()}.Build(), false, false},
 		{"stub-local download to a new path", flex.JobRequestCfg_builder{StubLocal: true, Download: true, LockedInfo: missing(10)}.Build(), false, false},

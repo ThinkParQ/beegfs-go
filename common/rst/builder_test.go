@@ -19,6 +19,8 @@ import (
 // and waited on, so tests can assert CompleteWorkRequests' abort path drives cancellation through
 // to completion.
 type trackingBulkOperation struct {
+	// cancelWalk is what Cancel reports, each as the operation's walk path for one request.
+	cancelWalk    []*BulkStreamPathResult
 	cancelCalled  bool
 	cancelReason  error
 	waitCalled    bool
@@ -45,9 +47,11 @@ func (t *trackingBulkOperation) Cancel(ctx context.Context, reason error) (<-cha
 
 	// The operation closes its own walk channel, as xtreemstoreS3BulkRetrieveManager.Cancel does
 	// from the goroutine that feeds it. cancelBulkOperation drains the walk to the end before it
-	// calls wait, so a fake that only closed the channel from wait would never be drained. This
-	// operation has no requests to release, so the walk is empty.
-	walkCh := make(chan *BulkStreamPathResult)
+	// calls wait, so a fake that only closed the channel from wait would never be drained.
+	walkCh := make(chan *BulkStreamPathResult, len(t.cancelWalk))
+	for _, result := range t.cancelWalk {
+		walkCh <- result
+	}
 	close(walkCh)
 
 	return walkCh, func() error {
@@ -155,7 +159,9 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 		Request: beeremote.JobRequest_builder{
 			Path:                "/test/builder",
 			RemoteStorageTarget: JobBuilderRstId,
-			Builder:             flex.BuilderJob_builder{}.Build(),
+			Builder: flex.BuilderJob_builder{
+				Cfg: flex.JobRequestCfg_builder{Path: "/test/builder", RemoteStorageTarget: 1}.Build(),
+			}.Build(),
 		}.Build(),
 	}.Build()
 
@@ -181,6 +187,62 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 	require.True(t, tracker.destroyCalled)
 	require.NoFileExists(t, manager.getEntryPath(), "a destroyed operation must not be left on the mount")
 	mockRST.AssertExpectations(t)
+}
+
+// missingPathMount reports every path as missing, like a download destination that does not exist
+// yet. getPathsFn stats the destination to decide how a key maps into it.
+type missingPathMount struct {
+	stubMountPoint
+}
+
+func (m missingPathMount) Lstat(path string) (os.FileInfo, error) {
+	return nil, os.ErrNotExist
+}
+
+// TestCompleteJobBuilderRequestCancelsReservationsByPathInMount pins how a cancelled builder job
+// releases the jobs its bulk operation reserved. The cancel walk reports each request by its walk
+// path, which for a download that walks the remote target is the object key. Remote keys reserved
+// jobs by the path in the mount, so cancelling by the key would find nothing and strand them.
+func TestCompleteJobBuilderRequestCancelsReservationsByPathInMount(t *testing.T) {
+	mountPath := t.TempDir()
+	mockRST := &MockClient{}
+	mountPoint := missingPathMount{stubMountPoint{mountPath: mountPath}}
+	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, mountPoint, DefaultStateRoot)
+
+	// A pull of the prefix data/ into /restore, which walks the remote target.
+	job := beeremote.Job_builder{
+		Id: "builder-job",
+		Request: beeremote.JobRequest_builder{
+			Path:                "/restore",
+			RemoteStorageTarget: JobBuilderRstId,
+			Builder: flex.BuilderJob_builder{
+				Cfg: flex.JobRequestCfg_builder{
+					Path:                "/restore",
+					RemoteStorageTarget: 1,
+					RemotePath:          "data/",
+					Download:            true,
+				}.Build(),
+			}.Build(),
+		}.Build(),
+	}.Build()
+
+	tracker := &trackingBulkOperation{cancelWalk: []*BulkStreamPathResult{
+		{Path: "data/a", ReservedJobId: "reserved-a", RstId: 1},
+	}}
+	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, "retrieve").Return(tracker, nil).Once()
+	saveTestBulkOperationEntry(t, mountPath, job.GetId(), &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+
+	cancelled := map[string]string{}
+	cancelRequest := func(path string, jobId string) error {
+		cancelled[path] = jobId
+		return nil
+	}
+
+	err := client.CompleteJobBuilderRequest(context.Background(), job, nil, cancelRequest, true)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"/restore/data/a": "reserved-a"}, cancelled,
+		"the reserved job must be cancelled by its path in the mount, not by the object key")
+	require.True(t, tracker.destroyCalled)
 }
 
 // ctxCheckingBulkOperation fails every call once its context is done.
@@ -267,7 +329,16 @@ func TestCompleteWorkRequestsFinishesBulkTeardownAfterCancel(t *testing.T) {
 	cancel()
 	require.Error(t, ctx.Err(), "precondition: the context must already be cancelled")
 
-	job := &beeremote.Job{Id: jobId}
+	job := beeremote.Job_builder{
+		Id: jobId,
+		Request: beeremote.JobRequest_builder{
+			Path:                "/test/builder",
+			RemoteStorageTarget: JobBuilderRstId,
+			Builder: flex.BuilderJob_builder{
+				Cfg: flex.JobRequestCfg_builder{Path: "/test/builder", RemoteStorageTarget: 1}.Build(),
+			}.Build(),
+		}.Build(),
+	}.Build()
 	workResults := []*flex.Work{{Status: &flex.Work_Status{State: flex.Work_COMPLETED}}}
 
 	// The job completed and is not aborted, so nothing is cancelled and the cancel walk never runs.

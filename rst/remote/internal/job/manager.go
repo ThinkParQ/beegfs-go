@@ -1552,6 +1552,9 @@ func cancelClaimedReservation(job *Job, reason error) {
 // It takes the path lock itself, so no caller may hold it. A builder's own path is never absorbed
 // into a bulk operation, so a builder job cannot reach its own path entry through this.
 func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
+	// Path entries are keyed by absolute paths in the mount but a provider's walk may
+	// report a path without the leading slash.
+	path = rst.NormalizePath(path)
 	pathEntry, commitAndReleasePath, pathEntryErr := m.pathStore.GetAndLockEntry(path)
 	if pathEntryErr != nil {
 		if errors.Is(pathEntryErr, kvstore.ErrEntryNotInDB) {
