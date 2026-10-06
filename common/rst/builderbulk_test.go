@@ -85,7 +85,7 @@ func newTestBulkOperationRegistry(t *testing.T, client Provider) *bulkOperationR
 // saveTestBulkOperationEntry persists entry the way an earlier attempt of the builder job would have,
 // so tests can exercise recovery from the mount without opening a provider handle first.
 func saveTestBulkOperationEntry(t *testing.T, mountPath string, jobId string, entry *bulkOperationEntry) *bulkOperationManager {
-	entry.StateMountPath = path.Join(DefaultStateRoot, bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
+	entry.StateMountPath = path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
 	manager := &bulkOperationManager{
 		bulkOperationEntry: entry,
 		mountPath:          mountPath,
@@ -99,7 +99,7 @@ func saveTestBulkOperationEntry(t *testing.T, mountPath string, jobId string, en
 // readTestBulkOperationEntries decodes every entry saved for jobId, keyed the same way the registry
 // keys its managers, so tests can assert what actually landed on the mount.
 func readTestBulkOperationEntries(t *testing.T, mountPath string, jobId string) map[string]*bulkOperationEntry {
-	entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, jobId))
+	entriesPath := path.Join(mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath(jobId)))
 	entryFiles, err := os.ReadDir(entriesPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -308,12 +308,12 @@ func TestBulkOperationRegistry_AddRequestSavesNewOperation(t *testing.T) {
 	require.NoError(t, registry.AddRequest(context.Background(), request, "retrieve"))
 
 	// Spelled out rather than derived so the on-disk layout can't drift silently.
-	require.FileExists(t, path.Join(registry.mountPath, ".beegfs-rst", "job", "job-1", "bulk-operations", "1-retrieve.json"))
+	require.FileExists(t, path.Join(registry.mountPath, ".beegfs-rst", "v1", "job", "job-1", "bulk-operations", "1-retrieve.json"))
 
 	entries := readTestBulkOperationEntries(t, registry.mountPath, "job-1")
 	require.Len(t, entries, 1)
 	assert.Equal(t, &bulkOperationEntry{
-		StateMountPath: ".beegfs-rst/job/job-1/1/retrieve",
+		StateMountPath: ".beegfs-rst/v1/job/job-1/1/retrieve",
 		RstId:          1,
 		Operation:      "retrieve",
 	}, entries["1-retrieve"], "the entry must be filed under the operation's key")
@@ -328,7 +328,7 @@ func TestBulkOperationRegistry_AddRequestFailsOperationThatCannotBeSaved(t *test
 	mountPath := t.TempDir()
 	// Occupy rstId 1's entry path with a directory so the save's rename over it fails, while
 	// rstId 2 saves normally.
-	entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
+	entriesPath := path.Join(mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1")))
 	require.NoError(t, os.MkdirAll(path.Join(entriesPath, "1-retrieve"+bulkOperationEntryExtension), 0o700))
 
 	client := &MockClient{}
@@ -458,10 +458,10 @@ func TestBulkOperationManager_DestroyRemovesSavedEntry(t *testing.T) {
 
 	manager := newBulkOperationManager(context.Background(), client, mountPath, DefaultStateRoot, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 	require.NoError(t, manager.Save())
-	require.FileExists(t, manager.getEntryPath())
+	require.FileExists(t, entryFilePath(manager))
 
 	require.NoError(t, manager.Destroy(context.Background()))
-	require.NoFileExists(t, manager.getEntryPath())
+	require.NoFileExists(t, entryFilePath(manager))
 	assert.Empty(t, readTestBulkOperationEntries(t, mountPath, "job-1"))
 }
 
@@ -479,12 +479,12 @@ func TestBulkOperationManager_DestroyRemovesEmptyStateDirectories(t *testing.T) 
 	// The provider owns this directory; creating it here stands in for the state it would have
 	// written and then deleted during its own Destroy.
 	require.NoError(t, os.MkdirAll(path.Join(mountPath, manager.StateMountPath), 0o700))
-	require.DirExists(t, path.Join(mountPath, ".beegfs-rst", "job", "job-1", "1", "retrieve"))
-	require.DirExists(t, path.Join(mountPath, ".beegfs-rst", "job", "job-1", "bulk-operations"))
+	require.DirExists(t, path.Join(mountPath, ".beegfs-rst", "v1", "job", "job-1", "1", "retrieve"))
+	require.DirExists(t, path.Join(mountPath, ".beegfs-rst", "v1", "job", "job-1", "bulk-operations"))
 
 	require.NoError(t, manager.Destroy(context.Background()))
 
-	assert.NoDirExists(t, path.Join(mountPath, ".beegfs-rst", "job", "job-1"), "the per-job directory holding both the state and the entry must not be left behind")
+	assert.NoDirExists(t, path.Join(mountPath, ".beegfs-rst", "v1", "job", "job-1"), "the per-job directory holding both the state and the entry must not be left behind")
 	assert.DirExists(t, path.Join(mountPath, ".beegfs-rst"), "the shared state root must survive")
 }
 
@@ -508,8 +508,8 @@ func TestBulkOperationManager_DestroyKeepsDirectoriesSharedWithAnotherOperation(
 
 	assert.NoDirExists(t, path.Join(mountPath, torndown.StateMountPath))
 	assert.DirExists(t, path.Join(mountPath, survivor.StateMountPath), "a sibling operation's state must survive")
-	assert.DirExists(t, path.Join(mountPath, ".beegfs-rst", "job", "job-1", "1"), "the shared parent must survive while a sibling uses it")
-	require.FileExists(t, survivor.getEntryPath(), "the sibling's entry must survive")
+	assert.DirExists(t, path.Join(mountPath, ".beegfs-rst", "v1", "job", "job-1", "1"), "the shared parent must survive while a sibling uses it")
+	require.FileExists(t, entryFilePath(survivor), "the sibling's entry must survive")
 }
 
 // TestBulkOperationManager_DestroyKeepsEntryWhenStateIsNotFullyDeleted asserts a provider that
@@ -534,7 +534,7 @@ func TestBulkOperationManager_DestroyKeepsEntryWhenStateIsNotFullyDeleted(t *tes
 	require.Error(t, manager.Destroy(context.Background()), "an incomplete teardown must be reported as a failure")
 
 	assert.FileExists(t, leftover, "state the provider did not delete must not be silently abandoned")
-	require.FileExists(t, manager.getEntryPath(), "the entry must survive so the leftover state can still be found")
+	require.FileExists(t, entryFilePath(manager), "the entry must survive so the leftover state can still be found")
 	entries := readTestBulkOperationEntries(t, mountPath, "job-1")
 	require.Contains(t, entries, "1-retrieve")
 	assert.True(t, entries["1-retrieve"].Destroying, "the entry must stay marked so a later Init finishes the teardown")
@@ -558,7 +558,7 @@ func TestBulkOperationManager_DestroyWithoutProviderHandleKeepsEntryForLeftoverS
 	require.Error(t, manager.Destroy(context.Background()))
 
 	assert.FileExists(t, leftover)
-	assert.FileExists(t, manager.getEntryPath(), "the entry must survive so the orphaned state stays referenced")
+	assert.FileExists(t, entryFilePath(manager), "the entry must survive so the orphaned state stays referenced")
 }
 
 // TestBulkOperationManager_DestroyWithoutProviderHandleCompletesWhenNothingWasWritten asserts the
@@ -571,7 +571,7 @@ func TestBulkOperationManager_DestroyWithoutProviderHandleCompletesWhenNothingWa
 
 	require.NoError(t, manager.Destroy(context.Background()))
 
-	assert.NoFileExists(t, manager.getEntryPath())
+	assert.NoFileExists(t, entryFilePath(manager))
 	assert.Empty(t, readTestBulkOperationEntries(t, mountPath, "job-1"))
 }
 
@@ -608,8 +608,8 @@ func TestBulkOperationRegistry_InitFinishesInterruptedDestroy(t *testing.T) {
 
 	torndown := &fakeBulkOperation{}
 	client := &MockClient{}
-	client.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/job/job-1/1/retrieve", "retrieve").Return(torndown, nil)
-	client.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/job/job-1/2/retrieve", "retrieve").Return(&fakeBulkOperation{}, nil)
+	client.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/v1/job/job-1/1/retrieve", "retrieve").Return(torndown, nil)
+	client.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/v1/job/job-1/2/retrieve", "retrieve").Return(&fakeBulkOperation{}, nil)
 
 	registry := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
@@ -652,7 +652,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// no Destroy will ever remove it, and while it is there the job's directories cannot be
 		// reclaimed either.
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
+		entriesPath := path.Join(registry.mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1")))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 		stagedPath := path.Join(entriesPath, "1-retrieve.json.tmp")
 		require.NoError(t, os.WriteFile(stagedPath, []byte(`{"rstId":1,`), 0o600))
@@ -670,7 +670,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// an operation that is still live.
 		mountPath := t.TempDir()
 		saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
-		entriesPath := path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
+		entriesPath := path.Join(mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1")))
 		stagedPath := path.Join(entriesPath, "1-retrieve.json.tmp")
 		require.NoError(t, os.WriteFile(stagedPath, []byte(`{"rstId":1,`), 0o600))
 
@@ -695,7 +695,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		// a crash between them leaves these behind with nothing referring to them. Reopening the job
 		// is the only chance to notice.
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
+		entriesPath := path.Join(registry.mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1")))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 
 		require.NoError(t, registry.Init(context.Background()))
@@ -718,13 +718,13 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		require.NoError(t, registry.Init(context.Background()))
 
 		require.Contains(t, registry.GetManagersSnapshot(), "1-retrieve")
-		assert.DirExists(t, path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1")), "a job that still has entries must keep its directories")
-		assert.FileExists(t, registry.managers["1-retrieve"].getEntryPath())
+		assert.DirExists(t, path.Join(mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1"))), "a job that still has entries must keep its directories")
+		assert.FileExists(t, entryFilePath(registry.managers["1-retrieve"]))
 	})
 
 	t.Run("a corrupt entry is an error instead of a silently lost operation", func(t *testing.T) {
 		registry := newRegistry(t.TempDir())
-		entriesPath := path.Join(registry.mountPath, bulkOperationMountPath(DefaultStateRoot, "job-1"))
+		entriesPath := path.Join(registry.mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath("job-1")))
 		require.NoError(t, os.MkdirAll(entriesPath, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(entriesPath, "1-retrieve.json"), []byte("not json"), 0o600))
 
@@ -878,4 +878,98 @@ func TestValidateStateRoot(t *testing.T) {
 			assert.Contains(t, err.Error(), stateRoot, "the error must name the value that was rejected")
 		})
 	}
+}
+
+// entryFilePath is where manager's entry is saved on the mount, for assertions that look at the
+// file directly.
+func entryFilePath(manager *bulkOperationManager) string {
+	return path.Join(manager.mountPath, stateLayoutMountPath(manager.stateRoot), manager.getEntryPath())
+}
+
+// An entry whose fields cannot safely name its state is loaded as a failed operation. Nothing is
+// opened, written or deleted on its behalf, even when it claims an interrupted teardown, and the
+// builder job reports why.
+func TestBulkOperationRegistry_InitFailsInvalidEntries(t *testing.T) {
+	const jobId = "job-1"
+	tests := []struct {
+		name     string
+		fileName string
+		entry    bulkOperationEntry
+		wantErr  string
+	}{
+		{
+			name:     "operation escapes its directory",
+			fileName: "1-x.json",
+			entry:    bulkOperationEntry{RstId: 1, Operation: "../../other/1/retrieve", Destroying: true},
+			wantErr:  "not a single path component",
+		},
+		{
+			name:     "operation is the parent directory",
+			fileName: "1-...json",
+			entry:    bulkOperationEntry{RstId: 1, Operation: ".."},
+			wantErr:  "not a single path component",
+		},
+		{
+			name:     "operation is empty",
+			fileName: "1-.json",
+			entry:    bulkOperationEntry{RstId: 1},
+			wantErr:  "not a single path component",
+		},
+		{
+			name:     "entry is saved under another operation's name",
+			fileName: "2-retrieve.json",
+			entry:    bulkOperationEntry{RstId: 1, Operation: "retrieve", Destroying: true},
+			wantErr:  "should be saved as 1-retrieve.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mountPath := t.TempDir()
+			entriesPath := path.Join(mountPath, stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath(jobId))
+			require.NoError(t, os.MkdirAll(entriesPath, 0o700))
+			data, err := json.Marshal(&tt.entry)
+			require.NoError(t, err)
+			entryPath := path.Join(entriesPath, tt.fileName)
+			require.NoError(t, os.WriteFile(entryPath, data, 0o600))
+
+			// A state directory the invalid entry could name if its fields were trusted.
+			otherState := path.Join(mountPath, stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, "other", "1", "retrieve")
+			require.NoError(t, os.MkdirAll(otherState, 0o700))
+
+			// The provider must never be asked to open state for an invalid entry.
+			client := &MockClient{}
+			client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("must not be called")).Maybe()
+			registry := &bulkOperationRegistry{
+				managers:     make(map[string]*bulkOperationManager),
+				mountPath:    mountPath,
+				stateRoot:    DefaultStateRoot,
+				rstMap:       map[uint32]Provider{1: client, 2: client},
+				builderJobId: jobId,
+			}
+			require.NoError(t, registry.Init(context.Background()))
+			client.AssertNotCalled(t, "OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything)
+
+			managers := registry.GetManagersSnapshot()
+			key := strings.TrimSuffix(tt.fileName, bulkOperationEntryExtension)
+			require.Contains(t, managers, key, "the invalid entry must be registered under its file name")
+			manager := managers[key]
+			assert.True(t, manager.IsFailed())
+			assert.ErrorContains(t, registry.GetFailedOperationErrors(), tt.wantErr)
+
+			// Failing and destroying must leave the file system as it was.
+			require.NoError(t, manager.Fail(errors.New("later failure")))
+			require.NoError(t, manager.Destroy(context.Background()))
+			saved, err := os.ReadFile(entryPath)
+			require.NoError(t, err)
+			assert.Equal(t, data, saved, "the invalid entry must be left as it was found")
+			assert.DirExists(t, otherState, "nothing named by the invalid entry may be deleted")
+		})
+	}
+}
+
+// A well formed entry passes validation, so the check does not get in the way of normal reopening.
+func TestValidateBulkOperationEntryAcceptsSavedEntries(t *testing.T) {
+	entry := &bulkOperationEntry{RstId: 7, Operation: "EFFICIENT_RETRIEVE"}
+	assert.NoError(t, validateBulkOperationEntry(entry, "7-EFFICIENT_RETRIEVE.json"))
 }

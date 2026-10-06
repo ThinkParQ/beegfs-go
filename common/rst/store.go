@@ -87,7 +87,7 @@ func (s *ClientStore) UpdateConfig(ctx context.Context, rstConfigs []*flex.Remot
 		// Otherwise configure the RSTs.
 		rstMap := make(map[uint32]Provider)
 		for _, config := range rstConfigs {
-			rst, err := New(ctx, config, s.mountPoint)
+			rst, err := New(ctx, config, s.mountPoint, stateRoot)
 			if err != nil {
 				return err
 			}

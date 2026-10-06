@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -170,7 +171,7 @@ func (f *fakeS3ApiClient) UploadPart(ctx context.Context, params *s3.UploadPartI
 // (as happens on every builder-job reschedule) should stop asking to reschedule.
 func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	tmpDir := t.TempDir()
-	const stateMountPath = "state"
+	const stateMountPath = testStateMountPath
 	var operation = flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()
 
 	// Shared across every manager instance the test constructs, mirroring how a real S3 bucket's
@@ -182,6 +183,7 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 			s3ApiClient:    fake,
 			rstId:          1,
 			mountPath:      tmpDir,
+			stateRoot:      DefaultStateRoot,
 			stateMountPath: stateMountPath,
 			operation:      operation,
 			state:          &xtreemstoreS3BulkRetrieveManagerState{},
@@ -225,6 +227,7 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	for _, bulkInfo := range dispatched {
 		completeManager := &xtreemstoreS3BulkRetrieveManager{
 			mountPath:      tmpDir,
+			stateRoot:      DefaultStateRoot,
 			stateMountPath: bulkInfo.StateMountPath,
 			operation:      bulkInfo.Operation,
 		}
@@ -451,20 +454,21 @@ func TestIsObjectReadyForDownload(t *testing.T) {
 // openState must create it and Destroy must be the only thing that takes it away.
 func TestBulkRetrieveErrorsFileTracksOperationLifetime(t *testing.T) {
 	tmpDir := t.TempDir()
-	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 
 	newManager := func() *xtreemstoreS3BulkRetrieveManager {
 		return &xtreemstoreS3BulkRetrieveManager{
 			s3ApiClient:    &fakeS3ApiClient{},
 			rstId:          1,
 			mountPath:      tmpDir,
+			stateRoot:      DefaultStateRoot,
 			stateMountPath: bulkInfo.StateMountPath,
 			operation:      bulkInfo.Operation,
 			state:          &xtreemstoreS3BulkRetrieveManagerState{},
 		}
 	}
 	readinessErr := func() error {
-		return xtreemstoreS3BulkRetrieveError(bulkInfo, 1, tmpDir)
+		return xtreemstoreS3BulkRetrieveError(bulkInfo, 1, tmpDir, DefaultStateRoot)
 	}
 
 	// Before the operation exists at all there is nothing staged, so requests must be refused.
@@ -472,7 +476,7 @@ func TestBulkRetrieveErrorsFileTracksOperationLifetime(t *testing.T) {
 
 	m := newManager()
 	require.NoError(t, m.openState())
-	errorsPath := m.getErrorsPath()
+	errorsPath := path.Join(m.mountPath, m.stateMountPath, xtreemstoreS3BulkErrorsFileName)
 
 	contents, err := os.ReadFile(errorsPath)
 	require.NoError(t, err, "openState must create the errors file")
@@ -501,13 +505,14 @@ func TestBulkRetrieveErrorsFileTracksOperationLifetime(t *testing.T) {
 // cut, and updating a status must not disturb the job ID beside it.
 func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 	tmpDir := t.TempDir()
-	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 
 	newManager := func() *xtreemstoreS3BulkRetrieveManager {
 		return &xtreemstoreS3BulkRetrieveManager{
 			s3ApiClient:    &fakeS3ApiClient{},
 			rstId:          1,
 			mountPath:      tmpDir,
+			stateRoot:      DefaultStateRoot,
 			stateMountPath: bulkInfo.StateMountPath,
 			operation:      bulkInfo.Operation,
 			state:          &xtreemstoreS3BulkRetrieveManagerState{},
@@ -577,7 +582,7 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 	got, err := getJobId(m, 2)
 	require.NoError(t, err)
 	assert.Equal(t, jobIds[2], got)
-	statusPath := m.getStatusPath()
+	statusPath := path.Join(m.mountPath, m.stateMountPath, xtreemstoreS3BulkStatusFileName)
 	require.NoError(t, m.closeState())
 
 	// A record is appended in one write, so an interrupted append is the only way the file ends
@@ -593,7 +598,7 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 	assert.Equal(t, int64(len(jobIds)), m.includedJobs)
 	info, err := os.Stat(statusPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(len(jobIds)*bulkRequestRecordLen), info.Size())
+	assert.Equal(t, int64(len(jobIds)*xtreemstoreS3BulkRecordLen), info.Size())
 	got, err = getJobId(m, 2)
 	require.NoError(t, err)
 	assert.Equal(t, jobIds[2], got, "cutting the partial record must not disturb the ones before it")
@@ -614,7 +619,8 @@ func bulkRetrieveTestManager(t *testing.T, tmpDir string) (
 			s3ApiClient:    &fakeS3ApiClient{},
 			rstId:          1,
 			mountPath:      tmpDir,
-			stateMountPath: "state",
+			stateRoot:      DefaultStateRoot,
+			stateMountPath: testStateMountPath,
 			operation:      operation,
 			state:          &xtreemstoreS3BulkRetrieveManagerState{},
 		}
@@ -626,7 +632,7 @@ func bulkRetrieveTestManager(t *testing.T, tmpDir string) (
 			Path:                remotePath,
 			RemoteStorageTarget: 1,
 			Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_DOWNLOAD, RemotePath: remotePath}.Build(),
-			BulkInfo:            &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: operation},
+			BulkInfo:            &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: operation},
 			ReserveJobId:        &jobId,
 		}.Build())
 	}
@@ -698,7 +704,7 @@ func TestBulkRetrieveRecoversFromInterruptedAdd(t *testing.T) {
 			for _, p := range before {
 				require.NoError(t, addRequest(m, p))
 			}
-			recordPath := m.getRecordPath()
+			recordPath := path.Join(m.mountPath, m.stateMountPath, xtreemstoreS3BulkRecordFileName)
 			require.NoError(t, m.closeState())
 
 			livePath, err := os.Stat(recordPath)
@@ -745,7 +751,7 @@ func TestBulkRetrieveRefusesTruncatedRecordFile(t *testing.T) {
 	require.NoError(t, m.openState())
 	require.NoError(t, addRequest(m, "/objects/0"))
 	require.NoError(t, addRequest(m, "/objects/1"))
-	recordPath := m.getRecordPath()
+	recordPath := path.Join(m.mountPath, m.stateMountPath, xtreemstoreS3BulkRecordFileName)
 	require.NoError(t, m.closeState())
 
 	stat, err := os.Stat(recordPath)
@@ -771,7 +777,7 @@ func TestBulkRetrieveRejectsOversizedPath(t *testing.T) {
 	require.NoError(t, addRequest(m, "/objects/0"))
 	recordBytes := m.recordBytes
 
-	err := addRequest(m, "/"+strings.Repeat("x", bulkRequestMaxPathLen))
+	err := addRequest(m, "/"+strings.Repeat("x", xtreemstoreS3BulkMaxPathLen))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds")
 
@@ -782,3 +788,7 @@ func TestBulkRetrieveRejectsOversizedPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/objects/0"}, got)
 }
+
+// testStateMountPath is the state mount path the bulk retrieve tests keep an operation's state in.
+// It has to lie under this build's layout directory, because the manager refuses any other path.
+const testStateMountPath = DefaultStateRoot + "/" + stateLayoutDir + "/state"

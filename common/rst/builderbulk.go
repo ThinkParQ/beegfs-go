@@ -168,8 +168,17 @@ func (m *bulkOperationRegistry) Init(ctx context.Context) error {
 // teardown was interrupted is finished instead of reopened, and the leftovers of an interrupted save
 // or teardown are reclaimed so nothing is left on the mount that no entry refers to.
 func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) error {
-	entriesPath := path.Join(m.mountPath, bulkOperationMountPath(m.stateRoot, m.builderJobId))
-	entryFiles, err := os.ReadDir(entriesPath)
+	root, err := openStateLayout(m.mountPath, m.stateRoot, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer root.Close()
+
+	entriesPath := bulkOperationEntriesPath(m.builderJobId)
+	entryFiles, err := readStateDir(root, entriesPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -197,7 +206,7 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 			staged, isStaged := strings.CutSuffix(entryFile.Name(), persistentTmpSuffix)
 			if _, owned := savedEntries[staged]; isStaged && !owned {
 				stagedPath := path.Join(entriesPath, entryFile.Name())
-				if err := removeIfExists(stagedPath); err != nil {
+				if err := removeIfExists(root, stagedPath); err != nil {
 					return fmt.Errorf("failed to remove the leftover of an interrupted save %s: %w", stagedPath, err)
 				}
 			}
@@ -205,7 +214,7 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 		}
 
 		entryPath := path.Join(entriesPath, entryFile.Name())
-		data, err := os.ReadFile(entryPath)
+		data, err := root.ReadFile(entryPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -216,6 +225,17 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 		entry := new(bulkOperationEntry)
 		if err := json.Unmarshal(data, entry); err != nil {
 			return fmt.Errorf("failed to decode bulk operation %s: %w", entryPath, err)
+		}
+
+		if invalidErr := validateBulkOperationEntry(entry, entryFile.Name()); invalidErr != nil {
+			// The entry's fields cannot be trusted to name its state, so no path is built from them
+			// and nothing is opened, written or deleted for it. The failed manager makes the builder
+			// job report the problem, and the file is left for an administrator to inspect. It is
+			// registered under its file name, which is unique, because its own key may collide with
+			// a valid entry.
+			invalid := newInvalidBulkOperationManager(m.mountPath, m.stateRoot, m.builderJobId, entry, invalidErr)
+			m.managers[strings.TrimSuffix(entryFile.Name(), bulkOperationEntryExtension)] = invalid
+			continue
 		}
 
 		manager := newBulkOperationManager(ctx, m.rstMap[entry.RstId], m.mountPath, m.stateRoot, m.builderJobId, entry)
@@ -237,7 +257,18 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 	// no entry referring to them. Nothing else enumerates those directories, which makes reopening
 	// the job the only chance to reclaim them. The prune stops at the first directory still in use,
 	// so it does nothing while the job still has entries or state.
-	return removeEmptyDirs(entriesPath, path.Join(m.mountPath, m.stateRoot))
+	return removeEmptyDirs(root, entriesPath)
+}
+
+// readStateDir lists the directory name within root.
+func readStateDir(root *os.Root, name string) ([]os.DirEntry, error) {
+	dir, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+
+	return dir.ReadDir(-1)
 }
 
 // Close closes all bulk operation managers and returns any errors encountered.
@@ -279,10 +310,33 @@ func ValidateStateRoot(stateRoot string) (string, error) {
 	return cleaned, nil
 }
 
-// bulkOperationMountPath is the mount relative directory holding the saved entry of every bulk
-// operation started by jobId.
-func bulkOperationMountPath(stateRoot string, jobId string) string {
-	return path.Join(stateRoot, bulkManagerPath, jobId, bulkOperationsPath)
+// validateBulkOperationEntry checks an entry decoded from fileName before its fields are used to
+// build state paths. Entries are only written by this service, under a state root nobody else can
+// write, so a failure means the file was corrupted or edited by hand.
+//   - Operation must be one plain path component, because it is joined into the operation's state
+//     directory. A value such as "../../<job>/1/<operation>" would name another job's state.
+//   - The entry must be saved under the name its own key gives. That ties the content to the file,
+//     so one entry cannot claim another operation's state.
+//
+// RstId needs no check of its own. It is a number, so it cannot change the shape of a path, and an
+// RstId with no configured RST already fails the manager in newBulkOperationManager.
+func validateBulkOperationEntry(entry *bulkOperationEntry, fileName string) error {
+	operation := entry.Operation
+	if operation == "" || operation == "." || operation == ".." || strings.ContainsRune(operation, '/') {
+		return fmt.Errorf("bulk operation entry %s names operation %q, which is not a single path component", fileName, operation)
+	}
+
+	key := bulkOperationKey(entry.RstId, operation)
+	if want := key + bulkOperationEntryExtension; fileName != want {
+		return fmt.Errorf("bulk operation entry %s describes operation %s, so it should be saved as %s", fileName, key, want)
+	}
+	return nil
+}
+
+// bulkOperationEntriesPath is the directory, relative to the layout directory, holding the saved entry of
+// every bulk operation started by jobId.
+func bulkOperationEntriesPath(jobId string) string {
+	return path.Join(bulkManagerPath, jobId, bulkOperationsPath)
 }
 
 type bulkOperationManager struct {
@@ -291,7 +345,11 @@ type bulkOperationManager struct {
 	mountPath string
 	stateRoot string
 	jobId     string
-	mu        sync.RWMutex
+	// invalidEntry is why the entry this manager was loaded from failed validateBulkOperationEntry,
+	// or nil. A manager with an invalid entry has no state path and never writes or deletes
+	// anything. See newInvalidBulkOperationManager.
+	invalidEntry error
+	mu           sync.RWMutex
 }
 
 // newBulkOperationManager opens the provider handle for entry. A failure to open is recorded on the
@@ -299,7 +357,7 @@ type bulkOperationManager struct {
 // created operation is persisted by addManagerUnlocked, whereas a reopen failure is left unsaved so
 // an operation whose RST is restored to the configuration can still run.
 func newBulkOperationManager(ctx context.Context, client Provider, mountPath string, stateRoot string, jobId string, entry *bulkOperationEntry) *bulkOperationManager {
-	stateMountPath := path.Join(stateRoot, bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
+	stateMountPath := path.Join(stateLayoutMountPath(stateRoot), bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
 	entry.StateMountPath = stateMountPath
 	manager := &bulkOperationManager{
 		bulkOperationEntry: entry,
@@ -323,6 +381,26 @@ func newBulkOperationManager(ctx context.Context, client Provider, mountPath str
 	return manager
 }
 
+// newInvalidBulkOperationManager returns a permanently failed manager for an entry that failed
+// validateBulkOperationEntry. It runs when the registry loads entries from disk.
+//
+// No state path is built from the entry and no provider handle is opened, so every operation on
+// the manager fails with err. Save and Destroy do nothing, because both would derive a path from
+// the fields that failed validation. The failure is reported like any other failed operation,
+// through GetFailedOperationErrors.
+func newInvalidBulkOperationManager(mountPath string, stateRoot string, jobId string, entry *bulkOperationEntry, err error) *bulkOperationManager {
+	entry.StateMountPath = ""
+	manager := &bulkOperationManager{
+		bulkOperationEntry: entry,
+		mountPath:          mountPath,
+		stateRoot:          stateRoot,
+		jobId:              jobId,
+		invalidEntry:       err,
+	}
+	manager.failLocked(err)
+	return manager
+}
+
 // isTransientBulkError reports whether the error means the operation was interrupted.
 func isTransientBulkError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
@@ -338,11 +416,11 @@ func failBulkOperation(manager *bulkOperationManager, err error) error {
 	return manager.Fail(err)
 }
 
-// getEntryPath is the file the manager's bulkOperationEntry is persisted to. Entries are filed per
-// builder job rather than under the operation's own StateMountPath so they can all be loaded from a
-// single directory when the job is rescheduled.
+// getEntryPath is the file, relative to the layout directory, the manager's bulkOperationEntry is
+// persisted to. Entries are filed per builder job rather than under the operation's own
+// StateMountPath so they can all be loaded from a single directory when the job is rescheduled.
 func (m *bulkOperationManager) getEntryPath() string {
-	return path.Join(m.mountPath, bulkOperationMountPath(m.stateRoot, m.jobId), m.Key()+bulkOperationEntryExtension)
+	return path.Join(bulkOperationEntriesPath(m.jobId), m.Key()+bulkOperationEntryExtension)
 }
 
 // Save persists the bulk operation's entry so a rescheduled builder job can reopen the operation.
@@ -358,17 +436,29 @@ func (m *bulkOperationManager) Save() error {
 // saveLocked is Save for callers already holding m.mu, so an entry can be mutated and persisted
 // without another goroutine observing (or persisting) the intermediate state.
 func (m *bulkOperationManager) saveLocked() error {
+	if m.invalidEntry != nil {
+		// The entry's own fields name the file it would be saved to, and they failed validation.
+		// The failure lives in memory instead, and the file on disk is left as it was found.
+		return nil
+	}
+
 	data, err := json.Marshal(m.bulkOperationEntry)
 	if err != nil {
 		return fmt.Errorf("failed to encode bulk operation %s: %w", m.Key(), err)
 	}
 
+	root, err := openStateLayout(m.mountPath, m.stateRoot, true)
+	if err != nil {
+		return fmt.Errorf("failed to open state root for bulk operation %s: %w", m.Key(), err)
+	}
+	defer root.Close()
+
 	entryPath := m.getEntryPath()
-	if err := os.MkdirAll(path.Dir(entryPath), 0o700); err != nil {
+	if err := root.MkdirAll(path.Dir(entryPath), stateDirPerm); err != nil {
 		return fmt.Errorf("failed to create state directory for bulk operation %s: %w", m.Key(), err)
 	}
 
-	if err := writePersistentFile(entryPath, data, 0o600); err != nil {
+	if err := writePersistentFile(root, entryPath, data); err != nil {
 		return fmt.Errorf("failed to write state for bulk operation %s: %w", m.Key(), err)
 	}
 
@@ -481,6 +571,12 @@ func (m *bulkOperationManager) Close(ctx context.Context) error {
 // was destroyed, so a resurrected operation reports itself as healthy to requests that have already
 // been resolved against it.
 func (m *bulkOperationManager) Destroy(ctx context.Context) error {
+	if m.invalidEntry != nil {
+		// Every path Destroy would delete is derived from fields that failed validation, so nothing
+		// is deleted. The entry file stays for an administrator to inspect.
+		return nil
+	}
+
 	if err := m.setDestroying(); err != nil {
 		return err
 	}
@@ -491,22 +587,35 @@ func (m *bulkOperationManager) Destroy(ctx context.Context) error {
 		}
 	}
 
-	stateRootPath := path.Join(m.mountPath, m.stateRoot)
-	stateDirPath := path.Join(m.mountPath, m.StateMountPath)
-	if err := removeIfExists(stateDirPath); err != nil {
+	root, err := openStateLayout(m.mountPath, m.stateRoot, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The entry lives under the layout directory, so without one there is nothing left to
+			// remove.
+			return nil
+		}
+		return fmt.Errorf("cannot open the state root of bulk operation %s, so its entry is kept to find its state again: %w", m.Key(), err)
+	}
+	defer root.Close()
+
+	stateDirPath, err := stateLayoutRelPath(m.stateRoot, m.StateMountPath)
+	if err != nil {
+		return fmt.Errorf("cannot remove the state of bulk operation %s, so its entry is kept to find that state again: %w", m.Key(), err)
+	}
+	if err := removeIfExists(root, stateDirPath); err != nil {
 		return fmt.Errorf("cannot remove the state of bulk operation %s, so its entry is kept to find that state again: %w", m.Key(), err)
 	}
 
-	if err := removeEmptyDirs(path.Dir(stateDirPath), stateRootPath); err != nil {
+	if err := removeEmptyDirs(root, path.Dir(stateDirPath)); err != nil {
 		return err
 	}
 
 	entryPath := m.getEntryPath()
-	if err := appendErrors(removeIfExists(entryPath), removeIfExists(persistentTmpPath(entryPath))); err != nil {
+	if err := appendErrors(removeIfExists(root, entryPath), removeIfExists(root, persistentTmpPath(entryPath))); err != nil {
 		return err
 	}
 
-	return removeEmptyDirs(path.Dir(entryPath), stateRootPath)
+	return removeEmptyDirs(root, path.Dir(entryPath))
 }
 
 // setDestroying records that the operation's teardown has started. It is a no-op once the entry is

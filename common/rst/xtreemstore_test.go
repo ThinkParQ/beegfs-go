@@ -105,7 +105,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 	t.Run("delays default when not specified", func(t *testing.T) {
 		provider, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		require.NoError(t, err)
 
 		cfg := provider.(*xtreemstoreS3Provider).bulkOperationCfgs[efficientRetrieve]
@@ -121,7 +121,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 				RetryDelay: proto.String("2m"),
 				PollDelay:  proto.String("30s"),
 			},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		require.NoError(t, err)
 
 		cfg := provider.(*xtreemstoreS3Provider).bulkOperationCfgs[efficientRetrieve]
@@ -135,7 +135,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 	t.Run("an operation that was not specified is rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{RetryDelay: proto.String("2m")},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "must specify a valid operation")
 	})
 
@@ -143,21 +143,21 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("30s")},
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("45s")},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "configured more than once")
 	})
 
 	t.Run("delays below the minimum are rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("100ms")},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "pollDelay >= '1s'")
 	})
 
 	t.Run("a delay that is not a duration is rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, RetryDelay: proto.String("soon")},
-		), stubMountPoint{mountPath: t.TempDir()})
+		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "invalid retryDelay")
 	})
 }
@@ -176,10 +176,11 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestReceived.Bytes(), 0o600))
@@ -200,10 +201,11 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 		errDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(errDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(errDir, "errors"), []byte("object no longer exists"), 0o600))
@@ -227,11 +229,12 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		// The state directory survives but every file in it is gone, as Destroy leaves it.
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 		require.NoError(t, os.MkdirAll(path.Join(mountPath, bulkInfo.StateMountPath), 0o700))
 
 		request := &flex.WorkRequest{
@@ -283,10 +286,11 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
 		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
 		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestAdded.Bytes(), 0o600))
@@ -312,12 +316,13 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		// The status path is a directory, so opening it for writing fails with something other
 		// than ErrNotExist and is reported rather than tolerated.
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
 		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(path.Join(statusDir, "status"), 0o700))
 
@@ -344,11 +349,12 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		x := &xtreemstoreS3Provider{
 			Provider:   mockProvider,
 			mountPoint: stubMountPoint{mountPath: mountPath},
+			stateRoot:  DefaultStateRoot,
 		}
 		mockProvider.On("GetConfig").Return(&flex.RemoteStorageTarget{Id: 1})
 
 		// No status file exists: the owning builder job already destroyed the operation's state.
-		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
+		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(), JobIndex: 0}
 		job := &beeremote.Job{Request: &beeremote.JobRequest{
 			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}},
 			BulkInfo: bulkInfo,
@@ -367,6 +373,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		manager := &xtreemstoreS3BulkRetrieveManager{
 			rstId:          1,
 			mountPath:      mountPath,
+			stateRoot:      DefaultStateRoot,
 			stateMountPath: bulkInfo.StateMountPath,
 			operation:      bulkInfo.Operation,
 		}

@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -347,8 +348,11 @@ type clientBulkOperation interface {
 // New initializes a provider client based on the provided config. It accepts a context that can be
 // used to cancel the initialization if for example initializing the specified RST type requires
 // resolving/contacting some external service that may block or hang. It requires a local mount
-// point to use as the source/destination for data transferred from the RST.
-func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
+// point to use as the source/destination for data transferred from the RST. stateRoot is where bulk
+// operations keep their state, relative to the mount, and must have passed ValidateStateRoot. It
+// may be empty for a provider that never runs or resolves bulk operations, such as one built for
+// the CLI, in which case any bulk state access fails.
+func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint filesystem.Provider, stateRoot string) (Provider, error) {
 	if config.Policies == nil {
 		config.SetPolicies(&flex.RemoteStorageTarget_Policies{})
 	}
@@ -357,7 +361,7 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 	case *flex.RemoteStorageTarget_S3_:
 		return newS3(ctx, config, mountPoint)
 	case *flex.RemoteStorageTarget_Xtreemstore:
-		return newXtreemstore(ctx, config, mountPoint)
+		return newXtreemstore(ctx, config, mountPoint, stateRoot)
 	case *flex.RemoteStorageTarget_Mock:
 		// This handles setting up a Mock RST for testing from external packages like WorkerMgr. See
 		// the documentation ion `MockClient` in mock.go for how to setup expectations.
@@ -1400,11 +1404,243 @@ func GetRstMap(ctx context.Context, mountPoint filesystem.Provider, rstConfigMap
 		if !IsValidRstId(rstId) {
 			continue
 		}
-		rst, err := New(ctx, rstConfig, mountPoint)
+		// Providers built here only inspect or submit jobs. They never touch bulk operation state, so
+		// they get no state root.
+		rst, err := New(ctx, rstConfig, mountPoint, "")
 		if err != nil {
 			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
 		}
 		rstMap[rstId] = rst
 	}
 	return rstMap, nil
+}
+
+const (
+	// stateDirPerm is the mode for every directory created in the state tree. Only the owner needs
+	// access, and the check on the state root relies on nobody else being able to write.
+	stateDirPerm = 0o700
+	// stateFilePerm is the mode for every file created in the state tree.
+	stateFilePerm = 0o600
+	// stateLayoutDir is the directory under the state root that holds the state this build reads
+	// and writes. Its name is the version of the on-disk layout below it. See openStateLayout.
+	//
+	// Change the name whenever a change to the directories or files below it would be misread by a
+	// build that expects the old shape. The new build must then handle operations left in the old
+	// directory, because no other build will:
+	//   - By default it keeps a reader for the old layout, so those operations finish. New
+	//     operations go to the new directory, and the old one only drains. Draining before an
+	//     upgrade is not a substitute, because some operations, such as tape retrieves, run for
+	//     days. Cancelling one to upgrade discards its retrieve session and any data already staged.
+	//   - The old reader can be removed once no supported upgrade path can still leave old
+	//     operations behind, at least one release after the new layout ships. From then on, an
+	//     operation found in the old directory must be reported as failed, not ignored.
+	stateLayoutDir = "v1"
+)
+
+// openStateRoot opens the state root under mountPath and checks it is safe to keep state in. It
+// runs every time state is read or written, so the check sees the directory as it is now.
+//
+// Bulk operations keep durable state in a tree under the state root, which is the directory
+// configured as job.state-root, relative to the mount. Remote and Sync run as root and read, write,
+// truncate and delete files in that tree. The tree sits in a namespace other users share, and two
+// facts about the mount shape how it is opened:
+//
+//   - The BeeGFS root directory is created world writable without the sticky bit. Any user can
+//     create the state root before Remote does. Any user can also rename a state root Remote
+//     created and put something else in its place.
+//   - A symlink on a BeeGFS mount resolves on the host that follows it. A symlink planted in the
+//     tree can therefore point at a file on the node's own root file system, such as /etc/shadow.
+//
+// So the state root is never trusted by name. This function opens it once and then checks the
+// directory it actually opened:
+//
+//   - The path from the mount to the state root contains no symlinks.
+//   - The state root is owned by the user this process runs as.
+//   - The state root grants no write access to group or other.
+//
+// Every state file is then reached through the returned os.Root, not by path. An os.Root holds the
+// directory open and resolves names relative to it, so renaming the state root away after the
+// check does not redirect later operations. It also refuses any name that would resolve outside
+// the directory, whether through ".." or a symlink. Nobody but the owner can create entries in a
+// state root that passed the check, so nothing below it needs to be checked again.
+//
+// mountPath is the BeeGFS mount point from the node's configuration and is trusted. stateRoot comes
+// from configuration and must already have passed ValidateStateRoot. When create is true, a missing
+// state root and any missing parent are created owner-only. When it is false, a missing state root
+// returns an error matching os.ErrNotExist so callers can tell "no state" from "unsafe state".
+//
+// An existing state root that fails a check is never repaired. It may have been created by another
+// user, so adopting it would hand that user control of files root later writes. The error names the
+// problem so an administrator can remove or fix the directory.
+func openStateRoot(mountPath string, stateRoot string, create bool) (*os.Root, error) {
+	if stateRoot == "" {
+		return nil, errors.New("no state root is configured for bulk operation state")
+	}
+	if cleaned, err := ValidateStateRoot(stateRoot); err != nil {
+		return nil, err
+	} else if cleaned != stateRoot {
+		return nil, fmt.Errorf("state root %q is not in canonical form %q (this is probably a bug)", stateRoot, cleaned)
+	}
+
+	mount, err := os.OpenRoot(mountPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open mount point %s: %w", mountPath, err)
+	}
+	defer mount.Close()
+
+	// Lstat each component so a symlink anywhere on the way is refused rather than followed. os.Root
+	// would follow a symlink that stays inside the mount, which could land the state root in some
+	// other directory the check below happens to accept.
+	var walked string
+	var lastInfo fs.FileInfo
+	for component := range strings.SplitSeq(stateRoot, "/") {
+		walked = path.Join(walked, component)
+		info, err := mount.Lstat(walked)
+		if errors.Is(err, fs.ErrNotExist) && create {
+			if err = mount.Mkdir(walked, stateDirPerm); err != nil && !errors.Is(err, fs.ErrExist) {
+				return nil, fmt.Errorf("failed to create state directory %s: %w", path.Join(mountPath, walked), err)
+			}
+			info, err = mount.Lstat(walked)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect state directory %s: %w", path.Join(mountPath, walked), err)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("state directory %s is a symlink, which is not allowed on the path to the state root", path.Join(mountPath, walked))
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("state directory %s is not a directory", path.Join(mountPath, walked))
+		}
+		lastInfo = info
+	}
+
+	root, err := mount.OpenRoot(stateRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open state root %s: %w", path.Join(mountPath, stateRoot), err)
+	}
+
+	if err := checkStateRoot(root, lastInfo, path.Join(mountPath, stateRoot)); err != nil {
+		root.Close()
+		return nil, err
+	}
+	return root, nil
+}
+
+// checkStateRoot applies the ownership and mode rules to the directory root holds open. walkedInfo
+// is the Lstat result for the same path from the walk in openStateRoot. The two must name the same
+// directory, otherwise it was swapped between the walk and the open and the walk proved nothing.
+func checkStateRoot(root *os.Root, walkedInfo fs.FileInfo, displayPath string) error {
+	info, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("failed to inspect state root %s: %w", displayPath, err)
+	}
+	if !os.SameFile(info, walkedInfo) {
+		return fmt.Errorf("state root %s was replaced while it was being opened", displayPath)
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unable to determine the owner of state root %s", displayPath)
+	}
+	if euid := os.Geteuid(); int(stat.Uid) != euid {
+		return fmt.Errorf("state root %s is owned by uid %d, not uid %d this service runs as, so it was not created by this service (remove it, or chown it to uid %d if it is known to be safe)", displayPath, stat.Uid, euid, euid)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("state root %s has mode %#o, which lets other users write to it (remove group and other write access)", displayPath, perm)
+	}
+	return nil
+}
+
+// openStateLayout opens the directory, under a checked state root, that holds the state this build
+// reads and writes. It is the entry point for every read or write of bulk state. mountPath,
+// stateRoot and create mean what they do for openStateRoot.
+//
+// Each layout of the state tree lives in its own directory under the state root, named for its
+// version (stateLayoutDir). That is what keeps builds with different layouts from corrupting each
+// other's state:
+//   - A build only opens paths under its own layout directory. It never reads, writes or deletes
+//     another version's directory, so after an upgrade or a downgrade the other build's operations
+//     are left exactly as it wrote them.
+//   - Every state mount path names its layout directory, and stateLayoutRelPath refuses one that
+//     names another. During a rolling upgrade a request carrying the other version's state is
+//     refused rather than resolved against the wrong layout.
+//
+// Nothing below the layout directory needs checking of its own. Only the owner of a checked state
+// root can create entries in it. When create is false, a missing layout directory returns an error
+// matching os.ErrNotExist, which callers treat as no state.
+func openStateLayout(mountPath string, stateRoot string, create bool) (*os.Root, error) {
+	root, err := openStateRoot(mountPath, stateRoot, create)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	if create {
+		if err := root.Mkdir(stateLayoutDir, stateDirPerm); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("failed to create state directory %s: %w", path.Join(mountPath, stateLayoutMountPath(stateRoot)), err)
+		}
+	}
+
+	layout, err := root.OpenRoot(stateLayoutDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open state directory %s: %w", path.Join(mountPath, stateLayoutMountPath(stateRoot)), err)
+	}
+	return layout, nil
+}
+
+// stateLayoutMountPath is the mount relative path of this build's layout directory under
+// stateRoot. Every state mount path this build hands out starts with it.
+func stateLayoutMountPath(stateRoot string) string {
+	return path.Join(stateRoot, stateLayoutDir)
+}
+
+// stateLayoutRelPath turns a state mount path into a path relative to this build's layout
+// directory. A state mount path built by this build always starts with that directory, so any
+// other path is refused instead of being resolved somewhere else:
+//   - A path under the state root but in another layout directory was written by a build with a
+//     different layout. It is refused so the two layouts are never mixed.
+//   - A path outside the state root came from a different configuration, or was supplied by
+//     something other than the builder.
+func stateLayoutRelPath(stateRoot string, stateMountPath string) (string, error) {
+	cleaned := path.Clean(stateMountPath)
+	if rel, ok := strings.CutPrefix(cleaned, stateLayoutMountPath(stateRoot)+"/"); ok && rel != "" {
+		return rel, nil
+	}
+	if cleaned == stateLayoutMountPath(stateRoot) {
+		return "", fmt.Errorf("bulk state path %q names the layout directory itself, not the state of an operation", stateMountPath)
+	}
+	if underRoot, ok := strings.CutPrefix(cleaned, stateRoot+"/"); ok && underRoot != ".." && !strings.HasPrefix(underRoot, "../") {
+		return "", fmt.Errorf("bulk state path %q is under the state root but not in layout directory %q, so it was written by a build with a different on-disk layout", stateMountPath, stateLayoutDir)
+	}
+	return "", fmt.Errorf("bulk state path %q is not under the state root %q", stateMountPath, stateRoot)
+}
+
+// openStateDir opens the directory a state mount path names, through this build's layout directory
+// under a checked state root. The returned os.Root confines every later operation to that
+// directory. When create is true, missing
+// directories are created owner-only. When it is false, a missing directory returns an error
+// matching os.ErrNotExist, which callers treat as state that was destroyed.
+func openStateDir(mountPath string, stateRoot string, stateMountPath string, create bool) (*os.Root, error) {
+	rel, err := stateLayoutRelPath(stateRoot, stateMountPath)
+	if err != nil {
+		return nil, err
+	}
+
+	root, err := openStateLayout(mountPath, stateRoot, create)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	if create {
+		if err := root.MkdirAll(rel, stateDirPerm); err != nil {
+			return nil, fmt.Errorf("failed to create state directory %s: %w", path.Join(mountPath, stateMountPath), err)
+		}
+	}
+
+	dir, err := root.OpenRoot(rel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open state directory %s: %w", path.Join(mountPath, stateMountPath), err)
+	}
+	return dir, nil
 }

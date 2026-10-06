@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -378,7 +379,15 @@ func (c *JobBuilderClient) OpenBulkOperation(ctx context.Context, stateMountPath
 // newBulkOperationRegistry creates the registry for builderJobId and reopens every bulk operation
 // the job already started by loading the entries saved on the mount. Records are persistent so
 // operations are never lost when sync crashes or shuts down.
+//
+// builderJobId arrives in the work request and is joined into every state path the registry
+// builds, so it must be a UUID, which is what Remote assigns to every job. Anything else could
+// carry a "/" or ".." and address another job's state under the state root.
 func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builderJobId string) (*bulkOperationRegistry, error) {
+	if err := uuid.Validate(builderJobId); err != nil {
+		return nil, fmt.Errorf("builder job ID %q is not a valid UUID: %w", builderJobId, err)
+	}
+
 	registry := &bulkOperationRegistry{
 		managers:     make(map[string]*bulkOperationManager),
 		managersMu:   sync.Mutex{},

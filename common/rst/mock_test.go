@@ -65,7 +65,7 @@ func TestMockClientBulkOperationReplaysArchivedRequestsOnce(t *testing.T) {
 	require.True(t, include)
 	assert.Equal(t, "retrieve", operation)
 
-	bulkOp, err := client.OpenBulkOperation(context.Background(), ".beegfs-rst/job/job-1/7", operation)
+	bulkOp, err := client.OpenBulkOperation(context.Background(), ".beegfs-rst/v1/job/job-1/7", operation)
 	require.NoError(t, err)
 	require.NoError(t, bulkOp.AddRequest(context.Background(), request))
 

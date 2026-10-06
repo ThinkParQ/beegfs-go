@@ -74,17 +74,17 @@ func (t *trackingBulkOperation) Destroy(ctx context.Context) error {
 // that state is what keeps an interrupted job from restarting or abandoning its bulk operations.
 func TestNewBulkOperationRegistryReopensSavedBulkOperations(t *testing.T) {
 	mountPath := t.TempDir()
-	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
-	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 2, Operation: "archive", Failed: true, Errors: []string{"resume failed"}})
+	saveTestBulkOperationEntry(t, mountPath, testBuilderJobId, &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	saveTestBulkOperationEntry(t, mountPath, testBuilderJobId, &bulkOperationEntry{RstId: 2, Operation: "archive", Failed: true, Errors: []string{"resume failed"}})
 
 	mockRST := &MockClient{}
 	// Both operations are reopened, the failed one included: without a provider handle it could never
 	// be cancelled or have its state deleted.
-	mockRST.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/job/job-1/1/retrieve", "retrieve").Return(&trackingBulkOperation{}, nil).Once()
-	mockRST.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/job/job-1/2/archive", "archive").Return(&trackingBulkOperation{}, nil).Once()
+	mockRST.On("OpenBulkOperation", mock.Anything, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, testBuilderJobId, "1", "retrieve"), "retrieve").Return(&trackingBulkOperation{}, nil).Once()
+	mockRST.On("OpenBulkOperation", mock.Anything, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, testBuilderJobId, "2", "archive"), "archive").Return(&trackingBulkOperation{}, nil).Once()
 
 	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
-	registry, err := client.newBulkOperationRegistry(context.Background(), "job-1")
+	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
 	managers := registry.GetManagersSnapshot()
@@ -105,8 +105,8 @@ func TestNewBulkOperationRegistryReopensSavedBulkOperations(t *testing.T) {
 // they would be dropped and the job would still report success.
 func TestBulkOperationRegistry_GetFailedOperationErrors(t *testing.T) {
 	mountPath := t.TempDir()
-	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
-	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{
+	saveTestBulkOperationEntry(t, mountPath, testBuilderJobId, &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	saveTestBulkOperationEntry(t, mountPath, testBuilderJobId, &bulkOperationEntry{
 		RstId: 2, Operation: "archive", Failed: true, Errors: []string{"retrieve-session expired"},
 	})
 
@@ -114,7 +114,7 @@ func TestBulkOperationRegistry_GetFailedOperationErrors(t *testing.T) {
 	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&trackingBulkOperation{}, nil)
 
 	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
-	registry, err := client.newBulkOperationRegistry(context.Background(), "job-1")
+	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
 	failedErr := registry.GetFailedOperationErrors()
@@ -128,13 +128,13 @@ func TestBulkOperationRegistry_GetFailedOperationErrors(t *testing.T) {
 // succeeded reports no error, so a healthy builder job isn't cancelled by this check.
 func TestBulkOperationRegistry_GetFailedOperationErrorsWhenNoneFailed(t *testing.T) {
 	mountPath := t.TempDir()
-	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
+	saveTestBulkOperationEntry(t, mountPath, testBuilderJobId, &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
 
 	mockRST := &MockClient{}
 	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&trackingBulkOperation{}, nil)
 
 	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
-	registry, err := client.newBulkOperationRegistry(context.Background(), "job-1")
+	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
 	assert.NoError(t, registry.GetFailedOperationErrors())
@@ -144,7 +144,7 @@ func TestBulkOperationRegistry_GetFailedOperationErrorsWhenNoneFailed(t *testing
 // a bulk operation doesn't fail just because it has no state on the mount.
 func TestNewBulkOperationRegistryWithoutSavedStateHasNoOperations(t *testing.T) {
 	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{}, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
-	registry, err := client.newBulkOperationRegistry(context.Background(), "job-1")
+	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 	assert.Empty(t, registry.GetManagersSnapshot())
 }
@@ -155,7 +155,7 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 
 	job := beeremote.Job_builder{
-		Id: "builder-job",
+		Id: testBuilderJobId,
 		Request: beeremote.JobRequest_builder{
 			Path:                "/test/builder",
 			RemoteStorageTarget: JobBuilderRstId,
@@ -166,7 +166,7 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 	}.Build()
 
 	tracker := &trackingBulkOperation{}
-	mockRST.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/job/builder-job/1/retrieve", "retrieve").Return(tracker, nil).Once()
+	mockRST.On("OpenBulkOperation", mock.Anything, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, testBuilderJobId, "1", "retrieve"), "retrieve").Return(tracker, nil).Once()
 
 	// The operation is recovered from the mount, which is the only record of it when the sync node
 	// that started it crashed before reporting it back to remote.
@@ -185,7 +185,7 @@ func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) 
 	require.True(t, tracker.waitCalled)
 	require.ErrorContains(t, tracker.cancelReason, "builder job was aborted")
 	require.True(t, tracker.destroyCalled)
-	require.NoFileExists(t, manager.getEntryPath(), "a destroyed operation must not be left on the mount")
+	require.NoFileExists(t, entryFilePath(manager), "a destroyed operation must not be left on the mount")
 	mockRST.AssertExpectations(t)
 }
 
@@ -211,7 +211,7 @@ func TestCompleteJobBuilderRequestCancelsReservationsByPathInMount(t *testing.T)
 
 	// A pull of the prefix data/ into /restore, which walks the remote target.
 	job := beeremote.Job_builder{
-		Id: "builder-job",
+		Id: testBuilderJobId,
 		Request: beeremote.JobRequest_builder{
 			Path:                "/restore",
 			RemoteStorageTarget: JobBuilderRstId,
@@ -297,7 +297,7 @@ func (f *ctxCheckingBulkOperation) Destroy(ctx context.Context) error {
 // outlive the cancellation, so asserting the mount is CLEAN afterwards is the same as asserting the
 // grace held.
 func TestCompleteWorkRequestsFinishesBulkTeardownAfterCancel(t *testing.T) {
-	const jobId = "grace-job-1"
+	const jobId = testBuilderJobId
 	// The registry and its managers persist entries with plain os calls under
 	// mountPoint.GetMountPath(), so the stub needs a real directory to report. A provider reporting
 	// "" would put that state at a relative path outside the test's control.
@@ -357,7 +357,7 @@ func TestCompleteWorkRequestsFinishesBulkTeardownAfterCancel(t *testing.T) {
 
 	// Nothing may be left behind under the job's directory either: a surviving state directory is
 	// what a later builder job would find and try to reopen.
-	_, statErr := os.Stat(path.Join(mountPath, bulkOperationMountPath(DefaultStateRoot, jobId)))
+	_, statErr := os.Stat(path.Join(mountPath, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkOperationEntriesPath(jobId))))
 	require.ErrorIs(t, statErr, os.ErrNotExist,
 		"the job's bulk state directory survived the teardown")
 }
@@ -468,4 +468,21 @@ func TestGetPathsFnLocalWalkAndUploadResolvers(t *testing.T) {
 	inMountPath, remotePath = getPaths("/mnt/src/file")
 	assert.Equal(t, "/mnt/src/file", inMountPath)
 	assert.Equal(t, "/mnt/src/file", remotePath)
+}
+
+// testBuilderJobId is the builder job the tests run as. It has to be a UUID because the registry
+// refuses any other ID before joining it into a state path.
+const testBuilderJobId = "6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f"
+
+// The builder job ID arrives in the work request and is joined into state paths, so anything that is
+// not a UUID is refused before the mount is touched.
+func TestNewBulkOperationRegistryRefusesNonUUIDJobId(t *testing.T) {
+	mountPath := t.TempDir()
+	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+
+	for _, jobId := range []string{"", "job-1", "../other", testBuilderJobId + "/../other"} {
+		_, err := client.newBulkOperationRegistry(context.Background(), jobId)
+		assert.ErrorContains(t, err, "is not a valid UUID", "job ID %q must be refused", jobId)
+	}
+	assert.NoDirExists(t, path.Join(mountPath, DefaultStateRoot), "a refused job ID must not create any state")
 }

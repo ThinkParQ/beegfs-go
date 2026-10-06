@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"strconv"
 	"sync"
 	"testing"
@@ -913,4 +914,203 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 			assert.Equal(t, tt.workRequired, workRequired)
 		})
 	}
+}
+
+// A state root that does not exist yet is created owner-only, and only when asked to. Reading state
+// must never create the tree, so nodes that never run a bulk operation never get one.
+func TestOpenStateRootCreatesOnlyWhenAsked(t *testing.T) {
+	mountPath := t.TempDir()
+
+	_, err := openStateRoot(mountPath, DefaultStateRoot, false)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.NoDirExists(t, path.Join(mountPath, DefaultStateRoot), "opening without create must not create the state root")
+
+	root, err := openStateRoot(mountPath, DefaultStateRoot, true)
+	require.NoError(t, err)
+	require.NoError(t, root.Close())
+
+	info, err := os.Stat(path.Join(mountPath, DefaultStateRoot))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(stateDirPerm), info.Mode().Perm())
+}
+
+// A state root another user could write to is refused rather than adopted or repaired, because that
+// user may already have planted entries in it.
+func TestOpenStateRootRefusesWritableByOthers(t *testing.T) {
+	mountPath := t.TempDir()
+	stateRootPath := path.Join(mountPath, DefaultStateRoot)
+	require.NoError(t, os.Mkdir(stateRootPath, 0o700))
+	require.NoError(t, os.Chmod(stateRootPath, 0o777))
+
+	_, err := openStateRoot(mountPath, DefaultStateRoot, true)
+	assert.ErrorContains(t, err, "lets other users write to it")
+
+	info, err := os.Stat(stateRootPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o777), info.Mode().Perm(), "a refused state root must be left as it was found")
+}
+
+// A state root owned by another user is refused. Only root can create one with a different owner,
+// so the test only runs as root.
+func TestOpenStateRootRefusesOtherOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("changing a directory's owner requires root")
+	}
+	mountPath := t.TempDir()
+	stateRootPath := path.Join(mountPath, DefaultStateRoot)
+	require.NoError(t, os.Mkdir(stateRootPath, 0o700))
+	require.NoError(t, os.Chown(stateRootPath, 65534, 65534))
+
+	_, err := openStateRoot(mountPath, DefaultStateRoot, true)
+	assert.ErrorContains(t, err, "is owned by uid 65534")
+}
+
+// A symlink on the way to the state root is refused even when it points at a directory that would
+// otherwise pass, because the link's owner chose where state lands.
+func TestOpenStateRootRefusesSymlink(t *testing.T) {
+	mountPath := t.TempDir()
+	target := path.Join(mountPath, "elsewhere")
+	require.NoError(t, os.Mkdir(target, 0o700))
+	require.NoError(t, os.Symlink(target, path.Join(mountPath, DefaultStateRoot)))
+
+	_, err := openStateRoot(mountPath, DefaultStateRoot, true)
+	assert.ErrorContains(t, err, "is a symlink")
+
+	// A nested state root is checked the same way at every level.
+	require.NoError(t, os.Symlink(target, path.Join(mountPath, "parent")))
+	_, err = openStateRoot(mountPath, "parent/state", true)
+	assert.ErrorContains(t, err, "is a symlink")
+	assert.NoDirExists(t, path.Join(target, "state"), "nothing may be created through the symlink")
+}
+
+// The finding this guards against: a symlink named like a state file pointing outside the mount.
+// Writes through the operation's state directory must refuse to follow it and must leave the target
+// untouched.
+func TestBulkStateFilesDoNotFollowSymlinksOutOfTheTree(t *testing.T) {
+	mountPath := t.TempDir()
+	outside := path.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(outside, []byte("precious"), 0o600))
+
+	m := &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient:    &fakeS3ApiClient{},
+		rstId:          1,
+		mountPath:      mountPath,
+		stateRoot:      DefaultStateRoot,
+		stateMountPath: testStateMountPath,
+		operation:      flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(),
+		state:          &xtreemstoreS3BulkRetrieveManagerState{},
+	}
+	require.NoError(t, m.openState())
+	defer m.closeState()
+
+	// Only the owner can create entries in the state tree, so planting a link takes the owner. The
+	// os.Root the manager holds is the second line of defense if one is planted anyway.
+	errorsPath := path.Join(mountPath, testStateMountPath, xtreemstoreS3BulkErrorsFileName)
+	require.NoError(t, os.Remove(errorsPath))
+	require.NoError(t, os.Symlink(outside, errorsPath))
+
+	assert.Error(t, m.recordError(nil), "writing through a symlink that leaves the tree must fail")
+
+	contents, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, "precious", string(contents))
+}
+
+// A request carries the path of its operation's state. A path outside the configured state root is
+// refused, rather than reported as a destroyed operation or resolved somewhere else on the mount.
+func TestBulkStatePathMustBeUnderStateRoot(t *testing.T) {
+	for _, stateMountPath := range []string{
+		"",
+		DefaultStateRoot,
+		"other/state",
+		"../outside",
+		DefaultStateRoot + "/../outside",
+		"/" + DefaultStateRoot + "/state",
+	} {
+		_, err := stateLayoutRelPath(DefaultStateRoot, stateMountPath)
+		assert.Error(t, err, "state mount path %q must be refused", stateMountPath)
+	}
+
+	rel, err := stateLayoutRelPath(DefaultStateRoot, testStateMountPath)
+	require.NoError(t, err)
+	assert.Equal(t, "state", rel)
+
+	mountPath := t.TempDir()
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: "other/state", Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+	err = xtreemstoreS3BulkRetrieveError(bulkInfo, 1, mountPath, DefaultStateRoot)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrBulkOperationDestroyed)
+	assert.ErrorContains(t, err, "is not under the state root")
+}
+
+// State lives in a directory named for its layout version, and it is only created when state is
+// written. Readers on a node that never ran a bulk operation create nothing.
+func TestOpenStateLayoutCreatesOnlyWhenAsked(t *testing.T) {
+	mountPath := t.TempDir()
+
+	_, err := openStateLayout(mountPath, DefaultStateRoot, false)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.NoDirExists(t, path.Join(mountPath, DefaultStateRoot), "a reader must not create the state root")
+
+	layout, err := openStateLayout(mountPath, DefaultStateRoot, true)
+	require.NoError(t, err)
+	require.NoError(t, layout.Close())
+
+	info, err := os.Stat(path.Join(mountPath, DefaultStateRoot, stateLayoutDir))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(stateDirPerm), info.Mode().Perm())
+}
+
+// A state path in another layout directory was written by a build with a different on-disk
+// layout. It is refused, not resolved against this build's layout, and the error says why.
+func TestStateLayoutRelPathRefusesOtherLayouts(t *testing.T) {
+	for _, stateMountPath := range []string{
+		DefaultStateRoot + "/v2/job/x/1/retrieve",
+		DefaultStateRoot + "/job/x/1/retrieve",
+	} {
+		_, err := stateLayoutRelPath(DefaultStateRoot, stateMountPath)
+		assert.ErrorContains(t, err, "different on-disk layout", "state mount path %q must be refused", stateMountPath)
+	}
+
+	_, err := stateLayoutRelPath(DefaultStateRoot, stateLayoutMountPath(DefaultStateRoot))
+	assert.ErrorContains(t, err, "names the layout directory itself")
+}
+
+// Builds with different layouts can share a state root. A request carrying another layout's state
+// path is refused, and nothing in that layout's directory is read, written or deleted. That keeps
+// an older build's operations intact across an upgrade, and a newer build's across a downgrade.
+func TestBulkStateLeavesOtherLayoutsAlone(t *testing.T) {
+	mountPath := t.TempDir()
+	otherLayout := path.Join(mountPath, DefaultStateRoot, "v2")
+	otherStatePath := path.Join(DefaultStateRoot, "v2", "state")
+	require.NoError(t, os.MkdirAll(path.Join(mountPath, otherStatePath), 0o700))
+	otherStatus := path.Join(mountPath, otherStatePath, xtreemstoreS3BulkStatusFileName)
+	require.NoError(t, os.WriteFile(otherStatus, []byte{0}, 0o600))
+	require.NoError(t, os.Chmod(path.Join(mountPath, DefaultStateRoot), stateDirPerm))
+
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: otherStatePath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+	err := xtreemstoreS3BulkRetrieveError(bulkInfo, 1, mountPath, DefaultStateRoot)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrBulkOperationDestroyed, "another layout's state must not look destroyed")
+	assert.ErrorContains(t, err, "different on-disk layout")
+	assert.Error(t, xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, 1, mountPath, DefaultStateRoot))
+
+	// This build's own state lands beside the other layout, never inside it.
+	m := &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient:    &fakeS3ApiClient{},
+		rstId:          1,
+		mountPath:      mountPath,
+		stateRoot:      DefaultStateRoot,
+		stateMountPath: testStateMountPath,
+		operation:      bulkInfo.Operation,
+		state:          &xtreemstoreS3BulkRetrieveManagerState{},
+	}
+	require.NoError(t, m.openState())
+	require.NoError(t, m.Destroy(context.Background()))
+	require.NoError(t, m.closeState())
+
+	status, err := os.ReadFile(otherStatus)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0}, status, "another layout's state must be left as it was found")
+	assert.DirExists(t, otherLayout)
 }

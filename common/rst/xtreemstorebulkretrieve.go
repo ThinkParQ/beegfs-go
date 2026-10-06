@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
-	"path"
 	"runtime"
 	"sync"
 	"time"
@@ -38,30 +36,6 @@ const (
 	// restoreProbeWorkerMultiplier scales GOMAXPROCS to set how many restore-readiness checks are
 	// done concurrently.
 	restoreProbeWorkerMultiplier = 4.0
-
-	// bulkRequestRecordLen is the width of one status file record. A record holds everything known
-	// about one job index: the request's status, the ID of the job reserved for it, and where that
-	// request's remote path lives in the record file. Keeping them in one record means one durable
-	// append per request rather than one per field, and makes it impossible for a request to have a
-	// status without a job, or a job without a path.
-	bulkRequestRecordLen = 1 + JobIdLen + 8 + 2
-	// bulkRequestJobIdOffset is where the job ID starts within a record.
-	bulkRequestJobIdOffset = 1
-	// bulkRequestPathOffsetOffset is where the path's byte offset into the record file starts, as a
-	// big endian int64.
-	bulkRequestPathOffsetOffset = bulkRequestJobIdOffset + JobIdLen
-	// bulkRequestPathLenOffset is where the path's length in bytes starts, as a big endian uint16.
-	// The length is what a reader uses, not the newline that follows the path, so a remote path
-	// that contains a newline is still stored and returned whole.
-	bulkRequestPathLenOffset = bulkRequestPathOffsetOffset + 8
-	// bulkRequestMaxPathLen is the longest remote path a record can describe, set by the width of
-	// the length field. It is far above both PATH_MAX and the 1024 byte S3 key limit, so a path
-	// that exceeds it is rejected rather than silently truncated.
-	bulkRequestMaxPathLen = math.MaxUint16
-	// bulkRequestPathTerminator ends every path in the record file. Nothing reads it: the record's
-	// length says where the path ends. It is written so the file stays readable with cat, grep and
-	// wc, which is how a stuck operation gets diagnosed by hand.
-	bulkRequestPathTerminator = "\n"
 )
 
 // xtreemstoreS3BulkRetrieveBatchEntry is one key of a retrieve-session batch, resolved to the bulk
@@ -93,13 +67,18 @@ var (
 
 type xtreemstoreS3BulkRetrieveManager struct {
 	s3ApiClient
-	rstId          uint32
-	bucket         string
-	operation      string
-	mountPath      string
+	rstId     uint32
+	bucket    string
+	operation string
+	mountPath string
+	// stateRoot is the configured state root, which stateMountPath must lie under. See openStateRoot.
+	stateRoot      string
 	stateMountPath string
-	state          *xtreemstoreS3BulkRetrieveManagerState
-	includedJobs   int64
+	// stateDir is the operation's state directory, held open from openState until closeState. Every
+	// state file is reached through it rather than by path, for the reasons openStateRoot gives.
+	stateDir     *os.Root
+	state        *xtreemstoreS3BulkRetrieveManagerState
+	includedJobs int64
 	// statusAppendHandle is maintained when the manager is open and should only be used for
 	// persistent appending new statuses. Do not use this to update statuses; use statusUpdateHandle
 	// instead.
@@ -145,10 +124,11 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 }
 
 // xtreemstoreS3BulkRetrieveMarkReceived marks a request sent by a bulk operation as received.
-func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string, stateRoot string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
 		rstId:          rstId,
 		mountPath:      mountPath,
+		stateRoot:      stateRoot,
 		stateMountPath: bulkInfo.StateMountPath,
 		operation:      bulkInfo.Operation,
 	}
@@ -156,10 +136,11 @@ func xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo *flex.BulkJobRequestInfo, rs
 }
 
 // xtreemstoreS3BulkRetrieveMarkComplete marks a request sent by a bulk operation as complete.
-func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string, stateRoot string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
 		rstId:          rstId,
 		mountPath:      mountPath,
+		stateRoot:      stateRoot,
 		stateMountPath: bulkInfo.StateMountPath,
 		operation:      bulkInfo.Operation,
 	}
@@ -168,15 +149,25 @@ func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rs
 
 // xtreemstoreS3BulkRetrieveError reports why a request belonging to a bulk operation cannot proceed,
 // or nil when there is nothing to report.
-func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string) error {
+func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string, stateRoot string) error {
 	m := &xtreemstoreS3BulkRetrieveManager{
 		rstId:          rstId,
 		mountPath:      mountPath,
+		stateRoot:      stateRoot,
 		stateMountPath: bulkInfo.StateMountPath,
 		operation:      bulkInfo.Operation,
 	}
 
-	message, err := os.ReadFile(m.getErrorsPath())
+	dir, err := m.openStateDir(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrBulkOperationDestroyed
+		}
+		return fmt.Errorf("unable to open the state of bulk operation %q: %w", bulkInfo.Operation, err)
+	}
+	defer dir.Close()
+
+	message, err := dir.ReadFile(xtreemstoreS3BulkErrorsFileName)
 	if err == nil {
 		if len(message) > 0 {
 			return fmt.Errorf("%s", message)
@@ -188,7 +179,7 @@ func xtreemstoreS3BulkRetrieveError(bulkInfo *flex.BulkJobRequestInfo, rstId uin
 		return fmt.Errorf("unable to retrieve bulk operation error message for %q: %w", bulkInfo.Operation, err)
 	}
 
-	if _, err := os.Stat(m.getStatusPath()); err != nil {
+	if _, err := dir.Stat(xtreemstoreS3BulkStatusFileName); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrBulkOperationDestroyed
 		}
@@ -210,8 +201,8 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	}
 
 	remotePath := request.GetSync().GetRemotePath()
-	if len(remotePath) > bulkRequestMaxPathLen {
-		return fmt.Errorf("remote path is %d bytes which exceeds the %d byte maximum a bulk request record can describe", len(remotePath), bulkRequestMaxPathLen)
+	if len(remotePath) > xtreemstoreS3BulkMaxPathLen {
+		return fmt.Errorf("remote path is %d bytes which exceeds the %d byte maximum a bulk request record can describe", len(remotePath), xtreemstoreS3BulkMaxPathLen)
 	}
 
 	request.GetBulkInfo().SetJobIndex(m.includedJobs)
@@ -225,7 +216,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	// counted, its record would name a job the builder goes on to discard, and every later path
 	// would sit one position out of step with the status record that points at it.
 	pathOffset := m.recordBytes
-	written, writeErr := m.recordHandle.WriteString(remotePath + bulkRequestPathTerminator)
+	written, writeErr := m.recordHandle.WriteString(remotePath + xtreemstoreS3BulkPathTerminator)
 	// A short write reports the bytes it did commit alongside the error, and those bytes are on
 	// disk. The counter has to move past them or the next request would record an offset pointing
 	// into this partial path.
@@ -238,11 +229,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	// only leave a partial record at the end of the file, which openState truncates away. Writing
 	// them separately would let a crash land between them and leave an index that is missing one of
 	// the three, after which every later record would be read against the wrong index.
-	var record [bulkRequestRecordLen]byte
+	var record [xtreemstoreS3BulkRecordLen]byte
 	record[0] = byte(xtreemstoreS3BulkRequestAdded)
-	copy(record[bulkRequestJobIdOffset:], request.GetReserveJobId())
-	binary.BigEndian.PutUint64(record[bulkRequestPathOffsetOffset:], uint64(pathOffset))
-	binary.BigEndian.PutUint16(record[bulkRequestPathLenOffset:], uint16(len(remotePath)))
+	copy(record[xtreemstoreS3BulkJobIdOffset:], request.GetReserveJobId())
+	binary.BigEndian.PutUint64(record[xtreemstoreS3BulkPathOffsetOffset:], uint64(pathOffset))
+	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkPathLenOffset:], uint16(len(remotePath)))
 	if _, err = m.statusAppendHandle.Write(record[:]); err != nil {
 		return
 	}
@@ -374,7 +365,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) recordError(reason error) error {
 		message = reason.Error()
 	}
 
-	if err := os.WriteFile(m.getErrorsPath(), []byte(message), 0o600); err != nil {
+	if m.stateDir == nil {
+		return errBulkStateNotOpen
+	}
+	if err := m.stateDir.WriteFile(xtreemstoreS3BulkErrorsFileName, []byte(message), stateFilePerm); err != nil {
 		return fmt.Errorf("failed to write errors file for bulk operation: %w", err)
 	}
 	return nil
@@ -394,13 +388,28 @@ func (m *xtreemstoreS3BulkRetrieveManager) Destroy(ctx context.Context) error {
 	return nil
 }
 
+// deleteState removes the operation's state files. Destroy may run whether or not the manager is
+// open, so a closed manager opens the state directory for the duration. A directory that is already
+// gone has nothing left to delete.
 func (m *xtreemstoreS3BulkRetrieveManager) deleteState() error {
+	dir := m.stateDir
+	if dir == nil {
+		var err error
+		if dir, err = m.openStateDir(false); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		defer dir.Close()
+	}
+
 	return appendErrors(
-		removeIfExists(m.getStatusPath()),
-		removeIfExists(m.getRecordPath()),
-		removeIfExists(m.getErrorsPath()),
-		removeIfExists(m.getManagerPath()),
-		removeIfExists(persistentTmpPath(m.getManagerPath())),
+		removeIfExists(dir, xtreemstoreS3BulkStatusFileName),
+		removeIfExists(dir, xtreemstoreS3BulkRecordFileName),
+		removeIfExists(dir, xtreemstoreS3BulkErrorsFileName),
+		removeIfExists(dir, xtreemstoreS3BulkManagerFileName),
+		removeIfExists(dir, persistentTmpPath(xtreemstoreS3BulkManagerFileName)),
 	)
 }
 
@@ -665,7 +674,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.
 func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
 	*m.state = xtreemstoreS3BulkRetrieveManagerState{}
 
-	data, err := os.ReadFile(m.getManagerPath())
+	data, err := m.stateDir.ReadFile(xtreemstoreS3BulkManagerFileName)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -677,13 +686,13 @@ func (m *xtreemstoreS3BulkRetrieveManager) loadManagerState() error {
 	// includedJobs is reconstructed from the status file rather than persisted in manager.json, so
 	// it stays correct even when manager.json doesn't exist (or predates the status file). It is the
 	// sole source of truth for the next JobIndex to assign, so this must run on every load.
-	if statusInfo, err := os.Stat(m.getStatusPath()); err != nil {
+	if statusInfo, err := m.stateDir.Stat(xtreemstoreS3BulkStatusFileName); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		m.includedJobs = 0
 	} else {
-		m.includedJobs = statusInfo.Size() / bulkRequestRecordLen
+		m.includedJobs = statusInfo.Size() / xtreemstoreS3BulkRecordLen
 	}
 
 	return nil
@@ -696,7 +705,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) saveManagerState() error {
 // createManagerFile creates a persistent file for operation's manager state. An existing file
 // is left untouched.
 func (m *xtreemstoreS3BulkRetrieveManager) createManagerFile() error {
-	if _, err := os.Stat(m.getManagerPath()); err == nil {
+	if _, err := m.stateDir.Stat(xtreemstoreS3BulkManagerFileName); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -711,20 +720,15 @@ func (m *xtreemstoreS3BulkRetrieveManager) writeManagerState(state *xtreemstoreS
 		return fmt.Errorf("failed to encode manager state: %w", err)
 	}
 
-	return writePersistentFile(m.getManagerPath(), data, 0600)
+	if m.stateDir == nil {
+		return errBulkStateNotOpen
+	}
+	return writePersistentFile(m.stateDir, xtreemstoreS3BulkManagerFileName, data)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
-	if err := os.MkdirAll(m.getStateMountPath(), 0o700); err != nil {
-		return fmt.Errorf("failed to create state directory: %w", err)
-	}
-
-	if err := m.createManagerFile(); err != nil {
-		return fmt.Errorf("failed to create manager state file: %w", err)
-	}
-
-	if err := m.loadManagerState(); err != nil {
-		return fmt.Errorf("failed to load manager state: %w", err)
+	if m.stateDir, err = m.openStateDir(true); err != nil {
+		return fmt.Errorf("failed to open state directory: %w", err)
 	}
 
 	defer func() {
@@ -732,6 +736,14 @@ func (m *xtreemstoreS3BulkRetrieveManager) openState() (err error) {
 			m.closeState()
 		}
 	}()
+
+	if err = m.createManagerFile(); err != nil {
+		return fmt.Errorf("failed to create manager state file: %w", err)
+	}
+
+	if err = m.loadManagerState(); err != nil {
+		return fmt.Errorf("failed to load manager state: %w", err)
+	}
 
 	if m.statusAppendHandle, err = m.openStatusFileForAppend(); err != nil {
 		err = fmt.Errorf("failed to open status append file: %w", err)
@@ -763,6 +775,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 	if m.statusAppendHandle != nil {
 		err = appendErrors(err, m.statusAppendHandle.Close())
 		m.statusAppendHandle = nil
+	}
+
+	if m.stateDir != nil {
+		err = appendErrors(err, m.stateDir.Close())
+		m.stateDir = nil
 	}
 
 	return err
@@ -811,7 +828,14 @@ func (m *xtreemstoreS3BulkRetrieveManager) MarkCompleteAck(jobIndex int64) error
 func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3BulkRequestStatus, jobIndex int64) (err error) {
 	f := m.statusUpdateHandle
 	if f == nil {
-		if f, err = m.openStatusFileForUpdate(); err != nil {
+		// A manager built only to report a request's outcome is never opened, so it reaches the
+		// state directory for this one write.
+		var dir *os.Root
+		if dir, err = m.openStateDir(false); err == nil {
+			defer dir.Close()
+			f, err = openFileForUpdate(dir, xtreemstoreS3BulkStatusFileName)
+		}
+		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// The operation's state has been destroyed, so there is nothing left to record.
 				// Only Destroy deletes state, and it runs once every request the builder sent has
@@ -826,65 +850,37 @@ func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3Bul
 		defer f.Close()
 	}
 
-	_, err = f.WriteAt(status.Bytes(), jobIndex*bulkRequestRecordLen)
+	_, err = f.WriteAt(status.Bytes(), jobIndex*xtreemstoreS3BulkRecordLen)
 	return err
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForAppend() (*os.File, error) {
-	return openFileForAppend(m.getStatusPath())
+	return openFileForAppend(m.stateDir, xtreemstoreS3BulkStatusFileName)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForUpdate() (*os.File, error) {
-	return openFileForUpdate(m.getStatusPath())
+	return openFileForUpdate(m.stateDir, xtreemstoreS3BulkStatusFileName)
 }
 
 // createErrorsFile ensures the operation's errors file exists so its absence unambiguously means the
 // operation's state was destroyed. It must not truncate or fail when the file is already there: a
 // reason recorded by a previous Cancel has to survive the builder reopening state.
 func (m *xtreemstoreS3BulkRetrieveManager) createErrorsFile() error {
-	return touchFile(m.getErrorsPath())
+	return touchFile(m.stateDir, xtreemstoreS3BulkErrorsFileName)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*os.File, error) {
-	return openFileForAppend(m.getRecordPath())
+	return openFileForAppend(m.stateDir, xtreemstoreS3BulkRecordFileName)
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) getStateMountPath() string {
-	return path.Join(m.mountPath, m.stateMountPath)
-}
+// errBulkStateNotOpen is returned by the operations that need the state directory a manager holds
+// open between openState and closeState, when they are called outside that window.
+var errBulkStateNotOpen = errors.New("the bulk operation's state is not open (this is probably a bug)")
 
-// getStatusPath is the file holding one bulkRequestRecordLen record per jobIndex: the request's
-// status byte, the ID of the job reserved for it, and the offset and length of its remote path in
-// the record file. AddRequest only ever appends, and it assigns jobIndex from includedJobs while
-// holding the manager lock, so record N always belongs to index N and any index can be addressed at
-// N*bulkRequestRecordLen without reading what precedes it. The size of this file is also what
-// includedJobs is recovered from.
-//
-// This file is the operation's index. Nothing in the record file can be located without it.
-func (m *xtreemstoreS3BulkRetrieveManager) getStatusPath() string {
-	return path.Join(m.getStateMountPath(), "status")
-}
-
-// getRecordPath is the file holding the remote path of every request the operation took, in the
-// order they were added, each followed by a newline.
-//
-// A path is located by the offset and length in its status record, never by counting newlines. The
-// newlines are there so the file can be read with cat, grep and wc when an operation has to be
-// diagnosed by hand, and so a reader can check that a path ends where its record says it does. That
-// separation is what lets a remote path contain a newline, which an S3 object key may.
-//
-// The file can hold bytes belonging to no record, left by a path whose status record never followed
-// it. Those bytes are unreachable, because nothing reads this file except through a status record.
-func (m *xtreemstoreS3BulkRetrieveManager) getRecordPath() string {
-	return path.Join(m.getStateMountPath(), "record")
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) getErrorsPath() string {
-	return path.Join(m.getStateMountPath(), "errors")
-}
-
-func (m *xtreemstoreS3BulkRetrieveManager) getManagerPath() string {
-	return path.Join(m.getStateMountPath(), "manager.json")
+// openStateDir opens the operation's state directory through the checked state root. See
+// openStateRoot for what is checked and why.
+func (m *xtreemstoreS3BulkRetrieveManager) openStateDir(create bool) (*os.Root, error) {
+	return openStateDir(m.mountPath, m.stateRoot, m.stateMountPath, create)
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (*xtreemstoreS3BulkRetrieveSessionInfo, error) {
@@ -1114,7 +1110,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) readRecordPaths(start int64, end int6
 	last := located[len(located)-1]
 	span := make([]byte, last.pathOffset+int64(last.pathLen)-first.pathOffset)
 
-	f, err := os.OpenFile(m.getRecordPath(), os.O_RDONLY, os.FileMode(0600))
+	if m.stateDir == nil {
+		return nil, errBulkStateNotOpen
+	}
+	f, err := m.stateDir.Open(xtreemstoreS3BulkRecordFileName)
 	if err != nil {
 		return nil, err
 	}
@@ -1135,11 +1134,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) readRecordPaths(start int64, end int6
 // truncatePartialStatusRecord drops a trailing record that was not written in full. Each record is
 // appended in one write, so an interrupted append is the only way the file ends mid-record, and the
 // request it belonged to was never counted by includedJobs. Cutting it keeps record N addressable
-// at N*bulkRequestRecordLen, which every reader relies on. It runs after loadManagerState has set
-// includedJobs from the size of this file.
+// at N*xtreemstoreS3BulkRecordLen, which every reader relies on. It runs after
+// loadManagerState has set includedJobs from the size of this file.
 func (m *xtreemstoreS3BulkRetrieveManager) truncatePartialStatusRecord() error {
-	whole := m.includedJobs * bulkRequestRecordLen
-	info, err := os.Stat(m.getStatusPath())
+	whole := m.includedJobs * xtreemstoreS3BulkRecordLen
+	info, err := m.stateDir.Stat(xtreemstoreS3BulkStatusFileName)
 	if err != nil {
 		return err
 	}
@@ -1147,7 +1146,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) truncatePartialStatusRecord() error {
 	if info.Size() == whole {
 		return nil
 	}
-	return os.Truncate(m.getStatusPath(), whole)
+	return truncateStateFile(m.stateDir, xtreemstoreS3BulkStatusFileName, whole)
 }
 
 // truncateOrphanedRecordBytes cuts the record file back to the end of the last path a status record
@@ -1178,10 +1177,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) truncateOrphanedRecordBytes() error {
 		if err != nil {
 			return fmt.Errorf("failed to decode the last status record: %w", err)
 		}
-		live = info.pathOffset + int64(info.pathLen) + int64(len(bulkRequestPathTerminator))
+		live = info.pathOffset + int64(info.pathLen) + int64(len(xtreemstoreS3BulkPathTerminator))
 	}
 
-	stat, err := os.Stat(m.getRecordPath())
+	stat, err := m.stateDir.Stat(xtreemstoreS3BulkRecordFileName)
 	if err != nil {
 		return err
 	}
@@ -1194,7 +1193,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) truncateOrphanedRecordBytes() error {
 	}
 
 	if stat.Size() != live {
-		if err := os.Truncate(m.getRecordPath(), live); err != nil {
+		if err := truncateStateFile(m.stateDir, xtreemstoreS3BulkRecordFileName, live); err != nil {
 			return err
 		}
 	}
@@ -1229,14 +1228,17 @@ func (m *xtreemstoreS3BulkRetrieveManager) getBulkInfos(start int64, end int64) 
 		return infos, nil
 	}
 
-	f, err := os.OpenFile(m.getStatusPath(), os.O_RDONLY, os.FileMode(0600))
+	if m.stateDir == nil {
+		return nil, errBulkStateNotOpen
+	}
+	f, err := m.stateDir.Open(xtreemstoreS3BulkStatusFileName)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	infos.records = make([]byte, (end-start)*bulkRequestRecordLen)
-	if n, err := f.ReadAt(infos.records, start*bulkRequestRecordLen); err != nil {
+	infos.records = make([]byte, (end-start)*xtreemstoreS3BulkRecordLen)
+	if n, err := f.ReadAt(infos.records, start*xtreemstoreS3BulkRecordLen); err != nil {
 		return nil, fmt.Errorf("failed to read bulk entry state file: %w", err)
 	} else if n != len(infos.records) {
 		return nil, fmt.Errorf("invalid bulk entry state")

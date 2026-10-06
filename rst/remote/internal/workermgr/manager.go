@@ -104,6 +104,15 @@ func NewManager(
 ) (*Manager, error) {
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 
+	// The config loader already validated stateRoot. It is checked again here because every bulk
+	// state path is joined onto the mount from it, so a value that escaped the mount would put root
+	// owned writes somewhere else. The on-disk checks happen when state is opened. See openStateRoot
+	// in common/rst.
+	stateRoot, err := rst.ValidateStateRoot(stateRoot)
+	if err != nil {
+		return nil, fmt.Errorf("invalid state root for bulk operations: %w", err)
+	}
+
 	rstMap := make(map[uint32]rst.Provider)
 	for _, config := range rstConfigs {
 		configId := config.GetId()
@@ -113,7 +122,7 @@ func NewManager(
 		// We could provide a real context here it it ever became necessary, however `NewManager()`
 		// is not expected to be run in a separate goroutine so we shouldn't become blocked if the
 		// user tries to shutdown via Ctrl+C.
-		rst, err := rst.New(ctx, config, mountPoint)
+		rst, err := rst.New(ctx, config, mountPoint, stateRoot)
 		if err != nil {
 			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
 		}

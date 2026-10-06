@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
-	"path/filepath"
+	"path"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -31,27 +32,29 @@ func appendErrors(accumulatedErr error, nextErrs ...error) error {
 	return accumulatedErr
 }
 
-// openFileForAppend returns a handle that durably appends to path, creating it if needed and never
-// truncating what is already there. Each Write is committed to stable storage before it returns, so
-// an appended record survives a crash without an explicit Sync. A crash part way through a Write
-// can still leave a partial record behind, so records must be fixed size or self delimiting.
-func openFileForAppend(path string) (*os.File, error) {
-	return createPersistentFile(path, unix.O_WRONLY|unix.O_APPEND, 0600)
+// openFileForAppend returns a handle that durably appends to name within dir, creating it if needed
+// and never truncating what is already there. Each Write is committed to stable storage before it
+// returns, so an appended record survives a crash without an explicit Sync. A crash part way
+// through a Write can still leave a partial record behind, so records must be fixed size or self
+// delimiting.
+func openFileForAppend(dir *os.Root, name string) (*os.File, error) {
+	return createPersistentFile(dir, name, unix.O_WRONLY|unix.O_APPEND, stateFilePerm)
 }
 
 // openFileForUpdate returns a handle that durably rewrites bytes of an existing file in place, such
 // as the fixed size records WriteAt addresses by offset. Nothing is created or truncated, so
 // os.ErrNotExist means the file was never created or has since been deleted, which is state a
 // caller can act on instead of silently recreating.
-func openFileForUpdate(path string) (*os.File, error) {
-	return updatePersistentFile(path, unix.O_WRONLY)
+func openFileForUpdate(dir *os.Root, name string) (*os.File, error) {
+	return updatePersistentFile(dir, name, unix.O_WRONLY)
 }
 
-// touchFile durably creates path and leaves an existing file's contents untouched, so it is safe to
-// call every time state is opened. Creating state files up front is what makes their later absence
-// unambiguous: it means the state was deleted, not that nothing has been written to it yet.
-func touchFile(path string) error {
-	f, err := createPersistentFile(path, 0, 0600)
+// touchFile durably creates name within dir and leaves an existing file's contents untouched, so it
+// is safe to call every time state is opened. Creating state files up front is what makes their
+// later absence unambiguous: it means the state was deleted, not that nothing has been written to
+// it yet.
+func touchFile(dir *os.Root, name string) error {
+	f, err := createPersistentFile(dir, name, 0, stateFilePerm)
 	if err != nil {
 		return err
 	}
@@ -59,31 +62,25 @@ func touchFile(path string) error {
 	return f.Close()
 }
 
-// createPersistentFile opens path for durable writes with the given unix.O_* mode flags, creating
-// it if needed but never truncating a file that already exists. perm applies only to a file this
-// call creates, and the parent directory has to exist already. Newly created files have their
-// parent directory fsynced so the directory entry is persisted. The returned file uses O_DSYNC so
-// successful writes are committed to stable storage before returning.
-func createPersistentFile(path string, mode int, perm uint32) (*os.File, error) {
-	mode |= unix.O_DSYNC | unix.O_CLOEXEC
+// createPersistentFile opens name within dir for durable writes with the given unix.O_* mode flags,
+// creating it if needed but never truncating a file that already exists. perm applies only to a
+// file this call creates, and the parent directory has to exist already. Newly created files have
+// their parent directory fsynced so the directory entry is persisted. The returned file uses
+// O_DSYNC so successful writes are committed to stable storage before returning.
+func createPersistentFile(dir *os.Root, name string, mode int, perm os.FileMode) (*os.File, error) {
+	mode |= unix.O_DSYNC
 
-	fd, err := unix.Open(path, mode|unix.O_CREAT|unix.O_EXCL, perm)
+	f, err := dir.OpenFile(name, mode|os.O_CREATE|os.O_EXCL, perm)
 	created := err == nil
-	if errors.Is(err, unix.EEXIST) {
-		fd, err = unix.Open(path, mode, 0)
+	if errors.Is(err, fs.ErrExist) {
+		f, err = dir.OpenFile(name, mode, 0)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("failed to create file handle for %s", path)
-	}
-
 	if created {
-		if err := syncDir(filepath.Dir(path)); err != nil {
+		if err := syncDir(dir, path.Dir(name)); err != nil {
 			_ = f.Close()
 			return nil, err
 		}
@@ -92,33 +89,23 @@ func createPersistentFile(path string, mode int, perm uint32) (*os.File, error) 
 	return f, nil
 }
 
-// updatePersistentFile opens an existing path for durable in-place writes with the given unix.O_*
-// mode flags. Nothing is created or truncated, so opening a path that doesn't exist fails. The
-// returned file uses O_DSYNC so successful writes are committed to stable storage before returning.
-func updatePersistentFile(path string, mode int) (*os.File, error) {
-	fd, err := unix.Open(path, mode|unix.O_DSYNC|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	f := os.NewFile(uintptr(fd), path)
-	if f == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("failed to create file handle for %s", path)
-	}
-
-	return f, nil
+// updatePersistentFile opens an existing name within dir for durable in-place writes with the given
+// unix.O_* mode flags. Nothing is created or truncated, so opening a name that doesn't exist fails.
+// The returned file uses O_DSYNC so successful writes are committed to stable storage before
+// returning.
+func updatePersistentFile(dir *os.Root, name string, mode int) (*os.File, error) {
+	return dir.OpenFile(name, mode|unix.O_DSYNC, 0)
 }
 
-// writePersistentFile atomically replaces path with data, which is how a whole file's worth of
-// state should be rewritten. Content is staged in a temporary file that is fsynced before being
-// renamed over path, then the parent directory is fsynced so the rename is persisted. A crash
-// therefore leaves path either fully replaced or untouched, never truncated part way through a
+// writePersistentFile atomically replaces name within dir with data, which is how a whole file's
+// worth of state should be rewritten. Content is staged in a temporary file that is fsynced before
+// being renamed over name, then the parent directory is fsynced so the rename is persisted. A crash
+// therefore leaves name either fully replaced or untouched, never truncated part way through a
 // rewrite the way an O_TRUNC write would. The parent directory has to exist already.
-func writePersistentFile(path string, data []byte, perm uint32) (err error) {
-	tmpPath := persistentTmpPath(path)
+func writePersistentFile(dir *os.Root, name string, data []byte) (err error) {
+	tmpName := persistentTmpPath(name)
 
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(perm))
+	f, err := dir.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, stateFilePerm)
 	if err != nil {
 		return err
 	}
@@ -129,28 +116,28 @@ func writePersistentFile(path string, data []byte, perm uint32) (err error) {
 			if !closed {
 				_ = f.Close()
 			}
-			_ = removeIfExists(tmpPath)
+			_ = removeIfExists(dir, tmpName)
 		}
 	}()
 
 	if _, err = f.Write(data); err != nil {
-		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+		return fmt.Errorf("failed to write %s: %w", tmpName, err)
 	}
 
 	if err = f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync %s: %w", tmpPath, err)
+		return fmt.Errorf("failed to sync %s: %w", tmpName, err)
 	}
 
 	if err = f.Close(); err != nil {
-		return fmt.Errorf("failed to close %s: %w", tmpPath, err)
+		return fmt.Errorf("failed to close %s: %w", tmpName, err)
 	}
 	closed = true
 
-	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %w", tmpPath, path, err)
+	if err = dir.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpName, name, err)
 	}
 
-	return syncDir(filepath.Dir(path))
+	return syncDir(dir, path.Dir(name))
 }
 
 // persistentTmpSuffix distinguishes the staging file writePersistentFile renames from. Listing code
@@ -164,38 +151,37 @@ func persistentTmpPath(path string) string {
 	return path + persistentTmpSuffix
 }
 
-// syncDir fsyncs the directory at path so entries created, renamed or removed within it are
+// syncDir fsyncs the directory name within dir so entries created, renamed or removed within it are
 // persisted. Only the directory's own entries are covered: file contents need their own sync.
-func syncDir(path string) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+func syncDir(dir *os.Root, name string) error {
+	f, err := dir.Open(name)
 	if err != nil {
-		return fmt.Errorf("failed to open %s for sync: %w", path, err)
+		return fmt.Errorf("failed to open %s for sync: %w", name, err)
 	}
 
-	syncErr := unix.Fsync(fd)
-	closeErr := unix.Close(fd)
+	syncErr := f.Sync()
+	closeErr := f.Close()
 
 	if syncErr != nil {
-		return fmt.Errorf("failed to sync %s: %w", path, syncErr)
+		return fmt.Errorf("failed to sync %s: %w", name, syncErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("failed to close %s: %w", path, closeErr)
+		return fmt.Errorf("failed to close %s: %w", name, closeErr)
 	}
 
 	return nil
 }
 
-// removeEmptyDirs removes dir and then each of its parents in turn, stopping at the first one that
-// is not empty or at stopAt, whichever comes first. stopAt itself is never removed.
+// removeEmptyDirs removes dir within root and then each of its parents in turn, stopping at the
+// first one that is not empty or at root itself, whichever comes first. root is never removed.
 //
 // A directory that still holds another operation's state ends the walk rather than failing, which is
 // what lets every teardown call this without knowing whether it is the last one to finish. Without
 // it the per-job and per-operation directories accumulate on the mount forever, since the files
 // inside them are removed but nothing ever removes the directories themselves.
-func removeEmptyDirs(dir string, stopAt string) error {
-	stopAt = filepath.Clean(stopAt)
-	for dir = filepath.Clean(dir); dir != stopAt && dir != "." && dir != string(filepath.Separator); {
-		if err := os.Remove(dir); err != nil {
+func removeEmptyDirs(root *os.Root, dir string) error {
+	for dir = path.Clean(dir); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if err := root.Remove(dir); err != nil {
 			if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
 				// Still in use by another operation, so this is as far up as the walk can go.
 				return nil
@@ -204,20 +190,27 @@ func removeEmptyDirs(dir string, stopAt string) error {
 				return fmt.Errorf("failed to remove empty state directory %s: %w", dir, err)
 			}
 		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
 	}
 	return nil
 }
 
-// removeIfExists removes path and reports success when it is already gone, for teardown paths that
-// cannot assume every state file was created.
-func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+// truncateStateFile cuts the existing file name within dir to size. It goes through an open handle
+// because os.Root has no Truncate, and a path based truncate would follow whatever the name
+// resolves to at the time.
+func truncateStateFile(dir *os.Root, name string, size int64) error {
+	f, err := dir.OpenFile(name, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+
+	truncErr := f.Truncate(size)
+	return appendErrors(truncErr, f.Close())
+}
+
+// removeIfExists removes name within dir and reports success when it is already gone, for teardown
+// paths that cannot assume every state file was created.
+func removeIfExists(dir *os.Root, name string) error {
+	if err := dir.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
