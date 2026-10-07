@@ -602,6 +602,81 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 	require.NoError(t, m.closeState())
 }
 
+// The builder, sync and remote all write a request's status byte, and nothing orders their writes.
+// Remote can finish a job and mark its request complete before the builder hears back from the
+// submission that created that job. The builder's late accepted must not undo the completion, or
+// the record is left waiting on a job that no longer exists and its batch never completes. So a
+// status may only move forward, and a write for an index past the last record must fail rather
+// than grow the file and misalign every record appended after it.
+func TestBulkRetrieveStatusOnlyMovesForward(t *testing.T) {
+	tmpDir := t.TempDir()
+	newManager, addRequest := bulkRetrieveTestManager(t, tmpDir)
+
+	m := newManager()
+	require.NoError(t, m.openState())
+	defer func() { require.NoError(t, m.closeState()) }()
+	for i := range 3 {
+		require.NoError(t, addRequest(m, fmt.Sprintf("/objects/%d", i)))
+	}
+
+	// Remote and sync report a request's outcome through a manager that is never opened, so the
+	// write takes a fresh handle instead of the opened manager's.
+	oneShot := &xtreemstoreS3BulkRetrieveManager{
+		mountPath:      tmpDir,
+		stateRoot:      DefaultStateRoot,
+		stateMountPath: m.stateMountPath,
+		operation:      m.operation,
+	}
+	// The builder reports through the opened manager it registered for the operation.
+	builderReports := func(jobIndex int64, state BulkRequestState) error {
+		request := beeremote.JobRequest_builder{
+			BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: m.stateMountPath, Operation: m.operation, JobIndex: jobIndex},
+		}.Build()
+		return m.UpdateBulkRequest(context.Background(), request, state)
+	}
+	statusOf := func(jobIndex int64) xtreemstoreS3BulkRequestStatus {
+		t.Helper()
+		infos, err := m.getBulkInfos(jobIndex, jobIndex+1)
+		require.NoError(t, err)
+		info, err := infos.Get(jobIndex)
+		require.NoError(t, err)
+		return info.status
+	}
+
+	// Record 0 takes the normal path, so the guard must still let every forward move through.
+	require.NoError(t, builderReports(0, BulkRequestAccepted))
+	assert.Equal(t, xtreemstoreS3BulkRequestAccepted, statusOf(0))
+	require.NoError(t, oneShot.MarkComplete(0))
+	assert.Equal(t, xtreemstoreS3BulkRequestComplete, statusOf(0))
+	require.NoError(t, m.MarkCompleteAck(0))
+	assert.Equal(t, xtreemstoreS3BulkRequestCompleteAcked, statusOf(0))
+
+	// Record 1 is the race: the job completes before the builder records the submission.
+	require.NoError(t, oneShot.MarkComplete(1))
+	require.NoError(t, builderReports(1, BulkRequestAccepted), "a late update is skipped, not refused")
+	assert.Equal(t, xtreemstoreS3BulkRequestComplete, statusOf(1), "a late accepted must not undo the completion")
+
+	// A completion that arrives after the operation acknowledged it must not reopen it either.
+	require.NoError(t, oneShot.MarkComplete(0))
+	assert.Equal(t, xtreemstoreS3BulkRequestCompleteAcked, statusOf(0))
+
+	// Repeating a status is a no-op, which is what makes marking a request complete twice safe.
+	require.NoError(t, oneShot.MarkComplete(1))
+	assert.Equal(t, xtreemstoreS3BulkRequestComplete, statusOf(1))
+
+	assert.Equal(t, xtreemstoreS3BulkRequestAdded, statusOf(2), "updates to other records must leave this one alone")
+
+	statusPath := path.Join(tmpDir, m.stateMountPath, xtreemstoreS3BulkStatusFileName)
+	before, err := os.Stat(statusPath)
+	require.NoError(t, err)
+	for _, writer := range []*xtreemstoreS3BulkRetrieveManager{m, oneShot} {
+		assert.Error(t, writer.MarkComplete(3), "index 3 has no record")
+	}
+	after, err := os.Stat(statusPath)
+	require.NoError(t, err)
+	assert.Equal(t, before.Size(), after.Size(), "a write past the last record must not grow the file")
+}
+
 // bulkRetrieveTestManager builds a manager against tmpDir together with helpers for adding requests
 // and reading them back, which the record-file tests all need.
 func bulkRetrieveTestManager(t *testing.T, tmpDir string) (

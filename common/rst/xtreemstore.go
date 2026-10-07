@@ -294,6 +294,15 @@ func (x *xtreemstoreS3Provider) newXtreemstoreS3BulkRetrieveManager(stateMountPa
 	}
 }
 
+// xtreemstoreS3BulkRequestStatus is the first byte of a request's status record. It is persisted, so
+// each value is part of the on-disk format.
+//
+// The values are declared in the order a request moves through them, and that order is
+// load-bearing. The builder, sync and remote all write the same status byte, and nothing orders
+// their writes. A late write could otherwise undo a later status, so markJobStatus compares the new
+// value with the stored one and skips any write that would not move the status forward. A new
+// status must therefore go where it falls in a request's lifetime, and inserting one renumbers
+// every status after it on disk.
 type xtreemstoreS3BulkRequestStatus byte
 
 const (
@@ -308,7 +317,8 @@ const (
 	xtreemstoreS3BulkRequestCompleteAcked
 	// xtreemstoreS3BulkRequestUnchanged is not a real status and is never persisted. It is only used
 	// as a resolveBulkRequest on-success argument, to say the request is still in flight and a later
-	// stage is responsible for resolving it.
+	// stage is responsible for resolving it. It must never reach markJobStatus: as the highest value
+	// it would pass the forward-only check and then block every real status after it.
 	xtreemstoreS3BulkRequestUnchanged = 255
 )
 

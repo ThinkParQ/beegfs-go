@@ -41,12 +41,13 @@ func openFileForAppend(dir *os.Root, name string) (*os.File, error) {
 	return createPersistentFile(dir, name, unix.O_WRONLY|unix.O_APPEND, stateFilePerm)
 }
 
-// openFileForUpdate returns a handle that durably rewrites bytes of an existing file in place, such
-// as the fixed size records WriteAt addresses by offset. Nothing is created or truncated, so
-// os.ErrNotExist means the file was never created or has since been deleted, which is state a
-// caller can act on instead of silently recreating.
+// openFileForUpdate returns a handle that reads and durably rewrites bytes of an existing file in
+// place, such as the fixed size records ReadAt and WriteAt address by offset. The handle is opened
+// for reading as well as writing so a caller can check a record before replacing it. Nothing is
+// created or truncated, so os.ErrNotExist means the file was never created or has since been
+// deleted, which is state a caller can act on instead of silently recreating.
 func openFileForUpdate(dir *os.Root, name string) (*os.File, error) {
-	return updatePersistentFile(dir, name, unix.O_WRONLY)
+	return updatePersistentFile(dir, name, unix.O_RDWR)
 }
 
 // touchFile durably creates name within dir and leaves an existing file's contents untouched, so it

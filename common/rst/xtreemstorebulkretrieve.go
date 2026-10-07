@@ -228,6 +228,12 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkInMountPathLenOffset:], uint16(len(inMountPath)))
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkRemotePathLenOffset:], uint16(len(remotePath)))
 	if _, err = m.statusAppendHandle.Write(record[:]); err != nil {
+		// A failed append may still have written part of the record. Cut it now, before the next
+		// append lands after it and shifts every later record off its index. openState does the same
+		// after a crash, but this process carries on appending.
+		if truncErr := m.truncatePartialStatusRecord(); truncErr != nil {
+			err = errors.Join(err, fmt.Errorf("unable to cut a partially written status record: %w", truncErr))
+		}
 		return
 	}
 
@@ -815,7 +821,28 @@ func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3Bul
 		defer f.Close()
 	}
 
-	_, err = f.WriteAt(status.Bytes(), jobIndex*xtreemstoreS3BulkRecordLen)
+	// The builder, sync and remote all write this byte without coordinating, so a status that arrives
+	// late is skipped rather than allowed to undo a later one. xtreemstoreS3BulkRequestStatus explains
+	// why its order makes that comparison valid.
+	//
+	// The read and the write are two separate calls, and nothing locks the record between them. A
+	// write from another process that lands in that gap is lost. That gap is one round trip to the
+	// file system, while the race this guards against spans the whole lifetime of a job, so the
+	// guard is left unlocked. A lock on the status file around both calls would close the gap.
+	//
+	// Reading first also bounds the index. A ReadAt past the last record returns io.EOF, so a stray
+	// index fails here instead of growing the file and misaligning every record appended after it.
+	location := jobIndex * xtreemstoreS3BulkRecordLen
+	current := make([]byte, 1)
+	if _, err := f.ReadAt(current, location); err != nil {
+		return fmt.Errorf("unable to read current bulk request status: %w", err)
+	}
+	if status <= xtreemstoreS3BulkRequestStatus(current[0]) {
+		// The status can only go forward. Ignore any delayed status updates that would go backwards.
+		return nil
+	}
+
+	_, err = f.WriteAt(status.Bytes(), location)
 	return err
 }
 
