@@ -2,6 +2,7 @@ package workmgr
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -12,6 +13,9 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestSendBuilderJobRequestCounters pins how each submission moves the builder job's counters. A
@@ -110,6 +114,92 @@ func TestSendBuilderJobRequestCounters(t *testing.T) {
 			assert.Equal(t, tc.want.GetJobsNotAllowed(), builder.GetJobsNotAllowed(), "not allowed")
 			assert.Equal(t, tc.want.GetJobsNotReserved(), builder.GetJobsNotReserved(), "not reserved")
 			assert.Equal(t, tc.want.GetJobsReserved(), builder.GetJobsReserved(), "reserved")
+		})
+	}
+}
+
+// TestSendBuilderJobRequestRetries pins which submit failures sendBuilderJobRequest retries. It
+// retries only while remote has not decided the request: remote cannot be reached, or the
+// connection was closed under a call the caller did not cancel. A refusal remote decided is counted
+// once, because remote gives the same answer on every retry. A call the caller cancelled is
+// returned without being counted, because nothing is wrong with the request. The retry cases each
+// wait out the first one second backoff, so the cases run in parallel.
+func TestSendBuilderJobRequestRetries(t *testing.T) {
+	unavailable := fmt.Errorf("%w: %w", beeremote.ErrUnavailable, status.Error(codes.Unavailable, "connection refused"))
+	canceled := fmt.Errorf("%w: %w", context.Canceled, status.Error(codes.Canceled, "grpc: the client connection is closing"))
+	refused := status.Error(codes.Unknown, "unable to generate job from job request")
+
+	cases := []struct {
+		name          string
+		callerCancels bool
+		// results are what remote answers to each submit, in order.
+		results []error
+		wantErr error
+		want    *flex.BuilderJob
+	}{
+		{
+			name:    "a refusal remote decided is counted once and not retried",
+			results: []error{refused},
+			wantErr: refused,
+			want:    flex.BuilderJob_builder{Errors: 1}.Build(),
+		},
+		{
+			name:    "remote that cannot be reached is retried until it accepts",
+			results: []error{unavailable, nil},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:    "a connection closed under a live call is retried until remote accepts",
+			results: []error{canceled, nil},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:          "a call the caller cancelled is returned and not counted",
+			callerCancels: true,
+			results:       []error{canceled},
+			wantErr:       context.Canceled,
+			want:          &flex.BuilderJob{},
+		},
+		{
+			name:          "remote that cannot be reached is not retried once the caller cancels",
+			callerCancels: true,
+			results:       []error{unavailable},
+			wantErr:       beeremote.ErrUnavailable,
+			want:          &flex.BuilderJob{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, err := beeremote.New(beeremote.Config{})
+			require.NoError(t, err)
+			// The address "mock:0" is what makes the client use the mock provider.
+			require.NoError(t, client.UpdateConfig(flex.BeeRemoteNode_builder{Address: "mock:0"}.Build(), "0"))
+			mockRemote, ok := client.Provider.(*beeremote.MockProvider)
+			require.True(t, ok)
+			for _, result := range tc.results {
+				mockRemote.On("submitJob", mock.Anything).Return(result).Once()
+			}
+			w := &worker{beeRemoteClient: client, log: zaptest.NewLogger(t)}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.callerCancels {
+				cancel()
+			}
+
+			builder := &flex.BuilderJob{}
+			gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, pbr.JobRequest_builder{Path: "/f"}.Build())
+			if tc.wantErr == nil {
+				require.NoError(t, gotErr)
+			} else {
+				require.ErrorIs(t, gotErr, tc.wantErr)
+			}
+
+			mockRemote.AssertNumberOfCalls(t, "submitJob", len(tc.results))
+			assert.Equal(t, tc.want.GetSubmitted(), builder.GetSubmitted(), "submitted")
+			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
 		})
 	}
 }

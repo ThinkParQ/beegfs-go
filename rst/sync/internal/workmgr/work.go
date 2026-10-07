@@ -537,12 +537,26 @@ func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment
 // will be incorrect.
 func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
 	const maxSendBuilderJobDelay = 60 * time.Second
-	delay := 1 * time.Second
+	const initialDelay = 1 * time.Second
+	delay := initialDelay
 
 	for {
 		err := w.beeRemoteClient.SubmitJobRequest(ctx, request)
-		if errors.Is(err, beeremote.ErrUnavailable) {
-			// Retry with an exponential backoff until remote is available again.
+		switch {
+		case errors.Is(err, context.Canceled):
+			if ctx.Err() != nil {
+				// The caller cancelled the call because the job was cancelled or the node is
+				// shutting down. Nothing is wrong with the request, so it is not counted.
+				return err
+			}
+			// The caller did not cancel which means the connection to remote was closed so retry.
+			fallthrough
+		case errors.Is(err, beeremote.ErrUnavailable):
+			// Retry with an exponential backoff until remote can be reached again. Only the first
+			// retry is logged, because every path the builder walks can be retrying at once.
+			if delay == initialDelay {
+				w.log.Warn("unable to submit job request, retrying until the connection to remote is restored", zap.String("path", request.GetPath()), zap.Error(err))
+			}
 			select {
 			case <-time.After(delay):
 				delay *= 2
