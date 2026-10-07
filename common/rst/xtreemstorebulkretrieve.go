@@ -123,18 +123,6 @@ type xtreemstoreS3BulkRetrieveRequest struct {
 	BucketRetrieve bool     `json:"bucket-retrieve,omitempty"`
 }
 
-// xtreemstoreS3BulkRetrieveMarkAccepted marks a request sent by a bulk operation as accepted.
-func xtreemstoreS3BulkRetrieveMarkAccepted(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string, stateRoot string) error {
-	manager := &xtreemstoreS3BulkRetrieveManager{
-		rstId:          rstId,
-		mountPath:      mountPath,
-		stateRoot:      stateRoot,
-		stateMountPath: bulkInfo.StateMountPath,
-		operation:      bulkInfo.Operation,
-	}
-	return manager.MarkAccepted(bulkInfo.JobIndex)
-}
-
 // xtreemstoreS3BulkRetrieveMarkComplete marks a request sent by a bulk operation as complete.
 func xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo *flex.BulkJobRequestInfo, rstId uint32, mountPath string, stateRoot string) error {
 	manager := &xtreemstoreS3BulkRetrieveManager{
@@ -778,7 +766,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 func (m *xtreemstoreS3BulkRetrieveManager) UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
 	jobIndex := request.GetBulkInfo().GetJobIndex()
 	switch state {
-	case BulkRequestSubmitted:
+	case BulkRequestAccepted:
 		return m.MarkAccepted(jobIndex)
 	case BulkRequestFailed:
 		// It's safe to mark the same request complete more than once.

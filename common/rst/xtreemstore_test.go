@@ -364,10 +364,17 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		mockProvider.On("CompleteWorkRequests", job, mock.Anything, true).Return(nil)
 		require.NoError(t, x.CompleteWorkRequests(context.Background(), job, nil, true))
 
-		// Regenerating work requests is what a retry does, and it must be allowed to succeed.
-		mockProvider.On("GenerateWorkRequests", job, 1).Return([]*flex.WorkRequest{}, nil, nil)
-		_, err := x.GenerateWorkRequests(context.Background(), nil, job, 1)
-		require.NoError(t, err)
+		// A retry reruns the job's work requests, and a part that fails again marks the request
+		// complete. The part must report only its own error, not a failure to reach the state.
+		workRequest := &flex.WorkRequest{
+			Type:     &flex.WorkRequest_Sync{Sync: &flex.SyncJob{}},
+			BulkInfo: bulkInfo,
+		}
+		part := &flex.Work_Part{}
+		mockProvider.On("ExecuteWorkRequestPart", mock.Anything, workRequest, part).Return(assert.AnError)
+		result := x.ExecuteWorkRequestPart(context.Background(), context.Background(), workRequest, part)
+		require.NotNil(t, result)
+		assert.Equal(t, assert.AnError, result.Err, "the part's own error must be returned unchanged")
 
 		// BulkRequestFailed is the release path for a request whose job never ran at all.
 		manager := &xtreemstoreS3BulkRetrieveManager{

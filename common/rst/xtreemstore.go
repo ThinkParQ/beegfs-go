@@ -172,22 +172,6 @@ func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjec
 	return x.s3ApiClient.HeadObject(ctx, in, optFns...)
 }
 
-func (x *xtreemstoreS3Provider) GenerateWorkRequests(ctx context.Context, lastJob *beeremote.Job, job *beeremote.Job, availableWorkers int) (requests []*flex.WorkRequest, err error) {
-
-	// TODO: Move this functionality into work.go.
-	defer func() {
-		// The request is not marked accepted here even though this is where remote takes ownership
-		// of it. This runs while the job is still being created, before remote has committed it, so
-		// a crash in that window would leave an accepted request that no job will ever resolve and a
-		// batch that can never complete. The builder marks it accepted once its submission returns,
-		// by which point the job is durable. Until then it stays added, which the operation replays.
-		err = x.resolveBulkRequest(job.GetRequest().GetBulkInfo(), xtreemstoreS3BulkRequestUnchanged, err)
-	}()
-
-	requests, err = x.Provider.GenerateWorkRequests(ctx, lastJob, job, availableWorkers)
-	return
-}
-
 func (x *xtreemstoreS3Provider) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest, part *flex.Work_Part) (result *SchedulingResult) {
 	defer func() {
 		var opErr error
@@ -439,8 +423,6 @@ func (x *xtreemstoreS3Provider) resolveBulkRequest(bulkInfo *flex.BulkJobRequest
 	var bulkErr error
 	switch outcome {
 	case xtreemstoreS3BulkRequestUnchanged:
-	case xtreemstoreS3BulkRequestAccepted:
-		bulkErr = xtreemstoreS3BulkRetrieveMarkAccepted(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath(), x.stateRoot)
 	case xtreemstoreS3BulkRequestComplete:
 		// It's safe to mark the same request complete more than once.
 		bulkErr = xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath(), x.stateRoot)
