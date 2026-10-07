@@ -21,7 +21,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const workDelayMinimum time.Duration = time.Second
+const (
+	// UpdateWorkRequestTimeout bounds a single attempt to update a work request to remote.
+	UpdateWorkRequestTimeout               = 30 * time.Second
+	workDelayMinimum         time.Duration = time.Second
+)
 
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
@@ -340,8 +344,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		return
 	}
 
-	// Update the entry in BadgerDB so other goroutines can get read only access to the result, then
-	// make a best-effort, non-blocking attempt to notify BeeRemote that the work request is running.
+	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
 	if state == flex.Work_SCHEDULED {
 		// Rescheduled work status messages will carry information aggregative status information.
 		// So, just set the running state information when the status state is scheduled.
@@ -352,9 +355,15 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
 		log.Warn("error updating journal work entry to running", zap.Error(err))
 	}
-	if _, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, result.Work); err != nil {
+
+	// Make a best-effort attempt to notify remote that the job is running. A failure is
+	// logged and not retried because the final result is sent with retries when the work
+	// completes.
+	updateCtx, cancel := context.WithTimeout(work.ctx, UpdateWorkRequestTimeout)
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, result.Work); err != nil {
 		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
 	}
+	cancel()
 
 	if request.HasBuilder() {
 		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry, log)
@@ -475,9 +484,6 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	}
 	return w.updateBuilderJob(shutdownCtx, work, entry, result)
 }
-
-// UpdateWorkRequestTimeout bounds a single attempt to update a work request to remote.
-const UpdateWorkRequestTimeout = 30 * time.Second
 
 // Returns true if the work result was sent, or for some reason cannot be sent but the overall state
 // is such we should not keep retrying and the work result is no longer needed (this should only
