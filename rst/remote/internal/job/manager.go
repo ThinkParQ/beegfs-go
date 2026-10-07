@@ -601,6 +601,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			// Distinct from the state check below only so the message says there is no record. Both
 			// are final, because a missing ID may belong to a job that was cancelled and deleted.
 			return nil, fmt.Errorf("%w: no job %s exists for path %s", rst.ErrReservationMissing, reservedJobId, jr.GetPath())
+		} else if !reserved.InReservedState() && !reserved.Request.GetReserve() {
+			// A claim replaces the job's reserve request with itself, so this job was already
+			// claimed. The caller is replaying a claim whose response it never received.
+			return &beeremote.JobResult{Job: reserved.Get()}, fmt.Errorf("%w: job %s for path %s was already claimed", rst.ErrJobAlreadyExists, reservedJobId, jr.GetPath())
 		} else if !reserved.InReservedState() {
 			return nil, fmt.Errorf("%w: job %s for path %s is %s", rst.ErrJobNotReserved, reservedJobId, jr.GetPath(), reserved.GetStatus().GetState())
 		} else if reserved.Request.GetRemoteStorageTarget() != jr.GetRemoteStorageTarget() {
@@ -609,6 +613,15 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		job = reserved
 		job.Request = jr
 		job.Segments = nil
+	} else if jr.GetReserve() && jr.HasReserveJobId() {
+		if existing, ok := pathEntry.Value[reservedJobId]; ok {
+			// The caller is replaying a reserve whose response it never received. Any other job
+			// holding this ID must not be replaced.
+			if existing.InReservedState() && existing.Request.GetRemoteStorageTarget() == jr.GetRemoteStorageTarget() {
+				return &beeremote.JobResult{Job: existing.Get()}, nil
+			}
+			return nil, fmt.Errorf("%w: job %s already exists for path %s in state %s", rst.ErrJobNotAllowed, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
+		}
 	}
 
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
