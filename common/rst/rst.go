@@ -284,7 +284,7 @@ type BulkCancelFn func(ctx context.Context, reason error) (walkCh <-chan *BulkSt
 type BulkRequestState int
 
 const (
-	// BulkRequestAccepted indicates a bulk request has been successfully submitted.
+	// BulkRequestAccepted indicates a bulk request has been accepted by remote.
 	BulkRequestAccepted BulkRequestState = iota
 	// BulkRequestFailed means no job will ever run the request so the bulk operation should not
 	// wait for it and instead, release any associated resources.
@@ -294,7 +294,7 @@ const (
 func (s BulkRequestState) String() string {
 	switch s {
 	case BulkRequestAccepted:
-		return "submitted"
+		return "accepted"
 	case BulkRequestFailed:
 		return "failed"
 	default:
