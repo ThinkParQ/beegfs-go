@@ -94,8 +94,8 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
-			// Note this is just a hint to the user, other error conditions may have the same
-			// message so we don't adjust behavior (i.e., treat it as fatal).
+			// Note this is just a hint to the user. Other error conditions may have the same
+			// message.
 			if strings.Contains(st.Message(), "error reading server preface: EOF") {
 				return fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
 			}
@@ -103,8 +103,8 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		return err
 	}
 
-	// If we could send the message but the node didn't update the configuration
-	// correctly probably we can't recover with a simple retry so consider fatal.
+	// The node received the config but rejected it. This usually needs an operator to fix the
+	// configuration, but the caller still retries with backoff in case the node recovers.
 	if configureResp.GetResult() != flex.UpdateConfigResponse_SUCCESS {
 		return fmt.Errorf("%s: node rejected config update: %s", configureResp.GetResult(), configureResp.GetMessage())
 	}
@@ -114,8 +114,8 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		return err
 	}
 
-	// If we could send the message but the node couldn't update the WRs,
-	// probably we can't recover with a simply retry so consider fatal.
+	// The node received the work requests but could not apply them. The caller retries with
+	// backoff like any other connect error.
 	if !updateWRResp.GetSuccess() {
 		return fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
 	}

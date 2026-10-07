@@ -204,6 +204,12 @@ func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdate
 			return n.nodeCtx.Err()
 		case <-time.After(retryDelay):
 			if err := n.connect(config, wrUpdates, requiredFeatures); err != nil {
+				// connect() may fail after it has already opened n.conn. Close that connection before retrying
+				// because the next connect() overwrites n.conn and the old connection would otherwise never close.
+				if disconnectErr := n.disconnect(); disconnectErr != nil {
+					n.log.Debug("error disconnecting before reconnect", zap.Error(disconnectErr))
+				}
+
 				// We'll retry to connect with an exponential back off. We'll add some jitter to avoid load spikes.
 				reconnectBackOff *= 2 + rand.Float64()
 				if reconnectBackOff > float64(n.config.MaxReconnectBackOff) {
