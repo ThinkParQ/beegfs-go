@@ -511,7 +511,12 @@ func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremot
 		Operation:      m.Operation,
 	})
 
-	return m.clientBulkOperation.AddRequest(ctx, request)
+	if err := m.clientBulkOperation.AddRequest(ctx, request); err != nil {
+		// The request never entered the operation so nothing may later report on its behalf.
+		request.ClearBulkInfo()
+		return err
+	}
+	return nil
 }
 
 // UpdateBulkRequest notifies the owning bulk operation of a state change. Any failures here will be
