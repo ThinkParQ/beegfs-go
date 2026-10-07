@@ -72,12 +72,14 @@ func TestMockClientBulkOperationReplaysArchivedRequestsOnce(t *testing.T) {
 	walkCh, getResults, err := bulkOp.Execute(context.Background())
 	require.NoError(t, err)
 
-	var replayPaths []string
+	var inMountPaths, remotePaths []string
 	for walkResp := range walkCh {
 		require.NoError(t, walkResp.Err)
-		replayPaths = append(replayPaths, walkResp.Path)
+		inMountPaths = append(inMountPaths, walkResp.InMountPath)
+		remotePaths = append(remotePaths, walkResp.RemotePath)
 	}
-	assert.Equal(t, []string{"remote/file"}, replayPaths)
+	assert.Equal(t, []string{"/mnt/file"}, inMountPaths)
+	assert.Equal(t, []string{"remote/file"}, remotePaths)
 
 	result := getResults()
 	require.NoError(t, result.Err)

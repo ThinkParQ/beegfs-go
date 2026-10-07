@@ -241,9 +241,9 @@ func TestRequestBuildController_ExecuteBulkOperationProcessesPathsAndSubmitsRequ
 
 	bulkCh := make(chan *BulkStreamPathResult, 1)
 	bulkCh <- &BulkStreamPathResult{
-		Path:     "/bulk-a",
-		RstId:    1,
-		BulkInfo: &flex.BulkJobRequestInfo{Operation: "retrieve"},
+		InMountPath: "/bulk-a",
+		RstId:       1,
+		BulkInfo:    &flex.BulkJobRequestInfo{Operation: "retrieve"},
 	}
 	close(bulkCh)
 

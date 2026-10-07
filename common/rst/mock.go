@@ -361,9 +361,9 @@ func (m *mockBulkOperation) UpdateBulkRequest(ctx context.Context, request *beer
 func (m *mockBulkOperation) Execute(ctx context.Context) (<-chan *BulkStreamPathResult, BulkExecuteResultFn, error) {
 	walkCh := make(chan *BulkStreamPathResult, len(m.requests))
 	for _, request := range m.requests {
-		path := getMockBulkReplayPath(request)
-		m.client.markBulkPathCompleted(m.operation, path)
-		walkCh <- &BulkStreamPathResult{Path: path}
+		m.client.markBulkPathCompleted(m.operation, getMockBulkReplayPath(request))
+		inMountPath, remotePath := getMockBulkRequestPaths(request)
+		walkCh <- &BulkStreamPathResult{InMountPath: inMountPath, RemotePath: remotePath}
 	}
 	close(walkCh)
 	return walkCh, func() *BulkExecuteResult { return &BulkExecuteResult{} }, nil
@@ -392,6 +392,24 @@ func getMockRequestLockedInfo(request *beeremote.JobRequest) *flex.JobLockedInfo
 		}
 	}
 	return nil
+}
+
+// getMockBulkRequestPaths returns the in-mount and remote paths a bulk operation records for
+// request, which are the paths it hands back when it replays the request.
+func getMockBulkRequestPaths(request *beeremote.JobRequest) (inMountPath string, remotePath string) {
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		return request.GetPath(), request.GetSync().GetRemotePath()
+	case beeremote.JobRequest_Mock_case:
+		if cfg := request.GetMock().GetCfg(); cfg != nil {
+			inMountPath = cfg.GetPath()
+			remotePath = cfg.GetRemotePath()
+		}
+	}
+	if inMountPath == "" {
+		inMountPath = request.GetPath()
+	}
+	return inMountPath, remotePath
 }
 
 func getMockBulkReplayPath(request *beeremote.JobRequest) string {

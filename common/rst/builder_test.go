@@ -227,7 +227,7 @@ func TestCompleteJobBuilderRequestCancelsReservationsByPathInMount(t *testing.T)
 	}.Build()
 
 	tracker := &trackingBulkOperation{cancelWalk: []*BulkStreamPathResult{
-		{Path: "data/a", ReservedJobId: "reserved-a", RstId: 1},
+		{InMountPath: "/restore/data/a", RemotePath: "data/a", ReservedJobId: "reserved-a", RstId: 1},
 	}}
 	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, "retrieve").Return(tracker, nil).Once()
 	saveTestBulkOperationEntry(t, mountPath, job.GetId(), &bulkOperationEntry{RstId: 1, Operation: "retrieve"})
@@ -241,7 +241,7 @@ func TestCompleteJobBuilderRequestCancelsReservationsByPathInMount(t *testing.T)
 	err := client.CompleteJobBuilderRequest(context.Background(), job, nil, cancelRequest, true)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"/restore/data/a": "reserved-a"}, cancelled,
-		"the reserved job must be cancelled by its path in the mount, not by the object key")
+		"the reserved job must be cancelled by the in-mount path the operation recorded, not by the object key")
 	require.True(t, tracker.destroyCalled)
 }
 

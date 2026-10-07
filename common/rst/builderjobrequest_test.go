@@ -1277,7 +1277,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.ErrorIs(t, err, ErrGetPathStateFatal)
 	})
@@ -1304,7 +1304,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
 		assert.True(t, cleared)
@@ -1330,7 +1330,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
 		assert.True(t, cleared)
@@ -1370,7 +1370,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		// A request remote refuses is an outcome for this one path, not a builder job failure.
 		require.NoError(t, err)
@@ -1405,7 +1405,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error { return nil }
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
 		require.Len(t, submissions.all(), 1, "a missing reservation must not be reserved again")
@@ -1440,7 +1440,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 
 		// The bulk operation is still released even though the failed rollback stops the builder
 		// job, so the operation is not left waiting on a request that will never be resolved.
-		require.ErrorContains(t, w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil), "rollback failed")
+		require.ErrorContains(t, w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil), "rollback failed")
 		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
 	})
 
@@ -1463,7 +1463,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return nil
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
 		require.Len(t, submissions.all(), 1)
@@ -1480,7 +1480,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			return wantErr
 		}
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.ErrorIs(t, err, wantErr)
 	})
@@ -1530,7 +1530,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 	t.Run("a submitted bulk request is reported to its operation exactly once", func(t *testing.T) {
 		w := newBuilder()
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
 		require.Equal(t, []BulkRequestState{BulkRequestSubmitted}, reportedStates)
@@ -1557,7 +1557,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		// to stop waiting on it. Reporting it submitted instead would strand the operation forever.
 		submissions.result = func(*beeremote.JobRequest) error { return errors.New("submit failed") }
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		// A request remote refuses is an outcome for this one path, not a builder job failure.
 		require.NoError(t, err)
@@ -1571,7 +1571,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		submissions.result = func(*beeremote.JobRequest) error { return errors.New("submit failed") }
 		updateBulkErr = errors.New("status write failed")
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.ErrorIs(t, err, updateBulkErr)
 	})
@@ -1583,7 +1583,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		w := newBuilder()
 		updateBulkErr = errors.New("status write failed")
 
-		err := w.ProcessPathFromBulkOperation(context.Background(), "/some/path", "/remote/path", 1, reservedJobId, bulkInfo, nil)
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.ErrorIs(t, err, updateBulkErr)
 		assert.ErrorContains(t, err, "/some/path", "the failure must name the path it belongs to")

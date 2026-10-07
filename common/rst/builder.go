@@ -207,8 +207,6 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 	if !job.GetRequest().HasBuilder() {
 		return ErrReqAndRSTTypeMismatch
 	}
-	builder := job.GetRequest().GetBuilder()
-
 	workState := GetWorkResultsState(workResults)
 	if !abort {
 		switch workState {
@@ -245,22 +243,11 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 	}
 
 	if reason != nil {
-		// The cancel walk reports each request by its walk path. Remote keys reserved jobs by the
-		// path in the mount so each walk path is mapped the way the builder's walk mapped it.
-		cfg := builder.GetCfg()
-		if cfg == nil {
-			return fmt.Errorf("unable to cancel bulk operations: builder job %s has no configuration (this is probably a bug)", job.GetId())
-		}
-		getPaths, pathsErr := c.getPathsFn(cfg)
-		if pathsErr != nil {
-			return fmt.Errorf("unable to map bulk requests to their paths in the mount: %w", pathsErr)
-		}
-
 		var errMu sync.Mutex
 		var wg sync.WaitGroup
 		for _, manager := range managers {
 			wg.Go(func() {
-				cancelErr := cancelBulkOperation(ctx, checkpoint, manager, reason, getPaths, cancelRequest)
+				cancelErr := cancelBulkOperation(ctx, checkpoint, manager, reason, cancelRequest)
 				if cancelErr == nil {
 					return
 				}
@@ -271,8 +258,8 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 		}
 		wg.Wait()
 
-		// Return if any bulk operations failed to be cancelled. This leaves keeps the bulk
-		// operation managers from being destroyed.
+		// Return if any bulk operations failed to be cancelled. This keeps the bulk operation
+		// managers from being destroyed.
 		if err != nil {
 			return
 		}
@@ -298,11 +285,9 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 //
 // It runs from CompleteJobBuilderRequest when a builder job ended in a state that must release what
 // the operation reserved remotely. That is either a cancelled job or an aborted one. The manager
-// comes from the registry snapshot of the builder job. getPaths maps a walk path to the path in the
-// mount, the same way the builder's walk did, because remote keys reserved jobs by that path.
-// cancelRequest cancels a single reserved job and is provided by the caller of
-// CompleteJobBuilderRequest. checkpoint extends the cancellation grace period, so it runs before
-// each step that can block.
+// comes from the registry snapshot of the builder job. cancelRequest cancels a single reserved job
+// and is provided by the caller of CompleteJobBuilderRequest. checkpoint extends the cancellation
+// grace period, so it runs before each step that can block.
 //
 // The rules it applies:
 //   - A cancel that cannot be started is reported and nothing else happens for that operation.
@@ -312,7 +297,7 @@ func (c *JobBuilderClient) CompleteJobBuilderRequest(ctx context.Context, job *b
 //
 // The errors from all three steps are joined into the returned error. Managers are cancelled in
 // parallel by the caller, so nothing here may touch state shared between managers.
-func cancelBulkOperation(ctx context.Context, checkpoint CancellationCheckpoint, manager *bulkOperationManager, reason error, getPaths requestPathResolverFn, cancelRequest CancelRequestFn) (err error) {
+func cancelBulkOperation(ctx context.Context, checkpoint CancellationCheckpoint, manager *bulkOperationManager, reason error, cancelRequest CancelRequestFn) (err error) {
 	checkpoint(checkpointGrace)
 	walkCh, wait, cancelErr := manager.Cancel(ctx, reason)
 	if cancelErr != nil {
@@ -321,8 +306,7 @@ func cancelBulkOperation(ctx context.Context, checkpoint CancellationCheckpoint,
 
 	for result := range walkCh {
 		checkpoint(checkpointGrace)
-		inMountPath, _ := getPaths(result.Path)
-		if cancelRequestErr := cancelRequest(inMountPath, result.ReservedJobId); cancelRequestErr != nil {
+		if cancelRequestErr := cancelRequest(result.InMountPath, result.ReservedJobId); cancelRequestErr != nil {
 			err = appendErrors(err, fmt.Errorf("failed to cancel request from bulk operation %s: %w", manager.Key(), cancelRequestErr))
 		}
 	}

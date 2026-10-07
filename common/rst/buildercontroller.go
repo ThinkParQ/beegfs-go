@@ -347,12 +347,10 @@ func (c *requestBuildController) bulkProcess(result *BulkStreamPathResult) error
 		}
 	}
 
-	inMountPath, remotePath := c.getPaths(result.Path)
-
 	c.addWorker()
 	c.bulkGroup.Go(func() error {
 		defer c.releaseWorker()
-		return c.requestBuilder.ProcessPathFromBulkOperation(c.workCtx, inMountPath, remotePath, result.RstId, result.ReservedJobId, result.BulkInfo, failedPrecondition)
+		return c.requestBuilder.ProcessPathFromBulkOperation(c.workCtx, result, failedPrecondition)
 	})
 
 	return nil

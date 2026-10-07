@@ -16,9 +16,10 @@ import (
 )
 
 type BulkStreamPathResult struct {
-	BulkInfo *flex.BulkJobRequestInfo
-	RstId    uint32
-	Path     string
+	BulkInfo    *flex.BulkJobRequestInfo
+	RstId       uint32
+	InMountPath string
+	RemotePath  string
 	// ReservedJobId is the job the operation reserved for this request when it absorbed it. The
 	// builder submits it as the request's reserved_job_id so the emitted request takes over that
 	// job instead of creating a new one. It is set on every result, including the ones carrying

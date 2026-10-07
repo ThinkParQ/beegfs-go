@@ -159,21 +159,13 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	return
 }
 
-func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
-	ctx context.Context,
-	inMountPath string,
-	remotePath string,
-	rstId uint32,
-	reservedJobId string,
-	BulkInfo *flex.BulkJobRequestInfo,
-	failedPrecondition error,
-) (err error) {
+func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, result *BulkStreamPathResult, failedPrecondition error) (err error) {
 	// Adding a cancellation delay so files are left in a valid state regardless of the cancellation
 	// reason. This provides any in-flight operation(s) a chance to finish.
 	workCtx, cancel, checkpoint := WithCancellationDelay(ctx, checkpointGrace)
 	defer cancel()
 
-	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, inMountPath, PathStateWithLock)
+	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, result.InMountPath, PathStateWithLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		err = pathStateErr
 		return
@@ -186,7 +178,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	defer func() {
 		if !keepLock {
 			checkpoint(checkpointGrace)
-			clearErr := w.clearAccessFlags(workCtx, inMountPath, beegfs.LockedContentAccessFlags)
+			clearErr := w.clearAccessFlags(workCtx, result.InMountPath, beegfs.LockedContentAccessFlags)
 			if clearErr != nil && !errors.Is(clearErr, fs.ErrNotExist) && !errors.Is(clearErr, syscall.ENOTDIR) && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
 				err = appendErrors(err, fmt.Errorf("unable to clear lock: %w", clearErr))
 			}
@@ -194,11 +186,11 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(
 	}()
 
 	checkpoint(checkpointGrace)
-	cfg := w.buildJobRequestCfg(inMountPath, remotePath, rstId, pathState.LockedInfo, w.builderCfg)
+	cfg := w.buildJobRequestCfg(result.InMountPath, result.RemotePath, result.RstId, pathState.LockedInfo, w.builderCfg)
 	request := w.buildRequest(workCtx, cfg, failedPrecondition)
-	request.SetRemoteStorageTarget(rstId)
-	request.SetBulkInfo(BulkInfo)
-	request.SetReserveJobId(reservedJobId)
+	request.SetRemoteStorageTarget(result.RstId)
+	request.SetBulkInfo(result.BulkInfo)
+	request.SetReserveJobId(result.ReservedJobId)
 
 	canReleaseLock, _, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 	if !canReleaseLock {
