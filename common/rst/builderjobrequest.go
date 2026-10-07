@@ -385,8 +385,8 @@ func (w *jobRequestBuilder) processRequest(
 
 	submitted = true
 	if request.HasBulkInfo() {
-		// Notify the bulk operation that its request was submitted.
-		if submittedErr := w.updateBulkRequest(ctx, request, BulkRequestSubmitted); submittedErr != nil {
+		// Notify the bulk operation that its request was accepted by remote.
+		if submittedErr := w.updateBulkRequest(ctx, request, BulkRequestAccepted); submittedErr != nil {
 			err = appendErrors(err, fmt.Errorf("unable to report the submission of %s to its bulk operation: %w", cfg.GetPath(), submittedErr))
 		}
 	}

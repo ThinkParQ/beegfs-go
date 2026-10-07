@@ -1312,7 +1312,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		request := submissions.all()[0]
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
 		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "non-fatal issue")
-		assert.Equal(t, []BulkRequestState{BulkRequestSubmitted}, reportedStates)
+		assert.Equal(t, []BulkRequestState{BulkRequestAccepted}, reportedStates)
 	})
 
 	t.Run("lock is cleared once processing completes without in-flight work", func(t *testing.T) {
@@ -1533,7 +1533,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.NoError(t, err)
-		require.Equal(t, []BulkRequestState{BulkRequestSubmitted}, reportedStates)
+		require.Equal(t, []BulkRequestState{BulkRequestAccepted}, reportedStates)
 		// The operation identifies the request by its index, so that has to survive intact.
 		assert.Equal(t, int64(7), reportedRequests[0].GetBulkInfo().GetJobIndex())
 		assert.Equal(t, "retrieve", reportedRequests[0].GetBulkInfo().GetOperation())
@@ -1588,7 +1588,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		require.ErrorIs(t, err, updateBulkErr)
 		assert.ErrorContains(t, err, "/some/path", "the failure must name the path it belongs to")
 		// The request still reached remote, so the job exists whatever the builder reports.
-		require.Equal(t, []BulkRequestState{BulkRequestSubmitted}, reportedStates)
+		require.Equal(t, []BulkRequestState{BulkRequestAccepted}, reportedStates)
 		require.Len(t, submissions.all(), 1)
 	})
 }

@@ -763,11 +763,11 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 		first, second := &fakeBulkOperation{}, &fakeBulkOperation{}
 		registry := newRegistry(first, second)
 
-		require.NoError(t, registry.UpdateBulkRequest(context.Background(), newRequest(2, "retrieve"), BulkRequestSubmitted))
+		require.NoError(t, registry.UpdateBulkRequest(context.Background(), newRequest(2, "retrieve"), BulkRequestAccepted))
 
 		assert.Empty(t, first.updatedRequests)
 		require.Len(t, second.updatedRequests, 1)
-		assert.Equal(t, BulkRequestSubmitted, second.updatedRequests[0].state)
+		assert.Equal(t, BulkRequestAccepted, second.updatedRequests[0].state)
 		assert.Equal(t, int64(3), second.updatedRequests[0].request.GetBulkInfo().GetJobIndex())
 	})
 
@@ -785,7 +785,7 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 		operation := &fakeBulkOperation{}
 		registry := newRegistry(operation)
 
-		require.NoError(t, registry.UpdateBulkRequest(context.Background(), newRequest(1, ""), BulkRequestSubmitted))
+		require.NoError(t, registry.UpdateBulkRequest(context.Background(), newRequest(1, ""), BulkRequestAccepted))
 
 		assert.Empty(t, operation.updatedRequests)
 	})
@@ -793,7 +793,7 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 	t.Run("an operation that is not open is reported rather than ignored", func(t *testing.T) {
 		registry := newRegistry(&fakeBulkOperation{})
 
-		err := registry.UpdateBulkRequest(context.Background(), newRequest(9, "retrieve"), BulkRequestSubmitted)
+		err := registry.UpdateBulkRequest(context.Background(), newRequest(9, "retrieve"), BulkRequestAccepted)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "9-retrieve")
@@ -803,7 +803,7 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 		wantErr := fmt.Errorf("status write failed")
 		registry := newRegistry(&fakeBulkOperation{updateBulkRequestErr: wantErr})
 
-		err := registry.UpdateBulkRequest(context.Background(), newRequest(1, "retrieve"), BulkRequestSubmitted)
+		err := registry.UpdateBulkRequest(context.Background(), newRequest(1, "retrieve"), BulkRequestAccepted)
 
 		require.ErrorIs(t, err, wantErr)
 	})
@@ -817,7 +817,7 @@ func TestBulkOperationRegistry_UpdateBulkRequest(t *testing.T) {
 			},
 		}
 
-		err := registry.UpdateBulkRequest(context.Background(), newRequest(1, "retrieve"), BulkRequestSubmitted)
+		err := registry.UpdateBulkRequest(context.Background(), newRequest(1, "retrieve"), BulkRequestAccepted)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "1-retrieve")
