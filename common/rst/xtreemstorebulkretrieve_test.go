@@ -206,7 +206,8 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	}
 	require.NoError(t, m.closeState())
 
-	// First Execute pass: everything is Initialized, so all 3 get dispatched and marked Sent.
+	// First Execute pass: every record is Added, so all 3 get dispatched. Dispatch does not change
+	// a record's status.
 	m = newManager(t)
 	walkCh, getResults, err := m.Execute(context.Background())
 	require.NoError(t, err)
@@ -218,7 +219,7 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	}
 	result := getResults()
 	require.NoError(t, result.Err)
-	assert.True(t, result.Reschedule, "should reschedule while records are still Sent")
+	assert.True(t, result.Reschedule, "should reschedule while records are still Added")
 	require.Len(t, dispatched, 3)
 	require.NoError(t, m.closeState())
 
@@ -248,23 +249,23 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 	assert.False(t, result2.Reschedule, "bulk operation should stop rescheduling once every record is marked complete")
 }
 
-// TestProcessSessionBatchKeyReceivedStillWaits ensures a record that has reached
-// xtreemstoreS3BulkRequestReceived (GenerateWorkRequests successfully created a Job for it) is
+// TestProcessSessionBatchKeyAcceptedStillWaits ensures a record that has reached
+// xtreemstoreS3BulkRequestAccepted (remote durably recorded a Job for it) is
 // still treated as in-progress, not as an unexpected status. Falling through to the default case
 // here would force-MarkCompleteAck a record whose real download may still be running in
 // ExecuteWorkRequestPart, and report a bogus "unexpected record status" error for it.
-func TestProcessSessionBatchKeyReceivedStillWaits(t *testing.T) {
+func TestProcessSessionBatchKeyAcceptedStillWaits(t *testing.T) {
 	m := &xtreemstoreS3BulkRetrieveManager{rstId: 1}
 	walkCh := make(chan *BulkStreamPathResult, 1)
 
-	entry := xtreemstoreS3BulkRetrieveBatchEntry{key: "/a", jobIndex: 0, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestReceived}}
+	entry := &xtreemstoreS3BulkRetrieveBatchEntry{remotePath: "/a", info: &xtreemstoreS3BulkInfo{jobIndex: 0, status: xtreemstoreS3BulkRequestAccepted}}
 	done, err := m.processSessionBatchKey(context.Background(), walkCh, entry)
 	require.NoError(t, err)
-	assert.False(t, done, "a Received record is still in flight and must not be reported done")
+	assert.False(t, done, "an Accepted record is still in flight and must not be reported done")
 
 	select {
 	case r := <-walkCh:
-		t.Fatalf("expected no result to be sent for a Received record, got: %+v", r)
+		t.Fatalf("expected no result to be sent for an Accepted record, got: %+v", r)
 	default:
 	}
 }
@@ -316,9 +317,8 @@ func (c *perKeyHeadObjectClient) headedKeys() []string {
 func TestProbeBatchReadiness(t *testing.T) {
 	client := &perKeyHeadObjectClient{
 		outputs: map[string]*s3.HeadObjectOutput{
-			"ready":     {StorageClass: types.StorageClassStandard},
-			"cold":      {StorageClass: types.StorageClassGlacier},
-			"sent-cold": {StorageClass: types.StorageClassGlacier},
+			"ready": {StorageClass: types.StorageClassStandard},
+			"cold":  {StorageClass: types.StorageClassGlacier},
 		},
 		errs: map[string]error{
 			"gone":   fakeNotFoundErr(),
@@ -327,40 +327,37 @@ func TestProbeBatchReadiness(t *testing.T) {
 	}
 	m := &xtreemstoreS3BulkRetrieveManager{s3ApiClient: client, bucket: "test-bucket"}
 
-	entries := []xtreemstoreS3BulkRetrieveBatchEntry{
-		{key: "ready", jobIndex: 0, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestAdded}},
-		{key: "cold", jobIndex: 1, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestAdded}},
-		{key: "received", jobIndex: 2, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestReceived}},
-		{key: "complete", jobIndex: 3, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestComplete}},
-		{key: "acked", jobIndex: 4, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestCompleteAcked}},
-		{key: "sent-cold", jobIndex: 5, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestSent}},
-		{key: "gone", jobIndex: 6, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestAdded}},
-		{key: "broken", jobIndex: 7, info: xtreemstoreS3BulkInfo{status: xtreemstoreS3BulkRequestAdded}},
+	entries := []*xtreemstoreS3BulkRetrieveBatchEntry{
+		{remotePath: "ready", info: &xtreemstoreS3BulkInfo{jobIndex: 0, status: xtreemstoreS3BulkRequestAdded}},
+		{remotePath: "cold", info: &xtreemstoreS3BulkInfo{jobIndex: 1, status: xtreemstoreS3BulkRequestAdded}},
+		{remotePath: "accepted", info: &xtreemstoreS3BulkInfo{jobIndex: 2, status: xtreemstoreS3BulkRequestAccepted}},
+		{remotePath: "complete", info: &xtreemstoreS3BulkInfo{jobIndex: 3, status: xtreemstoreS3BulkRequestComplete}},
+		{remotePath: "acked", info: &xtreemstoreS3BulkInfo{jobIndex: 4, status: xtreemstoreS3BulkRequestCompleteAcked}},
+		{remotePath: "gone", info: &xtreemstoreS3BulkInfo{jobIndex: 6, status: xtreemstoreS3BulkRequestAdded}},
+		{remotePath: "broken", info: &xtreemstoreS3BulkInfo{jobIndex: 7, status: xtreemstoreS3BulkRequestAdded}},
 	}
 
 	m.probeBatchReadiness(context.Background(), entries)
 
 	// Only the statuses that turn on the object's restore state are worth a HEAD.
-	assert.Equal(t, []string{"broken", "cold", "gone", "ready", "sent-cold"}, client.headedKeys(),
+	assert.Equal(t, []string{"broken", "cold", "gone", "ready"}, client.headedKeys(),
 		"an entry whose request is already with remote must not be probed")
 	assert.Greater(t, client.maxInFlight, 1, "probes should overlap, not run one at a time")
 
-	byKey := map[string]xtreemstoreS3BulkRetrieveBatchEntry{}
+	byKey := map[string]*xtreemstoreS3BulkRetrieveBatchEntry{}
 	for _, e := range entries {
-		byKey[e.key] = e
+		byKey[e.remotePath] = e
 	}
 	assert.True(t, byKey["ready"].ready)
 	assert.NoError(t, byKey["ready"].readyErr)
 	assert.False(t, byKey["cold"].ready)
 	assert.NoError(t, byKey["cold"].readyErr)
-	assert.False(t, byKey["sent-cold"].ready)
-	assert.NoError(t, byKey["sent-cold"].readyErr)
 	assert.ErrorIs(t, byKey["gone"].readyErr, os.ErrNotExist,
 		"a vanished object must still reach processSessionBatchKey as os.ErrNotExist so it is cancelled")
 	assert.ErrorContains(t, byKey["broken"].readyErr, "head object for key",
 		"a failed probe is recorded on its own entry, not propagated")
-	assert.NoError(t, byKey["received"].readyErr)
-	assert.False(t, byKey["received"].ready)
+	assert.NoError(t, byKey["accepted"].readyErr)
+	assert.False(t, byKey["accepted"].ready)
 }
 
 // stubHeadObjectClient fakes only HeadObject, the sole s3ApiClient method isObjectReadyForDownload
@@ -559,12 +556,12 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 
 	// Updating a status rewrites only the first byte of the record, so the job ID beside it and
 	// every record after it must be left alone.
-	require.NoError(t, m.MarkSent(1))
+	require.NoError(t, m.MarkAccepted(1))
 	infos, err := m.getBulkInfos(0, int64(len(jobIds)))
 	require.NoError(t, err)
 	wantStatuses := []xtreemstoreS3BulkRequestStatus{
 		xtreemstoreS3BulkRequestAdded,
-		xtreemstoreS3BulkRequestSent,
+		xtreemstoreS3BulkRequestAccepted,
 		xtreemstoreS3BulkRequestAdded,
 	}
 	for i, jobId := range jobIds {
@@ -629,7 +626,7 @@ func bulkRetrieveTestManager(t *testing.T, tmpDir string) (
 	addRequest = func(m *xtreemstoreS3BulkRetrieveManager, remotePath string) error {
 		jobId := uuid.NewString()
 		return m.AddRequest(context.Background(), beeremote.JobRequest_builder{
-			Path:                remotePath,
+			Path:                bulkRetrieveTestInMountPath(remotePath),
 			RemoteStorageTarget: 1,
 			Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_DOWNLOAD, RemotePath: remotePath}.Build(),
 			BulkInfo:            &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: operation},
@@ -637,6 +634,12 @@ func bulkRetrieveTestManager(t *testing.T, tmpDir string) (
 		}.Build())
 	}
 	return
+}
+
+// bulkRetrieveTestInMountPath is the in-mount path addRequest records for remotePath. It differs
+// from the remote path so a reader that returns one path where the other belongs is caught.
+func bulkRetrieveTestInMountPath(remotePath string) string {
+	return "/mnt" + remotePath
 }
 
 // TestBulkRetrieveRecordPathsAreLocatedByOffset checks that a path is returned by the offset and
@@ -667,19 +670,23 @@ func TestBulkRetrieveRecordPathsAreLocatedByOffset(t *testing.T) {
 
 	require.Equal(t, int64(len(paths)), m.includedJobs, "every path must be counted once, whatever bytes it holds")
 
-	got, err := m.getRecords(0, -1)
+	got, err := m.readRecordPaths(0, -1)
 	require.NoError(t, err)
 	assert.Equal(t, paths, got, "each path must come back exactly as it went in")
 
 	// A tail read is the common case: it must not depend on anything that precedes it.
-	got, err = m.getRecords(3, -1)
+	got, err = m.readRecordPaths(3, -1)
 	require.NoError(t, err)
 	assert.Equal(t, paths[3:], got)
 
-	keyMap, err := m.getRecordsMap(0, -1)
+	// The span carries both paths of every record, and each record knows its own index.
+	span, err := m.readRecordSpan(0, -1)
 	require.NoError(t, err)
-	for i, p := range paths {
-		assert.Equal(t, int64(i), keyMap[p], "path %q must map back to the index it was added at", p)
+	require.Len(t, span.recordInfos, len(paths))
+	for i, info := range span.recordInfos {
+		assert.Equal(t, int64(i), info.jobIndex, "record %d must report the index it was added at", i)
+		assert.Equal(t, bulkRetrieveTestInMountPath(paths[i]), span.inMountPath(info), "in-mount path of record %d", i)
+		assert.Equal(t, paths[i], span.remotePath(info), "remote path of record %d", i)
 	}
 }
 
@@ -728,13 +735,13 @@ func TestBulkRetrieveRecoversFromInterruptedAdd(t *testing.T) {
 			assert.Equal(t, liveBytes, trimmed.Size(), "the record file is cut back to the end of the last recorded path")
 			assert.Equal(t, liveBytes, m.recordBytes, "the next append lands where the file now ends")
 
-			got, err := m.getRecords(0, -1)
+			got, err := m.readRecordPaths(0, -1)
 			require.NoError(t, err)
 			assert.Equal(t, before, got, "the requests added before the interruption are untouched")
 
 			// The index the interrupted request would have taken is still free.
 			require.NoError(t, addRequest(m, "/objects/2"))
-			got, err = m.getRecords(0, -1)
+			got, err = m.readRecordPaths(0, -1)
 			require.NoError(t, err)
 			assert.Equal(t, append(append([]string{}, before...), "/objects/2"), got)
 		})
@@ -784,7 +791,7 @@ func TestBulkRetrieveRejectsOversizedPath(t *testing.T) {
 	assert.Equal(t, int64(1), m.includedJobs, "a refused request must not take an index")
 	assert.Equal(t, recordBytes, m.recordBytes, "a refused request must not write to the record file")
 
-	got, err := m.getRecords(0, -1)
+	got, err := m.readRecordPaths(0, -1)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/objects/0"}, got)
 }

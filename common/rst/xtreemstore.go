@@ -19,31 +19,30 @@ import (
 const (
 	// xtreemstoreS3BulkRecordLen is the width of one status file record. A record holds everything
 	// known about one job index: the request's status, the ID of the job reserved for it, and where
-	// that request's remote path lives in the record file. Keeping them in one record means one
-	// durable append per request rather than one per field. It also makes it impossible for a
-	// request to have a status without a job, or a job without a path.
-	xtreemstoreS3BulkRecordLen = 1 + JobIdLen + 8 + 2
+	// that request's in-mount and remote paths live in the record file. Keeping them in one record
+	// means one durable append per request rather than one per field. It also makes it impossible
+	// for a request to have a status without a job, or a job without its paths.
+	xtreemstoreS3BulkRecordLen = 1 + JobIdLen + 8 + 2 + 2
 	// xtreemstoreS3BulkJobIdOffset is where the job ID starts within a record.
 	xtreemstoreS3BulkJobIdOffset = 1
-	// xtreemstoreS3BulkPathOffsetOffset is where the path's byte offset into the record file
-	// starts, as a big endian int64.
-	xtreemstoreS3BulkPathOffsetOffset = xtreemstoreS3BulkJobIdOffset + JobIdLen
-	// xtreemstoreS3BulkPathLenOffset is where the path's length in bytes starts, as a big endian
-	// uint16. The length is what a reader uses, not the newline that follows the path, so a remote
-	// path that contains a newline is still stored and returned whole.
-	xtreemstoreS3BulkPathLenOffset = xtreemstoreS3BulkPathOffsetOffset + 8
-	// xtreemstoreS3BulkMaxPathLen is the longest remote path a record can describe, set by the
-	// width of the length field. It is far above both PATH_MAX and the 1024 byte S3 key limit, so a
-	// path that exceeds it is rejected rather than silently truncated.
+	// xtreemstoreS3BulkPathsOffsetOffset is where the byte offset of the request's paths in the
+	// record file starts, as a big endian int64. The in-mount path starts at that offset, and the
+	// remote path directly follows it.
+	xtreemstoreS3BulkPathsOffsetOffset = xtreemstoreS3BulkJobIdOffset + JobIdLen
+	// xtreemstoreS3BulkInMountPathLenOffset is where the in-mount path's length in bytes starts, as
+	// a big endian uint16. The in-mount path is the request's path inside the BeeGFS mount.
+	xtreemstoreS3BulkInMountPathLenOffset = xtreemstoreS3BulkPathsOffsetOffset + 8
+	// xtreemstoreS3BulkRemotePathLenOffset is where the remote path's length in bytes starts, as a
+	// big endian uint16.
+	xtreemstoreS3BulkRemotePathLenOffset = xtreemstoreS3BulkInMountPathLenOffset + 2
+	// xtreemstoreS3BulkMaxPathLen is the longest in-mount or remote path a record can describe, set
+	// by the width of the length fields. It is far above both PATH_MAX and the 1024 byte S3 key
+	// limit, so a path that exceeds it is rejected rather than silently truncated.
 	xtreemstoreS3BulkMaxPathLen = math.MaxUint16
-	// xtreemstoreS3BulkPathTerminator ends every path in the record file. Nothing reads it: the
-	// record's length says where the path ends. It is written so the file stays readable with cat,
-	// grep and wc, which is how a stuck operation gets diagnosed by hand.
-	xtreemstoreS3BulkPathTerminator = "\n"
 
 	// xtreemstoreS3BulkStatusFileName is the file, within the state directory, holding one
 	// xtreemstoreS3BulkRecordLen record per jobIndex: the request's status byte, the ID of the job
-	// reserved for it, and the offset and length of its remote path in the record file. An
+	// reserved for it, and the offset and lengths of its paths in the record file. An
 	// operation's AddRequest only ever appends, and it assigns jobIndex from includedJobs while
 	// holding the manager lock. So record N always belongs to index N, and any index can be
 	// addressed at N*xtreemstoreS3BulkRecordLen without reading what precedes it. The size of this
@@ -51,18 +50,15 @@ const (
 	//
 	// This file is the operation's index. Nothing in the record file can be located without it.
 	xtreemstoreS3BulkStatusFileName = "status"
-	// xtreemstoreS3BulkRecordFileName is the file, within the state directory, holding the remote
-	// path of every request the operation took, in the order they were added, each followed by a
-	// newline.
+	// xtreemstoreS3BulkRecordFileName is the file, within the state directory, holding the paths of
+	// every request the operation took, in the order they were added. Each request contributes its
+	// in-mount path and then its remote path, back to back with no separator.
 	//
-	// A path is located by the offset and length in its status record, never by counting newlines.
-	// The newlines are there so the file can be read with cat, grep and wc when an operation has to
-	// be diagnosed by hand, and so a reader can check that a path ends where its record says it
-	// does. That separation is what lets a remote path contain a newline, which an S3 object key
-	// may.
+	// A path is located only by the offset and lengths in its status record. No separator is
+	// needed, and none could be trusted: an S3 object key may contain any byte, including a newline.
 	//
-	// The file can hold bytes belonging to no record, left by a path whose status record never
-	// followed it. Those bytes are unreachable, because nothing reads this file except through a
+	// The file can hold bytes belonging to no record, left by paths whose status record never
+	// followed them. Those bytes are unreachable, because nothing reads this file except through a
 	// status record.
 	xtreemstoreS3BulkRecordFileName = "record"
 	// xtreemstoreS3BulkErrorsFileName is the file, within the state directory, holding the reason
@@ -180,11 +176,11 @@ func (x *xtreemstoreS3Provider) GenerateWorkRequests(ctx context.Context, lastJo
 
 	// TODO: Move this functionality into work.go.
 	defer func() {
-		// The request is not marked received here even though this is where remote takes ownership
+		// The request is not marked accepted here even though this is where remote takes ownership
 		// of it. This runs while the job is still being created, before remote has committed it, so
-		// a crash in that window would leave a received request that no job will ever resolve and a
-		// batch that can never complete. The builder marks it received once its submission returns,
-		// by which point the job is durable. Until then it stays sent, which the operation replays.
+		// a crash in that window would leave an accepted request that no job will ever resolve and a
+		// batch that can never complete. The builder marks it accepted once its submission returns,
+		// by which point the job is durable. Until then it stays added, which the operation replays.
 		err = x.resolveBulkRequest(job.GetRequest().GetBulkInfo(), xtreemstoreS3BulkRequestUnchanged, err)
 	}()
 
@@ -319,11 +315,8 @@ type xtreemstoreS3BulkRequestStatus byte
 const (
 	// Request has been added to bulk operation.
 	xtreemstoreS3BulkRequestAdded xtreemstoreS3BulkRequestStatus = iota
-	// Request has been sent from the bulk operation and is waiting for GenerateWorkRequests to
-	// acknowledge by marking it xtreemstoreS3BulkRequestReceived.
-	xtreemstoreS3BulkRequestSent
-	// Request has been received by GenerateWorkRequests.
-	xtreemstoreS3BulkRequestReceived
+	// Remote has durably recorded a job for the request, so the job now owns it and resolves it.
+	xtreemstoreS3BulkRequestAccepted
 	// Request has been completed from the perspective of the bulk operation but has not been
 	// acknowledged by the bulk operation yet.
 	xtreemstoreS3BulkRequestComplete
@@ -339,10 +332,8 @@ func (s xtreemstoreS3BulkRequestStatus) String() string {
 	switch s {
 	case xtreemstoreS3BulkRequestAdded:
 		return "added"
-	case xtreemstoreS3BulkRequestSent:
-		return "sent"
-	case xtreemstoreS3BulkRequestReceived:
-		return "received"
+	case xtreemstoreS3BulkRequestAccepted:
+		return "accepted"
 	case xtreemstoreS3BulkRequestComplete:
 		return "complete"
 	case xtreemstoreS3BulkRequestCompleteAcked:
@@ -359,17 +350,31 @@ func (s xtreemstoreS3BulkRequestStatus) Bytes() []byte {
 }
 
 // xtreemstoreS3BulkInfo is what the status file records for one request: how far the request has
-// got, the ID of the job the bulk operation reserved for it, and where the request's remote path
-// lives in the record file.
+// got, the ID of the job the bulk operation reserved for it, and where the request's in-mount and
+// remote paths live in the record file.
 //
-// pathOffset and pathLen locate the path but do not read it. They cost nothing to decode because
-// they arrive in the same bytes as the status and the job ID, and a caller that only needs a status
-// never touches the record file.
+// pathsOffset and the two lengths locate the paths but do not read them. They cost nothing to
+// decode because they arrive in the same bytes as the status and the job ID, and a caller that only
+// needs a status never touches the record file.
 type xtreemstoreS3BulkInfo struct {
-	status     xtreemstoreS3BulkRequestStatus
-	jobId      string
-	pathOffset int64
-	pathLen    int
+	status         xtreemstoreS3BulkRequestStatus
+	jobId          string
+	jobIndex       int64
+	pathsOffset    int64
+	inMountPathLen int
+	remotePathLen  int
+}
+
+// remotePathOffset is where the remote path starts in the record file. It directly follows the
+// in-mount path.
+func (i xtreemstoreS3BulkInfo) remotePathOffset() int64 {
+	return i.pathsOffset + int64(i.inMountPathLen)
+}
+
+// pathsEnd is the record file offset just past the remote path, where the next request's paths
+// may start.
+func (i xtreemstoreS3BulkInfo) pathsEnd() int64 {
+	return i.remotePathOffset() + int64(i.remotePathLen)
 }
 
 // xtreemstoreS3BulkInfos is a range of status file records, read in one go and left as the bytes
@@ -406,10 +411,12 @@ func (s *xtreemstoreS3BulkInfos) Get(jobIndex int64) (info xtreemstoreS3BulkInfo
 		return
 	}
 
+	info.jobIndex = jobIndex
 	info.status = xtreemstoreS3BulkRequestStatus(record[0])
 	info.jobId = jobId
-	info.pathOffset = int64(binary.BigEndian.Uint64(record[xtreemstoreS3BulkPathOffsetOffset:]))
-	info.pathLen = int(binary.BigEndian.Uint16(record[xtreemstoreS3BulkPathLenOffset:]))
+	info.pathsOffset = int64(binary.BigEndian.Uint64(record[xtreemstoreS3BulkPathsOffsetOffset:]))
+	info.inMountPathLen = int(binary.BigEndian.Uint16(record[xtreemstoreS3BulkInMountPathLenOffset:]))
+	info.remotePathLen = int(binary.BigEndian.Uint16(record[xtreemstoreS3BulkRemotePathLenOffset:]))
 	return
 }
 
@@ -432,8 +439,8 @@ func (x *xtreemstoreS3Provider) resolveBulkRequest(bulkInfo *flex.BulkJobRequest
 	var bulkErr error
 	switch outcome {
 	case xtreemstoreS3BulkRequestUnchanged:
-	case xtreemstoreS3BulkRequestReceived:
-		bulkErr = xtreemstoreS3BulkRetrieveMarkReceived(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath(), x.stateRoot)
+	case xtreemstoreS3BulkRequestAccepted:
+		bulkErr = xtreemstoreS3BulkRetrieveMarkAccepted(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath(), x.stateRoot)
 	case xtreemstoreS3BulkRequestComplete:
 		// It's safe to mark the same request complete more than once.
 		bulkErr = xtreemstoreS3BulkRetrieveMarkComplete(bulkInfo, x.GetConfig().GetId(), x.mountPoint.GetMountPath(), x.stateRoot)

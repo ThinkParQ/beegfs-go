@@ -183,7 +183,7 @@ func TestXtreemstoreProviderIsWorkRequestReady(t *testing.T) {
 		bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
 		statusDir := path.Join(mountPath, bulkInfo.StateMountPath)
 		require.NoError(t, os.MkdirAll(statusDir, 0o700))
-		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestReceived.Bytes(), 0o600))
+		require.NoError(t, os.WriteFile(path.Join(statusDir, "status"), xtreemstoreS3BulkRequestAccepted.Bytes(), 0o600))
 
 		request := &flex.WorkRequest{
 			Type:     &flex.WorkRequest_Sync{Sync: &flex.SyncJob{}},
@@ -364,7 +364,7 @@ func TestXtreemstoreProviderCompleteWorkRequests(t *testing.T) {
 		mockProvider.On("CompleteWorkRequests", job, mock.Anything, true).Return(nil)
 		require.NoError(t, x.CompleteWorkRequests(context.Background(), job, nil, true))
 
-		// Regenerating work requests is what a retry does, and it marks the request received.
+		// Regenerating work requests is what a retry does, and it must be allowed to succeed.
 		mockProvider.On("GenerateWorkRequests", job, 1).Return([]*flex.WorkRequest{}, nil, nil)
 		_, err := x.GenerateWorkRequests(context.Background(), nil, job, 1)
 		require.NoError(t, err)
