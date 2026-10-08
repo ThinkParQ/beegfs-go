@@ -20,6 +20,7 @@ var (
 	ErrJobNotAllowed                = errors.New("submitting a new job is not allowed in this state")
 	ErrJobAlreadyExists             = errors.New("no changes to entry detected since the last job")
 	ErrJobNotReserved               = errors.New("the job is no longer reserved: it was cancelled or already claimed")
+	ErrRequestNotDelivered          = errors.New("job request was not delivered to remote")
 	ErrReservationMissing           = &reservationMissingError{}
 	ErrJobBlockedByActiveJob        = &blockedByActiveJobError{}
 	ErrEntryNotFound                = errors.New("entry was not found")

@@ -1414,6 +1414,40 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
 	})
 
+	t.Run("a claim that never reached remote stays with its bulk operation", func(t *testing.T) {
+		// Remote never saw the claim, so the reserved job may still be live. The bulk operation
+		// must be told the request was not delivered, not that it failed, so it can keep the
+		// request replayable.
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
+		w := newBuilder()
+		submissions.result = func(*beeremote.JobRequest) error {
+			return fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
+		}
+		w.RstMap = map[uint32]Provider{1: client}
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, Mtime: timestamppb.Now()},
+				LockAcquired: true,
+				EntryInfo:    &entry.GetEntryCombinedInfo{},
+			}, nil
+		}
+		var undoCalls int
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
+			return func(context.Context, *PathState) (bool, undoFn, error) {
+				return true, func(context.Context) error { undoCalls++; return nil }, nil
+			}, true, nil
+		}
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error { return nil }
+
+		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
+
+		require.NoError(t, err)
+		assert.Equal(t, 1, undoCalls, "the applied file state plan must be rolled back")
+		assert.Equal(t, []BulkRequestState{BulkRequestNotDelivered}, reportedStates)
+	})
+
 	t.Run("a refused request keeps its lock when the rollback fails", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)

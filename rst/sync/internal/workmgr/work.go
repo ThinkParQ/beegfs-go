@@ -527,9 +527,14 @@ func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment
 }
 
 // sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
-// submission's outcome. A nil error means remote accepted the request and a job now owns everything
-// the builder prepared for it. Any other error means no job will ever run this request, and the
-// builder should revert its changes.
+// submission's outcome:
+//   - A nil error means remote accepted the request and a job now owns everything the builder
+//     prepared for it. A claim remote reports as already claimed is also accepted, because remote
+//     only says that when an earlier attempt of this same claim landed and its reply was lost.
+//   - An error wrapping rst.ErrRequestNotDelivered means ctx ended before remote confirmed it saw
+//     the request. The builder must leave the request replayable.
+//   - Any other error means remote refused the request, so no job will ever run it and the builder
+//     should revert its changes.
 //
 // builder's counters are incremented under mu because requests are submitted concurrently from
 // every goroutine building a path for the same builder job. These counters are only updated when
@@ -546,8 +551,9 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 		case errors.Is(err, context.Canceled):
 			if ctx.Err() != nil {
 				// The caller cancelled the call because the job was cancelled or the node is
-				// shutting down. Nothing is wrong with the request, so it is not counted.
-				return err
+				// shutting down. Nothing is wrong with the request, so it is not counted. The call
+				// was cut off in flight, so remote may or may not have received it.
+				return fmt.Errorf("%w: %w", rst.ErrRequestNotDelivered, err)
 			}
 			// The caller did not cancel which means the connection to remote was closed so retry.
 			fallthrough
@@ -565,16 +571,28 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 				}
 				continue
 			case <-ctx.Done():
-				// Remote is still unreachable and the node is shutting down, so report a terminal
-				// outcome instead of leaving the request with its plan applied and its lock held. It
-				// is deliberately not counted: nothing is wrong with the request itself and the
-				// builder job rewalks this path when it resumes after the restart.
-				return fmt.Errorf("unable to submit job request before the node shut down: %w", err)
+				// Remote is still unreachable and ctx has ended, so stop retrying instead of leaving
+				// the request with its plan applied and its lock held. It is deliberately not
+				// counted, because nothing is wrong with the request itself. A request from the
+				// original walk is rebuilt when the builder job rewalks the path after a restart. A
+				// request from a bulk operation keeps its record, so the next execute replays it.
+				return fmt.Errorf("%w: unable to submit job request before ctx ended: %w", rst.ErrRequestNotDelivered, err)
 			}
 		}
 
 		isReserve := request.GetReserve()
 		isClaim := !isReserve && request.HasReserveJobId()
+
+		if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
+			// Remote answers a claim this way only when the reserved job was already claimed by
+			// this request. An earlier attempt landed but its reply was lost, either to a closed
+			// connection that was retried above, or to a shutdown before the bulk operation
+			// replayed the claim. The job is live and owns the plan, so reporting a refusal would
+			// make the builder undo the plan and release the lock under it. For any request that is
+			// not a claim, ErrJobAlreadyExists means nothing changed since the last job, which is a
+			// real refusal.
+			err = nil
+		}
 
 		mu.Lock()
 		// The count stops at zero. A crash loses the counters of the round that had not committed

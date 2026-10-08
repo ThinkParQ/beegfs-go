@@ -2,6 +2,7 @@ package workmgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -122,7 +123,10 @@ func TestSendBuilderJobRequestCounters(t *testing.T) {
 // retries only while remote has not decided the request: remote cannot be reached, or the
 // connection was closed under a call the caller did not cancel. A refusal remote decided is counted
 // once, because remote gives the same answer on every retry. A call the caller cancelled is
-// returned without being counted, because nothing is wrong with the request. The retry cases each
+// returned without being counted, because nothing is wrong with the request. It is also marked
+// rst.ErrRequestNotDelivered, because remote may never have seen it. A claim remote reports as
+// already claimed was accepted by an earlier attempt, so it is returned as accepted. The same answer
+// to any other request is a refusal. The retry cases each
 // wait out the first one second backoff, so the cases run in parallel.
 func TestSendBuilderJobRequestRetries(t *testing.T) {
 	unavailable := fmt.Errorf("%w: %w", beeremote.ErrUnavailable, status.Error(codes.Unavailable, "connection refused"))
@@ -132,10 +136,14 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 	cases := []struct {
 		name          string
 		callerCancels bool
+		// claim is whether the request claims a reserved job.
+		claim bool
 		// results are what remote answers to each submit, in order.
 		results []error
 		wantErr error
-		want    *flex.BuilderJob
+		// notDelivered is whether the error must wrap rst.ErrRequestNotDelivered.
+		notDelivered bool
+		want         *flex.BuilderJob
 	}{
 		{
 			name:    "a refusal remote decided is counted once and not retried",
@@ -154,10 +162,23 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
 		},
 		{
+			name:    "a claim whose reply was lost is accepted when the retry finds it claimed",
+			claim:   true,
+			results: []error{canceled, rst.ErrJobAlreadyExists},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:    "an existing job is a refusal for a request that is not a claim",
+			results: []error{rst.ErrJobAlreadyExists},
+			wantErr: rst.ErrJobAlreadyExists,
+			want:    &flex.BuilderJob{},
+		},
+		{
 			name:          "a call the caller cancelled is returned and not counted",
 			callerCancels: true,
 			results:       []error{canceled},
 			wantErr:       context.Canceled,
+			notDelivered:  true,
 			want:          &flex.BuilderJob{},
 		},
 		{
@@ -165,6 +186,7 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 			callerCancels: true,
 			results:       []error{unavailable},
 			wantErr:       beeremote.ErrUnavailable,
+			notDelivered:  true,
 			want:          &flex.BuilderJob{},
 		},
 	}
@@ -190,11 +212,16 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 			}
 
 			builder := &flex.BuilderJob{}
-			gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, pbr.JobRequest_builder{Path: "/f"}.Build())
+			request := pbr.JobRequest_builder{Path: "/f"}.Build()
+			if tc.claim {
+				request.SetReserveJobId("00000000-0000-0000-0000-000000000001")
+			}
+			gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, request)
 			if tc.wantErr == nil {
 				require.NoError(t, gotErr)
 			} else {
 				require.ErrorIs(t, gotErr, tc.wantErr)
+				assert.Equal(t, tc.notDelivered, errors.Is(gotErr, rst.ErrRequestNotDelivered), "not delivered")
 			}
 
 			mockRemote.AssertNumberOfCalls(t, "submitJob", len(tc.results))

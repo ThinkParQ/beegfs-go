@@ -354,9 +354,21 @@ func (w *jobRequestBuilder) processRequest(
 		}
 
 		if request.HasBulkInfo() {
+			// A refusal is final, but a request that was not delivered may still have a live
+			// reservation. The bulk operation is told which one happened and decides what to do.
+			state := BulkRequestFailed
+			if errors.Is(submitErr, ErrRequestNotDelivered) {
+				state = BulkRequestNotDelivered
+				w.log.Warn("unable to deliver job request to remote, notifying its bulk operation",
+					zap.String("path", cfg.GetPath()),
+					zap.Uint32("rstId", request.GetRemoteStorageTarget()),
+					zap.String("operation", request.GetBulkInfo().GetOperation()),
+					zap.Int64("jobIndex", request.GetBulkInfo().GetJobIndex()),
+					zap.String("reservedJobId", request.GetReserveJobId()),
+					zap.Error(submitErr))
+			}
 			wg.Go(func() {
-				// Notify the bulk operation that its request failed to be submitted.
-				resolveBulkRequestErr = w.updateBulkRequest(ctx, request, BulkRequestFailed)
+				resolveBulkRequestErr = w.updateBulkRequest(ctx, request, state)
 			})
 		}
 

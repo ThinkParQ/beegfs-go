@@ -221,9 +221,11 @@ type Provider interface {
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 
-// SubmitRequestFn submits a fully prepared job request to remote and returns the outcome. A nil
-// error means remote accepted the request and a job now owns the request. Any other error means no
-// job will ever execute the request.
+// SubmitRequestFn submits a fully prepared job request to remote and returns the outcome:
+//   - A nil error means remote accepted the request and a job now owns the request.
+//   - An error wrapping ErrRequestNotDelivered means ctx ended before remote confirmed it saw the
+//     request. Remote may never have received it, so the caller must leave the request replayable.
+//   - Any other error means remote refused the request and no job will ever execute it.
 //
 // Implementations own retrying transient failures and must only return once the outcome is final.
 //
