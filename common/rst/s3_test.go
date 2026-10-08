@@ -184,6 +184,7 @@ func TestGenerateWorkRequestsReleasesOnlyItsOwnLock(t *testing.T) {
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrJobFailedPrecondition)
 			assert.ErrorContains(t, err, `invalid remote path "/key"`)
+			assert.ErrorContains(t, err, `use "key" instead`)
 
 			if tt.wantRelease {
 				assert.Equal(t, []string{job.Request.Path}, releasedPaths)
@@ -193,6 +194,26 @@ func TestGenerateWorkRequestsReleasesOnlyItsOwnLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A CLI older than beegfs-remote sends the in-mount path as the key for a single-file push. The
+// key check rejects it, and the error must point at the version mismatch instead of the key.
+func TestGenerateWorkRequestsHintsAtOlderCLI(t *testing.T) {
+	client := newTestS3Client(t, filesystem.NewMockFS())
+
+	job := proto.Clone(baseTestJob).(*beeremote.Job)
+	job.ExternalId = ""
+	job.Request.Type = &beeremote.JobRequest_Sync{
+		Sync: &flex.SyncJob{
+			Operation:  flex.SyncJob_UPLOAD,
+			RemotePath: job.Request.Path,
+		},
+	}
+
+	_, err := client.GenerateWorkRequests(context.Background(), nil, job, 1)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrJobFailedPrecondition)
+	assert.ErrorContains(t, err, "check that this version of the beegfs CLI is compatible")
 }
 
 // More complex testing around completing requests is not possible without mocking.
