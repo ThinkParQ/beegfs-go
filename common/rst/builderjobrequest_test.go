@@ -455,50 +455,63 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.False(t, submitted)
 	})
 
+	// Each path state is a lock the refused path must keep. A lock this pass took on a regular file is
+	// released by remote once the conflicting job is resolved. A stub holds its lock for as long as it
+	// is offloaded, whoever took it.
+	conflictPathStates := []struct {
+		name      string
+		pathState PathState
+	}{
+		{name: "a lock this pass took", pathState: PathState{LockAcquired: true}},
+		{name: "a stub's lock", pathState: PathState{LockedInfo: &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, StubUrlRstId: 1}}},
+	}
 	for _, conflictErr := range []error{ErrJobAlreadyExists, ErrJobNotAllowed, ErrJobBlockedByActiveJob} {
-		t.Run(fmt.Sprintf("a reservation refused with %q releases the bulk request and the lock", conflictErr), func(t *testing.T) {
-			client := &MockClient{}
-			client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
-			submissions := newTestSubmitter()
-			submissions.result = func(*beeremote.JobRequest) error { return conflictErr }
-			var reportedStates []BulkRequestState
-			w := &jobRequestBuilder{
-				log:           zap.NewNop(),
-				RstMap:        map[uint32]Provider{1: client},
-				submitRequest: submissions.submit,
-				addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
-					return nil
-				},
-				updateBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
-					reportedStates = append(reportedStates, state)
-					return nil
-				},
-				planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-					return func(context.Context, *PathState) (bool, undoFn, error) {
-						t.Fatal("a path whose reservation was refused must not have its file state prepared")
-						return false, noopUndo, nil
-					}, true, nil
-				},
-			}
-			cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
-			request := w.buildRequest(context.Background(), cfg, nil)
+		for _, conflictPath := range conflictPathStates {
+			t.Run(fmt.Sprintf("a reservation refused with %q releases the bulk request and keeps %s", conflictErr, conflictPath.name), func(t *testing.T) {
+				client := &MockClient{}
+				client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
+				submissions := newTestSubmitter()
+				submissions.result = func(*beeremote.JobRequest) error { return conflictErr }
+				var reportedStates []BulkRequestState
+				w := &jobRequestBuilder{
+					log:           zap.NewNop(),
+					RstMap:        map[uint32]Provider{1: client},
+					submitRequest: submissions.submit,
+					addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
+						return nil
+					},
+					updateBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+						reportedStates = append(reportedStates, state)
+						return nil
+					},
+					planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
+						return func(context.Context, *PathState) (bool, undoFn, error) {
+							t.Fatal("a path whose reservation was refused must not have its file state prepared")
+							return false, noopUndo, nil
+						}, true, nil
+					},
+				}
+				cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+				request := w.buildRequest(context.Background(), cfg, nil)
 
-			canReleaseLock, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{LockAcquired: true}, request)
+				canReleaseLock, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, conflictPath.pathState, request)
 
-			// The conflict is this path's outcome. It is already counted by the submit function, so
-			// it must not stop the builder job.
-			require.NoError(t, err)
-			// No job will run for the path, so the lock this builder took has nothing to guard.
-			assert.True(t, canReleaseLock)
-			assert.False(t, submitted)
-			// The refused reservation is the only submission. Falling through to the normal submit
-			// would send a second reserve that remote refuses and the counters record again.
-			require.Len(t, submissions.all(), 1)
-			assert.True(t, submissions.all()[0].GetReserve())
-			// The operation recorded the request before the reserve, so it has to be told to stop
-			// waiting on it. Otherwise the restore runs and the batch waits on a path with no job.
-			assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
-		})
+				// The conflict is this path's outcome. It is already counted by the submit function, so
+				// it must not stop the builder job.
+				require.NoError(t, err)
+				// Another job owns the path. Releasing the lock here would unlock the file under that
+				// job, or unlock a stub that must stay locked while it is offloaded.
+				assert.False(t, canReleaseLock)
+				assert.False(t, submitted)
+				// The refused reservation is the only submission. Falling through to the normal submit
+				// would send a second reserve that remote refuses and the counters record again.
+				require.Len(t, submissions.all(), 1)
+				assert.True(t, submissions.all()[0].GetReserve())
+				// The operation recorded the request before the reserve, so it has to be told to stop
+				// waiting on it. Otherwise the restore runs and the batch waits on a path with no job.
+				assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
+			})
+		}
 	}
 
 	t.Run("a refused reservation whose bulk request cannot be released fails the builder job", func(t *testing.T) {

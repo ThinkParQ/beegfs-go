@@ -294,7 +294,9 @@ func (w *jobRequestBuilder) processRequest(
 	pathState PathState,
 	request *beeremote.JobRequest,
 ) (canReleaseLock bool, submitted bool, err error) {
-	canReleaseLock = true
+	wasOffloaded := IsFileOffloaded(pathState.LockedInfo)
+	canReleaseLock = !wasOffloaded
+
 	var applyPlan applyPlanFn
 	var workRequired bool
 	if !request.HasGenerationStatus() {
@@ -314,12 +316,8 @@ func (w *jobRequestBuilder) processRequest(
 		if accepted, jobConflict, bulkErr := w.offerToBulkOperation(ctx, checkpoint, request); bulkErr != nil {
 			err = bulkErr
 			return
-		} else if accepted {
+		} else if accepted || jobConflict {
 			canReleaseLock = false
-			return
-		} else if jobConflict {
-			// No job will run for this path, so the lock this builder took has nothing to guard. A lock
-			// another job held is kept by the caller regardless.
 			return
 		}
 	}
@@ -349,7 +347,7 @@ func (w *jobRequestBuilder) processRequest(
 						zap.NamedError("submitError", submitErr),
 						zap.Error(undoPlanErr))
 				}
-				canReleaseLock = undoPlanErr == nil
+				canReleaseLock = undoPlanErr == nil && !wasOffloaded
 			})
 		}
 
@@ -513,11 +511,12 @@ func (w *jobRequestBuilder) prepareJobRequest(
 				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
 			})
 		} else if errors.Is(applyErr, ErrJobAlreadyOffloaded) {
+			canReleaseLock = false
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
 			})
 		} else if errors.Is(applyErr, ErrJobFailedPrecondition) {
-			canReleaseLock = true
+			canReleaseLock = !IsFileOffloaded(pathState.LockedInfo)
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 				Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
@@ -548,7 +547,7 @@ func (w *jobRequestBuilder) prepareJobRequest(
 		}
 
 		planApplied = false
-		canReleaseLock = true
+		canReleaseLock = !IsFileOffloaded(pathState.LockedInfo)
 		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 			Message: message,
