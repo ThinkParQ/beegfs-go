@@ -3,7 +3,9 @@ package index
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
@@ -23,6 +25,8 @@ type RescanCfg struct {
 	SkipTreesummary bool
 	Xattrs          bool
 }
+
+const rescanBatch = 512
 
 func Rescan(ctx context.Context, cfg RescanCfg) (<-chan string, func() error, error) {
 	log, _ := config.GetLogger()
@@ -47,18 +51,55 @@ func Rescan(ctx context.Context, cfg RescanCfg) (<-chan string, func() error, er
 		defer close(lines)
 
 		for _, t := range cfg.Targets {
-			cleanIndex := filepath.Clean(t.IndexPath)
-			args := buildRescanArgs(cfg, t.FSPath, filepath.Dir(cleanIndex))
-			bin, args, err := WrapForRemote(Dir2IndexBin, args, cfg.IndexAddr)
+			idx := filepath.Clean(t.IndexPath)
+
+			if cfg.Recurse {
+				if _, err := os.Stat(t.FSPath); err != nil {
+					return fmt.Errorf("stat %q: %w", t.FSPath, err)
+				}
+				if err := removeDirs(gCtx, cfg, lines, idx); err != nil {
+					log.Warn("removing old index before rebuild", zap.Error(err))
+				}
+				if err := dir2index(gCtx, cfg, lines, false, filepath.Dir(idx), t.FSPath); err != nil {
+					return fmt.Errorf("%w; the index for %s was removed and must be rescanned", err, t.FSPath)
+				}
+				continue
+			}
+
+			if err := dir2index(gCtx, cfg, lines, true, filepath.Dir(idx), t.FSPath); err != nil {
+				return err
+			}
+			src, err := childDirs(t.FSPath)
 			if err != nil {
 				return err
 			}
-			log.Debug("running gufi_dir2index",
-				zap.String("bin", bin),
-				zap.Strings("args", args),
-			)
-			if err := runSubprocess(gCtx, bin, args, lines); err != nil {
-				return fmt.Errorf("gufi_dir2index (%s): %w", t.FSPath, err)
+			have, err := indexChildDirs(gCtx, cfg, idx)
+			if err != nil {
+				return err
+			}
+			var stale, fresh []string
+			for n := range have {
+				if !src[n] {
+					stale = append(stale, filepath.Join(idx, n))
+				}
+			}
+			for n := range src {
+				if !have[n] {
+					fresh = append(fresh, filepath.Join(t.FSPath, n))
+				}
+			}
+			slices.Sort(stale)
+			slices.Sort(fresh)
+			for batch := range slices.Chunk(stale, rescanBatch) {
+				log.Info("removing stale index directories", zap.Strings("paths", batch))
+				if err := removeDirs(gCtx, cfg, lines, batch...); err != nil {
+					return err
+				}
+			}
+			for batch := range slices.Chunk(fresh, rescanBatch) {
+				if err := dir2index(gCtx, cfg, lines, false, idx, batch...); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -77,15 +118,79 @@ func Rescan(ctx context.Context, cfg RescanCfg) (<-chan string, func() error, er
 	}, nil
 }
 
-func buildRescanArgs(cfg RescanCfg, fsPath, indexParent string) []string {
+func dir2index(ctx context.Context, cfg RescanCfg, lines chan<- string, shallow bool, indexParent string, fsPaths ...string) error {
+	log, _ := config.GetLogger()
+	args := buildRescanArgs(cfg, shallow, indexParent, fsPaths...)
+	bin, args, err := WrapForRemote(Dir2IndexBin, args, cfg.IndexAddr)
+	if err != nil {
+		return err
+	}
+	log.Debug("running gufi_dir2index", zap.String("bin", bin), zap.Strings("args", args))
+	if err := runSubprocess(ctx, bin, args, lines); err != nil {
+		return fmt.Errorf("gufi_dir2index (%s): %w", strings.Join(fsPaths, " "), err)
+	}
+	return nil
+}
+
+func removeDirs(ctx context.Context, cfg RescanCfg, lines chan<- string, paths ...string) error {
+	bin, args, err := WrapForRemote("rm", append([]string{"-rf", "--"}, paths...), cfg.IndexAddr)
+	if err != nil {
+		return err
+	}
+	if err := runSubprocess(ctx, bin, args, lines); err != nil {
+		return fmt.Errorf("rm -rf %s: %w", strings.Join(paths, " "), err)
+	}
+	return nil
+}
+
+func indexChildDirs(ctx context.Context, cfg RescanCfg, idx string) (map[string]bool, error) {
+	if !IsRemoteAddr(cfg.IndexAddr) {
+		return childDirs(idx)
+	}
+	bin, args, err := WrapForRemote("find", []string{idx, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-printf", "%f\n"}, cfg.IndexAddr)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan string, rowChanBufFactor)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runSubprocess(ctx, bin, args, out)
+		close(out)
+	}()
+	dirs := make(map[string]bool)
+	for name := range out {
+		dirs[name] = true
+	}
+	if err := <-errc; err != nil {
+		return nil, fmt.Errorf("listing %s: %w", idx, err)
+	}
+	return dirs, nil
+}
+
+// childDirs returns the names of the directories directly under path.
+func childDirs(path string) (map[string]bool, error) {
+	ents, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", path, err)
+	}
+	dirs := make(map[string]bool, len(ents))
+	for _, e := range ents {
+		if e.IsDir() {
+			dirs[e.Name()] = true
+		}
+	}
+	return dirs, nil
+}
+
+func buildRescanArgs(cfg RescanCfg, shallow bool, indexParent string, fsPaths ...string) []string {
 	args := appendThreads(nil, cfg.Threads)
-	if !cfg.Recurse {
+	if shallow {
 		args = append(args, "--max-level", "0")
 	}
 	if cfg.Xattrs {
 		args = append(args, "-x")
 	}
 	args = append(args, "--plugin", IndexPluginPath)
-	args = append(args, fsPath, indexParent)
-	return args
+	args = append(args, fsPaths...)
+	return append(args, indexParent)
 }
