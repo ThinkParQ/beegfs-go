@@ -386,6 +386,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 	if !request.HasSync() {
 		return nil, ErrReqAndRSTTypeMismatch
 	}
+	sync := request.GetSync()
 
 	if job.GetExternalId() != "" {
 		return nil, ErrJobAlreadyHasExternalID
@@ -395,7 +396,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 	defer cancel()
 
 	undoAppliedPlan := noopUndo
-	lockAcquired := true
+	lockAcquired := IsFileLocked(sync.LockedInfo)
 	defer func() {
 		if err == nil {
 			return
@@ -417,7 +418,6 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 		}
 	}()
 
-	sync := request.GetSync()
 	if sync.RemotePath == "" {
 		if lastJob != nil {
 			sync.SetRemotePath(lastJob.Request.GetSync().RemotePath)
