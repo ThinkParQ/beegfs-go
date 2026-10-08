@@ -445,8 +445,16 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 	// Reject a caller-supplied key that isn't already in provider-normal form rather than
 	// silently rewriting it: the object would land under a key the caller never asked for,
 	// and a mismatch here is what made slash-prefixed keys unreachable by any walk.
-	if r.SanitizeRemotePath(sync.RemotePath) != sync.RemotePath {
-		err = fmt.Errorf("invalid remote path %q: s3 keys must not begin with '/'", sync.RemotePath)
+	//
+	// A remote path equal to the in-mount path almost always comes from a CLI older than this
+	// server. Those CLIs filled in the in-mount path as the default key for uploads, so the hint
+	// points the user at the version mismatch rather than at a flag they never passed.
+	if sanitized := r.SanitizeRemotePath(sync.RemotePath); sanitized != sync.RemotePath {
+		hint := fmt.Sprintf("use %q instead", sanitized)
+		if sync.RemotePath == request.Path {
+			hint = "check that this version of the beegfs CLI is compatible with this version of beegfs-remote"
+		}
+		err = fmt.Errorf("invalid remote path %q: s3 keys must not begin with '/' (hint: %s)", sync.RemotePath, hint)
 		return
 	}
 
