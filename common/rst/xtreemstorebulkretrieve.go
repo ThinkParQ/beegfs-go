@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -36,6 +37,10 @@ const (
 	// restoreProbeWorkerMultiplier scales GOMAXPROCS to set how many restore-readiness checks are
 	// done concurrently.
 	restoreProbeWorkerMultiplier = 4.0
+
+	// transientS3ErrorWindow is how long a bulk retrieve keeps retrying S3 calls that fail with an
+	// error the SDK calls retryable. retryTransientS3Error explains how it is enforced.
+	transientS3ErrorWindow = time.Hour
 )
 
 // xtreemstoreS3BulkRetrieveBatchEntry is one key of a retrieve-session batch, resolved to the bulk
@@ -63,6 +68,7 @@ func (e *xtreemstoreS3BulkRetrieveBatchEntry) needsRestoreProbe() bool {
 var (
 	ErrActiveRetrieveSessionAlreadyExists = errors.New("active retrieve-session already exists")
 	ErrBulkOperationDestroyed             = errors.New("the bulk operation that staged this request no longer exists (resubmit the job to retrieve the object again)")
+	errUnexpectedStorageClass             = errors.New("unexpected storage class")
 )
 
 type xtreemstoreS3BulkRetrieveManager struct {
@@ -96,6 +102,8 @@ type xtreemstoreS3BulkRetrieveManager struct {
 	recordBytes           int64
 	batchPollDelay        time.Duration
 	sessionBusyRetryDelay time.Duration
+	// now returns the current time. It is time.Now unless a test sets it.
+	now func() time.Time
 }
 
 var _ clientBulkOperation = &xtreemstoreS3BulkRetrieveManager{}
@@ -104,6 +112,18 @@ type xtreemstoreS3BulkRetrieveManagerState struct {
 	SessionRetrieveId string `json:"active-retrieve-id"`
 	SessionJobStart   int64  `json:"active-job-start"`
 	SessionJobEnd     int64  `json:"active-job-end"`
+	// The transient fields describe the current run of execute rounds that failed with a retryable
+	// S3 error. retryTransientS3Error maintains them and clears them when a round succeeds. They
+	// live here, not in memory, because every reschedule builds a new manager.
+	//   - TransientErrorsSince is when the run started.
+	//   - LastTransientErrorAt is when the run's latest round failed.
+	//   - TransientErrors counts the run's rounds.
+	//   - LastTransientError is the latest round's error. No logger reaches the manager, so this
+	//     field is where a retrying operation shows why it is not making progress.
+	TransientErrorsSince time.Time `json:"transient-errors-since,omitzero"`
+	LastTransientErrorAt time.Time `json:"last-transient-error-at,omitzero"`
+	TransientErrors      int64     `json:"transient-errors,omitempty"`
+	LastTransientError   string    `json:"last-transient-error,omitempty"`
 }
 
 type xtreemstoreS3BulkRetrieveSessionInfo struct {
@@ -410,6 +430,72 @@ func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh c
 		err = appendErrors(err, m.saveManagerState())
 	}()
 
+	reschedule, delay, err = m.executeRound(ctx, walkCh)
+	return m.retryTransientS3Error(reschedule, delay, err)
+}
+
+// retryTransientS3Error runs after every execute round. It decides whether the round's error fails
+// the operation or only delays it. Any error in BulkExecuteResult.Err cancels the operation, which
+// fails every reserved job and destroys the retrieve-session. So an error that may clear on its own
+// must not reach the controller while there is still time to wait for it.
+//   - A round without an error ends the run of transient errors.
+//   - An error the SDK would retry, such as an HTTP 5xx, throttling, or a reset or refused
+//     connection, reschedules the operation after batchPollDelay. The SDK has already made its own
+//     attempts by then, but those span seconds and an outage can last minutes.
+//   - Once a run of retryable errors has lasted transientS3ErrorWindow, the error fails the
+//     operation.
+//   - A gap longer than the window between two failed rounds starts a new run. Such a gap means
+//     the service was stopped, so the earlier failures say nothing about the endpoint now.
+//   - Any other error fails the operation at once. That includes a cancelled context, which the
+//     controller recognizes and spares on its own.
+//
+// The window is measured in time, not in rounds. Rounds do not come at a fixed pace. The builder
+// job reschedules with no delay while its walk is still adding requests, and when several
+// operations reschedule, the smallest delay wins.
+func (m *xtreemstoreS3BulkRetrieveManager) retryTransientS3Error(reschedule bool, delay time.Duration, err error) (bool, time.Duration, error) {
+	if err == nil {
+		m.state.TransientErrorsSince = time.Time{}
+		m.state.LastTransientErrorAt = time.Time{}
+		m.state.TransientErrors = 0
+		m.state.LastTransientError = ""
+		return reschedule, delay, nil
+	}
+	if !isRetryableS3Error(err) {
+		return reschedule, delay, err
+	}
+
+	now := time.Now()
+	if m.now != nil {
+		now = m.now()
+	}
+	if m.state.TransientErrorsSince.IsZero() || now.Sub(m.state.LastTransientErrorAt) > transientS3ErrorWindow {
+		m.state.TransientErrorsSince = now
+		m.state.TransientErrors = 0
+	}
+	m.state.LastTransientErrorAt = now
+	m.state.TransientErrors++
+	m.state.LastTransientError = err.Error()
+
+	if elapsed := now.Sub(m.state.TransientErrorsSince); elapsed >= transientS3ErrorWindow {
+		return false, 0, fmt.Errorf("retryable S3 errors persisted for %s over %d rounds, which reaches the %s allowed: %w", elapsed.Round(time.Second), m.state.TransientErrors, transientS3ErrorWindow, err)
+	}
+	return true, m.batchPollDelay, nil
+}
+
+// isRetryableS3Error reports whether err is one the S3 SDK's standard retryer treats as retryable.
+// The SDK classifies wrapped errors, so err may carry any context added on the way up. A cancelled
+// or timed out context is never retryable here. The controller already handles those, and
+// retrying would hide a shutdown.
+func isRetryableS3Error(err error) bool {
+	if isTransientBulkError(err) {
+		return false
+	}
+	return retry.IsErrorRetryables(retry.DefaultRetryables).IsErrorRetryable(err) == aws.TrueTernary
+}
+
+// executeRound advances the operation once. It starts a retrieve-session when none is active, sends
+// every object the session has restored, and moves to the next session when this one is done.
+func (m *xtreemstoreS3BulkRetrieveManager) executeRound(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
 	for {
 		if ready, err := m.ensureSessionActive(ctx); err != nil {
 			return false, 0, err
@@ -580,16 +666,17 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 		// stopped before the job was recorded. Sending it again is safe in both cases. The request
 		// carries its reserved job ID, so remote cannot create a second job for it.
 		if ready, readyErr := entry.ready, entry.readyErr; readyErr != nil {
-			if !errors.Is(readyErr, os.ErrNotExist) {
+			reason := objectCancelReason(readyErr)
+			if reason == nil {
 				err = fmt.Errorf("failed to determine restore state. Record: %s, Status: %v: %w", entry.remotePath, status, readyErr)
 				return
 			}
-			result.Err = &RequestCancelError{Reason: fmt.Errorf("object no longer exists")}
+			result.Err = &RequestCancelError{Reason: reason}
 			if err = sendBulkResult(); err != nil {
 				return
 			}
 			if err := m.MarkCompleteAck(jobIndex); err != nil {
-				return false, fmt.Errorf("remote object no longer exists but failed to mark bulk job request as complete. Record: %s, Status: %v: %w", entry.remotePath, status, err)
+				return false, fmt.Errorf("remote object cannot be retrieved but failed to mark bulk job request as complete. Record: %s, Status: %v: %w", entry.remotePath, status, err)
 			}
 
 			terminal = true
@@ -620,6 +707,30 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 	return
 }
 
+// objectCancelReason runs when the restore probe of one object failed. It decides whether the
+// failure belongs to that object alone, so only its request is cancelled, or to the whole
+// operation. It returns the reason to cancel the request with, or nil when the operation owns the
+// failure.
+//   - A missing object can never be retrieved, so its request is cancelled.
+//   - A storage class that never becomes downloadable is cancelled the same way.
+//   - An S3 API error that the SDK would not retry, such as access denied on that key, is a
+//     verdict on that key. Its request is cancelled.
+//   - Everything else belongs to the operation: retryable errors, which execute retries, and errors
+//     that are not S3 responses at all, such as a cancelled context.
+func objectCancelReason(readyErr error) error {
+	if errors.Is(readyErr, os.ErrNotExist) {
+		return errors.New("object no longer exists")
+	}
+	if errors.Is(readyErr, errUnexpectedStorageClass) {
+		return readyErr
+	}
+	var apiErr smithy.APIError
+	if errors.As(readyErr, &apiErr) && !isTransientBulkError(readyErr) && !isRetryableS3Error(readyErr) {
+		return readyErr
+	}
+	return nil
+}
+
 func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.Context, key string) (bool, error) {
 	input := &s3.HeadObjectInput{
 		Bucket: aws.String(m.bucket),
@@ -642,7 +753,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) isObjectReadyForDownload(ctx context.
 		// converted into standard storage class and is therefore not available yet.
 		return false, nil
 	default:
-		return false, fmt.Errorf("unexpected storage class, %s", resp.StorageClass)
+		return false, fmt.Errorf("%w, %s", errUnexpectedStorageClass, resp.StorageClass)
 	}
 }
 
@@ -970,7 +1081,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 	cleanupCreatedSession := func(reason error) error {
 		*m.state = previousState
 		if cleanupErr := m.destroyRetrieveSession(ctx); cleanupErr != nil {
-			return fmt.Errorf("retrieve-session was created but local ownership state could not be persisted, cleanup also failed, and manual intervention is required: %w; %w", reason, cleanupErr)
+			// %v, not %w: a retryable cause must not make this retryable. The created session is
+			// not recorded as ours, so no later round would clean it up.
+			return fmt.Errorf("retrieve-session was created but local ownership state could not be persisted, cleanup also failed, and manual intervention is required: %v; %v", reason, cleanupErr)
 		}
 		return reason
 	}

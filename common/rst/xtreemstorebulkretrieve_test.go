@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -879,3 +880,187 @@ func TestBulkRetrieveRejectsOversizedPath(t *testing.T) {
 // testStateMountPath is the state mount path the bulk retrieve tests keep an operation's state in.
 // It has to lie under this build's layout directory, because the manager refuses any other path.
 const testStateMountPath = DefaultStateRoot + "/" + stateLayoutDir + "/state"
+
+// fakeUnavailableErr is what the SDK returns once its own retries of an HTTP 503 run out.
+func fakeUnavailableErr() error {
+	return &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}},
+		Err:      &smithy.GenericAPIError{Code: "ServiceUnavailable"},
+	}
+}
+
+func fakeForbiddenErr() error {
+	return &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusForbidden}},
+		Err:      &smithy.GenericAPIError{Code: "AccessDenied"},
+	}
+}
+
+// flakyS3ApiClient is a fakeS3ApiClient whose HeadObject fails with an HTTP 503 until failHeads
+// calls have failed.
+type flakyS3ApiClient struct {
+	*fakeS3ApiClient
+	failHeads atomic.Int64
+}
+
+func (f *flakyS3ApiClient) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	if f.failHeads.Add(-1) >= 0 {
+		return nil, fakeUnavailableErr()
+	}
+	return f.fakeS3ApiClient.HeadObject(ctx, params, optFns...)
+}
+
+// bulkRetrieveExecuteRound opens a manager, runs one Execute round and closes it again. It returns
+// the round's result and the in-mount paths the round sent.
+func bulkRetrieveExecuteRound(t *testing.T, newManager func() *xtreemstoreS3BulkRetrieveManager) (*BulkExecuteResult, []string, *xtreemstoreS3BulkRetrieveManagerState) {
+	t.Helper()
+	m := newManager()
+	require.NoError(t, m.openState())
+	walkCh, getResults, err := m.Execute(context.Background())
+	require.NoError(t, err)
+	var sent []string
+	for r := range walkCh {
+		require.NoError(t, r.Err)
+		sent = append(sent, r.InMountPath)
+	}
+	result := getResults()
+	state := *m.state
+	require.NoError(t, m.closeState())
+	return result, sent, &state
+}
+
+// TestBulkRetrieveRetriesTransientS3Errors checks that a retryable S3 error while polling only
+// delays the operation. Returning it in BulkExecuteResult.Err would cancel the operation and fail
+// every reserved job.
+func TestBulkRetrieveRetriesTransientS3Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	client := &flakyS3ApiClient{fakeS3ApiClient: &fakeS3ApiClient{}}
+	client.failHeads.Store(1)
+	newManagerBase, addRequest := bulkRetrieveTestManager(t, tmpDir)
+	newManager := func() *xtreemstoreS3BulkRetrieveManager {
+		m := newManagerBase()
+		m.s3ApiClient = client
+		m.batchPollDelay = DefaultPollDelay
+		return m
+	}
+
+	m := newManager()
+	require.NoError(t, m.openState())
+	for _, p := range []string{"/a", "/b", "/c"} {
+		require.NoError(t, addRequest(m, p))
+	}
+	require.NoError(t, m.closeState())
+
+	result, sent, state := bulkRetrieveExecuteRound(t, newManager)
+	require.NoError(t, result.Err, "a retryable error must not fail the operation")
+	assert.True(t, result.Reschedule)
+	assert.Equal(t, DefaultPollDelay, result.Delay)
+	// The round stops at the entry whose probe failed. Entries before it may already be sent. The
+	// next round sends them again, which is safe because each carries its reserved job ID.
+	assert.Less(t, len(sent), 3, "the round stops at the failed probe")
+	assert.Equal(t, int64(1), state.TransientErrors)
+	assert.Contains(t, state.LastTransientError, "ServiceUnavailable")
+
+	result, sent, state = bulkRetrieveExecuteRound(t, newManager)
+	require.NoError(t, result.Err)
+	assert.ElementsMatch(t, []string{"/mnt/a", "/mnt/b", "/mnt/c"}, sent)
+	assert.Zero(t, state.TransientErrors, "a successful round ends the run")
+	assert.True(t, state.TransientErrorsSince.IsZero())
+	assert.True(t, state.LastTransientErrorAt.IsZero())
+	assert.Empty(t, state.LastTransientError)
+}
+
+// TestBulkRetrieveFailsOnceTransientWindowIsExhausted checks that retryable errors stop being
+// retried once they have lasted transientS3ErrorWindow, however many rounds that took. It also checks
+// that a gap longer than the window, as after a long service stop, starts the clock again.
+func TestBulkRetrieveFailsOnceTransientWindowIsExhausted(t *testing.T) {
+	tmpDir := t.TempDir()
+	client := &flakyS3ApiClient{fakeS3ApiClient: &fakeS3ApiClient{}}
+	client.failHeads.Store(100)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newManagerBase, addRequest := bulkRetrieveTestManager(t, tmpDir)
+	newManager := func() *xtreemstoreS3BulkRetrieveManager {
+		m := newManagerBase()
+		m.s3ApiClient = client
+		m.now = func() time.Time { return now }
+		return m
+	}
+
+	m := newManager()
+	require.NoError(t, m.openState())
+	require.NoError(t, addRequest(m, "/a"))
+	require.NoError(t, m.closeState())
+
+	// Many rounds in quick succession stay inside the window. Rounds come this fast while the
+	// builder job's walk is still adding requests.
+	for range 10 {
+		result, _, _ := bulkRetrieveExecuteRound(t, newManager)
+		require.NoError(t, result.Err)
+		require.True(t, result.Reschedule)
+		now = now.Add(time.Second)
+	}
+
+	// A gap longer than the window starts a new run instead of failing the operation.
+	now = now.Add(transientS3ErrorWindow + time.Minute)
+	result, _, state := bulkRetrieveExecuteRound(t, newManager)
+	require.NoError(t, result.Err, "a gap longer than the window must start a new run")
+	assert.Equal(t, int64(1), state.TransientErrors)
+	assert.Equal(t, now, state.TransientErrorsSince)
+
+	// Rounds spaced well inside the window add up until the run lasts the whole window.
+	now = now.Add(transientS3ErrorWindow / 2)
+	result, _, _ = bulkRetrieveExecuteRound(t, newManager)
+	require.NoError(t, result.Err)
+
+	now = now.Add(transientS3ErrorWindow / 2)
+	result, _, state = bulkRetrieveExecuteRound(t, newManager)
+	require.Error(t, result.Err, "the run has lasted the whole window")
+	assert.False(t, result.Reschedule)
+	var responseErr *smithyhttp.ResponseError
+	require.ErrorAs(t, result.Err, &responseErr, "the S3 error must stay reachable for the caller")
+	assert.Equal(t, http.StatusServiceUnavailable, responseErr.HTTPStatusCode())
+	assert.Equal(t, int64(3), state.TransientErrors)
+}
+
+func TestIsRetryableS3Error(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"HTTP 503", fakeUnavailableErr(), true},
+		{"throttling", &smithy.GenericAPIError{Code: "SlowDown"}, true},
+		{"connection reset", errors.New("read tcp: connection reset by peer"), true},
+		{"wrapped HTTP 503", fmt.Errorf("failed to load retrieve-session batch info: %w", fakeUnavailableErr()), true},
+		{"access denied", fakeForbiddenErr(), false},
+		{"missing key", fakeNotFoundErr(), false},
+		{"cancelled context", context.Canceled, false},
+		{"expired context", fmt.Errorf("head object: %w", context.DeadlineExceeded), false},
+		{"local error", errors.New("failed to write manager state"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isRetryableS3Error(tt.err))
+		})
+	}
+}
+
+func TestObjectCancelReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		readyErr   error
+		wantCancel bool
+	}{
+		{"missing object", os.ErrNotExist, true},
+		{"unexpected storage class", fmt.Errorf("%w, DEEP_ARCHIVE", errUnexpectedStorageClass), true},
+		{"access denied on the key", fmt.Errorf("head object for key %q: %w", "k", fakeForbiddenErr()), true},
+		{"HTTP 503 belongs to the operation", fmt.Errorf("head object for key %q: %w", "k", fakeUnavailableErr()), false},
+		{"connection reset belongs to the operation", errors.New("connection reset"), false},
+		{"cancelled context belongs to the operation", fmt.Errorf("head object for key %q: %w", "k", context.Canceled), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantCancel, objectCancelReason(tt.readyErr) != nil)
+		})
+	}
+}
