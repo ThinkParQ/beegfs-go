@@ -611,6 +611,15 @@ func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.Exists
 }
 
+// FileCreatedByJob returns whether the job's plan created the file. Use it on the lockedInfo
+// persisted with a job, after the plan was applied. prepareDownloadNoFile creates the file and
+// records the new file's attributes, but leaves Exists false so an abort knows to remove the file.
+// The lockedInfo of a path that does not exist is left empty, so a set Mtime means the plan
+// created the file.
+func FileCreatedByJob(lockedInfo *flex.JobLockedInfo) bool {
+	return lockedInfo != nil && !lockedInfo.Exists && lockedInfo.GetMtime() != nil
+}
+
 // IsFileAlreadySynced returns whether the file is already synced with remote storage target
 func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
@@ -1047,7 +1056,8 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 		}
 		info := pathState.LockedInfo
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		lockedInfo.SetExists(info.Exists)
+		// Leave Exists false. An abort reads it through FileCreatedByJob to learn that this job
+		// created the file and must remove it.
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)

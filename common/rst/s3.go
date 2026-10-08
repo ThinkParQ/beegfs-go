@@ -1048,13 +1048,18 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 			return nil
 		}
 
-		if !sync.LockedInfo.Exists {
+		if FileCreatedByJob(sync.LockedInfo) {
 			err := r.mountPoint.Remove(request.Path)
 			if errors.Is(err, fs.ErrNotExist) {
 				// Aborting the job request does not guarantee the the non-existing file was ever created so ignore.
 				return nil
 			}
 			return err
+		}
+
+		if !FileExists(sync.LockedInfo) {
+			// The path did not exist and the plan never created it, so there is nothing to restore.
+			return nil
 		}
 
 		// File exist and no changes were made so restore the mtime and if needed, restore the file size.

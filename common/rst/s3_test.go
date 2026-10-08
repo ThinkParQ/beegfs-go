@@ -392,13 +392,30 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 	t.Run("a download that never began removes a file it created", func(t *testing.T) {
 		fs := newAbortFS()
 		r := newTestS3Client(t, fs)
-		// The path did not exist before the job, so nothing local is worth keeping.
-		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false})
+		// The path did not exist before the job, so nothing local is worth keeping. This is the
+		// state prepareDownloadNoFile leaves: the new file's attributes, with Exists still false.
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: false, ReadWriteLocked: true, Size: 500, RemoteSize: 500, Mtime: mtime,
+		})
 
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
 		assert.Equal(t, []string{"/mnt/dest/file"}, fs.removed)
 		assert.Empty(t, fs.stubWrites, "an untouched file must not be replaced with a stub")
+	})
+
+	t.Run("a download whose plan never created the file leaves the path alone", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs)
+		// The path did not exist and the job aborted before its plan created the file.
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, RemoteSize: 500})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
+
+		assert.Empty(t, fs.removed)
+		assert.Empty(t, fs.resized, "an abort must not create the file it never had")
+		assert.Empty(t, fs.chtimes)
+		assert.Empty(t, fs.stubWrites)
 	})
 
 	t.Run("a download that never began restores an enlarged file", func(t *testing.T) {
