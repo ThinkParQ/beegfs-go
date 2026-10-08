@@ -666,6 +666,11 @@ func TestBulkRetrieveStatusOnlyMovesForward(t *testing.T) {
 
 	assert.Equal(t, xtreemstoreS3BulkRequestAdded, statusOf(2), "updates to other records must leave this one alone")
 
+	// A request that was not delivered may still hold a live reservation, so it stays added for
+	// the next execute to replay or a cancel to release.
+	require.NoError(t, builderReports(2, BulkRequestNotDelivered))
+	assert.Equal(t, xtreemstoreS3BulkRequestAdded, statusOf(2), "a request that was not delivered must stay replayable")
+
 	statusPath := path.Join(tmpDir, m.stateMountPath, xtreemstoreS3BulkStatusFileName)
 	before, err := os.Stat(statusPath)
 	require.NoError(t, err)

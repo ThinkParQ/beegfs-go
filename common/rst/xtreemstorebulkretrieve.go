@@ -769,6 +769,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) closeState() (err error) {
 //
 // A failed request is marked complete because the operation only needs to stop waiting on it; why
 // it will never run is the job's story to tell, not the batch's.
+//
+// A request that was not delivered is left at added, because its reserved job may still be live.
+// The next execute replays a ready added request, and a cancel releases its reservation. Marking it
+// complete would hide it from both, so the reservation would block the path until it was cancelled
+// by hand.
 func (m *xtreemstoreS3BulkRetrieveManager) UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
 	jobIndex := request.GetBulkInfo().GetJobIndex()
 	switch state {
@@ -777,6 +782,8 @@ func (m *xtreemstoreS3BulkRetrieveManager) UpdateBulkRequest(ctx context.Context
 	case BulkRequestFailed:
 		// It's safe to mark the same request complete more than once.
 		return m.MarkComplete(jobIndex)
+	case BulkRequestNotDelivered:
+		return nil
 	default:
 		// Never silently ignore a state this operation does not know about: a dropped transition is
 		// indistinguishable from one that never happened, and the batch waits on it forever.
