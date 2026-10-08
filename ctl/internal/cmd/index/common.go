@@ -325,7 +325,7 @@ func indexMountBase(indexRoot, mountPath string) (string, error) {
 	}
 	var dirs []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			dirs = append(dirs, e.Name())
 		}
 	}

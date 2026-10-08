@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -92,11 +93,14 @@ func chanBufSize(threads int) int {
 }
 
 // runSubprocess runs bin with args, streaming each line of its combined
-// stdout+stderr to lines until the process exits or ctx is cancelled. Shared by
-// Create and Rescan; the executors parse structured output and do not use it.
-func runSubprocess(ctx context.Context, bin string, args []string, lines chan<- string) error {
+// stdout+stderr to lines until the process exits or ctx is cancelled. stdin,
+// when non-nil, becomes the child's standard input; onLine, when non-nil, sees
+// every line before it is forwarded. Shared by Create and Rescan; the executors
+// parse structured output and do not use it.
+func runSubprocess(ctx context.Context, bin string, args []string, lines chan<- string, stdin io.Reader, onLine func(string)) error {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.SysProcAttr = CallerSysProcAttr()
+	cmd.Stdin = stdin
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("creating stdout pipe: %w", err)
@@ -109,6 +113,9 @@ func runSubprocess(ctx context.Context, bin string, args []string, lines chan<- 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), scannerMaxBuf)
 	for scanner.Scan() {
+		if onLine != nil {
+			onLine(scanner.Text())
+		}
 		select {
 		case lines <- scanner.Text():
 		case <-ctx.Done():

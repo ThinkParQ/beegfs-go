@@ -17,10 +17,11 @@ import (
 // Paths to the GUFI binaries shipped with the BeeGFS index packages. These are
 // fixed install locations, not user configuration.
 const (
-	QueryBin     = "/opt/beegfs/bin/index/gufi_query"
-	Sqlite3Bin   = "/opt/beegfs/bin/index/gufi_sqlite3"
-	Dir2IndexBin = "/opt/beegfs/bin/index/gufi_dir2index"
-	TreesumBin   = "/opt/beegfs/bin/index/gufi_treesummary"
+	QueryBin             = "/opt/beegfs/bin/index/gufi_query"
+	Sqlite3Bin           = "/opt/beegfs/bin/index/gufi_sqlite3"
+	Dir2IndexBin         = "/opt/beegfs/bin/index/gufi_dir2index"
+	TreesumBin           = "/opt/beegfs/bin/index/gufi_treesummary"
+	IncrementalUpdateBin = "/opt/beegfs/bin/index/gufi_incremental_update"
 )
 
 const (

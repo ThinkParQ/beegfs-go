@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -70,14 +71,18 @@ Example: rescan the entire filesystem index
 
 			targets := make([]indexPkg.RescanTarget, 0, len(paths))
 			for _, p := range paths {
-				idx, err := resolveFSPathToIndex(cfg, p)
+				abs, err := filepath.Abs(p)
+				if err != nil {
+					return fmt.Errorf("resolving %q: %w", p, err)
+				}
+				idx, err := resolveFSPathToIndex(cfg, abs)
 				if err != nil {
 					return fmt.Errorf("resolving index path for %q: %w", p, err)
 				}
 				if err := checkIndexExists(cfg, idx); err != nil && !errors.Is(err, errLegacyIndex) {
 					return err
 				}
-				targets = append(targets, indexPkg.RescanTarget{FSPath: p, IndexPath: idx})
+				targets = append(targets, indexPkg.RescanTarget{FSPath: abs, IndexPath: idx})
 			}
 			backendCfg.Targets = targets
 

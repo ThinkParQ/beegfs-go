@@ -38,7 +38,7 @@ func Create(ctx context.Context, cfg CreateCfg) (<-chan string, func() error, er
 			return err
 		}
 		log.Debug("running gufi_dir2index", zap.String("bin", bin), zap.Strings("args", args))
-		if err := runSubprocess(gCtx, bin, args, lines); err != nil {
+		if err := runSubprocess(gCtx, bin, args, lines, nil, nil); err != nil {
 			return fmt.Errorf("gufi_dir2index: %w", err)
 		}
 
@@ -70,7 +70,7 @@ func runTreesummary(ctx context.Context, indexAddr string, threads int, path str
 		return err
 	}
 	log.Debug("running gufi_treesummary", zap.String("bin", bin), zap.Strings("args", args))
-	if err := runSubprocess(ctx, bin, args, lines); err != nil {
+	if err := runSubprocess(ctx, bin, args, lines, nil, nil); err != nil {
 		return fmt.Errorf("gufi_treesummary: %w", err)
 	}
 	return nil
