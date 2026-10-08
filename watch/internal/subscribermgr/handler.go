@@ -175,35 +175,24 @@ func (h *Handler) connectLoop() bool {
 	h.log.Info("connecting to subscriber")
 	var reconnectBackOff float64 = 1
 
-	var metaID beegfs.NumId
-	if !h.Subscriber.Config.SkipNodeIDDetection {
-		ringID := h.metaEventBuffer.GetRingID()
-		if ringID == 0 {
-			h.log.Info("waiting for metadata node ID to be available due to subscriber configuration")
-			loggedV1Warning := false
-		waitForRingID:
-			for {
-				select {
-				case <-h.ctx.Done():
-					h.log.Info("not attempting to detect metadata node ID for subscriber because the handler is shutting down")
-					return false
-				case <-time.After(time.Second):
-					if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
-						break waitForRingID
-					}
-					// Node ID detection requires the v2 event protocol handshake. A v1 metadata
-					// service can never identify itself, so this wait would otherwise continue
-					// silently forever with only the info log above.
-					if !loggedV1Warning && h.metaEventBuffer.V1ProtocolInUse() {
-						h.log.Warn("subscriber is configured to wait for the metadata node ID before connecting, but the metadata service uses the v1 event protocol and can never identify itself; this subscriber will never connect or receive events until skip-node-id-detection is set to true for this subscriber")
-						loggedV1Warning = true
-					}
+	ringID := h.metaEventBuffer.GetRingID()
+	if ringID == 0 {
+		h.log.Info("waiting for metadata node ID to be available")
+	waitForRingID:
+		for {
+			select {
+			case <-h.ctx.Done():
+				h.log.Info("not attempting to detect metadata node ID for subscriber because the handler is shutting down")
+				return false
+			case <-time.After(time.Second):
+				if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
+					break waitForRingID
 				}
 			}
 		}
-		metaID = beegfs.NumId(ringID)
-		h.log.Info("detected metadata node ID for subscriber", zap.Any("metaID", metaID))
 	}
+	metaID := beegfs.NumId(ringID)
+	h.log.Info("detected metadata node ID for subscriber", zap.Any("metaID", metaID))
 
 	for {
 		select {
@@ -258,7 +247,6 @@ func (h *Handler) seekToEndOfBuffer() error {
 func (h *Handler) applyEventFilter(f *bw.EventFilter) {
 	h.eventFilter.Store(newCompiledFilter(f))
 	h.log.Info("subscriber set an event type filter",
-		zap.Any("v1Types", f.GetV1Types()),
 		zap.Any("v2Types", f.GetV2Types()))
 }
 
@@ -550,7 +538,6 @@ func (h *Handler) Stop() {
 // allowlist is stored as a map so membership tests are O(1). A nil map for a version means all
 // events of that version pass (no filtering). A nil *compiledFilter means no filter at all.
 type compiledFilter struct {
-	v1Types map[bw.V1Event_Type]struct{}
 	v2Types map[bw.V2Event_Type]struct{}
 }
 
@@ -558,12 +545,6 @@ type compiledFilter struct {
 // left as nil maps (pass-all) rather than empty maps (pass-none).
 func newCompiledFilter(f *bw.EventFilter) *compiledFilter {
 	cf := &compiledFilter{}
-	if v1 := f.GetV1Types(); len(v1) > 0 {
-		cf.v1Types = make(map[bw.V1Event_Type]struct{}, len(v1))
-		for _, t := range v1 {
-			cf.v1Types[t] = struct{}{}
-		}
-	}
 	if v2 := f.GetV2Types(); len(v2) > 0 {
 		cf.v2Types = make(map[bw.V2Event_Type]struct{}, len(v2))
 		for _, t := range v2 {
@@ -581,12 +562,6 @@ func (f *compiledFilter) passes(meta types.EventMeta) bool {
 		return true
 	}
 	switch meta.Version {
-	case types.EventTypeV1:
-		if f.v1Types == nil {
-			return true
-		}
-		_, ok := f.v1Types[bw.V1Event_Type(meta.EventType)]
-		return ok
 	case types.EventTypeV2:
 		if f.v2Types == nil {
 			return true
