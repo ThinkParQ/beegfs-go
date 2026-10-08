@@ -289,6 +289,11 @@ const (
 	// BulkRequestFailed means no job will ever run the request so the bulk operation should not
 	// wait for it and instead, release any associated resources.
 	BulkRequestFailed
+	// BulkRequestNotDelivered means the submission ended before remote confirmed it saw the
+	// request, usually because remote was unreachable until the builder was cancelled or the node
+	// shut down. Any job reserved for the request may still be live. This state is not final: a
+	// replay of the request reports accepted or failed later.
+	BulkRequestNotDelivered
 )
 
 func (s BulkRequestState) String() string {
@@ -297,6 +302,8 @@ func (s BulkRequestState) String() string {
 		return "accepted"
 	case BulkRequestFailed:
 		return "failed"
+	case BulkRequestNotDelivered:
+		return "not delivered"
 	default:
 		return fmt.Sprintf("unknown bulk request state (%d)", int(s))
 	}
@@ -312,6 +319,8 @@ type clientBulkOperation interface {
 	// UpdateBulkRequest reports a request's outcome to the bulk operation that staged it. The
 	// notification is delivered once and never repeated, so failing to record it must be treated as
 	// unrecoverable. Return an error only for failures that should stop the parent builder job.
+	// BulkRequestNotDelivered is the one state that is not final. The same request may report
+	// accepted or failed later, so the implementation must not treat it as terminal.
 	UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error
 	// Execute starts a bulk operation for the currently accumulated requests. The returned
 	// getResults function must not return until walkCh has been closed, and it reports the
