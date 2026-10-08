@@ -139,6 +139,9 @@ type S3Client struct {
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
 	isListStartAfterKeySupportedMu sync.Mutex
+	// clearAccessFlags releases the content lock when GenerateWorkRequests fails. It is
+	// entry.ClearAccessFlags unless a test sets it with withClearAccessFlagsFn.
+	clearAccessFlags clearAccessFlagsFn
 }
 
 var _ Provider = &S3Client{}
@@ -158,13 +161,15 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 
 type s3ProviderOption func(*s3ProviderBuildCfg)
 type s3ProviderBuildCfg struct {
-	apiClient func(base s3ApiClient) s3ApiClient
-	s3Options []func(*s3.Options)
+	apiClient        func(base s3ApiClient) s3ApiClient
+	s3Options        []func(*s3.Options)
+	clearAccessFlags clearAccessFlagsFn
 }
 
 func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
 	return s3ProviderBuildCfg{
-		apiClient: func(base s3ApiClient) s3ApiClient { return base },
+		apiClient:        func(base s3ApiClient) s3ApiClient { return base },
+		clearAccessFlags: entry.ClearAccessFlags,
 	}
 }
 
@@ -172,6 +177,16 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 	return func(cfg *s3ProviderBuildCfg) {
 		if fn != nil {
 			cfg.apiClient = fn
+		}
+	}
+}
+
+// withClearAccessFlagsFn replaces entry.ClearAccessFlags, which needs a mounted BeeGFS. It is for
+// tests only. A nil fn keeps the default, as withS3ApiClient does, so the client never holds nil.
+func withClearAccessFlagsFn(fn clearAccessFlagsFn) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		if fn != nil {
+			cfg.clearAccessFlags = fn
 		}
 	}
 }
@@ -255,6 +270,7 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 		mountPoint:                     mountPoint,
 		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
 		isListStartAfterKeySupportedMu: sync.Mutex{},
+		clearAccessFlags:               buildCfg.clearAccessFlags,
 	}
 
 	for _, class := range s3Config.StorageClass {
@@ -411,7 +427,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 		}
 
 		if lockAcquired && !errors.Is(err, ErrJobAlreadyOffloaded) {
-			clearErr := entry.ClearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags)
+			clearErr := r.clearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags)
 			if clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
 				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearErr))
 			}

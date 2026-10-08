@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -20,13 +21,41 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var testS3Client = &S3Client{
-	config: &flex.RemoteStorageTarget{
-		Policies: &flex.RemoteStorageTarget_Policies{},
-	},
-	s3Config: &flex.RemoteStorageTarget_S3{
-		Bucket: "test-bucket",
-	},
+// newTestS3Client builds an S3Client for the bucket "test-bucket". See newTestS3ClientWithConfig.
+func newTestS3Client(t *testing.T, mountPoint filesystem.Provider, opts ...s3ProviderOption) *S3Client {
+	t.Helper()
+	return newTestS3ClientWithConfig(t, mountPoint, &flex.RemoteStorageTarget_S3{Bucket: "test-bucket"}, opts...)
+}
+
+// newTestS3ClientWithConfig builds an S3Client through newS3WithOptions, so every field is set the
+// way production sets it. Tests build clients only through this helper, never as a struct literal.
+// A literal leaves clearAccessFlags nil, and GenerateWorkRequests calls it when a locked request
+// fails.
+//
+// The client releases locks through noopClearAccessFlags, because entry.ClearAccessFlags needs a
+// mounted BeeGFS. Options in opts are applied after that, so a test can pass withClearAccessFlagsFn
+// to record the release instead.
+func newTestS3ClientWithConfig(t *testing.T, mountPoint filesystem.Provider, s3Config *flex.RemoteStorageTarget_S3, opts ...s3ProviderOption) *S3Client {
+	t.Helper()
+	opts = append([]s3ProviderOption{withClearAccessFlagsFn(noopClearAccessFlags)}, opts...)
+	client, err := newS3WithOptions(
+		context.Background(),
+		&flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
+		s3Config,
+		mountPoint,
+		opts...,
+	)
+	require.NoError(t, err)
+	return client
+}
+
+// withTestApiClient makes the client send every S3 call to api.
+func withTestApiClient(api s3ApiClient) s3ProviderOption {
+	return withS3ApiClient(func(s3ApiClient) s3ApiClient { return api })
+}
+
+func noopClearAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+	return nil
 }
 
 func TestGenerateWorkRequests(t *testing.T) {
@@ -35,8 +64,8 @@ func TestGenerateWorkRequests(t *testing.T) {
 	mp.CreateWriteClose(baseTestJob.Request.GetPath(), make([]byte, 1023), 0644, false)
 	// Ensure fast start max size is less than the size used for the mock file (1023). This way the
 	// client doesn't try to create a multi-part upload, which can't be done without a real bucket.
+	testS3Client := newTestS3Client(t, mp)
 	testS3Client.config.Policies.FastStartMaxSize = 1024
-	testS3Client.mountPoint = mp
 
 	jobWithNoExternalID := proto.Clone(baseTestJob).(*beeremote.Job)
 	jobWithNoExternalID.ExternalId = ""
@@ -93,9 +122,83 @@ func TestGenerateWorkRequests(t *testing.T) {
 	assert.ErrorIs(t, err, ErrJobAlreadyHasExternalID)
 }
 
+// TestGenerateWorkRequestsReleasesOnlyItsOwnLock checks which failures release the content lock.
+// GenerateWorkRequests owns the lock in two cases. Either the request arrived already locked,
+// because the job builder handed its lock to the job, or prepareJobRequest acquired it. A request
+// that fails before either case holds no lock of its own. For an offloaded file that lock is the
+// stub's lock, so releasing it would unlock the stub.
+//
+// Each case sends a key with a leading '/'. The key check rejects it before prepareJobRequest
+// runs, so the request never reaches BeeGFS.
+func TestGenerateWorkRequestsReleasesOnlyItsOwnLock(t *testing.T) {
+	tests := []struct {
+		name        string
+		lockedInfo  *flex.JobLockedInfo
+		wantRelease bool
+	}{
+		{
+			// The CLI sends this when --remote-target is given for an existing file.
+			name:        "no locked info",
+			lockedInfo:  nil,
+			wantRelease: false,
+		},
+		{
+			// Every size and time is zero. A check that compares local and remote state, instead
+			// of the lock bit, would wrongly treat this as locked.
+			name:        "empty locked info",
+			lockedInfo:  &flex.JobLockedInfo{},
+			wantRelease: false,
+		},
+		{
+			// The local size differs from the remote size, as for any file that needs an upload.
+			// A check that compares local and remote state would miss this lock.
+			name:        "lock handed over by the job builder",
+			lockedInfo:  &flex.JobLockedInfo{ReadWriteLocked: true, Exists: true, Size: 1023},
+			wantRelease: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var releasedPaths []string
+			var releasedFlags []beegfs.AccessFlags
+			client := newTestS3Client(t, filesystem.NewMockFS(), withClearAccessFlagsFn(
+				func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+					releasedPaths = append(releasedPaths, path)
+					releasedFlags = append(releasedFlags, flags)
+					return nil
+				},
+			))
+
+			job := proto.Clone(baseTestJob).(*beeremote.Job)
+			job.ExternalId = ""
+			job.Request.Type = &beeremote.JobRequest_Sync{
+				Sync: &flex.SyncJob{
+					Operation:  flex.SyncJob_DOWNLOAD,
+					RemotePath: "/key",
+					LockedInfo: tt.lockedInfo,
+				},
+			}
+
+			_, err := client.GenerateWorkRequests(context.Background(), nil, job, 1)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrJobFailedPrecondition)
+			assert.ErrorContains(t, err, `invalid remote path "/key"`)
+
+			if tt.wantRelease {
+				assert.Equal(t, []string{job.Request.Path}, releasedPaths)
+				assert.Equal(t, []beegfs.AccessFlags{beegfs.LockedContentAccessFlags}, releasedFlags)
+			} else {
+				assert.Empty(t, releasedPaths)
+			}
+		})
+	}
+}
+
 // More complex testing around completing requests is not possible without mocking.
 // For now just verify errors are returned when job type or op is not supported.
 func TestCompleteRequests(t *testing.T) {
+	testS3Client := newTestS3Client(t, filesystem.NewMockFS())
 	workResponses := make([]*flex.Work, 0)
 	// If an invalid job type is specified for this RST return the correct error:
 	jobMock := proto.Clone(baseTestJob).(*beeremote.Job)
@@ -129,11 +232,7 @@ func (c *countingHeadObjectClient) HeadObject(ctx context.Context, params *s3.He
 // only to come back not ready and be rescheduled anyway.
 func TestIsWorkRequestReadySkipsRemoteCallsWhileShuttingDown(t *testing.T) {
 	api := &countingHeadObjectClient{}
-	client := &S3Client{
-		config:    &flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
-		s3Config:  &flex.RemoteStorageTarget_S3{Bucket: "test-bucket"},
-		apiClient: api,
-	}
+	client := newTestS3Client(t, nil, withTestApiClient(api))
 
 	request := &flex.WorkRequest{Type: &flex.WorkRequest_Sync{Sync: &flex.SyncJob{
 		Operation:  flex.SyncJob_DOWNLOAD,
@@ -271,7 +370,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a download that never began removes a file it created", func(t *testing.T) {
 		fs := newAbortFS()
-		r := &S3Client{mountPoint: fs}
+		r := newTestS3Client(t, fs)
 		// The path did not exist before the job, so nothing local is worth keeping.
 		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false})
 
@@ -283,7 +382,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a download that never began restores an enlarged file", func(t *testing.T) {
 		fs := newAbortFS()
-		r := &S3Client{mountPoint: fs}
+		r := newTestS3Client(t, fs)
 		// The file was preallocated out to the remote object's size but no bytes were written, so
 		// truncating back to its original size restores the original contents.
 		job := newDownloadAbortJob(&flex.JobLockedInfo{
@@ -300,7 +399,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a download that never began leaves a file that was not enlarged at its size", func(t *testing.T) {
 		fs := newAbortFS()
-		r := &S3Client{mountPoint: fs}
+		r := newTestS3Client(t, fs)
 		job := newDownloadAbortJob(&flex.JobLockedInfo{
 			Exists: true, Size: 500, RemoteSize: 500, Mtime: mtime,
 		})
@@ -313,7 +412,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a download that began is replaced with a stub", func(t *testing.T) {
 		fs := newAbortFS()
-		r := &S3Client{mountPoint: fs}
+		r := newTestS3Client(t, fs)
 		started := []*flex.Work{{Parts: []*flex.Work_Part{{Started: new(false)}, {Started: new(true)}}}}
 		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime})
 
@@ -328,7 +427,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a download of unknown progress is treated as begun", func(t *testing.T) {
 		fs := newAbortFS()
-		r := &S3Client{mountPoint: fs}
+		r := newTestS3Client(t, fs)
 		// Parts predating the Started field. Whether bytes were written is unknowable, so the file
 		// is stubbed rather than restored, which would present partial contents as the original.
 		legacy := []*flex.Work{{Parts: []*flex.Work_Part{{Started: nil}}}}
@@ -344,7 +443,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 	// Dropping this the offloaded-restore branch lost its unit coverage because entry.GetFileDataState needs a live client.
 	// t.Run("an offloaded file that was never downloaded is restored to its original stub", func(t *testing.T) {
 	// 	fs := newAbortFS()
-	// 	r := &S3Client{mountPoint: fs}
+	// 	r := newTestS3Client(t, fs)
 	// 	// Overwrite lets the stub point somewhere other than the download source, so the original
 	// 	// url has to be restored rather than the job's.
 	// 	job := newDownloadAbortJob(&flex.JobLockedInfo{
@@ -408,21 +507,21 @@ func newArchivedDownloadRequest() *flex.WorkRequest {
 	}}}
 }
 
-func newArchivedTestClient(api s3ApiClient) *S3Client {
-	return &S3Client{
-		config:    &flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
-		s3Config:  &flex.RemoteStorageTarget_S3{Bucket: "test-bucket"},
-		apiClient: api,
-		storageClasses: map[types.StorageClass]S3StorageClass{
-			types.StorageClassGlacier: {
-				archival:      true,
-				autoRestore:   true,
-				retentionDays: 7,
-				checkTime:     5 * time.Hour,
-				recheckTime:   30 * time.Minute,
+func newArchivedTestClient(t *testing.T, api s3ApiClient) *S3Client {
+	t.Helper()
+	s3Config := &flex.RemoteStorageTarget_S3{
+		Bucket: "test-bucket",
+		StorageClass: []*flex.RemoteStorageTarget_S3_StorageClass{{
+			Name: string(types.StorageClassGlacier),
+			Archival: &flex.RemoteStorageTarget_S3_StorageClass_Archival{
+				AutoRestore:   true,
+				RetentionDays: 7,
+				CheckTime:     "5h",
+				RecheckTime:   "30m",
 			},
-		},
+		}},
 	}
+	return newTestS3ClientWithConfig(t, nil, s3Config, withTestApiClient(api))
 }
 
 // TestIsWorkRequestReadyReschedulesWhenCancelledInFlight covers the failure that took eight download
@@ -433,7 +532,7 @@ func TestIsWorkRequestReadyReschedulesWhenCancelledInFlight(t *testing.T) {
 	t.Run("restore object", func(t *testing.T) {
 		shutdownCtx, shutdown := context.WithCancel(context.Background())
 		api := &cancellingRestoreClient{shutdown: shutdown}
-		client := newArchivedTestClient(api)
+		client := newArchivedTestClient(t, api)
 
 		ready, delay, err := client.IsWorkRequestReady(shutdownCtx, context.Background(), newArchivedDownloadRequest())
 		require.NoError(t, err, "a shutdown that lands mid-request is not a failure of the request")
@@ -445,7 +544,7 @@ func TestIsWorkRequestReadyReschedulesWhenCancelledInFlight(t *testing.T) {
 	t.Run("head object", func(t *testing.T) {
 		shutdownCtx, shutdown := context.WithCancel(context.Background())
 		api := &cancellingRestoreClient{shutdown: shutdown, headObjectErr: cancelledOperationError("HeadObject")}
-		client := newArchivedTestClient(api)
+		client := newArchivedTestClient(t, api)
 
 		ready, _, err := client.IsWorkRequestReady(shutdownCtx, context.Background(), newArchivedDownloadRequest())
 		require.NoError(t, err, "a shutdown that lands mid-request is not a failure of the request")
@@ -458,7 +557,7 @@ func TestIsWorkRequestReadyReschedulesWhenCancelledInFlight(t *testing.T) {
 // terminal rather than being rescheduled forever.
 func TestIsWorkRequestReadyFailsWhenOnlyTheWorkIsCancelled(t *testing.T) {
 	api := &cancellingRestoreClient{shutdown: func() {}}
-	client := newArchivedTestClient(api)
+	client := newArchivedTestClient(t, api)
 
 	_, ready, err := client.IsWorkRequestReady(context.Background(), context.Background(), newArchivedDownloadRequest())
 	require.Error(t, err, "a cancellation that is not a shutdown must remain a failure")
