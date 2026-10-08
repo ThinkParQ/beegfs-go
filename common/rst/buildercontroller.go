@@ -104,7 +104,22 @@ func (c *requestBuildController) runWalk(group *errgroup.Group, walkCh <-chan *f
 
 	maxRequestsExtension := max(1, int64(float64(maxRequests)*walkContinuationMaxRequestExtensionMultiplier))
 	group.Go(func() error {
-		defer releaseWalk(walkCh, stopWalk)
+		// dispatched reports whether the last result read from walkCh was handed to a worker.
+		var dispatched bool
+		defer func() {
+			if dispatched {
+				// The last result's token was consumed so get the next result's resume token. Any
+				// dispatched path will not be walked again.
+				select {
+				case result, ok := <-walkCh:
+					if ok {
+						*c.resumeToken = result.ResumeToken
+					}
+				default:
+				}
+			}
+			releaseWalk(walkCh, stopWalk)
+		}()
 
 		for {
 			if err := c.workCtx.Err(); err != nil {
@@ -125,6 +140,7 @@ func (c *requestBuildController) runWalk(group *errgroup.Group, walkCh <-chan *f
 					walkDrained = true
 					return nil
 				}
+				dispatched = false
 				*c.resumeToken = result.ResumeToken
 
 				var failedPrecondition error
@@ -155,7 +171,7 @@ func (c *requestBuildController) runWalk(group *errgroup.Group, walkCh <-chan *f
 					submissions.Add(submitted)
 					return err
 				})
-
+				dispatched = true
 			}
 		}
 	})

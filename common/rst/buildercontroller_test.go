@@ -214,6 +214,72 @@ func TestRequestBuildController_RunWalkInterruptedKeepsResumePosition(t *testing
 	assert.True(t, controller.result.Reschedule)
 }
 
+// newShutdownOnDispatchController returns a controller whose node shuts down while the walk loop
+// resolves the paths for dispatchPath. The loop goes on to dispatch that path, and the check at the
+// top of its next pass then ends the round. So every round ends with dispatchPath as the last path
+// dispatched, whatever else the walk has buffered.
+func newShutdownOnDispatchController(t *testing.T, dispatchPath string) *requestBuildController {
+	t.Helper()
+	controller := newTestRequestBuildController(t, context.Background(), newTestSubmitter())
+
+	// On a sync node shutdownCtx is the parent of every work context, so a shutdown cancels both.
+	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	workCtx, cancelWork := context.WithCancel(shutdownCtx)
+	t.Cleanup(cancelWork)
+	controller.shutdownCtx = shutdownCtx
+	controller.workCtx = workCtx
+
+	getPaths := controller.getPaths
+	controller.getPaths = func(path string) (string, string) {
+		if path == dispatchPath {
+			shutdown()
+		}
+		return getPaths(path)
+	}
+	return controller
+}
+
+// TestRequestBuildController_RunWalkInterruptedResumesAfterDispatchedPath asserts a round cut off
+// right after it dispatched a path resumes after that path rather than at it. A result's token names
+// the path sent before it, so only the next result's token resumes past the dispatched one.
+func TestRequestBuildController_RunWalkInterruptedResumesAfterDispatchedPath(t *testing.T) {
+	controller := newShutdownOnDispatchController(t, "/a")
+
+	// The channel is left open, as a real walk is until the caller stops it, and the next result is
+	// already buffered when the round ends.
+	walkCh := make(chan *filesystem.StreamPathResult, 2)
+	walkCh <- &filesystem.StreamPathResult{Path: "/a", ResumeToken: ""}
+	walkCh <- &filesystem.StreamPathResult{Path: "/b", ResumeToken: "/a"}
+	t.Cleanup(func() { close(walkCh) })
+
+	runTestWalk(controller, walkCh, func() {}, testMaxRequests)
+
+	walkComplete, _ := parseResumeToken(resumeToken(t, controller), testJobId)
+	assert.False(t, walkComplete, "an interrupted round resumes rather than retiring its walk")
+	assert.Equal(t, "/a", resumeToken(t, controller), "the round resumes after the path it dispatched")
+	require.NotNil(t, controller.result, "an interrupted round must reschedule itself")
+	assert.True(t, controller.result.Reschedule)
+}
+
+// TestRequestBuildController_RunWalkInterruptedWithNothingBufferedKeepsPosition asserts a round cut
+// off right after it dispatched a path ends even though the walk is open with nothing buffered. The
+// round does not wait for a next result, so it keeps the token that resumes at the dispatched path.
+func TestRequestBuildController_RunWalkInterruptedWithNothingBufferedKeepsPosition(t *testing.T) {
+	controller := newShutdownOnDispatchController(t, "/a")
+
+	walkCh := make(chan *filesystem.StreamPathResult, 1)
+	walkCh <- &filesystem.StreamPathResult{Path: "/a", ResumeToken: ""}
+	t.Cleanup(func() { close(walkCh) })
+
+	runTestWalk(controller, walkCh, func() {}, testMaxRequests)
+
+	walkComplete, _ := parseResumeToken(resumeToken(t, controller), testJobId)
+	assert.False(t, walkComplete, "an interrupted round resumes rather than retiring its walk")
+	assert.Equal(t, "", resumeToken(t, controller), "with no next result the round resumes at the path it dispatched")
+	require.NotNil(t, controller.result, "an interrupted round must reschedule itself")
+	assert.True(t, controller.result.Reschedule)
+}
+
 // TestRequestBuildController_RunWalkConvertsRequestCancelErrorToFailedPrecondition asserts that a
 // RequestCancelError on the walk result does not fail the builder job. Instead it is submitted as a
 // FAILED_PRECONDITION request carrying the cancellation reason.
