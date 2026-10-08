@@ -11,14 +11,19 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	"go.uber.org/zap"
+)
+
+// The file event protocol version watch sends in its handshake. Every BeeGFS 8 metadata service
+// speaks v2.0.
+const (
+	eventProtocolMajor uint16 = 2
+	eventProtocolMinor uint16 = 0
 )
 
 // The metadata.Manager manages a Unix socket where the BeeGFS metadata service
@@ -37,36 +42,7 @@ type Manager struct {
 	socket     net.Listener
 	// lastSeqID is the seqID of the last event pushed to the EventBuffer. It is used to prevent
 	// pushing duplicate or out of sequence events into the buffer.
-	lastSeqID    uint64
-	eventVersion eventVersion
-}
-
-func newEventVersion(version string) (eventVersion, error) {
-	parts := strings.Split(version, ".")
-	if len(parts) != 2 {
-		return eventVersion{}, fmt.Errorf("invalid version format")
-	}
-
-	major, err := strconv.ParseUint(parts[0], 10, 16)
-	if err != nil {
-		return eventVersion{}, fmt.Errorf("invalid major version: %w", err)
-	}
-
-	minor, err := strconv.ParseUint(parts[1], 10, 16)
-	if err != nil {
-		return eventVersion{}, fmt.Errorf("invalid minor version: %w", err)
-	}
-
-	if major != 1 && major != 2 && minor != 0 {
-		return eventVersion{}, fmt.Errorf("unsupported event version: %d.%d", major, minor)
-	}
-
-	return eventVersion{major: uint16(major), minor: uint16(minor)}, nil
-}
-
-type eventVersion struct {
-	major uint16
-	minor uint16
+	lastSeqID uint64
 }
 
 // Config defines the configuration for a metadata.Manager.
@@ -77,12 +53,6 @@ type Config struct {
 	EventLogTarget         string `mapstructure:"event-log-target"`
 	EventBufferSize        int    `mapstructure:"event-buffer-size"`
 	EventBufferGCFrequency int    `mapstructure:"event-buffer-gc-frequency"`
-	// It is not possible to automatically differentiate between the v1 event protocol in BeeGFS 7
-	// and v2 event protocol in BeeGFS 8 because the former requires Watch to wait to receive events
-	// from meta, whereas the latter requires Watch to initiate the handshake. While its not clear
-	// if we ever want to allow Watch to be used with BeeGFS 7, until we decided this for certain,
-	// I'm leaving that path open for now since the work is already done.
-	EventVersion string `mapstructure:"event-version"`
 }
 
 // New creates a new Metadata manager that handles reading events from the
@@ -105,15 +75,6 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		return nil, nil, fmt.Errorf("multiple metadata services were specified but currently only one is supported")
 	}
 	config = metaConfigs[0]
-
-	if config.EventVersion == "" {
-		config.EventVersion = "2.0"
-	}
-
-	eventVersion, err := newEventVersion(config.EventVersion)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	// Cleanup old socket if needed:
 	stat, err := os.Stat(config.EventLogTarget)
@@ -153,22 +114,13 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		}
 	}
 
-	eventBuffer := types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency)
-	if eventVersion.major == 1 {
-		// The v1 event protocol has no handshake through which the metadata service can identify
-		// itself, so the buffer's ring ID will never be set. Record this so subscribers configured
-		// to wait for node ID detection can warn instead of waiting silently forever.
-		eventBuffer.MarkV1ProtocolInUse()
-	}
-
 	return &Manager{
-		ctx:          ctx,
-		socket:       socket,
-		log:          log,
-		socketPath:   config.EventLogTarget,
-		EventBuffer:  eventBuffer,
-		lastSeqID:    types.NoSeqId,
-		eventVersion: eventVersion,
+		ctx:         ctx,
+		socket:      socket,
+		log:         log,
+		socketPath:  config.EventLogTarget,
+		EventBuffer: types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency),
+		lastSeqID:   types.NoSeqId,
 	}, cleanup, nil
 }
 
@@ -181,7 +133,7 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 //
 // If there is a problem accepting a connection it will continue trying to accept new connections.
 // If there is an error reading from a connection it will close the connection and wait for a new one.
-// If it receives a bad packet (length doesn't match bytes read) it will warn and just send the packet header.
+// An event that cannot be deserialized is handled the same way, so the stream restarts at that event.
 //
 // When Managers context is cancelled, Manage will attempt to shutdown cleanly.
 // If it is currently reading/serializing a packet, the packet will be saved before the connection is closed.
@@ -218,11 +170,7 @@ func (m *Manager) Manage(wg *sync.WaitGroup) {
 			// ready. It also ensures we are able to finish reading the last event and publish it to
 			// the buffer before disconnecting.
 			var connMutex sync.Mutex
-			if m.eventVersion.major == 1 {
-				go m.handleV1Connection(conn, &connMutex, cancelConn)
-			} else {
-				go m.handleV2Connection(conn, &connMutex, cancelConn)
-			}
+			go m.handleV2Connection(conn, &connMutex, cancelConn)
 
 			select {
 			case <-m.ctx.Done():
@@ -300,8 +248,8 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	defer cancelConn()
 
 	if !handler.send(&HandshakeRequest{
-		Major: m.eventVersion.major,
-		Minor: m.eventVersion.minor,
+		Major: eventProtocolMajor,
+		Minor: eventProtocolMinor,
 	}) {
 		return
 	}
@@ -309,10 +257,10 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	handshakeResp := &HandshakeResponse{}
 	if !handler.recv(handshakeResp) {
 		return
-	} else if handshakeResp.Major != m.eventVersion.major {
+	} else if handshakeResp.Major != eventProtocolMajor {
 		m.log.Error("unsupported metadata event protocol detected",
 			zap.String("metaProtocolVersion", fmt.Sprintf("%d.%d", handshakeResp.Major, handshakeResp.Minor)),
-			zap.String("watchProtocolVersion", fmt.Sprintf("%d.%d", m.eventVersion.major, m.eventVersion.minor)))
+			zap.String("watchProtocolVersion", fmt.Sprintf("%d.%d", eventProtocolMajor, eventProtocolMinor)))
 		return
 	}
 
@@ -409,73 +357,6 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		} else {
 			m.log.Debug("discarding event that already exists in the buffer", zap.Any("event", sendMsg.Event))
 		}
-	}
-}
-
-// handleV1Connection will read packets from the provided connection.
-// When it reads a packet it will be deserialized and send to the metaEventBuffer.
-// If there is an error reading from the connection it will return calling cancelCtx() for upstream handling.
-func (m *Manager) handleV1Connection(conn net.Conn, connMutex *sync.Mutex, cancelConn context.CancelFunc) {
-	// Right now the meta service establishes and sends events over a single connection.
-	// It expects that connection will remain active indefinitely and will indicate "broken pipe" otherwise.
-
-	// Allocating a new buffer for every event has an immense impact on performance.
-	// So we allocate a buffer once and reuse it.
-	buffer := make([]byte, 65536)
-	defer cancelConn()
-
-	// v1 has no sequence IDs, so Watch generates them from m.lastSeqID. It persists on the Manager
-	// across reconnects (Manage runs one handleV1Connection at a time) so IDs stay monotonic for the
-	// life of the process; they only restart if Watch itself restarts. m.lastSeqID starts at the
-	// types.NoSeqId sentinel, so reset it to 0 on first use to keep the first generated ID at 1.
-	if m.lastSeqID == types.NoSeqId {
-		m.lastSeqID = 0
-	}
-
-	for {
-		connMutex.Lock()
-		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		bytesRead, err := conn.Read(buffer)
-		connMutex.Unlock()
-		if err != nil {
-			// Handle if we just exceeded the deadline and gave up the lock temporarily.
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				if bytesRead != 0 {
-					// In theory we don't need to worry about reading a partial message when setting
-					// a read deadline because we're using the unixpacket type (SOCK_SEQPACKET), so
-					// each read corresponds to a full message. If this ever did happen we would
-					// loose the event.
-					m.log.Error("reading from the metadata socket exceeded the read deadline but still returned a partial message, this should never happen and a bug should be filed", zap.Any("bytesRead", bytesRead))
-				}
-				continue
-			}
-			// Handle if we're gracefully shutting down and the socket was closed.
-			if errors.Is(err, net.ErrClosed) {
-				m.log.Debug("disconnected from metadata service")
-				return
-			}
-			m.log.Error("error reading from metadata connection", zap.Error(err))
-			return
-		}
-
-		event, err := deserializeEvent(buffer, uint32(bytesRead))
-
-		if err != nil {
-			// Probably we received a malformed event packet. There really isn't much we can do here
-			// other than warn. Hopefully this would only come up in development when network
-			// protocols and packet versions may be in flux.
-			m.log.Warn("unable to correctly deserialize packet due to an error (ignoring)", zap.Error(err))
-		}
-
-		// There are no sequence IDs in the v1 protocol so Watch needs to handle generating these.
-		// This does impose certain limitations, namely when Watch is restarted sequence IDs always
-		// start over limiting subscribers ability to check for duplicate or dropped events.
-		m.lastSeqID++
-		event.SeqId = m.lastSeqID
-		if _, err := m.EventBuffer.Push(event); err != nil {
-			m.log.Error("skipping event", zap.Error(err), zap.Any("seqId", event.SeqId))
-		}
-
 	}
 }
 

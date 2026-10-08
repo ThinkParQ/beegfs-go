@@ -213,13 +213,13 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	ctx := stream.Context()
 	metadata, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		err := fmt.Errorf("event stream from watch does not include any metadata (ensure skip-node-id-detection is not set for this subscriber)")
+		err := fmt.Errorf("event stream from watch does not include any metadata")
 		s.log.Error(err.Error())
 		return err
 	}
 	nodeID := metadata.Get("node-id")
 	if len(nodeID) == 0 {
-		err := fmt.Errorf("event stream from watch does not include the metadata node-id (ensure skip-node-id-detection is not set for this subscriber)")
+		err := fmt.Errorf("event stream from watch does not include the metadata node-id")
 		s.log.Error(err.Error())
 		return err
 	}
@@ -227,13 +227,13 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	parser := beegfs.NewEntityIdParser(32, beegfs.Meta)
 	entityID, err := parser.Parse(nodeID[0])
 	if err != nil {
-		err := fmt.Errorf("unable to parse a valid metadata node ID from the watch event stream: %w (ensure skip-node-id-detection is not set for this subscriber)", err)
+		err := fmt.Errorf("unable to parse a valid metadata node ID from the watch event stream: %w", err)
 		s.log.Error(err.Error())
 		return err
 	}
 	legacyID, ok := entityID.(beegfs.LegacyId)
 	if !ok {
-		err := fmt.Errorf("successfully parsed metadata node entity ID from the watch event stream, but it is not a valid legacy ID: %s (ensure skip-node-id-detection is not set for this subscriber)", entityID)
+		err := fmt.Errorf("successfully parsed metadata node entity ID from the watch event stream, but it is not a valid legacy ID: %s", entityID)
 		s.log.Error(err.Error())
 		return err
 	}
