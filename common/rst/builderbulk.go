@@ -311,6 +311,22 @@ func ValidateStateRoot(stateRoot string) (string, error) {
 	return cleaned, nil
 }
 
+// IsInStateRoot reports whether inMountPath is the state root or lies below it. Paths inside the
+// state root hold bulk operation state, so no job may upload, stub or overwrite them.
+//   - inMountPath is a path inside the BeeGFS mount, with or without a leading slash. It may come
+//     from a job request, so it is cleaned first, and "/a/../.beegfs-rst/x" still matches.
+//   - stateRoot is relative to the mount and must have passed ValidateStateRoot. An empty value
+//     means DefaultStateRoot, as it does there.
+//   - A path that only shares a name prefix, such as "/.beegfs-rst2", does not match.
+func IsInStateRoot(inMountPath string, stateRoot string) bool {
+	if stateRoot == "" {
+		stateRoot = DefaultStateRoot
+	}
+	root := path.Clean(NormalizePath(stateRoot))
+	cleaned := path.Clean(NormalizePath(inMountPath))
+	return cleaned == root || strings.HasPrefix(cleaned, root+"/")
+}
+
 // validateBulkOperationEntry checks an entry decoded from fileName before its fields are used to
 // build state paths. Entries are only written by this service, under a state root nobody else can
 // write, so a failure means the file was corrupted or edited by hand.

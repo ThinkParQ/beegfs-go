@@ -415,6 +415,7 @@ func (c *JobBuilderClient) newRequestBuildController(
 		workCtx:          workCtx,
 		requestBuilder:   requestBuilder,
 		workerSaturation: workerSaturation,
+		stateRoot:        c.stateRoot,
 	}
 }
 

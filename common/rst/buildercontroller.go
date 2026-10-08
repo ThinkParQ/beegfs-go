@@ -30,6 +30,7 @@ type requestBuildController struct {
 	getPaths     requestPathResolverFn
 	getWalk      getWalkFn
 	jobId        string
+	stateRoot    string
 
 	requestBuilder   *jobRequestBuilder
 	workerSaturation []func() float64
@@ -163,6 +164,11 @@ func (c *requestBuildController) runWalk(group *errgroup.Group, walkCh <-chan *f
 				}
 
 				inMountPath, remotePath := c.getPaths(result.Path)
+				if IsInStateRoot(inMountPath, c.stateRoot) {
+					// Remote would reject the request anyway. Skipping it here keeps a walk of
+					// the whole mount from reporting the state files as failed submissions.
+					continue
+				}
 
 				c.addWorker()
 				group.Go(func() error {

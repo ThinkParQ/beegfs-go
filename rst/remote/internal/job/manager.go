@@ -563,6 +563,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		return nil, fmt.Errorf("unable to generate job from job request: %w", err)
 	}
 
+	// Every job is submitted here, whatever sent it, and Remote owns the state root setting. So
+	// this is the one place that can keep all jobs out of the bulk operation state.
+	if rst.IsInStateRoot(jr.GetPath(), m.config.StateRoot) {
+		return nil, fmt.Errorf("%w: path %s is inside the RST state root %s, which holds bulk operation state", rst.ErrJobNotAllowed, jr.GetPath(), rst.NormalizePath(m.config.StateRoot))
+	}
+
 	// Initialize reference types:
 	_, pathEntry, commitAndReleasePath, err := m.pathStore.CreateAndLockEntry(
 		job.Request.GetPath(),

@@ -973,3 +973,31 @@ func TestValidateBulkOperationEntryAcceptsSavedEntries(t *testing.T) {
 	entry := &bulkOperationEntry{RstId: 7, Operation: "EFFICIENT_RETRIEVE"}
 	assert.NoError(t, validateBulkOperationEntry(entry, "7-EFFICIENT_RETRIEVE.json"))
 }
+
+// TestIsInStateRoot pins the boundary rules every state root check depends on.
+func TestIsInStateRoot(t *testing.T) {
+	tests := []struct {
+		name        string
+		inMountPath string
+		stateRoot   string
+		expected    bool
+	}{
+		{name: "the state root itself", inMountPath: "/.beegfs-rst", stateRoot: DefaultStateRoot, expected: true},
+		{name: "the state root with a trailing slash", inMountPath: "/.beegfs-rst/", stateRoot: DefaultStateRoot, expected: true},
+		{name: "a file below the state root", inMountPath: "/.beegfs-rst/job/1/state.bin", stateRoot: DefaultStateRoot, expected: true},
+		{name: "a path without a leading slash", inMountPath: ".beegfs-rst/job", stateRoot: DefaultStateRoot, expected: true},
+		{name: "a path that escapes back in", inMountPath: "/data/../.beegfs-rst/x", stateRoot: DefaultStateRoot, expected: true},
+		{name: "an empty state root means the default", inMountPath: "/.beegfs-rst/x", stateRoot: "", expected: true},
+		{name: "a nested state root", inMountPath: "/custom/state/x", stateRoot: "custom/state", expected: true},
+		{name: "a sibling sharing a name prefix", inMountPath: "/.beegfs-rst2/x", stateRoot: DefaultStateRoot},
+		{name: "a parent of a nested state root", inMountPath: "/custom", stateRoot: "custom/state"},
+		{name: "the mount root", inMountPath: "/", stateRoot: DefaultStateRoot},
+		{name: "the default when a custom root is set", inMountPath: "/.beegfs-rst/x", stateRoot: "custom/state"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, IsInStateRoot(test.inMountPath, test.stateRoot))
+		})
+	}
+}
