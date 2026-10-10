@@ -870,8 +870,7 @@ func (r *S3Client) GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCf
 
 func (r *S3Client) GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (string, error) {
 	if !cfg.Download {
-		segCount, parts := r.recommendedSegments(cfg.LockedInfo.Size, 0)
-		if segCount*int64(parts) > 1 {
+		if r.isWorkSplit(cfg.LockedInfo.Size) {
 			return r.createUpload(ctx, cfg.RemotePath, cfg.LockedInfo.Mtime.AsTime(), cfg.Metadata, cfg.Tagging, cfg.StorageClass)
 		}
 	}
@@ -911,7 +910,12 @@ func (r *S3Client) generateSyncJobWorkRequest_Upload(job *beeremote.Job, availab
 		return nil, fmt.Errorf("%w", ErrFileTypeUnsupported)
 	}
 
-	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.Size, availableWorkers)
+	segCount, partsPerSegment := r.planSegments(lockedInfo.Size, availableWorkers)
+	// The externalId may come from another process so verify its existence.
+	if lockedInfo.ExternalId == "" && segCount*int64(partsPerSegment) > 1 {
+		return nil, fmt.Errorf("upload of %d bytes was planned as %d segments of %d parts but no multipart upload was created (did the RST fast start max size change after the job was submitted?)",
+			lockedInfo.Size, segCount, partsPerSegment)
+	}
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.Size, segCount, partsPerSegment))
 	return workRequests, nil
 }
@@ -922,7 +926,7 @@ func (r *S3Client) generateSyncJobWorkRequest_Download(job *beeremote.Job, avail
 	lockedInfo := sync.LockedInfo
 	job.SetStartMtime(lockedInfo.RemoteMtime)
 
-	segCount, partsPerSegment := r.recommendedSegments(lockedInfo.RemoteSize, availableWorkers)
+	segCount, partsPerSegment := r.planSegments(lockedInfo.RemoteSize, availableWorkers)
 	workRequests := RecreateWorkRequests(job, generateSegments(lockedInfo.RemoteSize, segCount, partsPerSegment))
 	return workRequests, nil
 }
@@ -1472,7 +1476,7 @@ const (
 	minWorkRequestSegmentSize = 5 * 1024 * 1024
 )
 
-// recommendedSegments determines how to split a transfer of fileSize bytes into work request
+// planSegments determines how to split a transfer of fileSize bytes into work request
 // segments, and how many parts each segment is broken into. Segments are the unit of parallelism
 // (each is handed to a worker), while parts are the unit of resumption (a segment restarts from its
 // last completed part). It returns (1, 1) when segmentation is disabled (FastStartMaxSize <= 0) or
@@ -1501,7 +1505,7 @@ const (
 //
 // The last two rows show the maxWorkRequestSegments ceiling forcing parts well above the target
 // size, which coarsens resumption granularity.
-func (r *S3Client) recommendedSegments(fileSize int64, availableWorkers int) (segments int64, parts int32) {
+func (r *S3Client) planSegments(fileSize int64, availableWorkers int) (segments int64, parts int32) {
 	segments, parts = 1, 1
 	fastStartMaxSize := r.config.Policies.FastStartMaxSize
 	if fastStartMaxSize <= 0 || fileSize <= fastStartMaxSize {
@@ -1522,9 +1526,17 @@ func (r *S3Client) recommendedSegments(fileSize int64, availableWorkers int) (se
 	maxParts := maxWorkRequestSegments / segments
 	targetParts := (bytesPerSegment + targetWorkRequestSegmentPartSize - 1) / targetWorkRequestSegmentPartSize
 	parts = int32(max(1, min(targetParts, maxParts)))
-
-	// TODO: https://github.com/thinkparq/gobee/issues/7
-	// Arbitrary selection for now. We should be smarter and take into
-	// consideration the number of workers for this RST type.
 	return
+}
+
+// isWorkSplit reports whether an upload of fileSize bytes may be split into more than one part.
+func (r *S3Client) isWorkSplit(fileSize int64) bool {
+	// It's safe to call planSegments with availableWorkers=0 since the exact segments and parts do
+	// not need to be known, just whether there are more than one. The only time this assumption
+	// will fail is when fastStartMaxSize has been reduced and fileSize results in one segment and
+	// part. Job builder request submissions wait for a response even on graceful shutdowns so this
+	// is not a problem. If FastStartMaxSize is reduced, generateSyncJobWorkRequest_Upload fails the
+	// job instead of splitting it without a multipart upload.
+	segments, parts := r.planSegments(fileSize, 0)
+	return segments*int64(parts) > 1
 }
