@@ -116,7 +116,13 @@ func ConnectTCP(ctx context.Context, addrs []string, authSecret uint64, timeout 
 	// Wait for the connection attempts to complete or the context being cancelled
 	var conn net.Conn
 	select {
-	case res := <-ch:
+	case res, ok := <-ch:
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("no connection established to any address %v", addrs)
+		}
 		if res.err != nil {
 			return nil, fmt.Errorf("no response from any address %v: %w", addrs, res.err)
 		}

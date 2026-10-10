@@ -5,11 +5,13 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -19,7 +21,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const workDelayMinimum time.Duration = time.Second
+const (
+	// UpdateWorkRequestTimeout bounds a single attempt to update a work request to remote.
+	UpdateWorkRequestTimeout               = 30 * time.Second
+	workDelayMinimum         time.Duration = time.Second
+)
 
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
@@ -128,32 +134,41 @@ type worker struct {
 	workQueue            <-chan workAssignment
 	completedWork        chan<- workIdentifier
 	remoteStorageTargets *rst.ClientStore
-	workJournal          *kvstore.MapStore[workEntry]
+	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       func(submissionId string, ExecuteAfter time.Time)
+	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
+	workerSaturation     []func() float64
 	metrics              managerMetrics
 }
 
-func (w *worker) run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for {
+func (w *worker) run(ctx context.Context) {
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
 		case work := <-w.workQueue:
-			w.process(work)
+			w.process(ctx, work)
 		}
 	}
 }
 
-func (w *worker) process(work workAssignment) {
+// process carries out a single work assignment. The shutdownCtx is the worker pool's context and is
+// the parent of every work.ctx. Both being cancelled means BeeSync is stopping and the request
+// should be left resumable, whereas only work.ctx being cancelled means this particular request was
+// cancelled (for example by `beegfs remote job cancel`) and must not resume.
+func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 
 	// Regardless if the work request was processed successfully, tell WorkMgr when we stop
 	// processing this work item so it can pull more work into the queue.
 	defer func() {
-		w.completedWork <- work.workIdentifier
+		if shutdownCtx.Err() != nil {
+			return
+		}
+		select {
+		case w.completedWork <- work.workIdentifier:
+		case <-shutdownCtx.Done():
+		}
 	}()
 
 	if work.ctx.Err() != nil {
@@ -276,7 +291,7 @@ func (w *worker) process(work workAssignment) {
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("unable to execute work request: invalid starting state " + state.String())
 		}
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
@@ -287,17 +302,27 @@ func (w *worker) process(work workAssignment) {
 		log.Debug("work request specifies an unknown RST")
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("work request specifies an unknown RST")
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
 	}
 
 	// Check whether the work request is ready. If not, reschedule the work for a later time.
-	if isWorkReady, workDelay, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest); err != nil {
+	isWorkReady, workDelay, err := client.IsWorkRequestReady(shutdownCtx, work.ctx, request.WorkRequest)
+	if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before the work request started because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("work request was aborted")
+		return
+	} else if err != nil {
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("failed to determine if work request is ready: " + err.Error())
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work) {
 			cleanupEntries = true
 		}
 		return
@@ -308,7 +333,7 @@ func (w *worker) process(work workAssignment) {
 		entry.ExecuteAfter = time.Now().Add(workDelay)
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
-		w.sendWorkResult(work, result.Work)
+		w.sendWorkResult(shutdownCtx, work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -320,17 +345,37 @@ func (w *worker) process(work workAssignment) {
 	}
 
 	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	if state == flex.Work_SCHEDULED {
+		// Rescheduled work status messages will carry information aggregative status information.
+		// So, just set the running state information when the status state is scheduled.
+		status.SetMessage("attempting to carry out the work request")
+	}
 	status.SetState(flex.Work_RUNNING)
-	status.SetMessage("attempting to carry out the work request")
-	commitJournalEntry(kvstore.WithUpdateOnly(true))
+
+	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
+		log.Warn("error updating journal work entry to running", zap.Error(err))
+	}
+
+	// Make a best-effort attempt to notify remote that the job is running. A failure is
+	// logged and not retried because the final result is sent with retries when the work
+	// completes.
+	updateCtx, cancel := context.WithTimeout(work.ctx, UpdateWorkRequestTimeout)
+	if _, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, result.Work); err != nil {
+		log.Warn("unable to update remote job status to running; continuing work request without retrying", zap.Error(err))
+	}
+	cancel()
+
 	if request.HasBuilder() {
-		cleanupEntries = w.processBuilder(work, client, entry)
+		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry, log)
 	} else {
-		cleanupEntries = w.processWork(work, client, entry, func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }, log)
+		// processWork can run for a long time without returning, so it checkpoints the entry after
+		// each completed part instead of relying on the commit in the deferred function above.
+		commitWorkPart := func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }
+		cleanupEntries = w.processWork(shutdownCtx, work, client, entry, commitWorkPart, log)
 	}
 }
 
-func (w *worker) processWork(work workAssignment, client rst.Provider, entry workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
+func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -344,11 +389,12 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 			continue
 		}
 
-		// Block until the request is completed. We pass a context to the request to handle
-		// graceful cancellation. If the context is cancelled we still want to update the
-		// journal with the latest result before exiting so we can resume later on. The part
-		// will simply not be marked completed if the context was cancelled.
-		if err := client.ExecuteWorkRequestPart(work.ctx, request.WorkRequest, part); err != nil {
+		partResult := client.ExecuteWorkRequestPart(shutdownCtx, work.ctx, request.WorkRequest, part)
+		if partResult == nil {
+			partResult = &rst.SchedulingResult{}
+		}
+
+		if err := partResult.Err; err != nil {
 			// TODO: https://github.com/ThinkParQ/bee-remote/issues/55. ExecuteWorkRequestPart
 			// should return a boolean indicating if the specified error can be retried. Some
 			// ephemeral errors will be retried by the RST, but longer lasting error states such as
@@ -366,94 +412,250 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry wor
 			} else {
 				status.SetMessage("error transferring part: " + err.Error())
 			}
-			if w.sendWorkResult(work, result.Work) {
+			if w.sendWorkResult(shutdownCtx, work, result.Work) {
 				cleanupEntries = true
 			}
+			return
+		}
+
+		if partResult.Reschedule {
+			commitWorkPart()
+			status.SetState(flex.Work_RESCHEDULED)
+			if shutdownCtx.Err() != nil {
+				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+				entry.ExecuteAfter = time.Time{}
+				return
+			}
+			status.SetMessage("stopped before all parts were synced")
+			entry.ExecuteAfter = time.Now().Add(partResult.Delay)
+			w.sendWorkResult(shutdownCtx, work, result.Work)
+			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("rescheduled"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
 			return
 		}
 
 		if part.GetCompleted() {
 			completedParts++
 		}
-		// Commit each part as they are completed so other readers can monitor progress.
 		commitWorkPart()
 	}
 
 	if len(result.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
+	} else if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("the work context was cancelled before all parts can be synced")
+		return
 	} else {
-		if work.ctx.Err() != nil {
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("the work context was cancelled before all parts can be synced")
-			// Don't send the work result and don't try to cleanup entries. We don't know why we
-			// were asked to be done early so we'll let the caller handle either sending the result
-			// or retrying the request later.
-			return
-		}
 		// This shouldn't happen so we set the state to failed to avoid making things worse and
 		// ensure we don't silently retry this forever.
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(shutdownCtx, work, result.Work) {
 		cleanupEntries = true
 	}
 	return
 }
 
-func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry workEntry) (cleanupEntries bool) {
-	request := entry.WorkRequest
-	result := entry.WorkResult
-	status := result.GetStatus()
+func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, log *zap.Logger) (cleanupEntries bool) {
+	workRequest := entry.WorkRequest.WorkRequest
+	builder := workRequest.GetBuilder()
 
-	var reschedule bool
-	var err error
-	jobSubmissionChan := make(chan *pbr.JobRequest, 2048)
-	go func() {
-		defer close(jobSubmissionChan)
-		reschedule, err = client.ExecuteJobBuilderRequest(work.ctx, request.WorkRequest, jobSubmissionChan)
-	}()
+	var builderMu sync.Mutex
+	result := client.ExecuteJobBuilderRequest(shutdownCtx, work.ctx, log, workRequest, func(ctx context.Context, request *pbr.JobRequest) error {
+		return w.sendBuilderJobRequest(ctx, &builderMu, builder, request)
+	}, w.workerSaturation)
 
-	total := 0
-	totalErrors := 0
-processJobs:
-	for {
+	if result == nil {
+		result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
+	}
+	return w.updateBuilderJob(shutdownCtx, work, entry, result)
+}
+
+// Returns true if the work result was sent, or for some reason cannot be sent but the overall state
+// is such we should not keep retrying and the work result is no longer needed (this should only
+// happen if the job was deleted on BeeRemote so there is nothing to update).
+func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment, workResult *flex.Work) bool {
+	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID))
+
+	for work.ctx.Err() == nil || shutdownCtx.Err() != nil {
+		// Detached from work.ctx so cancelling it cannot abort an attempt already inflight and leave the
+		// outcome unknown.
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(work.ctx), UpdateWorkRequestTimeout)
+		canRetry, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, workResult)
+		cancel()
+
+		if err == nil {
+			return true
+		} else if !canRetry {
+			log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on remote?)")
+			return true
+		} else if shutdownCtx.Err() != nil {
+			// Only allowed shutdown one attempt and it failed so keep the entries.
+			log.Warn("error sending work result to remote", zap.Error(err))
+			return false
+		}
+
+		log.Warn("error sending work result to remote (retrying indefinitely)", zap.Error(err))
+
+		// Don't block on shutdown waiting to retry if there is a problem sending the updated
+		// work request to BeeRemote. This particularly causes problems when testing because the
+		// test timeout can be exceeded because of all the time spent waiting here.
 		select {
+		case <-time.After(1 * time.Second):
+			// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
+			// Evaluate if we should add an exponential backoff here and not log every time above.
 		case <-work.ctx.Done():
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("work context was cancelled before job requests could be created")
-			if w.sendWorkResult(work, result.Work) {
-				cleanupEntries = true
-			}
-			for range jobSubmissionChan {
-			}
-			return
-		case jobRequest, ok := <-jobSubmissionChan:
-			if !ok {
-				break processJobs
-			}
-
-			if err := w.beeRemoteClient.SubmitJobRequest(work.ctx, jobRequest); err != nil {
-				totalErrors += 1
-			}
-			total++
 		}
 	}
 
-	if err != nil {
-		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage("job builder failed to complete: " + err.Error())
-	} else if reschedule {
-		status.SetState(flex.Work_RESCHEDULED)
-		message := "waiting for builder job to continue"
-		if totalErrors > 0 {
-			message = fmt.Sprintf("%s: %d job request(s) failed! See `beegfs remote status/job list` for details", message, totalErrors)
+	// The work request was cancelled by user
+	return false
+}
+
+// sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
+// submission's outcome:
+//   - A nil error means remote accepted the request and a job now owns everything the builder
+//     prepared for it. A claim remote reports as already claimed is also accepted, because remote
+//     only says that when an earlier attempt of this same claim landed and its reply was lost.
+//   - An error wrapping rst.ErrRequestNotDelivered means ctx ended before remote confirmed it saw
+//     the request. The builder must leave the request replayable.
+//   - Any other error means remote refused the request, so no job will ever run it and the builder
+//     should revert its changes.
+//
+// builder's counters are incremented under mu because requests are submitted concurrently from
+// every goroutine building a path for the same builder job. These counters are only updated when
+// the journal entry is committed; so, if the sync node crashes before committing them then they
+// will be incorrect.
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
+	const maxSendBuilderJobDelay = 60 * time.Second
+	const initialDelay = 1 * time.Second
+	delay := initialDelay
+
+	for {
+		err := w.beeRemoteClient.SubmitJobRequest(ctx, request)
+		switch {
+		case errors.Is(err, context.Canceled):
+			if ctx.Err() != nil {
+				// The caller cancelled the call because the job was cancelled or the node is
+				// shutting down. Nothing is wrong with the request, so it is not counted. The call
+				// was cut off in flight, so remote may or may not have received it.
+				return fmt.Errorf("%w: %w", rst.ErrRequestNotDelivered, err)
+			}
+			// The caller did not cancel which means the connection to remote was closed so retry.
+			fallthrough
+		case errors.Is(err, beeremote.ErrUnavailable):
+			// Retry with an exponential backoff until remote can be reached again. Only the first
+			// retry is logged, because every path the builder walks can be retrying at once.
+			if delay == initialDelay {
+				w.log.Warn("unable to submit job request, retrying until the connection to remote is restored", zap.String("path", request.GetPath()), zap.Error(err))
+			}
+			select {
+			case <-time.After(delay):
+				delay *= 2
+				if delay > maxSendBuilderJobDelay {
+					delay = maxSendBuilderJobDelay
+				}
+				continue
+			case <-ctx.Done():
+				// Remote is still unreachable and ctx has ended, so stop retrying instead of leaving
+				// the request with its plan applied and its lock held. It is deliberately not
+				// counted, because nothing is wrong with the request itself. A request from the
+				// original walk is rebuilt when the builder job rewalks the path after a restart. A
+				// request from a bulk operation keeps its record, so the next execute replays it.
+				return fmt.Errorf("%w: unable to submit job request before ctx ended: %w", rst.ErrRequestNotDelivered, err)
+			}
 		}
-		status.SetMessage(message)
-		entry.ExecuteAfter = time.Now()
-		w.sendWorkResult(work, result.Work)
+
+		isReserve := request.GetReserve()
+		isClaim := !isReserve && request.HasReserveJobId()
+
+		if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
+			// Remote answers a claim this way only when the reserved job was already claimed by
+			// this request. An earlier attempt landed but its reply was lost, either to a closed
+			// connection that was retried above, or to a shutdown before the bulk operation
+			// replayed the claim. The job is live and owns the plan, so reporting a refusal would
+			// make the builder undo the plan and release the lock under it. For any request that is
+			// not a claim, ErrJobAlreadyExists means nothing changed since the last job, which is a
+			// real refusal.
+			err = nil
+		}
+
+		mu.Lock()
+		// The count stops at zero. A crash loses the counters of the round that had not committed
+		// yet, including its reserves, while the claims for those reserves still arrive afterwards.
+		if isClaim && builder.JobsReserved > 0 {
+			builder.JobsReserved--
+		}
+		if err == nil {
+			if isReserve {
+				builder.JobsReserved++
+			} else {
+				builder.Submitted++
+			}
+		} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
+			builder.JobsAlreadyComplete++
+		} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+			builder.JobsAlreadyOffloaded++
+		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
+			builder.JobsAlreadyExist++
+		} else if errors.Is(err, rst.ErrJobNotAllowed) {
+			builder.JobsNotAllowed++
+		} else if errors.Is(err, rst.ErrJobNotReserved) {
+			builder.JobsNotReserved++
+		} else {
+			builder.Errors++
+		}
+		mu.Unlock()
+		return err
+	}
+}
+
+// updateBuilderJob uses result to update the builder job's work status and state.
+func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignment, entry *workEntry, result *rst.SchedulingResult) (cleanupEntries bool) {
+	request := entry.WorkRequest
+	workRequest := request.WorkRequest
+	workResult := entry.WorkResult
+	builder := workRequest.GetBuilder()
+	status := workResult.GetStatus()
+
+	builderMessage, builderHasErrors := getBuilderResults(builder)
+	defer func() {
+		status.SetMessage(appendMessage(status.Message, builderMessage))
+		if w.sendWorkResult(shutdownCtx, work, workResult.Work) && !result.Reschedule {
+			cleanupEntries = true
+		}
+	}()
+
+	if shutdownCtx.Err() != nil {
+		// Worker is shutting down so reschedule so the job can finished after it's started
+		// again. If not, then the job will be cancelled which will be failed after the restart.
+		result.Reschedule = true
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for builder job to continue because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+	} else if result.Err != nil {
+		result.Reschedule = false
+		message := result.Err.Error()
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("job builder failed to complete: " + message)
+	} else if result.Reschedule {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for builder job to continue")
+		entry.ExecuteAfter = time.Now().Add(result.Delay)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -461,52 +663,73 @@ processJobs:
 				attrPriority.Int(normalizedPriority(request.GetPriority())),
 			),
 		)
-		return
-	} else if totalErrors > 0 {
+	} else if builderHasErrors {
 		status.SetState(flex.Work_CANCELLED)
-		status.SetMessage(fmt.Sprintf("%d job request(s) failed! See `beegfs remote status/job list` for details", totalErrors))
+		status.SetMessage("completed with errors")
 	} else {
 		status.SetState(flex.Work_COMPLETED)
-		status.SetMessage("all jobs were submitted")
+		status.SetMessage("completed successfully")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
-		cleanupEntries = true
-	}
 	return
 }
 
-// Returns true if the work result was sent, or for some reason cannot be sent but the overall state
-// is such we should not keep retrying and the work result is no longer needed (this should only
-// happen if the job was deleted on BeeRemote so there is nothing to update).
-func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool {
-	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID))
-	for {
-		select {
-		case <-work.ctx.Done():
-			return false
-		default:
-			canRetry, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, workResult)
-			if err != nil {
-				if !canRetry {
-					log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on BeeRemote?)")
-					return true
-				}
-				log.Warn("error sending work result to BeeRemote (retrying indefinitely)", zap.Error(err))
-			} else {
-				return true
-			}
-			// Don't block on shutdown waiting to retry if there is a problem sending the updated
-			// work request to BeeRemote. This particularly causes problems when testing because the
-			// test timeout can be exceeded because of all the time spent waiting here.
-			select {
-			case <-time.After(1 * time.Second):
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
-				// Evaluate if we should add an exponential backoff here and not log every time above.
-			case <-work.ctx.Done():
-				return false
-			}
+// getBuilderResults generates a status message based on the builder submission counters and
+// reports whether any of those counters indicate a failure.
+func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool) {
+	cfg := builder.GetCfg()
+	jobsSubmitted := builder.GetSubmitted()
+	jobsErrors := builder.GetErrors()
+	jobsNotAllowed := builder.GetJobsNotAllowed()
+	jobsNotReserved := builder.GetJobsNotReserved()
+	jobsAlreadyComplete := builder.GetJobsAlreadyComplete()
+	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
+	jobsAlreadyExist := builder.GetJobsAlreadyExist()
+	jobsReserved := builder.GetJobsReserved()
 
+	var parts []string
+	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsNotReserved + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist + jobsReserved
+	if jobsProcessed == 0 {
+		hasErrors = true
+		if cfg.Download {
+			if rst.WalkLocalPathInsteadOfRemote(cfg) {
+				parts = append(parts, fmt.Sprintf("walked local path since --%s was not provided; No matches found in path: %s", rst.RemotePathFlag, cfg.Path))
+			} else {
+				parts = append(parts, fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath))
+			}
+		} else {
+			parts = append(parts, fmt.Sprintf("no matches found in local path: %s", cfg.Path))
 		}
 	}
+
+	if jobsSubmitted > 0 {
+		parts = append(parts, fmt.Sprintf("%d job request(s) submitted", jobsSubmitted))
+	}
+	if jobsAlreadyComplete > 0 {
+		parts = append(parts, fmt.Sprintf("%d already complete", jobsAlreadyComplete))
+	}
+	if jobsAlreadyOffloaded > 0 {
+		parts = append(parts, fmt.Sprintf("%d already offloaded", jobsAlreadyOffloaded))
+	}
+	if jobsAlreadyExist > 0 {
+		parts = append(parts, fmt.Sprintf("%d already exist", jobsAlreadyExist))
+	}
+	if jobsNotAllowed > 0 {
+		parts = append(parts, fmt.Sprintf("%d not allowed", jobsNotAllowed))
+		hasErrors = true
+	}
+	if jobsNotReserved > 0 {
+		parts = append(parts, fmt.Sprintf("%d not reserved", jobsNotReserved))
+		hasErrors = true
+	}
+	if jobsErrors > 0 {
+		parts = append(parts, fmt.Sprintf("%d submitted with errors", jobsErrors))
+		hasErrors = true
+	}
+	if jobsReserved > 0 {
+		parts = append(parts, fmt.Sprintf("%d reserved and not yet claimed by a bulk operation", jobsReserved))
+		hasErrors = true
+	}
+
+	return strings.Join(parts, "; "), hasErrors
 }

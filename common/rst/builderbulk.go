@@ -1,0 +1,689 @@
+package rst
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"os"
+	"path"
+	"strings"
+	"sync"
+
+	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
+)
+
+type BulkStreamPathResult struct {
+	BulkInfo    *flex.BulkJobRequestInfo
+	RstId       uint32
+	InMountPath string
+	RemotePath  string
+	// ReservedJobId is the job the operation reserved for this request when it absorbed it. The
+	// builder submits it as the request's reserved_job_id so the emitted request takes over that
+	// job instead of creating a new one. It is set on every result, including the ones carrying
+	// an Err, because the reserved job is where that failure has to be recorded.
+	ReservedJobId string
+	Err           error
+}
+
+type bulkOperationEntry struct {
+	StateMountPath string `json:"stateMountPath"`
+	RstId          uint32 `json:"rstId"`
+	// Operation is the bulk operation name and should correspond to the operation's string define
+	// in the protobuf RemoteStorageTarget type's bulk_operations.
+	Operation string `json:"operation"`
+	// Failed indicates whether the bulk operation has failed.
+	Failed bool `json:"failed"`
+	// Errors holds any errors that occurred to the bulk operation.
+	Errors []string `json:"errors,omitempty"`
+	// Destroying marks an entry whose teardown started. It is written before any provider state is
+	// deleted and only cleared by removing the entry, so an entry that still has it set means a
+	// Destroy was interrupted and has to be finished rather than reopened.
+	Destroying bool `json:"destroying,omitempty"`
+}
+
+type bulkOperationRegistry struct {
+	managers   map[string]*bulkOperationManager
+	managersMu sync.Mutex
+	mountPath  string
+	// stateRoot is the mount-relative path for storing persistent state information and is use here
+	// for maintaining bulk operation state.
+	stateRoot    string
+	rstMap       map[uint32]Provider
+	builderJobId string
+}
+
+func (m *bulkOperationRegistry) GetManagersSnapshot() map[string]*bulkOperationManager {
+	m.managersMu.Lock()
+	defer m.managersMu.Unlock()
+
+	snapshot := make(map[string]*bulkOperationManager, len(m.managers))
+	maps.Copy(snapshot, m.managers)
+	return snapshot
+}
+
+// GetFailedOperationErrors returns the reason every permanently failed operation failed, or nil
+// when none did. A failed operation never produces jobs for the paths it absorbed, so the builder
+// job has to report this or those paths are dropped without explanation.
+func (m *bulkOperationRegistry) GetFailedOperationErrors() (err error) {
+	for key, manager := range m.GetManagersSnapshot() {
+		if !manager.IsFailed() {
+			continue
+		}
+
+		if reason := manager.GetErrors(); reason != nil {
+			err = appendErrors(err, fmt.Errorf("bulk operation %s failed permanently: %w", key, reason))
+		} else {
+			err = appendErrors(err, fmt.Errorf("bulk operation %s failed permanently", key))
+		}
+	}
+	return
+}
+
+// AddRequest offers a request to the bulk operation that handles its remote storage target. The
+// target's client decides whether the request belongs to one. addedToBulk is true only when an
+// operation took the request, which makes that operation responsible for it (see offerBulkRequestFn).
+// A request that a failed operation would have taken gets a FAILED_PRECONDITION generation status
+// instead, so it is not added and the caller submits it as a failure.
+func (m *bulkOperationRegistry) AddRequest(ctx context.Context, request *beeremote.JobRequest, operation string) error {
+	rstId := request.GetRemoteStorageTarget()
+	manager, err := m.getOrAddManager(ctx, rstId, operation)
+	if err != nil {
+		return err
+	}
+
+	if manager.IsFailed() {
+		return fmt.Errorf("remote storage target %d's %q bulk operation previously failed and will not be retried: %s", rstId, operation, manager.GetErrors())
+	}
+	return manager.AddRequest(ctx, request)
+}
+
+// UpdateBulkRequest reports to a bulk operation of it's request state change. A request with no
+// bulk info belong to no operation and are ignored.
+func (m *bulkOperationRegistry) UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+	bulkInfo := request.GetBulkInfo()
+	if bulkInfo == nil {
+		return nil
+	}
+
+	key := bulkOperationKey(request.GetRemoteStorageTarget(), bulkInfo.GetOperation())
+	m.managersMu.Lock()
+	manager, ok := m.managers[key]
+	m.managersMu.Unlock()
+	if !ok {
+		return fmt.Errorf("unable to report bulk request state %s to operation %s: the operation is not open", state, key)
+	}
+
+	return manager.UpdateBulkRequest(ctx, request, state)
+}
+
+// getOrAddManager returns the manager for rstId's operation, creating it on first use. The registry
+// lock is only held long enough to look the manager up or create it, so adding a request to an
+// operation never blocks requests bound for a different one. Requests sharing a manager are still
+// serialized by the manager itself, which is what the provider relies on to assign job indexes.
+func (m *bulkOperationRegistry) getOrAddManager(ctx context.Context, rstId uint32, operation string) (*bulkOperationManager, error) {
+	client, ok := m.rstMap[rstId]
+	if !ok {
+		return nil, fmt.Errorf("missing remote storage target %d: %w", rstId, ErrConfigRSTTypeIsUnknown)
+	}
+
+	m.managersMu.Lock()
+	defer m.managersMu.Unlock()
+
+	if manager, ok := m.managers[bulkOperationKey(rstId, operation)]; ok {
+		return manager, nil
+	}
+	return m.addManagerUnlocked(ctx, client, rstId, operation)
+}
+
+func (m *bulkOperationRegistry) addManagerUnlocked(ctx context.Context, client Provider, rstId uint32, operation string) (manager *bulkOperationManager, err error) {
+	key := bulkOperationKey(rstId, operation)
+	bulkOperation := &bulkOperationEntry{RstId: rstId, Operation: operation}
+	manager = newBulkOperationManager(ctx, client, m.mountPath, m.stateRoot, m.builderJobId, bulkOperation)
+
+	// The manager is registered before its entry is saved so a save failure still leaves it
+	// reachable for the in-process teardown paths.
+	m.managers[key] = manager
+	if err = manager.Save(); err != nil {
+		err = fmt.Errorf("failed to save new bulk operation %s: %w", key, err)
+
+		// An operation that isn't on the mount must not absorb any requests. Only the goroutine
+		// that created it sees this error; the walk keeps running, and every path that follows
+		// would otherwise join an operation nothing can find after a restart and never become a
+		// job. Failing the manager makes those requests report the reason instead. Persisting the
+		// failure usually fails for the same reason the save did, which is why the error is
+		// dropped: it is the in-memory flag that protects the rest of this builder job. When the
+		// save does succeed the entry also becomes reachable for teardown to clean up.
+		_ = manager.Fail(err)
+	}
+	return
+}
+
+func (m *bulkOperationRegistry) Init(ctx context.Context) error {
+	return m.loadBulkOperationEntries(ctx)
+}
+
+// loadBulkOperationEntries recreates a manager for each entry the builder job saved. An entry whose
+// teardown was interrupted is finished instead of reopened, and the leftovers of an interrupted save
+// or teardown are reclaimed so nothing is left on the mount that no entry refers to.
+func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) error {
+	root, err := openStateLayout(m.mountPath, m.stateRoot, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer root.Close()
+
+	entriesPath := bulkOperationEntriesPath(m.builderJobId)
+	entryFiles, err := readStateDir(root, entriesPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to read state directory %s: %w", entriesPath, err)
+	}
+
+	savedEntries := make(map[string]struct{}, len(entryFiles))
+	for _, entryFile := range entryFiles {
+		if !entryFile.IsDir() && path.Ext(entryFile.Name()) == bulkOperationEntryExtension {
+			savedEntries[entryFile.Name()] = struct{}{}
+		}
+	}
+
+	for _, entryFile := range entryFiles {
+		if entryFile.IsDir() {
+			continue
+		}
+
+		if path.Ext(entryFile.Name()) != bulkOperationEntryExtension {
+			// An interrupted save leaves its staging file behind. One whose entry was written is
+			// removed when that entry is destroyed, but one whose entry never made it has no owner:
+			// nothing would ever remove it, and it keeps the job's directories from being reclaimed
+			// once the operations themselves are gone.
+			staged, isStaged := strings.CutSuffix(entryFile.Name(), persistentTmpSuffix)
+			if _, owned := savedEntries[staged]; isStaged && !owned {
+				stagedPath := path.Join(entriesPath, entryFile.Name())
+				if err := removeIfExists(root, stagedPath); err != nil {
+					return fmt.Errorf("failed to remove the leftover of an interrupted save %s: %w", stagedPath, err)
+				}
+			}
+			continue
+		}
+
+		entryPath := path.Join(entriesPath, entryFile.Name())
+		data, err := root.ReadFile(entryPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("failed to read bulk operation %s: %w", entryPath, err)
+		}
+
+		entry := new(bulkOperationEntry)
+		if err := json.Unmarshal(data, entry); err != nil {
+			return fmt.Errorf("failed to decode bulk operation %s: %w", entryPath, err)
+		}
+
+		if invalidErr := validateBulkOperationEntry(entry, entryFile.Name()); invalidErr != nil {
+			// The entry's fields cannot be trusted to name its state, so no path is built from them
+			// and nothing is opened, written or deleted for it. The failed manager makes the builder
+			// job report the problem, and the file is left for an administrator to inspect. It is
+			// registered under its file name, which is unique, because its own key may collide with
+			// a valid entry.
+			invalid := newInvalidBulkOperationManager(m.mountPath, m.stateRoot, m.builderJobId, entry, invalidErr)
+			m.managers[strings.TrimSuffix(entryFile.Name(), bulkOperationEntryExtension)] = invalid
+			continue
+		}
+
+		manager := newBulkOperationManager(ctx, m.rstMap[entry.RstId], m.mountPath, m.stateRoot, m.builderJobId, entry)
+
+		if entry.Destroying {
+			// An earlier Destroy was interrupted, so whatever provider state is left belongs to an
+			// operation whose requests were already resolved. Finishing the teardown reclaims it.
+			if destroyErr := manager.Destroy(ctx); destroyErr != nil {
+				return fmt.Errorf("failed to finish destroying bulk operation %s: %w", manager.Key(), destroyErr)
+			}
+			continue
+		}
+
+		m.managers[manager.Key()] = manager
+	}
+
+	// Removing a job's last entry and pruning the directory that held it cannot be done as one
+	// operation, so a teardown interrupted between the two leaves the job's directories behind with
+	// no entry referring to them. Nothing else enumerates those directories, which makes reopening
+	// the job the only chance to reclaim them. The prune stops at the first directory still in use,
+	// so it does nothing while the job still has entries or state.
+	return removeEmptyDirs(root, entriesPath)
+}
+
+// readStateDir lists the directory name within root.
+func readStateDir(root *os.Root, name string) ([]os.DirEntry, error) {
+	dir, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+
+	return dir.ReadDir(-1)
+}
+
+// Close closes all bulk operation managers and returns any errors encountered.
+func (m *bulkOperationRegistry) Close(ctx context.Context) (err error) {
+	for managerKey, manager := range m.GetManagersSnapshot() {
+		if closeErr := manager.Close(ctx); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close bulk operation manager, %s: %w", managerKey, closeErr))
+		}
+	}
+	return
+}
+
+const (
+	DefaultStateRoot            = ".beegfs-rst"
+	bulkManagerPath             = "job"
+	bulkOperationsPath          = "bulk-operations"
+	bulkOperationEntryExtension = ".json"
+)
+
+// ValidateStateRoot checks a configured state root and returns the cleaned value to use. An empty
+// stateRoot yields DefaultStateRoot.
+func ValidateStateRoot(stateRoot string) (string, error) {
+	if stateRoot == "" {
+		return DefaultStateRoot, nil
+	}
+
+	if strings.HasPrefix(stateRoot, "/") {
+		return "", fmt.Errorf("state root %q must be relative to the BeeGFS mount point, not an absolute path", stateRoot)
+	}
+
+	cleaned := path.Clean(stateRoot)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("state root %q resolves to %q, which is outside the BeeGFS mount point", stateRoot, cleaned)
+	}
+	if cleaned == "." {
+		return "", fmt.Errorf("state root %q resolves to the BeeGFS mount point itself, which cannot hold bulk operation state", stateRoot)
+	}
+
+	return cleaned, nil
+}
+
+// IsInStateRoot reports whether inMountPath is the state root or lies below it. Paths inside the
+// state root hold bulk operation state, so no job may upload, stub or overwrite them.
+//   - inMountPath is a path inside the BeeGFS mount, with or without a leading slash. It may come
+//     from a job request, so it is cleaned first, and "/a/../.beegfs-rst/x" still matches.
+//   - stateRoot is relative to the mount and must have passed ValidateStateRoot. An empty value
+//     means DefaultStateRoot, as it does there.
+//   - A path that only shares a name prefix, such as "/.beegfs-rst2", does not match.
+func IsInStateRoot(inMountPath string, stateRoot string) bool {
+	if stateRoot == "" {
+		stateRoot = DefaultStateRoot
+	}
+	root := path.Clean(NormalizePath(stateRoot))
+	cleaned := path.Clean(NormalizePath(inMountPath))
+	return cleaned == root || strings.HasPrefix(cleaned, root+"/")
+}
+
+// validateBulkOperationEntry checks an entry decoded from fileName before its fields are used to
+// build state paths. Entries are only written by this service, under a state root nobody else can
+// write, so a failure means the file was corrupted or edited by hand.
+//   - Operation must be one plain path component, because it is joined into the operation's state
+//     directory. A value such as "../../<job>/1/<operation>" would name another job's state.
+//   - The entry must be saved under the name its own key gives. That ties the content to the file,
+//     so one entry cannot claim another operation's state.
+//
+// RstId needs no check of its own. It is a number, so it cannot change the shape of a path, and an
+// RstId with no configured RST already fails the manager in newBulkOperationManager.
+func validateBulkOperationEntry(entry *bulkOperationEntry, fileName string) error {
+	operation := entry.Operation
+	if operation == "" || operation == "." || operation == ".." || strings.ContainsRune(operation, '/') {
+		return fmt.Errorf("bulk operation entry %s names operation %q, which is not a single path component", fileName, operation)
+	}
+
+	key := bulkOperationKey(entry.RstId, operation)
+	if want := key + bulkOperationEntryExtension; fileName != want {
+		return fmt.Errorf("bulk operation entry %s describes operation %s, so it should be saved as %s", fileName, key, want)
+	}
+	return nil
+}
+
+// bulkOperationEntriesPath is the directory, relative to the layout directory, holding the saved entry of
+// every bulk operation started by jobId.
+func bulkOperationEntriesPath(jobId string) string {
+	return path.Join(bulkManagerPath, jobId, bulkOperationsPath)
+}
+
+type bulkOperationManager struct {
+	clientBulkOperation
+	*bulkOperationEntry
+	mountPath string
+	stateRoot string
+	jobId     string
+	// invalidEntry is why the entry this manager was loaded from failed validateBulkOperationEntry,
+	// or nil. A manager with an invalid entry has no state path and never writes or deletes
+	// anything. See newInvalidBulkOperationManager.
+	invalidEntry error
+	mu           sync.RWMutex
+}
+
+// newBulkOperationManager opens the provider handle for entry. A failure to open is recorded on the
+// entry but deliberately not persisted: the caller decides whether the failure is durable. A newly
+// created operation is persisted by addManagerUnlocked, whereas a reopen failure is left unsaved so
+// an operation whose RST is restored to the configuration can still run.
+func newBulkOperationManager(ctx context.Context, client Provider, mountPath string, stateRoot string, jobId string, entry *bulkOperationEntry) *bulkOperationManager {
+	stateMountPath := path.Join(stateLayoutMountPath(stateRoot), bulkManagerPath, jobId, fmt.Sprint(entry.RstId), entry.Operation)
+	entry.StateMountPath = stateMountPath
+	manager := &bulkOperationManager{
+		bulkOperationEntry: entry,
+		mountPath:          mountPath,
+		stateRoot:          stateRoot,
+		jobId:              jobId,
+	}
+
+	if client == nil {
+		// The RST was removed from the configuration, so there is no provider left to release
+		// anything through. That is permanent as far as this job is concerned.
+		manager.failLocked(fmt.Errorf("unable to create bulk operation manager: remote storage target ID %d does not exist in the configuration", manager.RstId))
+	} else if clientBulkOperation, err := client.OpenBulkOperation(ctx, stateMountPath, manager.Operation); err != nil {
+		if !isTransientBulkError(err) {
+			manager.failLocked(err)
+		}
+	} else {
+		manager.clientBulkOperation = clientBulkOperation
+	}
+
+	return manager
+}
+
+// newInvalidBulkOperationManager returns a permanently failed manager for an entry that failed
+// validateBulkOperationEntry. It runs when the registry loads entries from disk.
+//
+// No state path is built from the entry and no provider handle is opened, so every operation on
+// the manager fails with err. Save and Destroy do nothing, because both would derive a path from
+// the fields that failed validation. The failure is reported like any other failed operation,
+// through GetFailedOperationErrors.
+func newInvalidBulkOperationManager(mountPath string, stateRoot string, jobId string, entry *bulkOperationEntry, err error) *bulkOperationManager {
+	entry.StateMountPath = ""
+	manager := &bulkOperationManager{
+		bulkOperationEntry: entry,
+		mountPath:          mountPath,
+		stateRoot:          stateRoot,
+		jobId:              jobId,
+		invalidEntry:       err,
+	}
+	manager.failLocked(err)
+	return manager
+}
+
+// isTransientBulkError reports whether the error means the operation was interrupted.
+func isTransientBulkError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// failBulkOperation records error and marks the manager permanently failed unless the operation was
+// interrupted. Bulk operations must only fail when there's an unrecoverable error. It returns the
+// error from persisting the failure, which must not be ignored.
+func failBulkOperation(manager *bulkOperationManager, err error) error {
+	if isTransientBulkError(err) {
+		return nil
+	}
+	return manager.Fail(err)
+}
+
+// getEntryPath is the file, relative to the layout directory, the manager's bulkOperationEntry is
+// persisted to. Entries are filed per builder job rather than under the operation's own
+// StateMountPath so they can all be loaded from a single directory when the job is rescheduled.
+func (m *bulkOperationManager) getEntryPath() string {
+	return path.Join(bulkOperationEntriesPath(m.jobId), m.Key()+bulkOperationEntryExtension)
+}
+
+// Save persists the bulk operation's entry so a rescheduled builder job can reopen the operation.
+// The entry is written atomically, so an interrupted save leaves the previously saved entry intact
+// instead of a partially rewritten one.
+func (m *bulkOperationManager) Save() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.saveLocked()
+}
+
+// saveLocked is Save for callers already holding m.mu, so an entry can be mutated and persisted
+// without another goroutine observing (or persisting) the intermediate state.
+func (m *bulkOperationManager) saveLocked() error {
+	if m.invalidEntry != nil {
+		// The entry's own fields name the file it would be saved to, and they failed validation.
+		// The failure lives in memory instead, and the file on disk is left as it was found.
+		return nil
+	}
+
+	data, err := json.Marshal(m.bulkOperationEntry)
+	if err != nil {
+		return fmt.Errorf("failed to encode bulk operation %s: %w", m.Key(), err)
+	}
+
+	root, err := openStateLayout(m.mountPath, m.stateRoot, true)
+	if err != nil {
+		return fmt.Errorf("failed to open state root for bulk operation %s: %w", m.Key(), err)
+	}
+	defer root.Close()
+
+	entryPath := m.getEntryPath()
+	if err := root.MkdirAll(path.Dir(entryPath), stateDirPerm); err != nil {
+		return fmt.Errorf("failed to create state directory for bulk operation %s: %w", m.Key(), err)
+	}
+
+	if err := writePersistentFile(root, entryPath, data); err != nil {
+		return fmt.Errorf("failed to write state for bulk operation %s: %w", m.Key(), err)
+	}
+
+	return nil
+}
+
+func (m *bulkOperationManager) IsFailed() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.Failed
+}
+
+// Fail records err against the operation and marks it permanently failed, persisting both in a
+// single write so the entry is never left reporting the error without the failure that caused it.
+func (m *bulkOperationManager) Fail(err error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.failLocked(err)
+	return m.saveLocked()
+}
+
+// failLocked records err and marks the operation failed without persisting it. Only for callers
+// that hold m.mu and take responsibility for persisting the entry themselves.
+func (m *bulkOperationManager) failLocked(err error) {
+	if err != nil {
+		m.Errors = append(m.Errors, err.Error())
+	}
+	m.Failed = true
+}
+
+// AddRequest attaches the bulk operation's StateMountPath and Operation to the request. JobIndex is
+// intentionally left unset here; the provider-specific clientBulkOperation assigns it based on its
+// own persisted state (e.g. the count of requests already recorded on disk) since it's the one that
+// must be able to reconstruct a correct index after a builder reschedule reopens the operation.
+func (m *bulkOperationManager) AddRequest(ctx context.Context, request *beeremote.JobRequest) error {
+	if m.IsFailed() {
+		return fmt.Errorf("cannot add request to bulk operation %s: it previously failed permanently", m.Key())
+	}
+	if m.clientBulkOperation == nil {
+		return fmt.Errorf("cannot add request to bulk operation %s: %w", m.Key(), m.notOpenedReason())
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	request.SetBulkInfo(&flex.BulkJobRequestInfo{
+		StateMountPath: m.StateMountPath,
+		Operation:      m.Operation,
+	})
+
+	if err := m.clientBulkOperation.AddRequest(ctx, request); err != nil {
+		// The request never entered the operation so nothing may later report on its behalf.
+		request.ClearBulkInfo()
+		return err
+	}
+	return nil
+}
+
+// UpdateBulkRequest notifies the owning bulk operation of a state change. Any failures here will be
+// treated as fatal because the issue is likely systemic.
+func (m *bulkOperationManager) UpdateBulkRequest(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+	if m.clientBulkOperation == nil {
+		return fmt.Errorf("cannot report bulk request state %s for operation %s: %w", state, m.Key(), m.notOpenedReason())
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.clientBulkOperation.UpdateBulkRequest(ctx, request, state)
+}
+
+// notOpenedReason explains why the manager has no provider handle.
+func (m *bulkOperationManager) notOpenedReason() error {
+	if err := m.GetErrors(); err != nil {
+		return fmt.Errorf("it could not be opened: %w", err)
+	}
+	return errors.New("it could not be opened and has no provider handle")
+}
+
+func (m *bulkOperationManager) Key() string {
+	return bulkOperationKey(m.RstId, m.Operation)
+}
+
+func (m *bulkOperationManager) Execute(ctx context.Context) (walkCh <-chan *BulkStreamPathResult, getResults BulkExecuteResultFn, err error) {
+	if m.clientBulkOperation == nil {
+		err = fmt.Errorf("cannot execute bulk operation %s: %w", m.Key(), m.notOpenedReason())
+		return
+	}
+	return m.clientBulkOperation.Execute(ctx)
+}
+
+func (m *bulkOperationManager) Cancel(ctx context.Context, reason error) (walkCh <-chan *BulkStreamPathResult, wait BulkCancelResultFn, err error) {
+	if m.clientBulkOperation == nil {
+		err = fmt.Errorf("cannot cancel bulk operation %s: %w", m.Key(), m.notOpenedReason())
+		return
+	}
+	return m.clientBulkOperation.Cancel(ctx, reason)
+}
+
+func (m *bulkOperationManager) Close(ctx context.Context) error {
+	if m.clientBulkOperation == nil {
+		return nil
+	}
+	return m.clientBulkOperation.Close(ctx)
+}
+
+// Destroy deletes the operation's provider state and its saved entry so a later registry for the
+// same builder job doesn't reopen an operation that was already torn down.
+//
+// The entry is marked as being destroyed before any state is deleted and removed only once all of
+// it is gone, which keeps the entry the one record that provider state may still exist. Removing it
+// first would orphan that state, since nothing else enumerates it, while deleting the state first
+// would let a reopen recreate it: the provider treats its own missing state as proof the operation
+// was destroyed, so a resurrected operation reports itself as healthy to requests that have already
+// been resolved against it.
+func (m *bulkOperationManager) Destroy(ctx context.Context) error {
+	if m.invalidEntry != nil {
+		// Every path Destroy would delete is derived from fields that failed validation, so nothing
+		// is deleted. The entry file stays for an administrator to inspect.
+		return nil
+	}
+
+	if err := m.setDestroying(); err != nil {
+		return err
+	}
+
+	if m.clientBulkOperation != nil {
+		if err := m.clientBulkOperation.Destroy(ctx); err != nil {
+			return err
+		}
+	}
+
+	root, err := openStateLayout(m.mountPath, m.stateRoot, false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The entry lives under the layout directory, so without one there is nothing left to
+			// remove.
+			return nil
+		}
+		return fmt.Errorf("cannot open the state root of bulk operation %s, so its entry is kept to find its state again: %w", m.Key(), err)
+	}
+	defer root.Close()
+
+	stateDirPath, err := stateLayoutRelPath(m.stateRoot, m.StateMountPath)
+	if err != nil {
+		return fmt.Errorf("cannot remove the state of bulk operation %s, so its entry is kept to find that state again: %w", m.Key(), err)
+	}
+	if err := removeIfExists(root, stateDirPath); err != nil {
+		return fmt.Errorf("cannot remove the state of bulk operation %s, so its entry is kept to find that state again: %w", m.Key(), err)
+	}
+
+	if err := removeEmptyDirs(root, path.Dir(stateDirPath)); err != nil {
+		return err
+	}
+
+	entryPath := m.getEntryPath()
+	if err := appendErrors(removeIfExists(root, entryPath), removeIfExists(root, persistentTmpPath(entryPath))); err != nil {
+		return err
+	}
+
+	return removeEmptyDirs(root, path.Dir(entryPath))
+}
+
+// setDestroying records that the operation's teardown has started. It is a no-op once the entry is
+// already marked so a retried Destroy doesn't rewrite it.
+func (m *bulkOperationManager) setDestroying() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Destroying {
+		return nil
+	}
+
+	m.Destroying = true
+	if err := m.saveLocked(); err != nil {
+		m.Destroying = false
+		return fmt.Errorf("failed to mark bulk operation %s as being destroyed: %w", m.Key(), err)
+	}
+	return nil
+}
+
+// AppendError records err against the operation and persists it so a rescheduled builder job can
+// report why the operation ended up in the state it did. The operation is not marked failed; use
+// Fail for errors the operation cannot recover from.
+func (m *bulkOperationManager) AppendError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.Errors = append(m.Errors, err.Error())
+	return m.saveLocked()
+}
+
+func (m *bulkOperationManager) GetErrors() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.Errors) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("bulk operation %s: (%s)", m.Operation, strings.Join(m.Errors, "; "))
+}
+
+func bulkOperationKey(rstId uint32, operation string) string {
+	return fmt.Sprintf("%d-%s", rstId, operation)
+}

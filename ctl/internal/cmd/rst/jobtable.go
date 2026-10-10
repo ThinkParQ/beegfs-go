@@ -300,8 +300,10 @@ type jobStateEmoji struct {
 var jobStateMap = map[beeremote.Job_State]jobStateEmoji{
 	beeremote.Job_UNKNOWN:    {"❓", beeremote.Job_UNKNOWN.String()},
 	beeremote.Job_UNASSIGNED: {"⏳", beeremote.Job_UNASSIGNED.String()},
-	beeremote.Job_SCHEDULED:  {"⏳", beeremote.Job_SCHEDULED.String()},
-	beeremote.Job_RUNNING:    {"🔄", beeremote.Job_RUNNING.String()},
+	// A reserved job holds its path and RST but has no work requests yet.
+	beeremote.Job_RESERVED:  {"🔒", beeremote.Job_RESERVED.String()},
+	beeremote.Job_SCHEDULED: {"⏳", beeremote.Job_SCHEDULED.String()},
+	beeremote.Job_RUNNING:   {"🔄", beeremote.Job_RUNNING.String()},
 	// The warning sign (⚠) emoji can cause alignment issues in go-pretty tables
 	// because it is normally followed by a variation selector (`\ufe0f`), making
 	// it behave inconsistently in monospaced environments.

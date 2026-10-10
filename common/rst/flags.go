@@ -20,6 +20,7 @@ const (
 	StorageClassFlag   = "storage-class"
 	UpdateFlag         = "update"
 	StubLocalFlag      = "stub-local"
+	OverwriteFlag      = "overwrite"
 )
 
 const (

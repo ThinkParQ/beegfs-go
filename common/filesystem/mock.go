@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 )
@@ -38,31 +39,61 @@ func (fs MockFS) Lstat(path string) (os.FileInfo, error) {
 }
 
 func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {
-	file, err := fs.Fs.Create(path)
+	flags := os.O_RDWR | os.O_CREATE
+	if overwrite {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_EXCL
+	}
+
+	file, err := fs.Fs.OpenFile(path, flags, 0666)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	file.Truncate(size)
-	return nil
+
+	return file.Truncate(size)
+}
+
+func (fs MockFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	flags := os.O_RDWR | os.O_CREATE
+	if !overwrite {
+		flags |= os.O_EXCL
+	}
+
+	file, err := fs.Fs.OpenFile(path, flags, 0666)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return file.Truncate(size)
 }
 
 func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
-	file, err := fs.Fs.Create(path)
+	flags := os.O_RDWR | os.O_CREATE
+	if overwrite {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_EXCL
+	}
+
+	file, err := fs.Fs.OpenFile(path, flags, os.FileMode(mode))
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
 	_, err = file.Write(buf)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func (fs MockFS) Remove(path string) error {
 	return fs.Fs.Remove(path)
+}
+
+func (fs MockFS) RemoveAll(path string) error {
+	return fs.Fs.RemoveAll(path)
 }
 
 func (fs MockFS) Open(path string) (io.ReadCloser, error) {
@@ -115,6 +146,10 @@ func (fs MockFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
 
 func (fs MockFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
+	return fs.Fs.Chtimes(path, atime, mtime)
 }
 
 func (fs MockFS) OverwriteFile(srcPath, dstPath string) error {
