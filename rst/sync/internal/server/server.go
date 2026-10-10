@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path"
@@ -161,13 +162,14 @@ func (s *WorkerNodeServer) SubmitWork(ctx context.Context, request *flex.SubmitW
 	// Draining alone is no longer a rejection: Remote offers a draining node work only after every
 	// online node has declined, and journaling it here so it runs after the restart beats failing
 	// the job outright. Once the manager starts shutting down there is no longer a journal to record
-	// it in, so reject then. The rejection is checked before the work manager is touched so it stays
-	// unambiguous: nothing was created here, and Remote is free to assign the request elsewhere.
-	if !s.workMgr.Accepting() {
+	// it in, so reject then. The work manager returns ErrStopping before it touches its stores, so
+	// the rejection is unambiguous: nothing was created here, and Remote is free to assign the
+	// request elsewhere.
+	work, err := s.workMgr.SubmitWorkRequest(request.GetRequest())
+	if errors.Is(err, workmgr.ErrStopping) {
 		s.log.Debug("rejecting work request because this node is shutting down", zap.Any("request", request))
 		return flex.SubmitWorkResponse_builder{Status: flex.SubmitWorkResponse_DRAINING}.Build(), nil
 	}
-	work, err := s.workMgr.SubmitWorkRequest(request.GetRequest())
 	if err != nil {
 		return nil, err
 	}
