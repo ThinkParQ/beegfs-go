@@ -72,11 +72,17 @@ type Config struct {
 type Manager struct {
 	ready   bool
 	readyMu sync.RWMutex
-	// stopping is set once Stop() has finished with the workers and starts tearing down the manager
-	// itself, after which the work journal is closing and no new request can be accepted. It is
-	// separate from ready because a draining node is still ready to record work, and separate from
-	// the worker context because workers are cancelled well before the journal closes.
-	stopping atomic.Bool
+	// rpcMu admits the calls the gRPC server makes on behalf of Remote (SubmitWorkRequest and
+	// UpdateWork) and keeps the job store and work journal open until they return. Each call holds a
+	// read lock for its whole duration, see admitRPC. Stop() takes the write lock once the workers
+	// have exited, which waits for every admitted call to finish, then sets stopping before anything
+	// is closed. The gRPC server keeps serving while the manager stops, so without this a call could
+	// pass its checks and then write to a store that is closing underneath it.
+	rpcMu sync.RWMutex
+	// stopping is set by Stop() under rpcMu once no admitted call remains, and is never cleared.
+	// It is separate from ready because a draining node is still ready to record work, and separate
+	// from the worker context because workers are cancelled well before the journal closes.
+	stopping bool
 	log      *logger.Logger
 	// When shutting down workers must be shutdown first so the manager can handle their results and
 	// store them in the database.
@@ -306,14 +312,20 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 	return nil
 }
 
-// Accepting reports whether new work requests can still be recorded. It stays true for as long as
-// the work journal is open, which includes the drain that precedes shutdown: a request accepted then
-// cannot run in this process, but it is journaled and replayed when the node restarts, which is
-// better than rejecting work that has nowhere else to go. It goes false once Stop() begins tearing
-// the manager down, because past that point the journal is closing and an accepted request would be
-// lost rather than replayed.
-func (m *Manager) Accepting() bool {
-	return !m.stopping.Load()
+// admitRPC runs at the start of every call made on behalf of Remote. It decides whether the call may
+// touch the job store and work journal, which stay open until the returned release function is
+// called. Calls are admitted for as long as the journal is open. That includes the drain before
+// shutdown: a request accepted then cannot run in this process, but it is journaled and replayed
+// when the node restarts, which is better than rejecting work that has nowhere else to go. Once
+// Stop() sets stopping, admitRPC returns ErrStopping without touching the manager, so the caller
+// knows nothing was recorded.
+func (m *Manager) admitRPC() (release func(), err error) {
+	m.rpcMu.RLock()
+	if m.stopping {
+		m.rpcMu.RUnlock()
+		return nil, ErrStopping
+	}
+	return m.rpcMu.RUnlock, nil
 }
 
 // Once manage is started it will not exit until the context is cancelled. If an error happens it
@@ -795,7 +807,24 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 	return
 }
 
+// SubmitWorkRequest records a work request Remote assigned to this node. Remote treats an error as
+// proof the request was not recorded here and may assign it to another node, so an error is only
+// returned when nothing will run it:
+//   - ErrStopping (unwrapped) when the manager is shutting down and the stores were never touched.
+//   - Any other error when the work journal entry was not committed. The work journal is what
+//     workers run and what is replayed after a restart, so its commit is the point after which the
+//     request exists on this node.
+//
+// The job entry indexes the request so UpdateWork can find it. It is written before the journal
+// entry, so a committed request is always indexed. If the journal commit then fails, the index entry
+// is removed again.
 func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
+	releaseRPC, err := m.admitRPC()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRPC()
+
 	if !m.IsReady() {
 		return nil, status.Errorf(codes.FailedPrecondition, "%s", ErrNotReady)
 	}
@@ -805,59 +834,88 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 
 	// First create or get the existing entry for this job and lock it to prevent anyone else from
 	// adding an entry for this WR. We also ensure there isn't an existing entry for the WR.
-	_, job, commitAndReleaseJob, err := m.jobStore.CreateAndLockEntry(
+	_, job, commitJob, err := m.jobStore.CreateAndLockEntry(
 		jobId,
 		kvstore.WithAllowExisting(true),
 		kvstore.WithValue(make(map[string]string)),
 	)
-	if err != nil && !errors.Is(err, kvstore.ErrEntryAlreadyExistsInDB) {
+	jobExisted := errors.Is(err, kvstore.ErrEntryAlreadyExistsInDB)
+	if err != nil && !jobExisted {
 		return nil, fmt.Errorf("unable to create new entry or get existing entry for job ID %s: %w", jobId, err)
 	}
 
-	if _, ok := job.Value[workRequestId]; ok {
-		if err := commitAndReleaseJob(); err != nil {
+	// releaseJob writes the job entry back and unlocks it. A job entry this call created is deleted
+	// instead when it indexes no requests, so a failed submission does not leave an empty one behind.
+	releaseJob := func() {
+		var err error
+		if !jobExisted && len(job.Value) == 0 {
+			err = commitJob(kvstore.WithDeleteEntry(true))
+		} else {
+			err = commitJob()
+		}
+		if err != nil {
 			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", jobId))
 		}
-		return nil, status.Errorf(codes.AlreadyExists, "%s", fmt.Errorf("already handling work request ID %s for job ID %s (refusing to create duplicate entries)", workRequestId, jobId))
 	}
 
-	defer func() {
-		if err := commitAndReleaseJob(); err != nil {
-			m.log.Error("unable to release job entry", zap.Error(err), zap.Any("jobID", jobId))
-		}
-	}()
+	if _, ok := job.Value[workRequestId]; ok {
+		releaseJob()
+		return nil, status.Errorf(codes.AlreadyExists, "%s", fmt.Errorf("already handling work request ID %s for job ID %s (refusing to create duplicate entries)", workRequestId, jobId))
+	}
 
 	// Have the MapStore auto generate the submission ID based. This will be a base 36 encoded
 	// string padded to a fixed width of 13 characters. Generally we should not need to worry about
 	// manually generating IDs, except for pullInNewWork() which needs to increment the ID.
 	key, err := m.workJournal.GenerateNextPK()
 	if err != nil {
+		releaseJob()
 		return nil, fmt.Errorf("unable to generate database key for job ID %s: %w", jobId, err)
 	}
 
 	submissionId, priority := scheduler.CreateSubmissionId(key, wr.GetPriority())
-	_, workEntry, commitAndReleaseWork, err := m.workJournal.CreateAndLockEntry(submissionId, kvstore.WithValue(&workEntry{}))
+	_, workEntry, commitWork, err := m.workJournal.CreateAndLockEntry(submissionId, kvstore.WithValue(&workEntry{}))
 	if err != nil {
+		releaseJob()
 		return nil, fmt.Errorf("unable to create work journal entry for job ID %s work request ID %s: %w", jobId, workRequestId, err)
 	}
-	defer func() {
-		if err := commitAndReleaseWork(); err != nil {
-			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
-		}
-		m.scheduler.AddWorkToken(submissionId)
-		m.metrics.workRequests.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attrState.String("new"),
-				attrPriority.Int(normalizedPriority(priority)),
-			),
-		)
-	}()
 
 	wr.SetPriority(priority)
 	workEntry.Value.WorkRequest = &workRequest{WorkRequest: wr}
 	workResult := newWorkFromRequest(workEntry.Value.WorkRequest)
 	workEntry.Value.WorkResult = workResult
+
+	// Index the request first and keep the job entry locked, so UpdateWork cannot act on the index
+	// until the journal entry is committed or the index is rolled back. Nothing has been recorded
+	// yet if this fails. Deleting the uncommitted journal entry only writes a tombstone for a key
+	// that was never stored, and releases its lock.
 	job.Value[workRequestId] = submissionId
+	if err := commitJob(kvstore.WithUpdateOnly(true)); err != nil {
+		delete(job.Value, workRequestId)
+		if err := commitWork(kvstore.WithDeleteEntry(true)); err != nil {
+			m.log.Error("unable to release work journal entry", zap.Error(err), zap.Any("jobID", jobId))
+		}
+		releaseJob()
+		return nil, fmt.Errorf("unable to index work request ID %s for job ID %s: %w", workRequestId, jobId, err)
+	}
+
+	if err := commitWork(); err != nil {
+		// A failed rollback leaves an index entry pointing at a journal entry that does not exist.
+		// UpdateWork then fails to find the journal entry and returns an error for that request.
+		delete(job.Value, workRequestId)
+		releaseJob()
+		return nil, fmt.Errorf("unable to record work request ID %s for job ID %s in the work journal: %w", workRequestId, jobId, err)
+	}
+	// The index was already written above, so a failure here only means the unchanged value could
+	// not be written a second time.
+	releaseJob()
+
+	m.scheduler.AddWorkToken(submissionId)
+	m.metrics.workRequests.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attrState.String("new"),
+			attrPriority.Int(normalizedPriority(priority)),
+		),
+	)
 
 	return workResult.Work, nil
 }
@@ -881,6 +939,14 @@ func (m *Manager) SubmitWorkRequest(wr *flex.WorkRequest) (*flex.Work, error) {
 // IMPORTANT: This is not well suited for "bulk" updates and should not (for example) be used to
 // cancel all work requests on this node.
 func (m *Manager) UpdateWork(update *flex.UpdateWorkRequest) (*flex.Work, error) {
+	releaseRPC, err := m.admitRPC()
+	if err != nil {
+		// Nothing was changed. The request stays in the journal and is replayed after a restart,
+		// so Remote can retry the update then.
+		return nil, status.Errorf(codes.Unavailable, "%s", err)
+	}
+	defer releaseRPC()
+
 	if !m.IsReady() {
 		return nil, status.Errorf(codes.FailedPrecondition, "%s", ErrNotReady)
 	}
@@ -1146,8 +1212,13 @@ func (m *Manager) Stop() {
 	stopProgressReports()
 	m.log.Info("stopped all workers, attempting stop manager")
 	// Past this point the journal and shared clients are being closed, so nothing more can be
-	// accepted. Reject before touching the manager rather than surfacing errors from a closing DB.
-	m.stopping.Store(true)
+	// accepted. Taking the write lock waits for every call already admitted by admitRPC to finish
+	// with the stores. Calls that arrive later are rejected before they touch the manager, rather
+	// than surfacing errors from a closing DB. No worker is left to hold a journal entry lock that
+	// an admitted UpdateWork waits on, so this wait is bounded by the admitted calls themselves.
+	m.rpcMu.Lock()
+	m.stopping = true
+	m.rpcMu.Unlock()
 	m.mgrCancel()
 	m.mgrWG.Wait()
 	m.log.Info("stopped manager")
