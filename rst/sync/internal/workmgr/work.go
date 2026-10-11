@@ -219,57 +219,55 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 	// database entries.
 	defer func() {
 		if cleanupEntries {
-
-			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(work.jobID)
-			if err != nil {
-				log.Warn("error getting job entry while trying to complete work request", zap.Error(err))
-			} else {
-				_, ok := jobEntry.Value[work.workRequestID]
-				if !ok {
-					// If this happens we'll still remove the journal entry because there is nothing
-					// to cleanup in the job entry anyway.
-					log.Warn("got job entry but it does not contain an entry for this work request (ignoring)")
-				} else {
-					if len(jobEntry.Value) == 1 {
-						// If this is the last/only work request for this job, delete the entire
-						// MapStore entry.
-						err = commitJob(kvstore.WithDeleteEntry(true))
-					} else {
-						// Otherwise just delete the single work request:
-						delete(jobEntry.Value, work.workRequestID)
-						err = commitJob()
-					}
-					if err != nil {
-						log.Warn("error cleaning up job entry while completing work request", zap.Error(err))
-					}
-				}
+			// The journal entry is deleted and its lock released before the job entry is locked.
+			// UpdateWork locks the job entry and then waits for the journal entry so waiting for
+			// the job entry while still holding the journal entry deadlocks with a cancel that
+			// arrives while this request is finishing. UpdateWork treats a journal entry that is
+			// gone as a request that already finished and removes its job index entry itself.
+			if err := commitJournalEntry(kvstore.WithDeleteEntry(true)); err != nil {
+				// The lock is released either way. The entry and its job index entry are kept, so
+				// the journal replay after a restart sends the result again and retries cleanup.
+				log.Warn("error deleting journal work entry", zap.Error(err))
+				return
 			}
-
-			// If for some reason the jobEntry no longer exists, just ignore the error. All we were
-			// going to do was clean up the entry anyway. A kvstore.ErrEntryNotInDB should only ever
-			// happen after a crash where we were able to clean up the jobStore entry, but didn't
-			// get a chance to cleanup the journalEntry. When we replayed the journal we would have
-			// tried to send the result to BeeRemote again, and if we were told to cleanupEntries
-			// that must have happened successfully so there is nothing left to do.
-			if err != nil && !errors.Is(err, kvstore.ErrEntryNotInDB) {
-				// Don't clean up the journal entry if there was an error, we may have an
-				// opportunity to try again later.
-				err = commitJournalEntry()
-			} else {
-				err = commitJournalEntry(kvstore.WithDeleteEntry(true))
-			}
-			if err != nil {
-				log.Warn("error releasing journal work entry", zap.Error(err))
-			}
-
 			w.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
 					attrState.String("completed"),
 					attrPriority.Int(normalizedPriority(request.GetPriority())),
 				),
 			)
+
+			// From here on a failure only leaves a stale job index entry that points at a deleted
+			// journal entry. UpdateWork removes it the next time the request is cancelled.
+			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(work.jobID)
+			if err != nil {
+				// UpdateWork deletes the job entry when it removes the last index entry so the
+				// entry being gone is expected after a cancel raced this request's completion.
+				if !errors.Is(err, kvstore.ErrEntryNotInDB) && !errors.Is(err, kvstore.ErrEntryAlreadyDeleted) {
+					log.Warn("error getting job entry while trying to complete work request", zap.Error(err))
+				}
+				return
+			}
+
+			if _, ok := jobEntry.Value[work.workRequestID]; !ok {
+				// UpdateWork already removed the index entry after a cancel raced this request's
+				// completion. Release the job entry unchanged.
+				err = commitJob()
+			} else if len(jobEntry.Value) == 1 {
+				// If this is the last work request for this job, delete the entire
+				// MapStore entry.
+				err = commitJob(kvstore.WithDeleteEntry(true))
+			} else {
+				// Otherwise just delete the single work request.
+				delete(jobEntry.Value, work.workRequestID)
+				err = commitJob()
+			}
+			if err != nil {
+				log.Warn("error cleaning up job entry while completing work request", zap.Error(err))
+			}
 			return
 		}
+
 		// Otherwise just commit the work entries to the database.
 		if err := commitJournalEntry(); err != nil {
 			log.Warn("error updating and releasing journal work entry", zap.Error(err))

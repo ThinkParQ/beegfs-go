@@ -862,6 +862,80 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 	mockBeeRemote.AssertExpectations(t)
 }
 
+// A cancel that arrives while a worker sends a request's final result must not deadlock. UpdateWork
+// locks the job entry and waits for the journal entry. The worker holds the journal entry until the
+// result is sent and then cleans up both entries. The final result is sent detached from the
+// request's context, so the cancel does not abort it and the cleanup always runs.
+func TestCancelDuringFinalUpdateDoesNotDeadlock(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	inFinalRPC := make(chan struct{})
+	releaseFinalRPC := make(chan struct{})
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(true, time.Duration(0), nil).Times(1)
+	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("0", "0"), mock.Anything).Return(nil).Times(2)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_RUNNING)).Return(nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_COMPLETED)).
+		Run(func(mock.Arguments) {
+			close(inFinalRPC)
+			<-releaseFinalRPC
+		}).Return(nil).Times(1)
+
+	_, err = mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.NoError(t, err)
+
+	select {
+	case <-inFinalRPC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never reached the final UpdateWork RPC")
+	}
+
+	type result struct {
+		work *flex.Work
+		err  error
+	}
+	updateDone := make(chan result, 1)
+	go func() {
+		work, err := mgr.UpdateWork(flex.UpdateWorkRequest_builder{JobId: "0", RequestId: "0", NewState: flex.UpdateWorkRequest_CANCELLED}.Build())
+		updateDone <- result{work, err}
+	}()
+	// Give UpdateWork time to lock the job entry and block on the journal entry, then let the final
+	// RPC succeed so the worker moves on to its cleanup.
+	time.Sleep(300 * time.Millisecond)
+	close(releaseFinalRPC)
+
+	select {
+	case r := <-updateDone:
+		// The worker already reported COMPLETED, so the cancel finds nothing left to cancel.
+		require.Nil(t, r.work)
+		require.Equal(t, codes.NotFound, status.Code(r.err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: UpdateWork did not return after the worker's final RPC succeeded")
+	}
+
+	require.Eventually(t, func() bool { return assertDBEntriesLenForTesting(mgr, 0) == nil }, 5*time.Second, 25*time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return, the worker is still blocked in its cleanup")
+	}
+}
+
 // This test intentionally reuses the same job ID (potentially with different requests for that
 // job), to also verify handling when the node has multiple requests for the same job.
 func TestUpdateRequests(t *testing.T) {
