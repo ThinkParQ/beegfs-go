@@ -17,6 +17,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // We use ConfigManager to handle configuration updates.
@@ -38,8 +39,10 @@ type AppConfig struct {
 	Workers              []worker.Config             `mapstructure:"worker"`
 	RemoteStorageTargets []*flex.RemoteStorageTarget `mapstructure:"remote-storage-target"`
 	Developer            struct {
-		PerfProfilingPort int  `mapstructure:"perf-profiling-port"`
-		DumpConfig        bool `mapstructure:"dump-config"`
+		PerfProfilingPort    int  `mapstructure:"perf-profiling-port"`
+		BlockProfileRate     int  `mapstructure:"block-profile-rate"`
+		MutexProfileFraction int  `mapstructure:"mutex-profile-fraction"`
+		DumpConfig           bool `mapstructure:"dump-config"`
 	}
 }
 
@@ -84,6 +87,15 @@ func (c *AppConfig) ValidateConfig() error {
 	var multiErr types.MultiError
 	if c.Job.PathDBPath == "" {
 		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db-path must be set to a valid path (provided path: '%s')", c.Job.PathDBPath))
+	}
+
+	// The cleaned state root is written back so everything downstream, including the value sent to
+	// Sync nodes, uses the one canonical form. ValidateConfig runs on the new configuration before
+	// it is adopted, so nothing observes the value until it has been through here.
+	if stateRoot, err := rst.ValidateStateRoot(c.Job.StateRoot); err != nil {
+		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.state-root is invalid: %w", err))
+	} else {
+		c.Job.StateRoot = stateRoot
 	}
 
 	if c.Job.MinJobEntriesPerRST < 1 {
@@ -163,6 +175,10 @@ func SetRSTTypeHook() mapstructure.DecodeHookFuncType {
 								Metadata:    nil,
 								Result:      &newTypeField,
 								ErrorUnused: true, // Ensure any unknown configuration will return an error.
+								// This decoder inherits none of the hooks configured for the
+								// application configuration as a whole, so any hook required to
+								// decode RST type configuration must be added here.
+								DecodeHook: mapstructure.ComposeDecodeHookFunc(StringToProtoEnumHook()),
 								MatchName: func(mapKey, fieldName string) bool {
 									return strings.ReplaceAll(strings.ToLower(mapKey), "-", "") == strings.ToLower(fieldName)
 								},
@@ -199,5 +215,41 @@ func SetRSTTypeHook() mapstructure.DecodeHookFuncType {
 		}
 
 		return data, nil
+	}
+}
+
+// protoEnumType is the interface every generated protobuf enum satisfies, used to recognize enum
+// fields while decoding without knowing the individual enum types.
+var protoEnumType = reflect.TypeFor[protoreflect.Enum]()
+
+// StringToProtoEnumHook decodes a protobuf enum field from the name of one of its values, so enums
+// can be configured the way they are named in the proto (for example operation =
+// "EFFICIENT_RETRIEVE") instead of by their numeric value. Names are matched case insensitively and
+// "-" is accepted in place of "_", matching how mapKeys are matched elsewhere in the RST
+// configuration. Numeric values continue to decode without this hook, which only handles strings.
+//
+// Note the zero value of an enum (conventionally UNKNOWN) is a valid value as far as this hook is
+// concerned. Whether an RST type can actually do anything with it is left to the provider to decide
+// when it validates its configuration.
+func StringToProtoEnumHook() mapstructure.DecodeHookFuncType {
+	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
+		if f.Kind() != reflect.String || !t.Implements(protoEnumType) {
+			return data, nil
+		}
+
+		values := reflect.Zero(t).Interface().(protoreflect.Enum).Descriptor().Values()
+		name := strings.ToUpper(strings.ReplaceAll(data.(string), "-", "_"))
+		value := values.ByName(protoreflect.Name(name))
+		if value == nil {
+			valid := make([]string, 0, values.Len())
+			for i := range values.Len() {
+				valid = append(valid, string(values.Get(i).Name()))
+			}
+			return nil, fmt.Errorf("invalid value %q (expected one of: %s)", data, strings.Join(valid, ", "))
+		}
+
+		enum := reflect.New(t).Elem()
+		enum.SetInt(int64(value.Number()))
+		return enum.Interface(), nil
 	}
 }

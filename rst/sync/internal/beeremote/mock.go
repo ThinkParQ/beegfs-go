@@ -49,8 +49,5 @@ func (c *MockProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobR
 	if err != nil && !ok {
 		panic("error type used for test is invalid")
 	}
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }

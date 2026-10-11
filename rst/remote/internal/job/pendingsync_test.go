@@ -338,6 +338,62 @@ func TestPendingSyncTracker_NotAllowedWarnsContinuesAndRemoves(t *testing.T) {
 	assert.False(t, present, "entry should be removed after the loop completes")
 }
 
+// An active job that holds the path, for this RST or another one, clears on its own when that job
+// finishes. The deferred upload must be retried rather than dropped, which is what separates it from
+// ErrJobNotAllowed. ErrJobBlockedByActiveJob unwraps to ErrJobNotAllowed, so this also pins that the
+// more specific error is recognized first.
+func TestPendingSyncTracker_BlockedByActiveJobBailsAndRetries(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	stub := newStubSubmit()
+	stub.queueResponse(1, rst.ErrJobBlockedByActiveJob)
+	tr := newTestTracker(t, clock, stub)
+
+	cooldown := 10 * time.Second
+	tr.Mark("/foo", cooldown, []uint32{1, 2, 3})
+	clock.Advance(11 * time.Second)
+	tr.drainReady(context.Background())
+
+	calls := stub.callsFor("/foo")
+	require.Len(t, calls, 1, "should bail out rather than try the remaining RSTs")
+	assert.Equal(t, uint32(1), calls[0].RemoteStorageTarget)
+
+	tr.mu.Lock()
+	ps, present := tr.entries["/foo"]
+	expectedReadyAt := clock.Now().Add(cooldown)
+	tr.mu.Unlock()
+	require.True(t, present, "the upload must not be dropped while an active job holds the path")
+	assert.Equal(t, expectedReadyAt, ps.readyAt)
+
+	// Once the blocking job finishes the retry submits for every RST and the entry is removed.
+	clock.Advance(11 * time.Second)
+	tr.drainReady(context.Background())
+	assert.Len(t, stub.callsFor("/foo"), 4, "after the retry all three RSTs submitted")
+	tr.mu.Lock()
+	_, present = tr.entries["/foo"]
+	tr.mu.Unlock()
+	assert.False(t, present)
+}
+
+// A job on another RST that is not running does not clear on its own, so the manager reports it as
+// ErrJobNotAllowed rather than ErrJobBlockedByActiveJob. The tracker must give up on it instead of
+// re-arming forever. This is the counterpart to the test above and pins the split between the two
+// errors.
+func TestPendingSyncTracker_StalledOtherRSTIsNotRetried(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	stub := newStubSubmit()
+	stub.queueResponse(1, rst.ErrJobNotAllowed)
+	tr := newTestTracker(t, clock, stub)
+
+	tr.Mark("/foo", 5*time.Second, []uint32{1, 2})
+	clock.Advance(6 * time.Second)
+	tr.drainReady(context.Background())
+
+	tr.mu.Lock()
+	_, present := tr.entries["/foo"]
+	tr.mu.Unlock()
+	assert.False(t, present, "a block that needs an operator must not be retried on a timer")
+}
+
 func TestPendingSyncTracker_UnknownErrorContinuesAndRemoves(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	stub := newStubSubmit()
