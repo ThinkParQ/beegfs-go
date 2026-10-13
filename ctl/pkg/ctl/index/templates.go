@@ -19,7 +19,7 @@ const FindCoreE = `` +
 const FindBeeGFSE = `` +
 	`SELECT rpath(v.sname, v.sroll, v.name) AS path, v.name, v.type, v.inode, v.size, v.mtime, v.atime, v.ctime, v.mode, %s, v.nlink, ` +
 	`b.owner_id, b.parent_entry_id, b.entry_id, b.stripe_num_targets ` +
-	`FROM (SELECT * FROM vrpentries WHERE %s) AS v LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode ` +
+	`FROM (SELECT * FROM vrpentries WHERE %s) AS v LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode AND b.name = v.name ` +
 	`WHERE %s`
 
 // FindTargetsE additionally LEFT JOINs beegfs_file_view so b.* predicates
@@ -30,8 +30,8 @@ const FindBeeGFSE = `` +
 const FindTargetsE = `` +
 	`SELECT rpath(v.sname, v.sroll, v.name) AS path, v.name, v.type, v.inode, v.size, v.mtime, v.atime, v.ctime, v.mode, %s, v.nlink, ` +
 	`b.owner_id, b.parent_entry_id, b.entry_id, b.stripe_num_targets, t.target_or_group ` +
-	`FROM (SELECT * FROM vrpentries WHERE %s) AS v INNER JOIN beegfs_file_targets_view AS t ON t.inode = v.inode ` +
-	`LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode ` +
+	`FROM (SELECT * FROM vrpentries WHERE %s) AS v INNER JOIN beegfs_file_targets_view AS t ON t.inode = v.inode AND t.name = v.name ` +
+	`LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode AND b.name = v.name ` +
 	`WHERE %s`
 
 const FindDirS = `` +
@@ -82,7 +82,7 @@ const LsCoreRecursiveE = `` +
 const LsBeeGFSE = `` +
 	`SELECT e.name, e.type, e.inode, e.size, e.mtime, e.atime, e.ctime, e.mode, %s, e.nlink, e.blocks, ` +
 	`b.owner_id, b.parent_entry_id, b.entry_id, b.stripe_pattern_type, b.stripe_chunk_size, b.stripe_num_targets ` +
-	`FROM (SELECT * FROM entries WHERE %s) AS e LEFT JOIN beegfs_file_view AS b ON b.inode = e.inode`
+	`FROM (SELECT * FROM entries WHERE %s) AS e LEFT JOIN beegfs_file_view AS b ON b.inode = e.inode AND b.name = e.name`
 
 const LsBeeGFSDirS = `` +
 	`SELECT s.name, s.type, s.inode, s.size, s.mtime, s.atime, s.ctime, s.mode, %s, s.nlink, s.blocks, ` +
@@ -92,7 +92,7 @@ const LsBeeGFSDirS = `` +
 const LsBeeGFSRecursiveE = `` +
 	`SELECT rpath(v.sname, v.sroll, v.name) AS path, v.name, v.type, v.inode, v.size, v.mtime, v.atime, v.ctime, v.mode, %s, v.nlink, v.blocks, ` +
 	`b.owner_id, b.parent_entry_id, b.entry_id, b.stripe_pattern_type, b.stripe_chunk_size, b.stripe_num_targets ` +
-	`FROM (SELECT * FROM vrpentries WHERE %s) AS v LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode`
+	`FROM (SELECT * FROM vrpentries WHERE %s) AS v LEFT JOIN beegfs_file_view AS b ON b.inode = v.inode AND b.name = v.name`
 
 const LsBeeGFSRecursiveDirS = `` +
 	`SELECT rpath(s.sname, s.sroll) AS path, s.name, s.type, s.inode, s.size, s.mtime, s.atime, s.ctime, s.mode, %s, s.nlink, s.blocks, ` +
@@ -107,7 +107,7 @@ const StatBeeGFSE = `` +
 	`SELECT e.name, e.type, e.inode, e.size, e.blocks, e.mode, e.uid, uidtouser(e.uid), e.gid, gidtogroup(e.gid), e.nlink, e.atime, e.mtime, e.ctime, ` +
 	`b.owner_id, b.parent_entry_id, b.entry_id, ` +
 	`b.stripe_pattern_type, b.stripe_chunk_size, b.stripe_num_targets ` +
-	`FROM (SELECT * FROM entries WHERE %s) AS e LEFT JOIN beegfs_file_view AS b ON b.inode = e.inode LIMIT 1`
+	`FROM (SELECT * FROM entries WHERE %s) AS e LEFT JOIN beegfs_file_view AS b ON b.inode = e.inode AND b.name = e.name LIMIT 1`
 
 const StatDirS = `` +
 	`SELECT name, type, inode, size, blocks, mode, uid, uidtouser(uid), gid, gidtogroup(gid), nlink, atime, mtime, ctime ` +
