@@ -55,8 +55,10 @@ func normalizedPriority(p int32) int {
 }
 
 type Config struct {
-	WorkJournalPath string `mapstructure:"journal-db"`
-	JobStorePath    string `mapstructure:"job-db"`
+	WorkJournalPath       string `mapstructure:"journal-db"`
+	WorkJournalBlockCache int64  `mapstructure:"journal-db-block-cache"`
+	JobStorePath          string `mapstructure:"job-db"`
+	JobStoreBlockCache    int64  `mapstructure:"job-db-block-cache"`
 	// ActiveWorkQueueSize is the number of active work requests stored in the active work queue
 	// (channel) and corresponding active work map. We don't just pull everything into these data
 	// structures to ensure we can handles bursts of potentially millions of requests without
@@ -194,6 +196,9 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup work journal:
 	workJournalOpts := badger.DefaultOptions(m.config.WorkJournalPath)
 	workJournalOpts = workJournalOpts.WithLogger(logger.NewBadgerLoggerBridge("workJournal", m.log.Logger))
+	if m.config.WorkJournalBlockCache > 0 {
+		workJournalOpts = workJournalOpts.WithBlockCacheSize(m.config.WorkJournalBlockCache)
+	}
 	workJournal, closeWorkJournal, err := kvstore.NewMapStore[workEntry](workJournalOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup work journal: %w", err)
@@ -204,6 +209,9 @@ func NewAndStart(log *logger.Logger, config Config, beeRemoteClient *beeremote.C
 	// Setup job store:
 	jobStoreOpts := badger.DefaultOptions(m.config.JobStorePath)
 	jobStoreOpts = jobStoreOpts.WithLogger(logger.NewBadgerLoggerBridge("jobStore", m.log.Logger))
+	if m.config.JobStoreBlockCache > 0 {
+		jobStoreOpts = jobStoreOpts.WithBlockCacheSize(m.config.JobStoreBlockCache)
+	}
 	jobStore, closeJobStore, err := kvstore.NewMapStore[map[string]string](jobStoreOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup job store: %w", err)
