@@ -165,7 +165,11 @@ func (b *MultiCursorRingBuffer) AllEventsAcknowledged() bool {
 	done := true
 
 	for _, c := range b.cursors {
-		if b.buffer[c.ackCursor] != nil && !c.ackError {
+		// Handlers keep acknowledging while shutdown polls this, so read the cursor under its lock.
+		c.cursorMutex.RLock()
+		pending := b.buffer[c.ackCursor] != nil && !c.ackError
+		c.cursorMutex.RUnlock()
+		if pending {
 			return false
 		}
 	}

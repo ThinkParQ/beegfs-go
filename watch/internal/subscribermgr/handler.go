@@ -27,11 +27,13 @@ type Handler struct {
 	metaEventBuffer *types.MultiCursorRingBuffer
 	config          HandlerConfig
 	*subscriber.Subscriber
-	// The mutex serves two purposes: (1) guarantee only one handler runs at a
-	// time. (2) guarantee when dynamic configuration updates happen the old
-	// version has finished shutting down before we swap out the handler or
-	// delete it.
+	// The mutex guarantees only one Handle runs at a time.
 	mu sync.Mutex
+	// done is closed when Handle returns. The manager waits on it after Stop, so the old handler
+	// no longer uses the buffer cursor when a restarted handler takes it over or the cursor is
+	// removed. A channel works whether or not Handle has started yet, because Handle returns at
+	// once on a stopped handler.
+	done chan struct{}
 	// lastSeqID is the last sequence ID acknowledged by the subscriber. It is used to avoid
 	// sending duplicate events to subscribers after a restart. This is necessary because
 	// subscribers may acknowledge the last event they received before that event exists in the
@@ -79,6 +81,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 		metaEventBuffer: metaEventBuffer,
 		config:          config,
 		Subscriber:      subscriber,
+		done:            make(chan struct{}),
 	}
 	// types.NoSeqId means "no subscriber ack received yet." Zero is not usable as a sentinel
 	// because SeqId=0 is a valid first event from the metadata PMQ, and lastSeqID=0 would be
@@ -93,6 +96,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 func (h *Handler) Handle(wg *sync.WaitGroup) {
 	wg.Add(1)
 	defer wg.Done()
+	defer close(h.done)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

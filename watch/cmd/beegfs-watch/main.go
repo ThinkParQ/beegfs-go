@@ -207,7 +207,8 @@ Using environment variables:
 	defer metaCleanup()
 
 	// Setup the subscriber manager:
-	sm := subscribermgr.New(logger, metaMgr.EventBuffer, &wg)
+	sm := subscribermgr.New(logger, &wg)
+	sm.AddEventBuffer(metaMgr.EventBuffer)
 
 	// Using a different context for subscribers is important so we can coordinate shutdown.
 	// Notably we want to wait to disconnect until the buffer is empty.

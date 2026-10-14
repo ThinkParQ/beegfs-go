@@ -37,45 +37,28 @@ func TestNewHandler(t *testing.T) {
 	})
 }
 
-func TestEvaluateChangedSubscribers(t *testing.T) {
+// planSubscriberChanges sorts each subscriber into add, restart or remove by comparing the applied
+// configuration with the new one. A subscriber restarts when its own settings change, or when the
+// [handler] settings change, because those apply to every handler.
+func TestPlanSubscriberChanges(t *testing.T) {
 
-	currentHandlers := []*Handler{
-		{
-			Subscriber: &subscriber.Subscriber{
-				Config: subscriber.Config{
-					ID: 1,
-				},
-			},
-		},
-		{
-			Subscriber: &subscriber.Subscriber{
-				Config: subscriber.Config{
-					ID: 2,
-				},
-			},
-		},
-	}
-	// newSubscribers := []*subscriber.Subscriber{{ID: 1}, {ID: 3}}
-	newSubscribers := []*subscriber.Subscriber{
-		{
-			Config: subscriber.Config{
-				ID: 1,
-			},
-		},
-		{
-			Config: subscriber.Config{
-				ID: 3,
-			},
-		},
-	}
+	applied := []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two"}, {ID: 3, Name: "three"}}
+	newConfigs := []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two renamed"}, {ID: 4, Name: "four"}}
+	handlerConfig := HandlerConfig{PollFrequency: 1}
 
-	toAdd, toRemove, toVerify := evaluateAddedAndRemovedSubscribers(currentHandlers, newSubscribers)
-	assert.Contains(t, toAdd, 3)
-	assert.Contains(t, toRemove, 2)
-	assert.Contains(t, toVerify, 1)
-	assert.Len(t, toAdd, 1)
-	assert.Len(t, toRemove, 1)
-	assert.Len(t, toVerify, 1)
+	t.Run("only changed subscribers restart when the handler configuration is unchanged", func(t *testing.T) {
+		toAdd, toRestart, toRemove := planSubscriberChanges(handlerConfig, handlerConfig, applied, newConfigs)
+		assert.Equal(t, []subscriber.Config{{ID: 4, Name: "four"}}, toAdd)
+		assert.Equal(t, []subscriber.Config{{ID: 2, Name: "two renamed"}}, toRestart)
+		assert.Equal(t, []subscriber.Config{{ID: 3, Name: "three"}}, toRemove)
+	})
+
+	t.Run("every kept subscriber restarts when the handler configuration changed", func(t *testing.T) {
+		toAdd, toRestart, toRemove := planSubscriberChanges(handlerConfig, HandlerConfig{PollFrequency: 2}, applied, newConfigs)
+		assert.Equal(t, []subscriber.Config{{ID: 4, Name: "four"}}, toAdd)
+		assert.Equal(t, []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two renamed"}}, toRestart)
+		assert.Equal(t, []subscriber.Config{{ID: 3, Name: "three"}}, toRemove)
+	})
 }
 
 // fakeSubscriberConn is a minimal subscriber.Interface used to drive sendLoop and receiveLoop
