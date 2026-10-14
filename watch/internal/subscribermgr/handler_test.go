@@ -1,11 +1,13 @@
 package subscribermgr
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/watch/internal/subscriber"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
@@ -290,6 +292,73 @@ func TestSeekToEndEmptyBufferDeliversSeqIdZero(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// refusingSubscriberConn is a subscriber.Interface whose Connect always fails with an error the
+// handler retries. It records when each attempt was made.
+type refusingSubscriberConn struct {
+	fakeSubscriberConn
+	attemptsMu sync.Mutex
+	attempts   []time.Time
+}
+
+func (f *refusingSubscriberConn) Connect(forMetaID beegfs.NumId) (retry bool, err error) {
+	f.attemptsMu.Lock()
+	defer f.attemptsMu.Unlock()
+	f.attempts = append(f.attempts, time.Now())
+	return true, errors.New("connection refused")
+}
+
+func (f *refusingSubscriberConn) attemptTimes() []time.Time {
+	f.attemptsMu.Lock()
+	defer f.attemptsMu.Unlock()
+	return append([]time.Time{}, f.attempts...)
+}
+
+// TestConnectLoopWaitsBetweenFailedAttempts verifies a handler waits at least minReconnectDelay
+// between two failed connection attempts when max-reconnect-backoff is 1 second. A capped wait
+// below one second must not shrink to zero, or the handler retries without pause. Every attempt
+// of a real subscriber opens a connection, so such a loop burns CPU and memory.
+func TestConnectLoopWaitsBetweenFailedAttempts(t *testing.T) {
+	fake := &refusingSubscriberConn{}
+	sub := &subscriber.Subscriber{
+		Config:    subscriber.Config{ID: 1, Name: "test"},
+		Interface: fake,
+	}
+	buffer := types.NewMultiCursorRingBuffer(64, 8)
+	// connectLoop waits until the buffer knows its meta ID, so set one to reach the connect attempts.
+	buffer.SetRingID(1)
+	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{MaxReconnectBackOff: 1})
+
+	done := make(chan bool, 1)
+	go func() { done <- handler.connectLoop() }()
+	require.Eventually(t, func() bool { return len(fake.attemptTimes()) >= 2 }, 5*time.Second, 10*time.Millisecond)
+	handler.Stop()
+	select {
+	case connected := <-done:
+		assert.False(t, connected)
+	case <-time.After(5 * time.Second):
+		t.Fatal("connectLoop did not exit after the handler was stopped")
+	}
+
+	attempts := fake.attemptTimes()
+	assert.GreaterOrEqual(t, attempts[1].Sub(attempts[0]), minReconnectDelay)
+}
+
+// TestNextReconnectDelay verifies the wait between connection attempts stays between
+// minReconnectDelay and max-reconnect-backoff. A setting of 1 second or less holds the wait at
+// minReconnectDelay instead of shrinking it to zero.
+func TestNextReconnectDelay(t *testing.T) {
+	for _, maxSeconds := range []int{-1, 0, 1, 2, 60} {
+		upper := max(time.Duration(maxSeconds)*time.Second, minReconnectDelay)
+		delay := minReconnectDelay
+		// Enough steps for the wait to grow from minReconnectDelay past every limit above.
+		for range 10 {
+			delay = nextReconnectDelay(delay, maxSeconds)
+			assert.GreaterOrEqual(t, delay, minReconnectDelay, "max-reconnect-backoff %d", maxSeconds)
+			assert.LessOrEqual(t, delay, upper, "max-reconnect-backoff %d", maxSeconds)
+		}
+	}
 }
 
 // TestReceiveLoopLateInitialResponse verifies a subscriber's initial response arriving after a

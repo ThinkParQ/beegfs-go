@@ -96,6 +96,10 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 	s.stream, err = s.client.ReceiveEvents(context.TODO())
 
 	if err != nil {
+		// The handler calls Connect again after a failure, and that call replaces s.conn. So close
+		// the connection now, or nothing would ever close it.
+		s.conn.Close()
+		s.conn = nil
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
 			// Note this is just a hint to the user, other error conditions may have the same
