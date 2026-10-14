@@ -1,6 +1,10 @@
 package types
 
 import (
+	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,11 +17,31 @@ func entry(seqID uint64) *RingEntry {
 	return &RingEntry{Meta: EventMeta{SeqId: seqID}}
 }
 
+// slots builds buffer slots holding the given entries, for use in tests that build buffer state
+// directly. A nil entry makes an empty slot.
+func slots(entries ...*RingEntry) []atomic.Pointer[RingEntry] {
+	out := make([]atomic.Pointer[RingEntry], len(entries))
+	for i, e := range entries {
+		out[i].Store(e)
+	}
+	return out
+}
+
+// entriesOf loads every buffer slot, returning nil for empty slots. Used to compare buffer
+// contents with a []*RingEntry.
+func entriesOf(buf []atomic.Pointer[RingEntry]) []*RingEntry {
+	out := make([]*RingEntry, len(buf))
+	for i := range buf {
+		out[i] = buf[i].Load()
+	}
+	return out
+}
+
 // seqIDsOf extracts the SeqID from each buffer slot, returning 0 for nil slots.
 // Used when comparing buffer contents after Push, which also sets Marshaled bytes.
-func seqIDsOf(buf []*RingEntry) []uint64 {
+func seqIDsOf(buf []atomic.Pointer[RingEntry]) []uint64 {
 	out := make([]uint64, len(buf))
-	for i, e := range buf {
+	for i, e := range entriesOf(buf) {
 		if e != nil {
 			out[i] = e.Meta.SeqId
 		}
@@ -41,7 +65,7 @@ func TestAllEventsAcknowledged(t *testing.T) {
 		{
 			name: "One subscriber has acknowledged all events but the other hasn't.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -54,7 +78,7 @@ func TestAllEventsAcknowledged(t *testing.T) {
 		{
 			name: "One subscriber has acknowledged all events but the other hasn't (reversed).",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -67,7 +91,7 @@ func TestAllEventsAcknowledged(t *testing.T) {
 		{
 			name: "All subscribers are caught up.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -125,7 +149,7 @@ func TestPush(t *testing.T) {
 	}
 
 	// GC should happen every 100 events, meaning everything before index 199 and after 299 should be nil:
-	for i, e := range rb.buffer {
+	for i, e := range entriesOf(rb.buffer) {
 		if i >= 200 && i < 300 {
 			assert.NotNil(t, e)
 		} else {
@@ -135,7 +159,7 @@ func TestPush(t *testing.T) {
 
 	// If we push one more event, GC should happen making it the only one in the buffer:
 	rb.Push(&pb.Event{SeqId: 301})
-	for i, e := range rb.buffer {
+	for i, e := range entriesOf(rb.buffer) {
 		if i == 300 {
 			assert.NotNil(t, e)
 		} else {
@@ -150,7 +174,7 @@ func TestCollectGarbage(t *testing.T) {
 		{
 			name: "Test when no events should be cleared because we haven't run out of space and a cursor still points to the start of the buffer.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil, nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil, nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -164,7 +188,7 @@ func TestCollectGarbage(t *testing.T) {
 		{
 			name: "Test when we run out of space but only the oldest event can be cleared (GC should always end with two nil events).",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), entry(4), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), entry(4), nil),
 				start:  0,
 				end:    5,
 				cursors: map[int]*SubscriberCursor{
@@ -178,7 +202,7 @@ func TestCollectGarbage(t *testing.T) {
 		{
 			name: "Test when multiple events can be cleared.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -192,7 +216,7 @@ func TestCollectGarbage(t *testing.T) {
 		{
 			name: "Test when multiple events can be cleared and the buffer wraps around.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(5), entry(6), nil, entry(0), entry(1), entry(2), entry(3), entry(4)},
+				buffer: slots(entry(5), entry(6), nil, entry(0), entry(1), entry(2), entry(3), entry(4)),
 				start:  3,
 				end:    2,
 				cursors: map[int]*SubscriberCursor{
@@ -207,7 +231,7 @@ func TestCollectGarbage(t *testing.T) {
 
 	for _, test := range tests {
 		dropped := test.input.collectGarbage()
-		assert.Equal(t, test.expected, test.input.buffer, test.name)
+		assert.Equal(t, test.expected, entriesOf(test.input.buffer), test.name)
 		if test.expectedReturn == nil {
 			assert.Nil(t, dropped)
 		} else {
@@ -222,7 +246,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are positive.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -235,7 +259,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are zero then positive.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(0), entry(1), entry(2), entry(3), nil},
+				buffer: slots(entry(0), entry(1), entry(2), entry(3), nil),
 				start:  0,
 				end:    4,
 				cursors: map[int]*SubscriberCursor{
@@ -248,7 +272,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are zero then negative.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(2), entry(3), nil, entry(0), entry(1)},
+				buffer: slots(entry(2), entry(3), nil, entry(0), entry(1)),
 				start:  3,
 				end:    2,
 				cursors: map[int]*SubscriberCursor{
@@ -261,7 +285,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are negative then zero.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(2), entry(3), nil, entry(0), entry(1)},
+				buffer: slots(entry(2), entry(3), nil, entry(0), entry(1)),
 				start:  3,
 				end:    2,
 				cursors: map[int]*SubscriberCursor{
@@ -274,7 +298,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are negative then positive.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(2), entry(3), entry(4), nil, entry(1)},
+				buffer: slots(entry(2), entry(3), entry(4), nil, entry(1)),
 				start:  4,
 				end:    3,
 				cursors: map[int]*SubscriberCursor{
@@ -287,7 +311,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are positive then negative.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(2), entry(3), entry(4), nil, entry(1)},
+				buffer: slots(entry(2), entry(3), entry(4), nil, entry(1)),
 				start:  4,
 				end:    3,
 				cursors: map[int]*SubscriberCursor{
@@ -300,7 +324,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are all negative and the oldest is in the middle of the ackCursor map.",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{entry(5), entry(6), nil, entry(1), entry(2), entry(3), entry(4)},
+				buffer: slots(entry(5), entry(6), nil, entry(1), entry(2), entry(3), entry(4)),
 				start:  3,
 				end:    2,
 				cursors: map[int]*SubscriberCursor{
@@ -314,7 +338,7 @@ func TestGetOldestAckCursor(t *testing.T) {
 		{
 			name: "Test when ackCursor and end offsets are all negative and the oldest is at the start of the ackCursor map. ",
 			input: &MultiCursorRingBuffer{
-				buffer: []*RingEntry{nil, entry(1), entry(2), entry(3), entry(4)},
+				buffer: slots(nil, entry(1), entry(2), entry(3), entry(4)),
 				start:  1,
 				end:    0,
 				cursors: map[int]*SubscriberCursor{
@@ -565,7 +589,7 @@ func TestSeekToEnd(t *testing.T) {
 		// Construct a buffer where end has wrapped around to index 0 so that the last
 		// event is at the highest index. SeekToEnd must use modular arithmetic to find it.
 		rb := &MultiCursorRingBuffer{
-			buffer: []*RingEntry{nil, entry(1), entry(2), entry(3), entry(4)},
+			buffer: slots(nil, entry(1), entry(2), entry(3), entry(4)),
 			start:  1,
 			end:    0,
 			cursors: map[int]*SubscriberCursor{
@@ -667,4 +691,99 @@ func TestSearchIndexOfSeqID(t *testing.T) {
 	idx, found = rb.searchIndexOfSeqID(5, 3, 27)
 	assert.Equal(t, 2, idx)
 	assert.True(t, found)
+}
+
+// TestConcurrentPushAndRead runs one writer and two readers at once, the way watch runs one
+// connection goroutine per meta and one handler per subscriber. Each reader gets and acks every
+// event and checks that it sees each sequence ID once and in order. The buffer holds twice the
+// events pushed, so none is dropped, and GC never runs. Without -race it checks only the order of
+// events. A data race has no deterministic wrong result, so the race it guards against shows only
+// under `go test -race`.
+func TestConcurrentPushAndRead(t *testing.T) {
+	const events = 10_000
+	subscribers := []int{1, 2}
+	rb := NewMultiCursorRingBuffer(2*events, 2*events)
+	for _, id := range subscribers {
+		rb.AddCursor(id)
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for seqID := uint64(1); seqID <= events; seqID++ {
+			_, err := rb.Push(&pb.Event{SeqId: seqID})
+			assert.NoError(t, err)
+		}
+	})
+	for _, id := range subscribers {
+		wg.Go(func() {
+			for expected := uint64(1); expected <= events; {
+				got, err := rb.GetEvent(id)
+				if !assert.NoError(t, err) {
+					return
+				}
+				if got == nil {
+					runtime.Gosched()
+					continue
+				}
+				if !assert.Equal(t, expected, got.Meta.SeqId, "subscriber %d", id) {
+					return
+				}
+				assert.NoError(t, rb.AckEvent(id, got.Meta.SeqId))
+				expected++
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// BenchmarkPushAndRead measures watch's hot path. One writer pushes b.N events while each cursor
+// gets and acks every event. It uses the buffer size and GC frequency that beegfs-watch.toml
+// ships. A reader that falls behind may lose events to overflow, so each reader stops when it
+// sees the last sequence ID instead of counting events.
+func BenchmarkPushAndRead(b *testing.B) {
+	for _, cursors := range []int{1, 4} {
+		b.Run(fmt.Sprintf("cursors=%d", cursors), func(b *testing.B) {
+			rb := NewMultiCursorRingBuffer(4194304, 419430)
+			for id := range cursors {
+				rb.AddCursor(id)
+			}
+			// Push marshals the event before it returns, so one event can be reused for every push.
+			event := &pb.Event{EventData: &pb.Event_V2{V2: &pb.V2Event{
+				Type:          pb.V2Event_CLOSE_WRITE,
+				Path:          "/projects/run-42/output/part-00017.dat",
+				EntryId:       "1A-6512F3C4-1",
+				ParentEntryId: "0-6512F3C4-1",
+			}}}
+			last := uint64(b.N)
+
+			b.ResetTimer()
+			var wg sync.WaitGroup
+			for id := range cursors {
+				wg.Go(func() {
+					for {
+						got, err := rb.GetEvent(id)
+						if err != nil {
+							b.Error(err)
+							return
+						}
+						if got == nil {
+							runtime.Gosched()
+							continue
+						}
+						_ = rb.AckEvent(id, got.Meta.SeqId)
+						if got.Meta.SeqId == last {
+							return
+						}
+					}
+				})
+			}
+			for seqID := uint64(1); seqID <= last; seqID++ {
+				event.SeqId = seqID
+				if _, err := rb.Push(event); err != nil {
+					b.Fatal(err)
+				}
+			}
+			wg.Wait()
+		})
+	}
 }
