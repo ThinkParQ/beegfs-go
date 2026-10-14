@@ -696,13 +696,13 @@ func TestSearchIndexOfSeqID(t *testing.T) {
 // TestConcurrentPushAndRead runs one writer and two readers at once, the way watch runs one
 // connection goroutine per meta and one handler per subscriber. Each reader gets and acks every
 // event and checks that it sees each sequence ID once and in order. The buffer holds twice the
-// events pushed, so none is dropped, and GC never runs. Without -race it checks only the order of
-// events. A data race has no deterministic wrong result, so the race it guards against shows only
-// under `go test -race`.
+// events pushed, so none is dropped. GC every 100 pushes still clears acked slots behind the
+// readers. Without -race it checks only the order of events. A data race has no deterministic wrong
+// result, so the race it guards against shows only under `go test -race`.
 func TestConcurrentPushAndRead(t *testing.T) {
 	const events = 10_000
 	subscribers := []int{1, 2}
-	rb := NewMultiCursorRingBuffer(2*events, 2*events)
+	rb := NewMultiCursorRingBuffer(2*events, 100)
 	for _, id := range subscribers {
 		rb.AddCursor(id)
 	}

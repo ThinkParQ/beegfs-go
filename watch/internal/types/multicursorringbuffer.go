@@ -42,7 +42,7 @@ type RingEntry struct {
 //
 // The buffer should only be written to by a single writer using Push so no typically no locks are required.
 // The buffer may be read by N SubscriberCursors, so long as they have locked their respective mutexes.
-// Lock contention between the writer and readers only happens when freeing up space that requires a SubscriberCursor to be moved.
+// Lock contention between the writer and readers only happens during garbage collection.
 // Otherwise events can be added to the buffer and subscribers can get/ack those events with no lock contention.
 //
 // How the writer hands an event to readers without a lock:
@@ -250,7 +250,7 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 	defer b.cursorsMutex.RUnlock()
 
 	// Determine the index of the oldest ackCursor in case we can free up lots of space:
-	// Note we don't have to lock individual cursors unless we actually have to advance them.
+	// getOldestAckCursor releases each cursor's lock as soon as it has read the ackCursor.
 	// At worst this means the actual oldestAckCursor may have moved forward in the meantime so we aren't able to free up quite as much space.
 	oldestAckCursor := b.getOldestAckCursor()
 
@@ -301,7 +301,8 @@ func (b *MultiCursorRingBuffer) collectGarbage() *uint64 {
 }
 
 // getOldestAckCursor returns the index of the ackCursor that is the furthest away from the end of the buffer.
-// It SHOULD ONLY be called from collectGarbage() as it expects the MultiCursorRingBuffer and cursor mutexes to already be locked.
+// It SHOULD ONLY be called from collectGarbage() as it expects cursorsMutex to already be locked.
+// It takes each cursor's lock only while it reads that cursor's ackCursor.
 func (b *MultiCursorRingBuffer) getOldestAckCursor() int {
 
 	// The index the oldest ackCursor is pointing to.
@@ -312,30 +313,34 @@ func (b *MultiCursorRingBuffer) getOldestAckCursor() int {
 	var oldestOffset int
 
 	for _, c := range b.cursors {
+		// Handlers keep acknowledging while GC runs, so read the cursor under its lock.
+		c.cursorMutex.RLock()
+		ackCursor := c.ackCursor
+		c.cursorMutex.RUnlock()
 
 		if oldestAckCursor == -1 {
-			oldestAckCursor = c.ackCursor
-			oldestOffset = b.end - c.ackCursor
+			oldestAckCursor = ackCursor
+			oldestOffset = b.end - ackCursor
 		} else {
-			offset := b.end - c.ackCursor
+			offset := b.end - ackCursor
 
 			// The oldest offset is always the highest negative number:
 			if offset < 0 {
 				if oldestOffset < 0 {
 					// If both offsets are negative, the oldest offset will be greater:
 					if offset > oldestOffset {
-						oldestAckCursor = c.ackCursor
+						oldestAckCursor = ackCursor
 						oldestOffset = offset
 					}
 				} else {
 					// Otherwise if the new offset is negative it will always be older:
-					oldestAckCursor = c.ackCursor
+					oldestAckCursor = ackCursor
 					oldestOffset = offset
 				}
 			} else if oldestOffset >= 0 { // Otherwise the offset is positive. If the oldest offset was already negative it is older.
 				// If both the offset and the oldest offset are positive, the oldest offset is whichever one is greater:
 				if offset > oldestOffset {
-					oldestAckCursor = c.ackCursor
+					oldestAckCursor = ackCursor
 					oldestOffset = offset
 				}
 			}
