@@ -109,19 +109,30 @@ func (c *AppConfig) ValidateConfig() error {
 	if len(c.Metadata) != 1 {
 		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("exactly one metadata service must be specified"))
 	} else {
-		if c.Metadata[0].EventLogTarget == "" {
-			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-log-target for this metadata service must be specified"))
-		}
-		if c.Metadata[0].EventBufferGCFrequency == 0 {
-			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-gc-frequency for this metadata service cannot be 0"))
-		}
-		if c.Metadata[0].EventBufferSize == 0 {
-			multiErr.Errors = append(multiErr.Errors, fmt.Errorf("the event-buffer-size for this metadata service cannot be 0"))
-		}
+		multiErr.Errors = append(multiErr.Errors, validateMetadataBlock(c.Metadata[0])...)
 	}
 
 	if len(multiErr.Errors) > 0 {
 		return &multiErr
 	}
 	return nil
+}
+
+// checks one [[metadata]] block and returns every problem it finds, or nil.
+//
+// Rules:
+//   - event-log-target must be set.
+//   - event-buffer-size and event-buffer-gc-frequency must not be 0.
+func validateMetadataBlock(b metadata.Config) []error {
+	var errs []error
+	if b.EventLogTarget == "" {
+		errs = append(errs, fmt.Errorf("the event-log-target for this metadata service must be specified"))
+	}
+	if b.EventBufferGCFrequency == 0 {
+		errs = append(errs, fmt.Errorf("the event-buffer-gc-frequency for this metadata service cannot be 0"))
+	}
+	if b.EventBufferSize == 0 {
+		errs = append(errs, fmt.Errorf("the event-buffer-size for this metadata service cannot be 0"))
+	}
+	return errs
 }
