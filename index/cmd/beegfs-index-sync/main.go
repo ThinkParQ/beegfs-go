@@ -1,6 +1,5 @@
-// Command beegfs-index-sync feeds BeeGFS Watch events to GUFI's incremental update. The collector
-// receives events from Watch and spools them to disk; markwalk turns the spool into suspect files
-// for beegfs index update. See MERGE-DESIGN.md.
+// Command beegfs-index-sync feeds BeeGFS Watch events to GUFI's incremental update: it receives
+// events from Watch, batches them and writes one suspect file per batch for beegfs index update.
 package main
 
 import (
@@ -17,9 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/index/internal/collector"
 	"github.com/thinkparq/beegfs-go/index/internal/config"
-	"github.com/thinkparq/beegfs-go/index/internal/markwalk"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 const envVarPrefix = "BEEINDEXSYNC_"
@@ -35,7 +32,6 @@ var (
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
 	pflag.String("cfg-file", "", "The path to a configuration file (can be omitted to set all configuration using flags and/or environment variables).")
-	pflag.String("spool", "/var/lib/beegfs/index-sync/spool", "The segment directory shared by the collector and markwalk.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-index-sync.log", "The path to the desired log file when logType is 'logfile' (if needed the directory and all parent directories will be created).")
 	pflag.Int8("log.level", 3, "Adjust the logging level (0=Fatal, 1=Error, 2=Warn, 3=Info, 4+5=Debug).")
@@ -44,23 +40,19 @@ func main() {
 	pflag.Bool("log.developer", false, "Enable developer logging including stack traces and setting the equivalent of log.level=5 and log.type=stdout (all other log settings are ignored).")
 	pflag.String("collector.listen", "0.0.0.0:50052", "The address Watch connects to.")
 	pflag.String("collector.checkpoint", "/var/lib/beegfs/index-sync/checkpoint.json", "The file where acknowledged sequence IDs are recorded.")
-	pflag.String("collector.counter", "/var/lib/beegfs/index-sync/counter.json", "The file recording the highest sealed segment number (empty keeps no counter).")
 	pflag.Duration("collector.ack-frequency", time.Second, "How often acknowledgements are sent to Watch and written to the checkpoint.")
-	pflag.Duration("collector.roll-every", 30*time.Second, "Seal the open segment at least this often.")
-	pflag.Int("collector.roll-events", 100_000, "Seal the open segment once it holds this many events.")
-	pflag.Int("collector.queue", 65536, "The number of events buffered between the gRPC streams and the segment writer.")
-	pflag.Int("collector.seal-queue", 4, "The number of written segments that may wait for fsync before receiving blocks.")
+	pflag.Duration("collector.batch-every", 30*time.Second, "Close the open batch at least this often.")
+	pflag.Int("collector.batch-events", 50_000, "Close the open batch once it holds this many events.")
+	pflag.Int("collector.queue", 65536, "The number of events buffered between the gRPC streams and the batcher.")
+	pflag.Int("collector.batch-queue", 2, "The number of closed batches that may wait for markwalk before receiving blocks.")
 	pflag.Bool("collector.tls-disable", true, "Disable TLS for the gRPC server Watch connects to.")
-	pflag.String("markwalk.state", "/var/lib/beegfs/index-sync/markwalk.json", "The file recording the last segment whose suspect file was written.")
 	pflag.String("markwalk.work", "/var/lib/beegfs/index-sync/markwalk", "The directory each batch's suspect file is written to, as batch-<N>/suspects.")
 	pflag.String("markwalk.mount", "/mnt/beegfs", "The path where BeeGFS is mounted.")
 	pflag.String("markwalk.index", "/var/lib/gufi", "The GUFI index root.")
 	pflag.String("markwalk.query", "/opt/beegfs/bin/index/gufi_query", "The gufi_query binary used to find the other names of a multi-link inode (empty disables the lookup).")
-	pflag.Duration("markwalk.every", time.Minute, "The least time between batches.")
-	pflag.Int("markwalk.max-segments", 100, "The most segments in one batch.")
+	pflag.Duration("markwalk.query-timeout", 30*time.Second, "The most time one gufi_query run may take; on timeout the batch goes on without those names.")
 	pflag.Int("markwalk.stat-cache", 200_000, "The most stat results a batch keeps.")
 	pflag.Bool("markwalk.track-opens", false, "Include open events so atime changes are indexed.")
-	pflag.Bool("markwalk.retain", false, "Remove segments once their suspect file is written, keeping the newest.")
 	pflag.CommandLine.SortFlags = false
 	pflag.Parse()
 
@@ -89,19 +81,9 @@ func main() {
 	}()
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
 
-	c, m := cfg.Collector, cfg.Markwalk
-	c.Spool, m.Spool = cfg.Spool, cfg.Spool
-	// A seal nudges markwalk through this channel; one pending nudge covers any number of seals.
-	sealed := make(chan struct{}, 1)
-
-	// SIGINT or SIGTERM stops both: the collector seals the open segment and markwalk finishes
-	// the batch it is on. A collector error stops the process too; markwalk retries its own.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return collector.Run(gctx, c, logger.Logger, sealed) })
-	g.Go(func() error { return markwalk.Run(gctx, m, logger.Logger, sealed) })
-	if err := g.Wait(); err != nil {
+	if err := collector.Run(ctx, cfg.Collector, cfg.Markwalk, logger.Logger); err != nil {
 		logger.Fatal("stopped on error", zap.Error(err))
 	}
 	logger.Info("stopped")

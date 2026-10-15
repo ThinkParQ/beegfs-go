@@ -1,34 +1,31 @@
-// Package markwalk turns the collector's segment files into GUFI suspect files.
-//
-// It reads sealed segments in number order and turns each batch into one "<inode> d" line per
-// directory to rescan, written to <work>/batch-<last segment>/suspects. Only then does the
-// state file move past the batch, so a crash repeats a batch and never skips one. Running
-// gufi_incremental_update on the file is up to beegfs index update.
+// Package markwalk turns a batch of BeeGFS Watch events into a GUFI suspect file: one
+// "<inode> d" line per directory to rescan, written to <work>/batch-<N>/suspects. Running
+// gufi_incremental_update on the files is up to beegfs index update.
 package markwalk
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/renameio/v2"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
 )
 
-// Config holds markwalk's configuration.
 type Config struct {
-	// Spool is the directory the collector writes segment files to, set from the shared spool option.
-	Spool string `mapstructure:"-"`
-	// State is the file recording the last segment whose suspect file was written.
-	State string `mapstructure:"state"`
 	// Work is the directory each batch's suspect file is written to, as batch-<N>/suspects.
 	Work string `mapstructure:"work"`
 	// Mount is the path where BeeGFS is mounted, so event paths can be made absolute.
@@ -38,24 +35,104 @@ type Config struct {
 	// Query is the gufi_query binary used to find the other names of a multi-link inode. Empty
 	// disables the lookup.
 	Query string `mapstructure:"query"`
-	// Every is the least time between batches.
-	Every time.Duration `mapstructure:"every"`
-	// MaxSegments is the most segments in one batch.
-	MaxSegments int `mapstructure:"max-segments"`
+	// QueryTimeout bounds one gufi_query run; on timeout the batch goes on without those names.
+	QueryTimeout time.Duration `mapstructure:"query-timeout"`
 	// StatCache is the most stat results a batch keeps.
 	StatCache int `mapstructure:"stat-cache"`
 	// TrackOpens includes open events so atime changes are indexed.
 	TrackOpens bool `mapstructure:"track-opens"`
-	// Retain removes segments once their suspect file is written, keeping the newest.
-	Retain bool `mapstructure:"retain"`
 }
 
-// Run makes batches until ctx is done. A nudge on sealed means the collector sealed a
-// segment. A failed batch is retried after a growing delay, so that nothing is skipped and
-// the collector sharing the process is never stopped.
-func Run(ctx context.Context, cfg Config, log *zap.Logger, sealed <-chan struct{}) error {
-	cfg.Mount, cfg.Index = filepath.Clean(cfg.Mount), filepath.Clean(cfg.Index)
-	return (&reader{Config: cfg, log: log}).run(ctx, sealed)
+// Process writes the suspect file for one batch, <work>/batch-<n>/suspects, and returns once it
+// is on disk, so the caller can acknowledge the events. With nothing to mark it writes nothing.
+// A cancelled ctx returns ctx.Err() before the file is written, because the sibling lookup it
+// cut short would leave directories out.
+func Process(ctx context.Context, cfg Config, log *zap.Logger, n uint64, events []*bw.Event) error {
+	mount, index := filepath.Clean(cfg.Mount), filepath.Clean(cfg.Index)
+	dirs := map[string]struct{}{}
+	links := map[string]struct{}{} // entry IDs of multi-name files, see siblingDirs
+	var v1 int
+	for _, ev := range events {
+		v2 := ev.GetV2()
+		if v2 == nil {
+			v1++ // BeeGFS 7 format, not used
+			continue
+		}
+		ds, id := dirsFor(v2, mount, cfg.TrackOpens)
+		for _, d := range ds {
+			dirs[d] = struct{}{}
+		}
+		if id != "" {
+			links[id] = struct{}{}
+		}
+	}
+	marked := append(slices.Collect(maps.Keys(dirs)),
+		siblingDirs(ctx, log, slices.Collect(maps.Keys(links)), mount, index, cfg.Query, cfg.QueryTimeout)...)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	out := filepath.Join(BatchDir(cfg.Work, n), "suspects")
+	marks, stats, err := writeSuspects(marked, mount, index, out, cfg.StatCache)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", out, err)
+	}
+	if marks == 0 {
+		out = "none: nothing left to mark"
+	}
+	log.Info("batch done", zap.Uint64("batch", n), zap.Int("events", len(events)),
+		zap.Int("directories", len(dirs)), zap.Int("multi_name_inodes", len(links)), zap.Int("marks", marks),
+		zap.Int("stats", stats), zap.Int("v1_events_skipped", v1), zap.String("suspects", out))
+	return nil
+}
+
+// BatchDir is the directory of batch n under work: batch-<n>, zero-padded to ten digits so
+// names list in number order.
+func BatchDir(work string, n uint64) string {
+	return filepath.Join(work, fmt.Sprintf("batch-%010d", n))
+}
+
+// LastBatch returns the highest batch number present under work, so numbering continues after
+// a restart. A missing work directory is batch 0.
+func LastBatch(work string) (uint64, error) {
+	entries, err := os.ReadDir(work)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var last uint64
+	for _, e := range entries {
+		digits, ok := strings.CutPrefix(e.Name(), "batch-")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseUint(digits, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s: not a batch directory", filepath.Join(work, e.Name()))
+		}
+		last = max(last, n)
+	}
+	return last, nil
+}
+
+// writeFileDurable replaces path with data so that after a crash it holds either the old or
+// the new content. renameio writes, fsyncs and renames a temp file; the directory is then
+// fsynced too, so the rename itself survives a crash before the events are acknowledged.
+func writeFileDurable(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := renameio.WriteFile(path, data, 0o644, renameio.WithTempDir(dir)); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // dirsFor returns the directories an event dirties and, when the inode has other names, its
@@ -63,8 +140,8 @@ func Run(ctx context.Context, cfg Config, log *zap.Logger, sealed <-chan struct{
 // names the path itself, which markChain keeps if it is a directory (its attributes live in
 // its own db.db) and otherwise replaces with the parent.
 func dirsFor(ev *bw.V2Event, mount string, trackOpens bool) (dirs []string, entryID string) {
-	path := filepath.Join(mount, ev.GetPath()) // "/" for the root makes the mount itself
-	parent := filepath.Dir(path)
+	path := filepath.Join(mount, ev.GetPath())
+	parent := dirOf(path, mount)
 
 	switch ev.GetType() {
 	case bw.V2Event_INVALID, bw.V2Event_OPEN_BLOCKED, bw.V2Event_INODE_LOCKED:
@@ -79,12 +156,12 @@ func dirsFor(ev *bw.V2Event, mount string, trackOpens bool) (dirs []string, entr
 		// Fired once, on the source. Without the common ancestor GUFI sees a delete plus a
 		// create and throws the moved databases away instead of moving them.
 		target := filepath.Join(mount, ev.GetTargetPath())
-		dst := filepath.Dir(target)
+		dst := dirOf(target, mount)
 		return []string{commonAncestor(parent, dst), parent, dst, target}, ""
 
 	case bw.V2Event_HARDLINK:
 		// nlink is stored per name, so the other name's directory is stale too.
-		return []string{parent, filepath.Dir(filepath.Join(mount, ev.GetTargetPath()))}, linkedEntryID(ev)
+		return []string{parent, dirOf(filepath.Join(mount, ev.GetTargetPath()), mount)}, linkedEntryID(ev)
 
 	case bw.V2Event_OPEN_READ, bw.V2Event_OPEN_WRITE, bw.V2Event_OPEN_READ_WRITE:
 		if !trackOpens { // only atime, and very many events
@@ -104,6 +181,15 @@ func dirsFor(ev *bw.V2Event, mount string, trackOpens bool) (dirs []string, entr
 		// CREATE, MKNOD, SYMLINK, RMDIR, UNLINK, and any type added later: the listing changed.
 		return []string{parent}, linkedEntryID(ev)
 	}
+}
+
+// dirOf returns the directory that lists path. The root lists itself: its parent is outside
+// the mount.
+func dirOf(path, mount string) string {
+	if path == mount {
+		return mount
+	}
+	return filepath.Dir(path)
 }
 
 // linkedEntryID returns the event's entry ID when it changed an inode that has other names,
@@ -140,8 +226,10 @@ const idsPerQuery = (100 << 10) / 29
 
 // siblingDirs asks the index which directories list these entry IDs, through the
 // beegfs_entries table the BeeGFS plugin fills in. Every query walks the whole index, so
-// it asks for as many IDs at once as fit; a failed query loses only its own IDs.
-func siblingDirs(ctx context.Context, log *zap.Logger, entryIDs []string, mount, indexRoot, queryBin string) []string {
+// it asks for as many IDs at once as fit; a failed or timed-out query loses only its own IDs.
+// gufi_query prints each directory as the index root it was given plus the relative path,
+// so swapping the root for the mount names the source directory.
+func siblingDirs(ctx context.Context, log *zap.Logger, entryIDs []string, mount, indexRoot, queryBin string, timeout time.Duration) []string {
 	if queryBin == "" {
 		return nil
 	}
@@ -149,7 +237,9 @@ func siblingDirs(ctx context.Context, log *zap.Logger, entryIDs []string, mount,
 	seen := map[string]bool{}
 	for chunk := range slices.Chunk(entryIDs, idsPerQuery) {
 		sql := "SELECT path() FROM beegfs_entries WHERE entry_id IN ('" + strings.Join(chunk, "','") + "');"
-		out, err := exec.CommandContext(ctx, queryBin, "-d", "\n", "-E", sql, indexRoot).Output()
+		qctx, cancel := context.WithTimeout(ctx, timeout)
+		out, err := exec.CommandContext(qctx, queryBin, "-d", "\n", "-E", sql, indexRoot).Output()
+		cancel()
 		if err != nil {
 			log.Warn("sibling lookup failed; other names of these multi-name files keep a stale size",
 				zap.Int("entry_ids", len(chunk)), zap.Error(err))
@@ -159,11 +249,7 @@ func siblingDirs(ctx context.Context, log *zap.Logger, entryIDs []string, mount,
 			if line = strings.TrimSpace(line); line == "" {
 				continue
 			}
-			rel, err := filepath.Rel(indexRoot, line)
-			if err != nil || strings.HasPrefix(rel, "..") {
-				continue
-			}
-			if src := filepath.Join(mount, rel); !seen[src] {
+			if src := filepath.Join(mount, strings.TrimPrefix(line, indexRoot)); !seen[src] {
 				seen[src] = true
 				dirs = append(dirs, src)
 			}
@@ -173,8 +259,8 @@ func siblingDirs(ctx context.Context, log *zap.Logger, entryIDs []string, mount,
 }
 
 // statCache remembers, for one batch, whether a path is a directory and its inode, so paths
-// many marks share cost one metadata round trip. It drops the least recently used answer
-// beyond its limit; forgetting only means asking again.
+// many marks share cost one stat. Beyond its limit it drops the least recently used answer;
+// forgetting only means asking again.
 type statCache struct {
 	lru   *simplelru.LRU[string, dirStat]
 	stats int // os.Stat calls made
@@ -186,9 +272,9 @@ type dirStat struct {
 }
 
 func newStatCache(limit int) *statCache {
-	lru, err := simplelru.NewLRU[string, dirStat](max(limit, 1), nil)
+	lru, err := simplelru.NewLRU[string, dirStat](limit, nil)
 	if err != nil {
-		panic(err) // only for a size below 1
+		panic(err) // a size below 1, which ValidateConfig refuses
 	}
 	return &statCache{lru: lru}
 }
@@ -259,9 +345,10 @@ func writeSuspects(dirs []string, mount, indexRoot, out string, cacheSize int) (
 	return len(inodes), cache.stats, writeFileDurable(out, []byte(b.String()))
 }
 
-// commonAncestor returns the deepest directory that holds both a and b.
+// commonAncestor returns the deepest directory that holds both a and b. Both lie within the
+// mount, so the climb ends there at the latest.
 func commonAncestor(a, b string) string {
-	for !within(b, a) && filepath.Dir(a) != a {
+	for !within(b, a) {
 		a = filepath.Dir(a)
 	}
 	return a

@@ -12,8 +12,6 @@
 # --- Section 1: [Settings] ---
 #
 
-spool = "/var/lib/beegfs/index-sync/spool"
-
 [log]
 level = 3
 type = "syslog"
@@ -21,21 +19,18 @@ type = "syslog"
 [collector]
 listen = "0.0.0.0:50052"
 checkpoint = "/var/lib/beegfs/index-sync/checkpoint.json"
-counter = "/var/lib/beegfs/index-sync/counter.json"
 ack-frequency = "1s"
-roll-every = "30s"
-roll-events = 100000
+batch-every = "30s"
+batch-events = 50000
+batch-queue = 2
 tls-disable = true
 
 [markwalk]
-state = "/var/lib/beegfs/index-sync/markwalk.json"
 work = "/var/lib/beegfs/index-sync/markwalk"
 mount = "/mnt/beegfs"
 index = "/var/lib/gufi"
 query = "/opt/beegfs/bin/index/gufi_query"
-every = "1m"
-max-segments = 100
-retain = false
+query-timeout = "30s"
 
 
 #
@@ -53,11 +48,10 @@ retain = false
 #
 
 # BeeGFS Index Sync has two halves. The collector is a BeeGFS Watch subscriber: it receives file
-# system events over gRPC and writes them to segment files in the spool. Markwalk reads sealed
-# segments and writes, per batch, the list of directories the index must rescan (a suspect file for
-# `beegfs index update`). The configuration is read once at start.
-
-# spool: The directory segment files are written to and read from.
+# system events over gRPC and gathers them into batches in memory. Markwalk writes, per batch, the
+# list of directories the index must rescan (a suspect file for `beegfs index update`). Only then
+# are the batch's events acknowledged to Watch, which keeps everything not yet acknowledged. The
+# configuration is read once at start.
 
 
 #
@@ -100,18 +94,18 @@ retain = false
 # checkpoint: The file where the sequence IDs acknowledged to Watch are recorded, so a restart
 # resumes where it left off.
 
-# counter: The file recording the highest sealed segment number, so numbering continues after
-# segments are removed. Leave empty to keep no counter.
-
 # ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
 
-# roll-every: Seal the open segment at least this often, so events reach markwalk on a quiet system.
+# batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
+# system. Together with batch-events this bounds how long Watch waits for an acknowledgement.
 
-# roll-events: Seal the open segment once it holds this many events.
+# batch-events: Close the open batch once it holds this many events.
 
-# queue: The number of events buffered between the gRPC streams and the segment writer.
+# queue: The number of events buffered between the gRPC streams and the batcher.
 
-# seal-queue: The number of written segments that may wait for fsync before receiving blocks.
+# batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
+# the collector stops reading from Watch, which then keeps the events in its own buffer. At most
+# batch-queue + 2 batches of batch-events events are held in memory unacknowledged.
 
 # tls-disable: Disable TLS for the gRPC server Watch connects to.
 
@@ -122,9 +116,8 @@ retain = false
 
 # Markwalk configuration must be specified under [markwalk].
 
-# state: The file recording the last segment whose suspect file was written.
-
-# work: The directory each batch's suspect file is written to, as batch-<N>/suspects.
+# work: The directory each batch's suspect file is written to, as batch-<N>/suspects. Numbering
+# continues from the highest batch present after a restart.
 
 # mount: The path where BeeGFS is mounted, so event paths can be made absolute.
 
@@ -133,12 +126,9 @@ retain = false
 # query: The gufi_query binary used to find the other names of a multi-link inode. Leave empty to
 # disable the lookup.
 
-# every: The least time between batches.
-
-# max-segments: The most segments in one batch.
+# query-timeout: The most time one gufi_query run may take. On timeout the batch goes on without
+# those names and a warning is logged, so one slow query cannot hold back acknowledgements.
 
 # stat-cache: The most stat results a batch keeps.
 
 # track-opens: Include open events so atime changes are indexed.
-
-# retain: Remove segments once their suspect file is written, keeping the newest.

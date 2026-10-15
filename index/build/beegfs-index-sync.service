@@ -8,9 +8,9 @@ Wants=basic.target
 Type=simple
 ExecStart=/opt/beegfs/sbin/beegfs-index-sync --cfg-file=/etc/beegfs/beegfs-index-sync.toml
 
-# On stop the collector seals the segment it is writing and markwalk finishes the batch it is on.
-# A batch stats every directory it touches on BeeGFS, so allow it time to complete.
-TimeoutStopSec=300
+# Stopping does not wait for the batch in progress: events not yet acknowledged stay in Watch and
+# are delivered again on the next start.
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
