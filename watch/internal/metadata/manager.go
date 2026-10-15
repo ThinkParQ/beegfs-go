@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -59,6 +60,10 @@ type Config struct {
 // specified EventLogTarget and publishing them to an EventBuffer.
 // If the socket's directory is missing, New creates it with mode 0700 and
 // creates any missing parents with mode 0755.
+// New then takes an exclusive flock on <EventLogTarget>.lock and holds it until
+// cleanup runs. If another watch holds that lock, New returns an error naming
+// the socket path. Only with the lock held does it remove a stale socket file
+// and listen.
 // It is the callers responsibility to call the returned cleanup function to
 // avoid leaking resources (typically using a defer statement).
 // This allows us to initialize the metadata socket and buffer which are then
@@ -78,18 +83,6 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 	}
 	config = metaConfigs[0]
 
-	// Cleanup old socket if needed:
-	stat, err := os.Stat(config.EventLogTarget)
-	if err == nil {
-		if stat.IsDir() {
-			return nil, nil, errors.New("the provided Unix socket path for sysFileEventLogTarget was an existing directory, but must be a new or existing file path")
-		}
-		if err = os.Remove(config.EventLogTarget); err != nil {
-			return nil, nil, err
-		}
-
-	}
-
 	socketDir := filepath.Dir(config.EventLogTarget)
 	if _, err := os.Stat(socketDir); os.IsNotExist(err) {
 		// Parents such as /run/beegfs may be missing too, because /run is tmpfs.
@@ -107,9 +100,38 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		log.Debug("using existing socket directory", zap.Any("socketDir", socketDir))
 	}
 
+	// Lock the socket path so only one watch can use it. The kernel drops the lock if watch dies.
+	lockPath := config.EventLogTarget + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to open socket lock file %s: %w", lockPath, err)
+	}
+	err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		lockFile.Close()
+		return nil, nil, fmt.Errorf("another beegfs-watch is using the socket path %s (it holds the lock %s; run one beegfs-watch per socket path)", config.EventLogTarget, lockPath)
+	}
+	if err != nil {
+		lockFile.Close()
+		return nil, nil, fmt.Errorf("unable to lock socket lock file %s: %w", lockPath, err)
+	}
+
+	// We hold the lock, so no other watch uses the path:
+	stat, err := os.Stat(config.EventLogTarget)
+	if err == nil && stat.IsDir() {
+		lockFile.Close()
+		return nil, nil, errors.New("the provided Unix socket path for sysFileEventLogTarget was an existing directory, but must be a new or existing file path")
+	}
+	err = os.Remove(config.EventLogTarget)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		lockFile.Close()
+		return nil, nil, err
+	}
+
 	socket, err := net.Listen("unixpacket", config.EventLogTarget)
 
 	if err != nil {
+		lockFile.Close()
 		return nil, nil, fmt.Errorf("error listening for unix packets using socket %s: %w", config.EventLogTarget, err)
 	}
 
@@ -118,6 +140,9 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		err := socket.Close()
 		if err != nil {
 			log.Error("unable to close metadata socket", zap.Error(err))
+		}
+		if err := lockFile.Close(); err != nil {
+			log.Error("unable to close socket lock file", zap.String("lockPath", lockPath), zap.Error(err))
 		}
 	}
 
