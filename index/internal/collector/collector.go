@@ -80,7 +80,7 @@ type Config struct {
 
 // Run serves Watch until ctx is done, then stops cleanly: nothing new is
 // accepted, every file is sealed, and the checkpoint records what was acked.
-// After each seal it does a non-blocking send on sealed, when that is not nil.
+// After each seal it does a non-blocking send on sealed.
 // A disk error returns at once: nothing unsealed was acked, so Watch replays
 // it after a restart.
 func Run(ctx context.Context, cfg Config, log *zap.Logger, sealed chan<- struct{}) error {
@@ -231,7 +231,7 @@ type collector struct {
 	dir       string
 	counter   string
 	maxEvents int
-	sealed    chan<- struct{} // nudged after each seal; nil when nobody listens
+	sealed    chan<- struct{} // nudged after each seal
 
 	events chan *bw.Event
 	acks   chan subscriber.Ack
@@ -390,11 +390,9 @@ func (c *collector) seal(fl *file, dir *os.File, high map[uint32]uint64) error {
 		high[a.MetaId] = max(high[a.MetaId], a.SeqId)
 	}
 	c.log.Info("sealed", zap.String("file", fl.name), zap.Int("events", len(fl.acks)))
-	if c.sealed != nil {
-		select {
-		case c.sealed <- struct{}{}:
-		default: // one pending nudge covers any number of seals
-		}
+	select {
+	case c.sealed <- struct{}{}:
+	default: // one pending nudge covers any number of seals
 	}
 	return nil
 }

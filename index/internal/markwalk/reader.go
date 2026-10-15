@@ -73,10 +73,9 @@ type reader struct {
 }
 
 // run makes batches until ctx is done. Behind, when a batch filled up to MaxSegments, it goes
-// straight on to the next. Caught up, it waits for a nudge on sealed, or Poll when sealed is
-// nil, and then lets Every pass since the last batch: steady load makes one batch per Every,
-// and idle costs nothing. A failed batch is retried after a growing delay, and nothing is
-// skipped. With Once it makes batches of what is there now and returns the first error.
+// straight on to the next. Caught up, it waits for a nudge on sealed and then lets Every pass
+// since the last batch: steady load makes one batch per Every, and idle costs nothing. A
+// failed batch is retried after a growing delay, and nothing is skipped.
 func (r *reader) run(ctx context.Context, sealed <-chan struct{}) error {
 	st, err := readState(r.State)
 	if err != nil {
@@ -100,9 +99,6 @@ func (r *reader) run(ctx context.Context, sealed <-chan struct{}) error {
 			if ctx.Err() != nil {
 				return nil // stopping mid-batch; the batch repeats after a restart
 			}
-			if r.Once {
-				return err
-			}
 			d := retry.NextBackOff()
 			r.log.Error("batch failed, retrying", zap.Error(err), zap.Duration("after", d))
 			if !sleep(ctx, d) {
@@ -115,23 +111,15 @@ func (r *reader) run(ctx context.Context, sealed <-chan struct{}) error {
 			if r.Retain {
 				r.retain(st.Segment)
 			}
-			if full || r.Once {
+			if full {
 				continue // behind: straight on to the next batch
 			}
-		case r.Once:
-			return nil
 		}
 		// Caught up: wait for a seal, then let Every pass since the last batch.
-		if sealed == nil {
-			if !sleep(ctx, r.Poll) {
-				return nil
-			}
-		} else {
-			select {
-			case <-sealed:
-			case <-ctx.Done():
-				return nil
-			}
+		select {
+		case <-sealed:
+		case <-ctx.Done():
+			return nil
 		}
 		if !sleep(ctx, time.Until(last.Add(r.Every))) {
 			return nil

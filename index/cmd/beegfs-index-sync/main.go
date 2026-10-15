@@ -1,6 +1,6 @@
 // Command beegfs-index-sync feeds BeeGFS Watch events to GUFI's incremental update. The collector
 // receives events from Watch and spools them to disk; markwalk turns the spool into suspect files
-// for beegfs index update. --mode runs both in one process or either one alone, see MERGE-DESIGN.md.
+// for beegfs index update. See MERGE-DESIGN.md.
 package main
 
 import (
@@ -35,7 +35,6 @@ var (
 func main() {
 	pflag.Bool("version", false, "Print the version then exit.")
 	pflag.String("cfg-file", "", "The path to a configuration file (can be omitted to set all configuration using flags and/or environment variables).")
-	pflag.String("mode", "both", "What to run: 'both', 'collect' (Watch to spool) or 'process' (spool to suspect files).")
 	pflag.String("spool", "/var/lib/beegfs/index-sync/spool", "The segment directory shared by the collector and markwalk.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
 	pflag.String("log.file", "/var/log/beegfs/beegfs-index-sync.log", "The path to the desired log file when logType is 'logfile' (if needed the directory and all parent directories will be created).")
@@ -58,12 +57,10 @@ func main() {
 	pflag.String("markwalk.index", "/var/lib/gufi", "The GUFI index root.")
 	pflag.String("markwalk.query", "/opt/beegfs/bin/index/gufi_query", "The gufi_query binary used to find the other names of a multi-link inode (empty disables the lookup).")
 	pflag.Duration("markwalk.every", time.Minute, "The least time between batches.")
-	pflag.Duration("markwalk.poll", 30*time.Second, "How often to look for new segments when running without the collector.")
 	pflag.Int("markwalk.max-segments", 100, "The most segments in one batch.")
 	pflag.Int("markwalk.stat-cache", 200_000, "The most stat results a batch keeps.")
 	pflag.Bool("markwalk.track-opens", false, "Include open events so atime changes are indexed.")
 	pflag.Bool("markwalk.retain", false, "Remove segments once their suspect file is written, keeping the newest.")
-	pflag.Bool("markwalk.once", false, "Process the segments present now and exit (mode 'process' only).")
 	pflag.CommandLine.SortFlags = false
 	pflag.Parse()
 
@@ -92,28 +89,18 @@ func main() {
 	}()
 	logger.Info("start-of-day", zap.String("application", binaryName), zap.String("version", version), zap.String("commit", commit), zap.String("built", buildTime))
 
-	runCollector := cfg.Mode == "both" || cfg.Mode == "collect"
-	runMarkwalk := cfg.Mode == "both" || cfg.Mode == "process"
 	c, m := cfg.Collector, cfg.Markwalk
 	c.Spool, m.Spool = cfg.Spool, cfg.Spool
-
-	// In one process a seal nudges markwalk through this channel. Alone, markwalk polls instead.
-	var sealed chan struct{}
-	if runCollector && runMarkwalk {
-		sealed = make(chan struct{}, 1)
-	}
+	// A seal nudges markwalk through this channel; one pending nudge covers any number of seals.
+	sealed := make(chan struct{}, 1)
 
 	// SIGINT or SIGTERM stops both: the collector seals the open segment and markwalk finishes
 	// the batch it is on. A collector error stops the process too; markwalk retries its own.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	g, gctx := errgroup.WithContext(ctx)
-	if runCollector {
-		g.Go(func() error { return collector.Run(gctx, c, logger.Logger, sealed) })
-	}
-	if runMarkwalk {
-		g.Go(func() error { return markwalk.Run(gctx, m, logger.Logger, sealed) })
-	}
+	g.Go(func() error { return collector.Run(gctx, c, logger.Logger, sealed) })
+	g.Go(func() error { return markwalk.Run(gctx, m, logger.Logger, sealed) })
 	if err := g.Wait(); err != nil {
 		logger.Fatal("stopped on error", zap.Error(err))
 	}

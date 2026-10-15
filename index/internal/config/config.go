@@ -4,7 +4,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -16,10 +15,8 @@ import (
 var _ configmgr.Configurable = &AppConfig{}
 var _ logger.Configurer = &AppConfig{}
 
-// AppConfig is the whole configuration. Mode selects what runs: both, collect (Watch to spool) or
-// process (spool to suspect files). Spool is the segment directory both halves share.
+// AppConfig is the whole configuration. Spool is the segment directory both halves share.
 type AppConfig struct {
-	Mode      string           `mapstructure:"mode"`
 	Spool     string           `mapstructure:"spool"`
 	Collector collector.Config `mapstructure:"collector"`
 	Markwalk  markwalk.Config  `mapstructure:"markwalk"`
@@ -44,19 +41,11 @@ func (c *AppConfig) UpdateAllowed(configmgr.Configurable) error {
 // ValidateConfig reports every bad value at once.
 func (c *AppConfig) ValidateConfig() error {
 	var errs []error
-	switch c.Mode {
-	case "both", "collect", "process":
-	default:
-		errs = append(errs, fmt.Errorf("mode must be both, collect or process, not %q", c.Mode))
-	}
 	if co := c.Collector; co.RollEvents < 1 || co.Queue < 1 || co.SealQueue < 1 || co.RollEvery <= 0 {
 		errs = append(errs, errors.New("collector.roll-events, collector.queue and collector.seal-queue must be at least 1, collector.roll-every above 0"))
 	}
-	if m := c.Markwalk; m.MaxSegments < 1 || m.StatCache < 1 || m.Every <= 0 || m.Poll <= 0 {
-		errs = append(errs, errors.New("markwalk.max-segments and markwalk.stat-cache must be at least 1, markwalk.every and markwalk.poll above 0"))
-	}
-	if c.Markwalk.Once && c.Mode != "process" {
-		errs = append(errs, errors.New("markwalk.once needs mode process"))
+	if m := c.Markwalk; m.MaxSegments < 1 || m.StatCache < 1 || m.Every <= 0 {
+		errs = append(errs, errors.New("markwalk.max-segments and markwalk.stat-cache must be at least 1, markwalk.every above 0"))
 	}
 	return errors.Join(errs...)
 }

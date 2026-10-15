@@ -40,8 +40,6 @@ type Config struct {
 	Query string `mapstructure:"query"`
 	// Every is the least time between batches.
 	Every time.Duration `mapstructure:"every"`
-	// Poll is how often to look for new segments when nobody nudges.
-	Poll time.Duration `mapstructure:"poll"`
 	// MaxSegments is the most segments in one batch.
 	MaxSegments int `mapstructure:"max-segments"`
 	// StatCache is the most stat results a batch keeps.
@@ -50,14 +48,11 @@ type Config struct {
 	TrackOpens bool `mapstructure:"track-opens"`
 	// Retain removes segments once their suspect file is written, keeping the newest.
 	Retain bool `mapstructure:"retain"`
-	// Once makes batches of the segments present now and returns.
-	Once bool `mapstructure:"once"`
 }
 
 // Run makes batches until ctx is done. A nudge on sealed means the collector sealed a
-// segment; with sealed nil it polls every cfg.Poll instead. Run returns only when ctx is
-// done, or at once with cfg.Once; a failed batch is retried after a growing delay, so that
-// nothing is skipped and the collector sharing the process is never stopped.
+// segment. A failed batch is retried after a growing delay, so that nothing is skipped and
+// the collector sharing the process is never stopped.
 func Run(ctx context.Context, cfg Config, log *zap.Logger, sealed <-chan struct{}) error {
 	cfg.Mount, cfg.Index = filepath.Clean(cfg.Mount), filepath.Clean(cfg.Index)
 	return (&reader{Config: cfg, log: log}).run(ctx, sealed)

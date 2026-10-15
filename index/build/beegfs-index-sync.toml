@@ -12,7 +12,6 @@
 # --- Section 1: [Settings] ---
 #
 
-mode = "both"
 spool = "/var/lib/beegfs/index-sync/spool"
 
 [log]
@@ -35,7 +34,6 @@ mount = "/mnt/beegfs"
 index = "/var/lib/gufi"
 query = "/opt/beegfs/bin/index/gufi_query"
 every = "1m"
-poll = "30s"
 max-segments = 100
 retain = false
 
@@ -58,10 +56,6 @@ retain = false
 # system events over gRPC and writes them to segment files in the spool. Markwalk reads sealed
 # segments and writes, per batch, the list of directories the index must rescan (a suspect file for
 # `beegfs index update`). The configuration is read once at start.
-
-# mode: What this process runs. "both" runs the collector and markwalk together, "collect" only the
-# collector (Watch to spool) and "process" only markwalk (spool to suspect files). In split mode the
-# two processes share the spool directory.
 
 # spool: The directory segment files are written to and read from.
 
@@ -141,8 +135,6 @@ retain = false
 
 # every: The least time between batches.
 
-# poll: How often to look for new segments when running without the collector (mode "process").
-
 # max-segments: The most segments in one batch.
 
 # stat-cache: The most stat results a batch keeps.
@@ -150,5 +142,3 @@ retain = false
 # track-opens: Include open events so atime changes are indexed.
 
 # retain: Remove segments once their suspect file is written, keeping the newest.
-
-# once: Process the segments present now and exit (mode "process" only).
