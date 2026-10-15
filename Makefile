@@ -6,7 +6,8 @@ INSTALL_TARGETS := \
   ctl:beegfs:./ctl/cmd/beegfs \
   remote:beegfs-remote:./rst/remote/cmd/beegfs-remote \
   sync:beegfs-sync:./rst/sync/cmd/beegfs-sync \
-  watch:beegfs-watch:./watch/cmd/beegfs-watch
+  watch:beegfs-watch:./watch/cmd/beegfs-watch \
+  index-sync:beegfs-index-sync:./index/cmd/beegfs-index-sync
 INSTALL_DIR=$(HOME)/go/bin
 
 .PHONY: all install uninstall
@@ -66,6 +67,7 @@ generate-notices:
 	@go tool go-licenses report ./rst/remote/... --template rst/remote/build/notice.tpl > rst/remote/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 	@go tool go-licenses report ./rst/sync/... --template rst/sync/build/notice.tpl > rst/sync/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq	
 	@go tool go-licenses report ./watch/... --template watch/build/notice.tpl > watch/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
+	@go tool go-licenses report ./index/... --template index/build/notice.tpl > index/NOTICE.md --ignore git.beegfs.io --ignore github.com/thinkparq
 
 # Test targets:
 # Test targets may make change to the local repository (e.g. running go mod tidy) to
@@ -146,6 +148,9 @@ check-go-tidy: tidy
 #   original source. Note this exists in the project because we use Viper
 #   creating an indirect dependancy on HCL. However we don't allow users to use
 #   HCL for configuration so technically we don't even use this at all.
+#
+# github.com/hashicorp/golang-lru: Also MPL 2.0. beegfs-index-sync uses its LRU cache as-is
+#   without modifying any of the original source, which is acceptable under the license.
 .PHONY: check-licenses
 check-licenses: generate-notices
 	@echo "Checking license compliance..."
@@ -153,7 +158,8 @@ check-licenses: generate-notices
 		--disallowed_types=forbidden,permissive,reciprocal,restricted,unknown \
 		--ignore git.beegfs.io \
 		--ignore github.com/thinkparq \
-		--ignore github.com/hashicorp/hcl
+		--ignore github.com/hashicorp/hcl \
+		--ignore github.com/hashicorp/golang-lru
 	@if [ -n "$$(git status --porcelain ctl/NOTICE.md)" ]; then \
         echo "BeeGFS CTL NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
@@ -168,6 +174,10 @@ check-licenses: generate-notices
     fi
 	@if [ -n "$$(git status --porcelain watch/NOTICE.md)" ]; then \
         echo "NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
+        exit 1; \
+    fi
+	@if [ -n "$$(git status --porcelain index/NOTICE.md)" ]; then \
+        echo "BeeGFS Index Sync NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \
     fi
 

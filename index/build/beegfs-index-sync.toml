@@ -1,0 +1,154 @@
+# This is a config file for BeeGFS Index Sync.
+# http://www.beegfs.com
+
+
+# --- [Table of Contents] ---
+#
+# 1) Settings
+# 2) Command Line Arguments
+# 3) Settings Documentation
+
+#
+# --- Section 1: [Settings] ---
+#
+
+mode = "both"
+spool = "/var/lib/beegfs/index-sync/spool"
+
+[log]
+level = 3
+type = "syslog"
+
+[collector]
+listen = "0.0.0.0:50052"
+checkpoint = "/var/lib/beegfs/index-sync/checkpoint.json"
+counter = "/var/lib/beegfs/index-sync/counter.json"
+ack-frequency = "1s"
+roll-every = "30s"
+roll-events = 100000
+tls-disable = true
+
+[markwalk]
+state = "/var/lib/beegfs/index-sync/markwalk.json"
+work = "/var/lib/beegfs/index-sync/markwalk"
+mount = "/mnt/beegfs"
+index = "/var/lib/gufi"
+query = "/opt/beegfs/bin/index/gufi_query"
+every = "1m"
+poll = "30s"
+max-segments = 100
+retain = false
+
+
+#
+# --- Section 2: [Command Line Arguments] ---
+#
+
+# Use the command line argument "--cfg-file=/etc/another-config.conf" to specify a different config
+# file. All other options in this file can also be used as command line arguments, or set using
+# environment variables, overriding the corresponding config file values. See `--help` for details
+# on how to configure using flags and/or environment variables.
+
+
+#
+# --- Section 3: [Settings Documentation] ---
+#
+
+# BeeGFS Index Sync has two halves. The collector is a BeeGFS Watch subscriber: it receives file
+# system events over gRPC and writes them to segment files in the spool. Markwalk reads sealed
+# segments and writes, per batch, the list of directories the index must rescan (a suspect file for
+# `beegfs index update`). The configuration is read once at start.
+
+# mode: What this process runs. "both" runs the collector and markwalk together, "collect" only the
+# collector (Watch to spool) and "process" only markwalk (spool to suspect files). In split mode the
+# two processes share the spool directory.
+
+# spool: The directory segment files are written to and read from.
+
+
+#
+# --- Section 3.1: [Logging Settings] ---
+#
+
+# Logging configuration must be specified under [log].
+
+# level: Adjust the logging verbosity. Supported levels:
+# 0 - Fatal Only (not recommended).
+# 1 - Fatal + Error
+# 2 - Warn + Error + Fatal
+# 3 - Info + Warn + Error + Fatal
+# 4, 5 - Debug, Info, Warn, Error, Fatal
+# Note: Levels above 3 might decrease performance.
+
+# type: Defines the logger type. This can either be "syslog" to send log messages to the general
+# system logger, "logfile", "stderr", or "stdout". If set to "logfile" logs will be written to the
+# below file and rotated based on the provided settings.
+
+# file: The path to the desired log file when logType is "logfile". As needed the directory and all
+# parent directories will be created.
+
+# max-size: When type is set to "logfile" this is the maximum size of the file in megabytes before
+# it is rotated.
+
+# num-rotated-files: When type is "logfile" the maximum number old file(s) to keep when max-size is
+# reached and the log is rotated.
+
+
+#
+# --- Section 3.2: [Collector Settings] ---
+#
+
+# Collector configuration must be specified under [collector]. Configure each BeeGFS Watch instance
+# with a gRPC subscriber pointing at the listen address.
+
+# listen: The address and port Watch connects to.
+
+# checkpoint: The file where the sequence IDs acknowledged to Watch are recorded, so a restart
+# resumes where it left off.
+
+# counter: The file recording the highest sealed segment number, so numbering continues after
+# segments are removed. Leave empty to keep no counter.
+
+# ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
+
+# roll-every: Seal the open segment at least this often, so events reach markwalk on a quiet system.
+
+# roll-events: Seal the open segment once it holds this many events.
+
+# queue: The number of events buffered between the gRPC streams and the segment writer.
+
+# seal-queue: The number of written segments that may wait for fsync before receiving blocks.
+
+# tls-disable: Disable TLS for the gRPC server Watch connects to.
+
+
+#
+# --- Section 3.3: [Markwalk Settings] ---
+#
+
+# Markwalk configuration must be specified under [markwalk].
+
+# state: The file recording the last segment whose suspect file was written.
+
+# work: The directory each batch's suspect file is written to, as batch-<N>/suspects.
+
+# mount: The path where BeeGFS is mounted, so event paths can be made absolute.
+
+# index: The GUFI index root.
+
+# query: The gufi_query binary used to find the other names of a multi-link inode. Leave empty to
+# disable the lookup.
+
+# every: The least time between batches.
+
+# poll: How often to look for new segments when running without the collector (mode "process").
+
+# max-segments: The most segments in one batch.
+
+# stat-cache: The most stat results a batch keeps.
+
+# track-opens: Include open events so atime changes are indexed.
+
+# retain: Remove segments once their suspect file is written, keeping the newest.
+
+# once: Process the segments present now and exit (mode "process" only).
