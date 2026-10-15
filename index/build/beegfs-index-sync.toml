@@ -27,7 +27,6 @@ tls-disable = true
 
 [markwalk]
 work = "/var/lib/beegfs/index-sync/markwalk"
-mount = "/mnt/beegfs"
 index = "/var/lib/gufi"
 query = "/opt/beegfs/bin/index/gufi_query"
 query-timeout = "30s"
@@ -49,7 +48,8 @@ query-timeout = "30s"
 
 # BeeGFS Index Sync has two halves. The collector is a BeeGFS Watch subscriber: it receives file
 # system events over gRPC and gathers them into batches in memory. Markwalk writes, per batch, the
-# list of directories the index must rescan (a suspect file for `beegfs index update`). Only then
+# list of directories whose index databases must be rebuilt (a suspect file for `beegfs index
+# update`), with their inodes read from the index itself. It never reads the file system. Only then
 # are the batch's events acknowledged to Watch, which keeps everything not yet acknowledged. The
 # configuration is read once at start.
 
@@ -119,16 +119,14 @@ query-timeout = "30s"
 # work: The directory each batch's suspect file is written to, as batch-<N>/suspects. Numbering
 # continues from the highest batch present after a restart.
 
-# mount: The path where BeeGFS is mounted, so event paths can be made absolute.
+# index: The GUFI index root: the index directory that corresponds to the BeeGFS mount.
 
-# index: The GUFI index root.
+# query: The gufi_query binary. Each batch runs it once to read the inodes of the directories the
+# events named, and once more per batch that touched a hard-linked file, to find the directories of
+# its other names.
 
-# query: The gufi_query binary used to find the other names of a multi-link inode. Leave empty to
-# disable the lookup.
-
-# query-timeout: The most time one gufi_query run may take. On timeout the batch goes on without
-# those names and a warning is logged, so one slow query cannot hold back acknowledgements.
-
-# stat-cache: The most stat results a batch keeps.
+# query-timeout: The most time one gufi_query run may take. A directory lookup that times out fails
+# the batch, which is retried. A hard-link lookup that times out is logged and skipped: the other
+# names keep a stale row until the next change in their directory.
 
 # track-opens: Include open events so atime changes are indexed.

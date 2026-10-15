@@ -22,7 +22,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/google/renameio/v2 v2.0.2
 	github.com/google/uuid v1.6.0
-	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jedib0t/go-pretty/v6 v6.6.7
 	github.com/mitchellh/go-wordwrap v1.0.1
 	github.com/pelletier/go-toml/v2 v2.2.4

@@ -52,6 +52,10 @@ func Run(ctx context.Context, cfg Config, mw markwalk.Config, log *zap.Logger) e
 	if err != nil {
 		return fmt.Errorf("unable to read work directory: %w", err)
 	}
+	marker := markwalk.New(mw, log)
+	if err := marker.Check(ctx); err != nil {
+		return fmt.Errorf("unable to check the index: %w", err)
+	}
 	store, err := subscriber.NewDiskStore(cfg.Checkpoint)
 	if err != nil {
 		return fmt.Errorf("unable to open checkpoint: %w", err)
@@ -67,7 +71,7 @@ func Run(ctx context.Context, cfg Config, mw markwalk.Config, log *zap.Logger) e
 		return fmt.Errorf("unable to create subscriber server: %w", err)
 	}
 	c := &collector{
-		log: log, markwalk: mw, maxEvents: cfg.BatchEvents, last: last, seqs: newSeqTracker(stored),
+		log: log, marker: marker, maxEvents: cfg.BatchEvents, last: last, seqs: newSeqTracker(stored),
 		events:  make(chan *bw.Event, cfg.Queue),
 		batches: make(chan *batch, cfg.BatchQueue),
 		acks:    make(chan subscriber.Ack, 1<<16),
@@ -108,7 +112,7 @@ type batch struct {
 
 type collector struct {
 	log       *zap.Logger
-	markwalk  markwalk.Config
+	marker    *markwalk.Marker
 	maxEvents int
 
 	events  chan *bw.Event      // from the SDK's stream goroutines to the batcher
@@ -172,7 +176,7 @@ func (c *collector) processor(ctx context.Context) {
 	retry := backoff.NewExponentialBackOff()
 	for b := range c.batches {
 		for {
-			err := safely(func() error { return markwalk.Process(ctx, c.markwalk, c.log, b.n, b.events) })
+			err := safely(func() error { return c.marker.Process(ctx, b.n, b.events) })
 			if err == nil {
 				break
 			}

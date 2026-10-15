@@ -148,9 +148,6 @@ check-go-tidy: tidy
 #   original source. Note this exists in the project because we use Viper
 #   creating an indirect dependancy on HCL. However we don't allow users to use
 #   HCL for configuration so technically we don't even use this at all.
-#
-# github.com/hashicorp/golang-lru: Also MPL 2.0. beegfs-index-sync uses its LRU cache as-is
-#   without modifying any of the original source, which is acceptable under the license.
 .PHONY: check-licenses
 check-licenses: generate-notices
 	@echo "Checking license compliance..."
@@ -158,8 +155,7 @@ check-licenses: generate-notices
 		--disallowed_types=forbidden,permissive,reciprocal,restricted,unknown \
 		--ignore git.beegfs.io \
 		--ignore github.com/thinkparq \
-		--ignore github.com/hashicorp/hcl \
-		--ignore github.com/hashicorp/golang-lru
+		--ignore github.com/hashicorp/hcl
 	@if [ -n "$$(git status --porcelain ctl/NOTICE.md)" ]; then \
         echo "BeeGFS CTL NOTICE file is not up to date. Please run 'make generate-notices' and commit the changes."; \
         exit 1; \

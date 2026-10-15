@@ -41,8 +41,8 @@ func (c *AppConfig) ValidateConfig() error {
 	if co := c.Collector; co.BatchEvents < 1 || co.Queue < 1 || co.BatchQueue < 1 || co.BatchEvery <= 0 {
 		errs = append(errs, errors.New("collector.batch-events, collector.queue and collector.batch-queue must be at least 1, collector.batch-every above 0"))
 	}
-	if m := c.Markwalk; m.StatCache < 1 || m.QueryTimeout <= 0 {
-		errs = append(errs, errors.New("markwalk.stat-cache must be at least 1, markwalk.query-timeout above 0"))
+	if m := c.Markwalk; m.Query == "" || m.QueryTimeout <= 0 {
+		errs = append(errs, errors.New("markwalk.query is required, markwalk.query-timeout must be above 0"))
 	}
 	return errors.Join(errs...)
 }
