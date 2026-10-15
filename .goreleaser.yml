@@ -71,6 +71,23 @@ builds:
       - arm64
     main: watch/cmd/beegfs-watch/main.go
 
+  - id: beegfs_index_sync
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.binaryName=beegfs-index-sync
+      - -X main.commit={{ .Commit }}
+      - -X main.buildTime={{ .Date }}
+    binary: beegfs-index-sync
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: index/cmd/beegfs-index-sync/main.go
+
 nfpms:
   - id: beegfs_tools
     ids:
@@ -187,6 +204,35 @@ nfpms:
         dst: /usr/share/doc/beegfs-watch/NOTICE.md
       - src: LICENSE.md
         dst: /usr/share/doc/beegfs-watch/LICENSE.md
+
+  - id: beegfs_index_sync
+    ids:
+      - beegfs_index_sync
+    package_name: beegfs-index-sync
+    file_name_template: "beegfs-index-sync-{{ .Version }}-{{ .Os }}.{{ .Arch }}"
+    vendor: "ThinkparQ GmbH"
+    homepage: https://www.beegfs.io
+    maintainer: BeeGFS Maintainers <packages@beegfs.com>
+    description: BeeGFS Index Sync (Watch events to index suspect files)
+    license: BeeGFS License Agreement
+    formats:
+      - rpm
+      - deb
+    epoch: "20"
+    bindir: /opt/beegfs/sbin/
+    contents:
+      - src: /opt/beegfs/sbin/beegfs-index-sync
+        dst: /usr/sbin/beegfs-index-sync
+        type: "symlink"
+      - src: index/build/beegfs-index-sync.service
+        dst: /usr/lib/systemd/system/beegfs-index-sync.service
+      - src: index/build/beegfs-index-sync.toml
+        dst: /etc/beegfs/beegfs-index-sync.toml
+        type: "config|noreplace"
+      - src: index/NOTICE.md
+        dst: /usr/share/doc/beegfs-index-sync/NOTICE.md
+      - src: LICENSE.md
+        dst: /usr/share/doc/beegfs-index-sync/LICENSE.md
 
 # TODO (https://github.com/ThinkParQ/bee-watch/issues/31): Add support for building multi-platform
 # (amd64+arm64) images using GitHub Actions.

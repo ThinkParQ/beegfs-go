@@ -1,0 +1,16 @@
+[Unit]
+Description=BeeGFS Index Sync (Watch events to index suspect files)
+Documentation=http://www.beegfs.com/content/documentation/
+After=remote-fs.target beegfs-client.service
+Wants=basic.target
+
+[Service]
+Type=simple
+ExecStart=/opt/beegfs/sbin/beegfs-index-sync --cfg-file=/etc/beegfs/beegfs-index-sync.toml
+
+# Stopping does not wait for the batch in progress: events not yet acknowledged stay in Watch and
+# are delivered again on the next start.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

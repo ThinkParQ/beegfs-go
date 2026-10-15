@@ -1,0 +1,132 @@
+# This is a config file for BeeGFS Index Sync.
+# http://www.beegfs.com
+
+
+# --- [Table of Contents] ---
+#
+# 1) Settings
+# 2) Command Line Arguments
+# 3) Settings Documentation
+
+#
+# --- Section 1: [Settings] ---
+#
+
+[log]
+level = 3
+type = "syslog"
+
+[collector]
+listen = "0.0.0.0:50052"
+checkpoint = "/var/lib/beegfs/index-sync/checkpoint.json"
+ack-frequency = "1s"
+batch-every = "30s"
+batch-events = 50000
+batch-queue = 2
+tls-disable = true
+
+[markwalk]
+work = "/var/lib/beegfs/index-sync/markwalk"
+index = "/var/lib/gufi"
+query = "/opt/beegfs/bin/index/gufi_query"
+query-timeout = "30s"
+
+
+#
+# --- Section 2: [Command Line Arguments] ---
+#
+
+# Use the command line argument "--cfg-file=/etc/another-config.conf" to specify a different config
+# file. All other options in this file can also be used as command line arguments, or set using
+# environment variables, overriding the corresponding config file values. See `--help` for details
+# on how to configure using flags and/or environment variables.
+
+
+#
+# --- Section 3: [Settings Documentation] ---
+#
+
+# BeeGFS Index Sync has two halves. The collector is a BeeGFS Watch subscriber: it receives file
+# system events over gRPC and gathers them into batches in memory. Markwalk writes, per batch, the
+# list of directories whose index databases must be rebuilt (a suspect file for `beegfs index
+# update`), with their inodes read from the index itself. It never reads the file system. Only then
+# are the batch's events acknowledged to Watch, which keeps everything not yet acknowledged. The
+# configuration is read once at start.
+
+
+#
+# --- Section 3.1: [Logging Settings] ---
+#
+
+# Logging configuration must be specified under [log].
+
+# level: Adjust the logging verbosity. Supported levels:
+# 0 - Fatal Only (not recommended).
+# 1 - Fatal + Error
+# 2 - Warn + Error + Fatal
+# 3 - Info + Warn + Error + Fatal
+# 4, 5 - Debug, Info, Warn, Error, Fatal
+# Note: Levels above 3 might decrease performance.
+
+# type: Defines the logger type. This can either be "syslog" to send log messages to the general
+# system logger, "logfile", "stderr", or "stdout". If set to "logfile" logs will be written to the
+# below file and rotated based on the provided settings.
+
+# file: The path to the desired log file when logType is "logfile". As needed the directory and all
+# parent directories will be created.
+
+# max-size: When type is set to "logfile" this is the maximum size of the file in megabytes before
+# it is rotated.
+
+# num-rotated-files: When type is "logfile" the maximum number old file(s) to keep when max-size is
+# reached and the log is rotated.
+
+
+#
+# --- Section 3.2: [Collector Settings] ---
+#
+
+# Collector configuration must be specified under [collector]. Configure each BeeGFS Watch instance
+# with a gRPC subscriber pointing at the listen address.
+
+# listen: The address and port Watch connects to.
+
+# checkpoint: The file where the sequence IDs acknowledged to Watch are recorded, so a restart
+# resumes where it left off.
+
+# ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
+
+# batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
+# system. Together with batch-events this bounds how long Watch waits for an acknowledgement.
+
+# batch-events: Close the open batch once it holds this many events.
+
+# queue: The number of events buffered between the gRPC streams and the batcher.
+
+# batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
+# the collector stops reading from Watch, which then keeps the events in its own buffer. At most
+# batch-queue + 2 batches of batch-events events are held in memory unacknowledged.
+
+# tls-disable: Disable TLS for the gRPC server Watch connects to.
+
+
+#
+# --- Section 3.3: [Markwalk Settings] ---
+#
+
+# Markwalk configuration must be specified under [markwalk].
+
+# work: The directory each batch's suspect file is written to, as batch-<N>/suspects. Numbering
+# continues from the highest batch present after a restart.
+
+# index: The GUFI index root: the index directory that corresponds to the BeeGFS mount.
+
+# query: The gufi_query binary. Each batch runs it once to read the inodes of the directories the
+# events named, and once more per batch that touched a hard-linked file, to find the directories of
+# its other names.
+
+# query-timeout: The most time one gufi_query run may take. A directory lookup that times out fails
+# the batch, which is retried. A hard-link lookup that times out is logged and skipped: the other
+# names keep a stale row until the next change in their directory.
+
+# track-opens: Include open events so atime changes are indexed.
