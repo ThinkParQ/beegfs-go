@@ -304,8 +304,9 @@ type StripePattern struct {
 const hasNoPoolFlag uint32 = 1 << 24
 
 func (m *StripePattern) Serialize(s *beeserde.Serializer) {
+	startPos := s.Buf.Len()
 	// Length is populated at the end once we know the size of the message.
-	lengthPos := s.Buf.Len()
+	lengthPos := startPos
 	beeserde.SerializeInt(s, int32(0))
 	// This flag is for compatibility with really old versions of BeeGFS (e.g., 2014). If we
 	// find a stripe pattern with the no pool flag set, most likely something went wrong or
@@ -328,8 +329,64 @@ func (m *StripePattern) Serialize(s *beeserde.Serializer) {
 		s.Fail(fmt.Errorf("unknown stripe pattern: %s", m.Type))
 	}
 	// Now populate length:
-	finalLength := s.Buf.Len()
+	finalLength := s.Buf.Len() - startPos
 	binary.LittleEndian.PutUint32(s.Buf.Bytes()[lengthPos:], uint32(finalLength))
+}
+
+type LayoutRange struct {
+	EndOffset uint64
+	Pattern   StripePattern
+}
+
+func (m *LayoutRange) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, m.EndOffset)
+	m.Pattern.Serialize(s)
+}
+
+func (m *LayoutRange) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &m.EndOffset)
+	m.Pattern.Deserialize(d)
+}
+
+type FileLayout struct {
+	DataOnMetadataEndOffset uint64
+	LayoutRanges            []LayoutRange
+}
+
+func (m *FileLayout) Serialize(s *beeserde.Serializer) {
+	startPos := s.Buf.Len()
+	lengthPos := startPos
+	beeserde.SerializeInt(s, uint32(0))
+	beeserde.SerializeInt(s, beegfs.StripePatternMultiRange)
+	beeserde.SerializeInt(s, m.DataOnMetadataEndOffset)
+	beeserde.SerializeSeq(s, m.LayoutRanges, true, func(layoutRange LayoutRange) {
+		layoutRange.Serialize(s)
+	})
+
+	finalLength := s.Buf.Len() - startPos
+	binary.LittleEndian.PutUint32(s.Buf.Bytes()[lengthPos:], uint32(finalLength))
+}
+
+func (m *FileLayout) Deserialize(d *beeserde.Deserializer) {
+	startLength := d.Buf.Len()
+	var serializedLength uint32
+	var layoutType beegfs.StripePatternType
+
+	beeserde.DeserializeInt(d, &serializedLength)
+	beeserde.DeserializeInt(d, &layoutType)
+	if layoutType != beegfs.StripePatternMultiRange {
+		d.Fail(fmt.Errorf("unsupported file layout type: %s", layoutType))
+		return
+	}
+
+	beeserde.DeserializeInt(d, &m.DataOnMetadataEndOffset)
+	beeserde.DeserializeSeq(d, &m.LayoutRanges, true, func(layoutRange *LayoutRange) {
+		layoutRange.Deserialize(d)
+	})
+
+	if uint32(startLength-d.Buf.Len()) != serializedLength {
+		d.Fail(fmt.Errorf("invalid file layout length: %d", serializedLength))
+	}
 }
 
 func (m *StripePattern) Deserialize(d *beeserde.Deserializer) {
@@ -447,9 +504,10 @@ func (m *RemoteStorageTarget) Deserialize(d *beeserde.Deserializer) {
 }
 
 type SetDirPatternRequest struct {
-	EntryInfo EntryInfo
-	Pattern   StripePattern
-	RST       RemoteStorageTarget
+	EntryInfo  EntryInfo
+	Pattern    StripePattern
+	FileLayout *FileLayout
+	RST        RemoteStorageTarget
 	// Uid is an internal field to force callers to use the SetUID method so the hasUid flag is
 	// always set correctly. This is required for serialization to work correctly.
 	uid uint32
@@ -463,17 +521,27 @@ func (m *SetDirPatternRequest) MsgId() uint16 {
 
 func (m *SetDirPatternRequest) Serialize(s *beeserde.Serializer) {
 	m.EntryInfo.Serialize(s)
-	m.Pattern.Serialize(s)
+	if m.FileLayout != nil {
+		m.FileLayout.Serialize(s)
+		s.MsgFeatureFlags |= 2
+	} else {
+		m.Pattern.Serialize(s)
+	}
 	m.RST.Serialize(s)
 	if m.hasUid {
 		beeserde.SerializeInt(s, m.uid)
-		s.MsgFeatureFlags = 1
+		s.MsgFeatureFlags |= 1
 	}
 }
 
 func (m *SetDirPatternRequest) Deserialize(d *beeserde.Deserializer) {
 	m.EntryInfo.Deserialize(d)
-	m.Pattern.Deserialize(d)
+	if d.MsgFeatureFlags&2 != 0 {
+		m.FileLayout = &FileLayout{}
+		m.FileLayout.Deserialize(d)
+	} else {
+		m.Pattern.Deserialize(d)
+	}
 	m.RST.Deserialize(d)
 	if d.MsgFeatureFlags&1 != 0 {
 		beeserde.DeserializeInt(d, &m.uid)

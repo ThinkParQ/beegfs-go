@@ -66,6 +66,7 @@ const (
 	StripePatternRaid0
 	StripePatternRaid10
 	StripePatternBuddyMirror
+	StripePatternMultiRange StripePatternType = 5
 )
 
 func (p StripePatternType) String() string {
@@ -76,6 +77,8 @@ func (p StripePatternType) String() string {
 		return "raid10"
 	case StripePatternBuddyMirror:
 		return "buddy-mirror"
+	case StripePatternMultiRange:
+		return "multi-range"
 	case StripePatternInvalid:
 		return "invalid"
 	default:
