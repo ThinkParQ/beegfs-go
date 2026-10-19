@@ -88,13 +88,13 @@ type xtreemstoreS3BulkRetrieveManager struct {
 	// statusAppendHandle is maintained when the manager is open and should only be used for
 	// persistent appending new statuses. Do not use this to update statuses; use statusUpdateHandle
 	// instead.
-	statusAppendHandle *os.File
+	statusAppendHandle *persistentFile
 	// statusUpdateHandle is maintained when the manager is open and should only be used for
 	// persistent status updates. Do not use to append new statuses; use statusAppendHandle instead.
-	statusUpdateHandle *os.File
+	statusUpdateHandle *persistentFile
 	// recordHandle is maintained when the manager is open and is used to append new records. It is
 	// imperative that records are only added and never changed for the bulk operation's lifecycle.
-	recordHandle *os.File
+	recordHandle *persistentFile
 	// recordBytes is the size of the record file, which is where the next path will land. The
 	// manager holds the only handle that appends to that file and AddRequest is serialized by the
 	// caller, so this tracks the file without re-reading its size on every request. openState sets
@@ -964,11 +964,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) markJobStatus(status xtreemstoreS3Bul
 	return err
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForAppend() (*os.File, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForAppend() (*persistentFile, error) {
 	return openFileForAppend(m.stateDir, xtreemstoreS3BulkStatusFileName)
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForUpdate() (*os.File, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) openStatusFileForUpdate() (*persistentFile, error) {
 	return openFileForUpdate(m.stateDir, xtreemstoreS3BulkStatusFileName)
 }
 
@@ -979,7 +979,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) createErrorsFile() error {
 	return touchFile(m.stateDir, xtreemstoreS3BulkErrorsFileName)
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*os.File, error) {
+func (m *xtreemstoreS3BulkRetrieveManager) openRecordFileForAppend() (*persistentFile, error) {
 	return openFileForAppend(m.stateDir, xtreemstoreS3BulkRecordFileName)
 }
 
