@@ -2,6 +2,7 @@ package rst
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -36,6 +37,7 @@ type jobRequestBuilder struct {
 	mountPoint        filesystem.Provider
 	RstMap            map[uint32]Provider
 	submitRequest     SubmitRequestFn
+	builderJobId      uuid.UUID
 	builderCfg        *flex.JobRequestCfg
 	addToBulkRequest  addToBulkRequestFn
 	updateBulkRequest updateBulkRequestFn
@@ -453,9 +455,24 @@ func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint
 		return
 	}
 
+	// Derive the reserved jobId from the builder jobId, path and rstId so that replaying from an
+	// older resume token after a crash reserves the same job instead of conflicting with its own
+	// reservation.
+	name := binary.BigEndian.AppendUint32([]byte(request.GetPath()), request.GetRemoteStorageTarget())
+	jobId := uuid.NewSHA1(w.builderJobId, name)
+	request.SetReserveJobId(jobId.String())
 	request.SetReserve(true)
-	request.SetReserveJobId(uuid.New().String())
 
+	// The request joins the bulk operation before its job is reserved. Remote never reads the bulk
+	// info when it reserves a job, so either order would work. This order is chosen because each
+	// failure between the two steps is cheaper to undo:
+	//   - The add fails. Nothing is reserved yet, so the request drops its reservation fields and
+	//     is submitted on its own with a failed precondition.
+	//   - Remote refuses the reservation. The operation marks the request failed, which is a local
+	//     write. The other order would need a call to remote to release the reservation.
+	//   - The builder stops between the two steps. The operation holds a request with no
+	//     reservation, and its later claim fails with ErrReservationMissing. The other order would
+	//     leave a reserved job that nothing claims, and it would block every later job for the path.
 	checkpoint(checkpointGrace)
 	if addErr := w.addToBulkRequest(ctx, request, operation); addErr != nil {
 		request.SetReserve(false)
@@ -472,7 +489,8 @@ func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint
 	if reserveErr != nil {
 		if errors.Is(reserveErr, ErrJobAlreadyExists) || errors.Is(reserveErr, ErrJobNotAllowed) {
 			jobConflict = true
-			// This would have been the job conflicts with another job so fail the bulk request.
+			// Remote refused the reservation because another job for this path conflicts with it.
+			// The refusal is about this path alone, so only its request in the operation is failed.
 			if markErr := w.updateBulkRequest(ctx, request, BulkRequestFailed); markErr != nil {
 				err = fmt.Errorf("unable to release %s from bulk operation %q after its reservation was refused: %w", request.GetPath(), operation, markErr)
 			}

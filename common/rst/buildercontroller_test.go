@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -29,8 +30,9 @@ const testMaxRequests = 1000
 
 // testJobId is the builder job id newTestRequestBuildController builds its controller for. A walk
 // that drains records its completion as a sentinel resume token naming this job, so tests read the
-// token back with parseResumeToken rather than matching the sentinel's format.
-const testJobId = "test-job"
+// token back with parseResumeToken rather than matching the sentinel's format. It has to be a UUID
+// because the request builder derives reserved job IDs from it.
+const testJobId = "3b8e5a1c-7f2d-4e9a-b6c4-1d0f2e3a4b5c"
 
 // resumeToken returns the token the controller has written back to its work request. The controller
 // updates it in place as the walk advances, so it is read from the controller rather than returned
@@ -800,7 +802,7 @@ func newTestRequestBuildController(t *testing.T, ctx context.Context, submission
 	}
 	// MockClient only offers a request to a bulk operation when its locked info says the file is
 	// archived. These tests build no archived paths, so no request may reach addToBulkRequest.
-	requestBuilder := client.newJobRequestBuilder(zap.NewNop(), workRequest.GetBuilder().GetCfg(), submissions.submit, requireNoBulkRequest(t), func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+	requestBuilder := client.newJobRequestBuilder(zap.NewNop(), uuid.MustParse(testJobId), workRequest.GetBuilder().GetCfg(), submissions.submit, requireNoBulkRequest(t), func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
 		return nil
 	})
 	controller := client.newRequestBuildController(ctx, ctx, requestBuilder, nil)

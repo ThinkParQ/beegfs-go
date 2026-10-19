@@ -83,13 +83,19 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 		return
 	}
 	builder := workRequest.GetBuilder()
+	builderJobId, err := uuid.Parse(workRequest.GetJobId())
+	if err != nil {
+		result.Err = fmt.Errorf("builder job ID %q is not a valid UUID: %w", workRequest.GetJobId(), err)
+		return
+	}
 
 	registry, err := c.newBulkOperationRegistry(workCtx, workRequest.GetJobId())
 	if err != nil {
 		result.Err = err
 		return
 	}
-	requestBuilder := c.newJobRequestBuilder(log, builder.Cfg, submitRequest, registry.AddRequest, registry.UpdateBulkRequest)
+
+	requestBuilder := c.newJobRequestBuilder(log, builderJobId, builder.Cfg, submitRequest, registry.AddRequest, registry.UpdateBulkRequest)
 	controller := c.newRequestBuildController(shutdownCtx, workCtx, requestBuilder, workerSaturation)
 
 	defer func() {
@@ -421,6 +427,7 @@ func (c *JobBuilderClient) newRequestBuildController(
 
 func (c *JobBuilderClient) newJobRequestBuilder(
 	log *zap.Logger,
+	builderJobId uuid.UUID,
 	builderCfg *flex.JobRequestCfg,
 	submitRequest SubmitRequestFn,
 	addToBulkRequest addToBulkRequestFn,
@@ -431,6 +438,7 @@ func (c *JobBuilderClient) newJobRequestBuilder(
 		mountPoint:        c.mountPoint,
 		RstMap:            c.rstMap,
 		submitRequest:     submitRequest,
+		builderJobId:      builderJobId,
 		builderCfg:        builderCfg,
 		getPathState:      GetPathState,
 		planFileState:     PlanFileStateForWorkRequests,
