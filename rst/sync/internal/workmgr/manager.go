@@ -779,7 +779,7 @@ func (m *Manager) initScheduler(priority int, start string, stop string) (entrie
 		}
 	}
 
-	allRescheduledCount := rescheduledCount + replayCount
+	allRescheduledCount := rescheduledCount + replayCount + unrecoverableCount
 	if scheduledCount == 0 && allRescheduledCount > 0 {
 		// All recovered were rescheduled work request so increment the last known rescheduled
 		// submissionId to get the nextExpectedSubmissionId.
