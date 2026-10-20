@@ -71,6 +71,9 @@ Specifying Paths:
 	cmd.Flags().BoolVar(&backendCfg.VerifyRemote, "verify-remote", false, "Also queries the remote storage target(s) to detect changes not tracked by BeeGFS Remote (slower than local-only verification).")
 	cmd.MarkFlagsMutuallyExclusive("verbose", "summarize")
 	cmd.MarkFlagsMutuallyExclusive("summarize", "attention")
+	// --attention replaces the row selection --verbose asks for, so accepting both would silently
+	// drop the paths --verbose promises to print.
+	cmd.MarkFlagsMutuallyExclusive("verbose", "attention")
 	// --verify-remote does not read jobs, so no path would ever need attention.
 	cmd.MarkFlagsMutuallyExclusive("verify-remote", "attention")
 	return cmd
