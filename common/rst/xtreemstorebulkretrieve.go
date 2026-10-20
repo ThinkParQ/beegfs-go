@@ -41,6 +41,12 @@ const (
 	// transientS3ErrorWindow is how long a bulk retrieve keeps retrying S3 calls that fail with an
 	// error the SDK calls retryable. retryTransientS3Error explains how it is enforced.
 	transientS3ErrorWindow = time.Hour
+
+	// sessionStartUndecidedLimit is how long resolveSessionStart may fail to tell whether an active
+	// session is ours before it fails the operation. A session is undecided while its batch files
+	// are missing. The gateway may not have written them yet, which should take moments, or someone
+	// deleted them, which waiting never resolves.
+	sessionStartUndecidedLimit = 30 * time.Minute
 )
 
 // xtreemstoreS3BulkRetrieveBatchEntry is one key of a retrieve-session batch, resolved to the bulk
@@ -112,6 +118,12 @@ type xtreemstoreS3BulkRetrieveManagerState struct {
 	SessionRetrieveId string `json:"active-retrieve-id"`
 	SessionJobStart   int64  `json:"active-job-start"`
 	SessionJobEnd     int64  `json:"active-job-end"`
+	// SessionStartingAt is set while startSession sends the PUT that starts a session, and cleared
+	// once the outcome is saved. A value read back at the start of a round means the process
+	// stopped, or the PUT failed, before the outcome was known. The session the PUT may have
+	// started is then not recorded in SessionRetrieveId. resolveSessionStart works out what
+	// happened.
+	SessionStartingAt time.Time `json:"session-starting-at,omitzero"`
 	// The transient fields describe the current run of execute rounds that failed with a retryable
 	// S3 error. retryTransientS3Error maintains them and clears them when a round succeeds. They
 	// live here, not in memory, because every reschedule builds a new manager.
@@ -343,7 +355,19 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 			return fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
 		}
 
-		if sessionInfo != nil && sessionInfo.Active && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
+		// An interrupted start may have created a session that the state does not record. If it
+		// did, the session is ours to end like any other.
+		if !m.state.SessionStartingAt.IsZero() {
+			verdict, _, err := m.classifySessionStart(ctx, sessionInfo)
+			if err != nil {
+				return fmt.Errorf("unable to tell whether the interrupted retrieve-session start created the active session: %w", err)
+			}
+			if verdict == sessionStartOurs {
+				m.state.SessionRetrieveId = sessionInfo.RetrieveId
+			}
+		}
+
+		if sessionInfo != nil && sessionInfo.Active && m.state.SessionRetrieveId != "" && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
 			checkpoint(checkpointGrace)
 			batchInfos, err := m.getSessionBatchInfo(ctx)
 			if err != nil {
@@ -434,6 +458,13 @@ func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh c
 	return m.retryTransientS3Error(reschedule, delay, err)
 }
 
+func (m *xtreemstoreS3BulkRetrieveManager) currentTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
 // retryTransientS3Error runs after every execute round. It decides whether the round's error fails
 // the operation or only delays it. Any error in BulkExecuteResult.Err cancels the operation, which
 // fails every reserved job and destroys the retrieve-session. So an error that may clear on its own
@@ -448,10 +479,6 @@ func (m *xtreemstoreS3BulkRetrieveManager) execute(ctx context.Context, walkCh c
 //     the service was stopped, so the earlier failures say nothing about the endpoint now.
 //   - Any other error fails the operation at once. That includes a cancelled context, which the
 //     controller recognizes and spares on its own.
-//
-// The window is measured in time, not in rounds. Rounds do not come at a fixed pace. The builder
-// job reschedules with no delay while its walk is still adding requests, and when several
-// operations reschedule, the smallest delay wins.
 func (m *xtreemstoreS3BulkRetrieveManager) retryTransientS3Error(reschedule bool, delay time.Duration, err error) (bool, time.Duration, error) {
 	if err == nil {
 		m.state.TransientErrorsSince = time.Time{}
@@ -464,10 +491,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) retryTransientS3Error(reschedule bool
 		return reschedule, delay, err
 	}
 
-	now := time.Now()
-	if m.now != nil {
-		now = m.now()
-	}
+	now := m.currentTime()
 	if m.state.TransientErrorsSince.IsZero() || now.Sub(m.state.LastTransientErrorAt) > transientS3ErrorWindow {
 		m.state.TransientErrorsSince = now
 		m.state.TransientErrors = 0
@@ -494,10 +518,31 @@ func isRetryableS3Error(err error) bool {
 }
 
 // executeRound advances the operation once. It starts a retrieve-session when none is active, sends
-// every object the session has restored, and moves to the next session when this one is done.
+// every object the session has restored, and moves to the next session when this one is done. The
+// round ends without rescheduling once every request has been through a session.
 func (m *xtreemstoreS3BulkRetrieveManager) executeRound(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (reschedule bool, delay time.Duration, err error) {
 	for {
-		if ready, err := m.ensureSessionActive(ctx); err != nil {
+		sessionInfo, err := m.getSessionInfo(ctx)
+		if err != nil {
+			return false, 0, fmt.Errorf("unable to determine whether retrieve-session is active: %w", err)
+		}
+		if resolved, err := m.resolveSessionStart(ctx, sessionInfo); err != nil {
+			return false, 0, err
+		} else if !resolved {
+			return true, m.batchPollDelay, nil
+		}
+		if err = m.resolveEndedSession(sessionInfo); err != nil {
+			return false, 0, err
+		}
+
+		// SessionJobEnd only moves when a session starts so a non-zero value equal to includedJobs
+		// means no request was added since the last session started. With no session of ours left
+		// then nothing remains to retrieve.
+		if m.state.SessionRetrieveId == "" && m.state.SessionJobEnd > 0 && m.state.SessionJobEnd == m.includedJobs {
+			return false, 0, nil
+		}
+
+		if ready, err := m.ensureSessionActive(ctx, sessionInfo); err != nil {
 			return false, 0, err
 		} else if !ready {
 			return true, m.sessionBusyRetryDelay, nil
@@ -515,33 +560,223 @@ func (m *xtreemstoreS3BulkRetrieveManager) executeRound(ctx context.Context, wal
 		if err = m.saveManagerState(); err != nil {
 			return false, 0, fmt.Errorf("retrieve-session was completed and destroyed successfully but the state could not be saved: %w", err)
 		}
-
-		if m.includedJobs == m.state.SessionJobEnd {
-			// No more requests were added since the previous session was started.
-			break
-		}
 	}
-
-	return false, 0, nil
 }
 
-func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Context) (ready bool, err error) {
-	sessionInfo, sessionInfoErr := m.getSessionInfo(ctx)
-	if sessionInfoErr != nil {
-		err = fmt.Errorf("unable to determine whether retrieve-session is active: %w", sessionInfoErr)
-		return
+type sessionStartVerdict int
+
+const (
+	// sessionStartUnknown is returned with an error, when no verdict could be reached.
+	sessionStartUnknown sessionStartVerdict = iota
+	// sessionStartNotLanded means no session is active. An active session was not created or was
+	// already ended.
+	sessionStartNotLanded
+	// sessionStartForeign means the active session was started by someone else.
+	sessionStartForeign
+	// sessionStartOurs means the active session holds the requests the start sent ignoring any
+	// object that no longer exist.
+	sessionStartOurs
+	// sessionStartUndecided means the session is active but its batch files are missing, so its
+	// owner cannot be told. resolveSessionStart waits up to sessionStartUndecidedLimit.
+	sessionStartUndecided
+)
+
+// resolveSessionStart runs at the start of every pass through executeRound before
+// releaseEndedSession. It finishes a start that SessionStartingAt indicates was interrupted.
+// resolved is false when the round must wait and look again. classifySessionStart decides whose
+// session is active.
+func (m *xtreemstoreS3BulkRetrieveManager) resolveSessionStart(ctx context.Context, sessionInfo *xtreemstoreS3BulkRetrieveSessionInfo) (resolved bool, err error) {
+	if m.state.SessionStartingAt.IsZero() {
+		return true, nil
 	}
 
-	if sessionInfo != nil && sessionInfo.Active {
-		ready = sessionInfo.RetrieveId == m.state.SessionRetrieveId
-	} else if startSessionErr := m.startSession(ctx); startSessionErr != nil {
-		if !errors.Is(startSessionErr, ErrActiveRetrieveSessionAlreadyExists) {
-			err = fmt.Errorf("failed to start retrieve-session: %w", startSessionErr)
-		}
-	} else {
-		ready = true
+	verdict, objects, err := m.classifySessionStart(ctx, sessionInfo)
+	if err != nil {
+		return false, fmt.Errorf("unable to tell whether the interrupted retrieve-session start created the active session: %w", err)
 	}
-	return
+
+	switch verdict {
+	case sessionStartNotLanded, sessionStartForeign:
+	case sessionStartOurs:
+		m.state.SessionJobStart = m.state.SessionJobEnd
+		m.state.SessionJobEnd += objects
+		m.state.SessionRetrieveId = sessionInfo.RetrieveId
+	case sessionStartUndecided:
+		if waited := m.currentTime().Sub(m.state.SessionStartingAt); waited >= sessionStartUndecidedLimit {
+			return false, fmt.Errorf("retrieve-session %s started at %s may have been started by this bulk operation, but its requests could not be matched within %s, so it must be checked and ended by hand", sessionInfo.RetrieveId, sessionInfo.Started.Format(time.RFC3339), sessionStartUndecidedLimit)
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown retrieve-session start verdict %d", verdict)
+	}
+
+	m.state.SessionStartingAt = time.Time{}
+	if err = m.saveManagerState(); err != nil {
+		return false, fmt.Errorf("failed to save the outcome of the interrupted retrieve-session start: %w", err)
+	}
+	return true, nil
+}
+
+// classifySessionStart decides whether an interrupted start created the active session.
+//
+// A start always sends the pending requests from SessionJobEnd on as one contiguous range. Later
+// requests only append to that range. So a session this manager started holds the first n pending
+// requests, where n is the session's object count. The rules:
+//   - No active session: not landed.
+//   - The batch list or a batch file is missing, or the list counts no objects: undecided. The
+//     gateway may not have written them yet, or someone deleted them. Neither shows the owner.
+//   - Fewer pending requests than n, or a batch key outside the first n: foreign.
+//   - One of the first n is in no batch and its object exists: foreign. A key whose object does
+//     not exist is ignored, because the gateway may leave such keys out.
+//   - Otherwise: ours.
+//
+// A key the gateway leaves out also lowers n. So a missing object before the last listed key moves
+// a later key of ours past the first n, and our session reads as foreign. Only missing objects
+// after every listed key are ignored.
+//
+// A different bulk operation cannot hold the same paths because each request holds its file's
+// access lock. So a match can only be another client outside BeeGFS asking for exactly the same
+// objects, which is not a case worth guarding against.
+func (m *xtreemstoreS3BulkRetrieveManager) classifySessionStart(
+	ctx context.Context,
+	sessionInfo *xtreemstoreS3BulkRetrieveSessionInfo,
+) (verdict sessionStartVerdict, objects int64, err error) {
+	if sessionInfo == nil || !sessionInfo.Active {
+		return sessionStartNotLanded, 0, nil
+	}
+
+	batchInfos, err := m.getSessionBatchInfo(ctx)
+	if err != nil {
+		if isS3NotFound(err) {
+			return sessionStartUndecided, 0, nil
+		}
+		return sessionStartUnknown, 0, err
+	}
+	for _, batchInfo := range batchInfos {
+		objects += batchInfo.Objects
+	}
+	if objects == 0 {
+		// The session is active but has no batch files. The gateway may not have created them yet,
+		// or someone deleted them. Both are handled by waiting sessionStartUndecidedLimit and then
+		// failing.
+		return sessionStartUndecided, 0, nil
+	}
+
+	expectedPaths, err := m.readRecordPaths(m.state.SessionJobEnd, -1)
+	if err != nil {
+		return sessionStartUnknown, 0, err
+	}
+	if int64(len(expectedPaths)) < objects {
+		return sessionStartForeign, 0, nil
+	}
+
+	unverified := make(map[string]struct{}, objects)
+	for _, path := range expectedPaths[:objects] {
+		unverified[path] = struct{}{}
+	}
+	for _, batchInfo := range batchInfos {
+		keys, err := m.getSessionBatchKeys(ctx, batchInfo)
+		if err != nil {
+			if isS3NotFound(err) {
+				return sessionStartUndecided, 0, nil
+			}
+			return sessionStartUnknown, 0, err
+		}
+		for key := range keys {
+			if _, ok := unverified[key]; !ok {
+				return sessionStartForeign, 0, nil
+			}
+			delete(unverified, key)
+		}
+	}
+
+	for key := range unverified {
+		if exists, err := m.objectExists(ctx, key); err != nil {
+			return sessionStartUnknown, 0, err
+		} else if !exists {
+			delete(unverified, key)
+		}
+	}
+	if len(unverified) != 0 {
+		return sessionStartForeign, 0, nil
+	}
+	return sessionStartOurs, objects, nil
+}
+
+// objectExists reports whether the bucket holds an object at key.
+func (m *xtreemstoreS3BulkRetrieveManager) objectExists(ctx context.Context, key string) (bool, error) {
+	_, err := m.s3ApiClient.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(m.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("head object for key %q: %w", key, err)
+	}
+	return true, nil
+}
+
+// resolveEndedSession runs at the start of every pass through executeRound. It decides what to do
+// when the state records a session of ours but the server no longer reports it as active. The
+// input is the session the server reports, or nil when there is none.
+//
+// destroyRetrieveSession clears SessionRetrieveId when a session finishes, so a recorded id means
+// the session was not finished through this manager. There are two ways that happens:
+//   - The process stopped after destroying the session but before saving state. Every request in
+//     the session is then complete, and the id is only stale. It is cleared so the operation can
+//     move on.
+//   - The session was ended outside this operation, for example by an administrator, while some
+//     of its requests were not complete. Those requests can no longer be restored by it. The
+//     operation fails, which makes the controller cancel it. Cancel covers every request from
+//     SessionJobStart on, so the requests the session left behind are resolved too.
+//
+// The operation fails rather than starting a new session for the left-behind requests. Someone who
+// ends a session most likely meant to stop the retrieve, and a new session would undo that.
+func (m *xtreemstoreS3BulkRetrieveManager) resolveEndedSession(sessionInfo *xtreemstoreS3BulkRetrieveSessionInfo) error {
+	if m.state.SessionRetrieveId == "" {
+		return nil
+	}
+	if sessionInfo != nil && sessionInfo.Active && sessionInfo.RetrieveId == m.state.SessionRetrieveId {
+		return nil
+	}
+
+	span, err := m.readActiveRecordSpan()
+	if err != nil {
+		return fmt.Errorf("retrieve-session %s is no longer active and its records could not be read: %w", m.state.SessionRetrieveId, err)
+	}
+	var incomplete int
+	for _, info := range span.recordInfos {
+		if info.status != xtreemstoreS3BulkRequestComplete && info.status != xtreemstoreS3BulkRequestCompleteAcked {
+			incomplete++
+		}
+	}
+	if incomplete > 0 {
+		return fmt.Errorf("retrieve-session %s was ended outside this bulk operation with %d of its %d requests not complete", m.state.SessionRetrieveId, incomplete, len(span.recordInfos))
+	}
+
+	ended := m.state.SessionRetrieveId
+	m.state.SessionRetrieveId = ""
+	if err = m.saveManagerState(); err != nil {
+		return fmt.Errorf("retrieve-session %s already finished but clearing it from the state failed: %w", ended, err)
+	}
+	return nil
+}
+
+// ensureSessionActive reports whether a session of ours is active or starts one when there's no
+// active session.
+func (m *xtreemstoreS3BulkRetrieveManager) ensureSessionActive(ctx context.Context, sessionInfo *xtreemstoreS3BulkRetrieveSessionInfo) (ready bool, err error) {
+	if sessionInfo != nil && sessionInfo.Active {
+		return m.state.SessionRetrieveId != "" && sessionInfo.RetrieveId == m.state.SessionRetrieveId, nil
+	}
+	if err = m.startSession(ctx); err != nil {
+		if errors.Is(err, ErrActiveRetrieveSessionAlreadyExists) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatches(ctx context.Context, walkCh chan<- *BulkStreamPathResult) (success bool, err error) {
@@ -993,6 +1228,12 @@ func (m *xtreemstoreS3BulkRetrieveManager) openStateDir(create bool) (*os.Root, 
 	return openStateDir(m.mountPath, m.stateRoot, m.stateMountPath, create)
 }
 
+// isS3NotFound reports whether err is the gateway saying the object does not exist.
+func isS3NotFound(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey")
+}
+
 func (m *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (*xtreemstoreS3BulkRetrieveSessionInfo, error) {
 	getObjectInput := &s3.GetObjectInput{
 		Bucket: aws.String(m.bucket),
@@ -1001,8 +1242,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) getSessionInfo(ctx context.Context) (
 
 	resp, err := m.s3ApiClient.GetObject(ctx, getObjectInput)
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
+		if isS3NotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -1079,11 +1319,13 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 
 	previousState := *m.state
 	cleanupCreatedSession := func(reason error) error {
+		attemptAt := m.state.SessionStartingAt
 		*m.state = previousState
 		if cleanupErr := m.destroyRetrieveSession(ctx); cleanupErr != nil {
-			// %v, not %w: a retryable cause must not make this retryable. The created session is
-			// not recorded as ours, so no later round would clean it up.
-			return fmt.Errorf("retrieve-session was created but local ownership state could not be persisted, cleanup also failed, and manual intervention is required: %v; %v", reason, cleanupErr)
+			// Keep the marker so the next round's resolveSessionStart finds the session again.
+			// %v, not %w: a retryable cause must not make this retryable.
+			m.state.SessionStartingAt = attemptAt
+			return fmt.Errorf("retrieve-session was created but local ownership state could not be persisted and cleanup also failed: %v; %v", reason, cleanupErr)
 		}
 		return reason
 	}
@@ -1100,6 +1342,14 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 		return fmt.Errorf("failed to marshal retrieve-session request: %w", err)
 	}
 
+	// Record SessionStartingAt before requesting the session. If the process stops before the
+	// outcome is saved then the next round's resolveSessionStart will determine the outcome.
+	m.state.SessionStartingAt = m.currentTime()
+	if err = m.saveManagerState(); err != nil {
+		*m.state = previousState
+		return fmt.Errorf("failed to record the retrieve-session start attempt: %w", err)
+	}
+
 	_, err = m.s3ApiClient.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(m.bucket),
 		Key:         aws.String(XTS_SYSTEM_RETRIEVE_SESSION),
@@ -1109,10 +1359,11 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 	if err != nil {
 		var responseErr *smithyhttp.ResponseError
 		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusConflict {
+			// The conflict proves the session was not created because there was a race for the
+			// session and the other process won.
 			*m.state = previousState
 			return ErrActiveRetrieveSessionAlreadyExists
 		}
-
 		return fmt.Errorf("failed to start retrieve-session: %w", err)
 	}
 
@@ -1124,7 +1375,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) startSession(ctx context.Context) (er
 	m.state.SessionJobStart = activeJobStart
 	m.state.SessionJobEnd = activeJobEnd
 	m.state.SessionRetrieveId = sessionInfo.RetrieveId
-
+	m.state.SessionStartingAt = time.Time{}
 	if err = m.saveManagerState(); err != nil {
 		return cleanupCreatedSession(fmt.Errorf("failed to store retrieve-session ownership state after creation: %w", err))
 	}
@@ -1139,11 +1390,8 @@ func (m *xtreemstoreS3BulkRetrieveManager) destroyRetrieveSession(ctx context.Co
 		Bucket: aws.String(m.bucket),
 		Key:    aws.String(XTS_SYSTEM_RETRIEVE_SESSION),
 	})
-	if err != nil {
-		var apiErr smithy.APIError
-		if !(errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey")) {
-			return fmt.Errorf("unable to destroy retrieve session: %w", err)
-		}
+	if err != nil && !isS3NotFound(err) {
+		return fmt.Errorf("unable to destroy retrieve session: %w", err)
 	}
 
 	m.state.SessionRetrieveId = ""

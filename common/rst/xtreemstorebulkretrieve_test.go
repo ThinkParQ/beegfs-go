@@ -41,6 +41,19 @@ type fakeS3ApiClient struct {
 	active bool
 	id     string
 	ids    []string
+	// started is the session's start time, which the gateway reports in retrieve-session.json.
+	started time.Time
+	// starts counts the sessions PutObject started.
+	starts int
+	// putErr fails PutObject without starting a session. putErrAfterLanding starts the session
+	// and then fails, as a timeout can after the gateway applied the request.
+	putErr             error
+	putErrAfterLanding error
+	// hideBatchList makes the batch list read as missing, as before the gateway writes it.
+	hideBatchList bool
+	// missing holds keys with no object. HeadObject reports them not found, and PutObject leaves
+	// them out of the session, as a gateway may for objects that do not exist.
+	missing map[string]bool
 }
 
 var _ s3ApiClient = &fakeS3ApiClient{}
@@ -70,16 +83,17 @@ func (f *fakeS3ApiClient) GetObject(ctx context.Context, params *s3.GetObjectInp
 
 	switch aws.ToString(params.Key) {
 	case XTS_SYSTEM_RETRIEVE_SESSION:
+		// The gateway reports an inactive session as {"active": false}, not as a missing object.
 		if !f.active {
-			return nil, fakeNotFoundErr()
+			return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader([]byte(`{ "active": false }`)))}, nil
 		}
 		return &s3.GetObjectOutput{Body: fakeJSONBody(xtreemstoreS3BulkRetrieveSessionInfo{
 			Active:     true,
 			RetrieveId: f.id,
-			Started:    time.Now(),
+			Started:    f.started,
 		})}, nil
 	case XTS_SYSTEM_RETRIEVE_BATCH_LIST:
-		if !f.active {
+		if !f.active || f.hideBatchList {
 			return nil, fakeNotFoundErr()
 		}
 		return &s3.GetObjectOutput{Body: fakeJSONBody([]xtreemstoreS3BulkRetrieveBatchInfo{
@@ -105,6 +119,9 @@ func (f *fakeS3ApiClient) PutObject(ctx context.Context, params *s3.PutObjectInp
 	if f.active {
 		return nil, fakeConflictErr()
 	}
+	if f.putErr != nil {
+		return nil, f.putErr
+	}
 
 	body, err := io.ReadAll(params.Body)
 	if err != nil {
@@ -117,7 +134,17 @@ func (f *fakeS3ApiClient) PutObject(ctx context.Context, params *s3.PutObjectInp
 
 	f.active = true
 	f.id = "test-retrieve-id"
-	f.ids = req.Ids
+	f.ids = nil
+	for _, id := range req.Ids {
+		if !f.missing[id] {
+			f.ids = append(f.ids, id)
+		}
+	}
+	f.started = time.Now().UTC().Truncate(time.Second)
+	f.starts++
+	if f.putErrAfterLanding != nil {
+		return nil, f.putErrAfterLanding
+	}
 	return &s3.PutObjectOutput{}, nil
 }
 
@@ -134,7 +161,12 @@ func (f *fakeS3ApiClient) DeleteObject(ctx context.Context, params *s3.DeleteObj
 }
 
 func (f *fakeS3ApiClient) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
-	// Always ready: this test exercises reschedule/completion bookkeeping, not restore timing.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.missing[aws.ToString(params.Key)] {
+		return nil, fakeNotFoundErr()
+	}
+	// Otherwise always ready: this test exercises reschedule/completion bookkeeping, not restore timing.
 	return &s3.HeadObjectOutput{StorageClass: types.StorageClassStandard}, nil
 }
 
@@ -1063,4 +1095,346 @@ func TestObjectCancelReason(t *testing.T) {
 			assert.Equal(t, tt.wantCancel, objectCancelReason(tt.readyErr) != nil)
 		})
 	}
+}
+
+// TestBulkRetrieveExecuteHandlesSessionEndedOutsideOperation checks what Execute does when the
+// state records a retrieve-session of ours that the server no longer reports as active.
+//   - Ended with requests left: the operation fails, so the controller cancels it and resolves the
+//     requests the session left behind. Starting a new session from SessionJobEnd would skip them.
+//   - Replaced by another session: the same, because ours is gone either way.
+//   - Ended after every request completed: the id is stale, as after a crash between destroying
+//     the session and saving state. The operation finishes without starting an empty session.
+func TestBulkRetrieveExecuteHandlesSessionEndedOutsideOperation(t *testing.T) {
+	tests := []struct {
+		name         string
+		completeAll  bool
+		endSession   func(f *fakeS3ApiClient)
+		wantErr      bool
+		wantActiveId string
+	}{
+		{
+			name:       "deleted with requests left",
+			endSession: func(f *fakeS3ApiClient) { f.active, f.id, f.ids = false, "", nil },
+			wantErr:    true,
+		},
+		{
+			name:         "replaced with requests left",
+			endSession:   func(f *fakeS3ApiClient) { f.id, f.ids = "other-retrieve-id", nil },
+			wantErr:      true,
+			wantActiveId: "other-retrieve-id",
+		},
+		{
+			name:        "deleted after every request completed",
+			completeAll: true,
+			endSession:  func(f *fakeS3ApiClient) { f.active, f.id, f.ids = false, "", nil },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			operation := flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()
+			fake := &fakeS3ApiClient{}
+			newManager := func() *xtreemstoreS3BulkRetrieveManager {
+				m := &xtreemstoreS3BulkRetrieveManager{
+					s3ApiClient:    fake,
+					rstId:          1,
+					mountPath:      tmpDir,
+					stateRoot:      DefaultStateRoot,
+					stateMountPath: testStateMountPath,
+					operation:      operation,
+					state:          &xtreemstoreS3BulkRetrieveManagerState{},
+				}
+				require.NoError(t, m.openState())
+				return m
+			}
+
+			m := newManager()
+			for _, p := range []string{"/a", "/b", "/c"} {
+				reservedJobId := uuid.NewString()
+				require.NoError(t, m.AddRequest(context.Background(), &beeremote.JobRequest{
+					Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
+					BulkInfo:     &flex.BulkJobRequestInfo{},
+					ReserveJobId: &reservedJobId,
+				}))
+			}
+			require.NoError(t, m.closeState())
+
+			// The first pass starts the session and dispatches every request.
+			m = newManager()
+			walkCh, getResults, err := m.Execute(context.Background())
+			require.NoError(t, err)
+			var dispatched []*flex.BulkJobRequestInfo
+			for r := range walkCh {
+				dispatched = append(dispatched, r.BulkInfo)
+			}
+			result := getResults()
+			require.NoError(t, result.Err)
+			require.True(t, result.Reschedule)
+			require.Len(t, dispatched, 3)
+			require.NoError(t, m.closeState())
+
+			if tt.completeAll {
+				for _, bulkInfo := range dispatched {
+					completeManager := &xtreemstoreS3BulkRetrieveManager{
+						mountPath:      tmpDir,
+						stateRoot:      DefaultStateRoot,
+						stateMountPath: bulkInfo.StateMountPath,
+						operation:      bulkInfo.Operation,
+					}
+					require.NoError(t, completeManager.MarkComplete(bulkInfo.JobIndex))
+				}
+			}
+			tt.endSession(fake)
+
+			m = newManager()
+			walkCh, getResults, err = m.Execute(context.Background())
+			require.NoError(t, err)
+			for r := range walkCh {
+				t.Fatalf("expected no dispatch once the session ended, got: %+v", r)
+			}
+			result = getResults()
+			if tt.wantErr {
+				require.ErrorContains(t, result.Err, "was ended outside this bulk operation with 3 of its 3 requests not complete")
+				assert.False(t, isRetryableS3Error(result.Err), "a lost session must fail the operation, not be retried")
+			} else {
+				require.NoError(t, result.Err)
+				assert.False(t, result.Reschedule)
+				assert.Empty(t, m.state.SessionRetrieveId)
+			}
+			assert.Equal(t, tt.wantActiveId != "", fake.active, "the operation must not start a session or end someone else's")
+			assert.Equal(t, tt.wantActiveId, fake.id)
+			assert.Equal(t, 1, fake.starts, "only the first pass may start a session")
+			require.NoError(t, m.closeState())
+		})
+	}
+}
+
+// bulkRetrieveSessionTestFixture builds managers that share one fake bucket and one state
+// directory, and adds three requests for /a, /b and /c.
+func bulkRetrieveSessionTestFixture(t *testing.T) (fake *fakeS3ApiClient, newManager func() *xtreemstoreS3BulkRetrieveManager) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	operation := flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()
+	fake = &fakeS3ApiClient{}
+	newManager = func() *xtreemstoreS3BulkRetrieveManager {
+		m := &xtreemstoreS3BulkRetrieveManager{
+			s3ApiClient:    fake,
+			rstId:          1,
+			mountPath:      tmpDir,
+			stateRoot:      DefaultStateRoot,
+			stateMountPath: testStateMountPath,
+			operation:      operation,
+			state:          &xtreemstoreS3BulkRetrieveManagerState{},
+		}
+		require.NoError(t, m.openState())
+		t.Cleanup(func() { m.closeState() })
+		return m
+	}
+
+	m := newManager()
+	for _, p := range []string{"/a", "/b", "/c"} {
+		reservedJobId := uuid.NewString()
+		require.NoError(t, m.AddRequest(context.Background(), &beeremote.JobRequest{
+			Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
+			BulkInfo:     &flex.BulkJobRequestInfo{},
+			ReserveJobId: &reservedJobId,
+		}))
+	}
+	require.NoError(t, m.closeState())
+	return fake, newManager
+}
+
+// bulkRetrieveExecuteOnce runs one Execute pass and returns how many requests it dispatched.
+func bulkRetrieveExecuteOnce(t *testing.T, m *xtreemstoreS3BulkRetrieveManager) (int, *BulkExecuteResult) {
+	t.Helper()
+	walkCh, getResults, err := m.Execute(context.Background())
+	require.NoError(t, err)
+	dispatched := 0
+	for range walkCh {
+		dispatched++
+	}
+	return dispatched, getResults()
+}
+
+// TestBulkRetrieveResolvesInterruptedSessionStart checks what the next round does when a start
+// was interrupted, so SessionStartingAt is set but the outcome was never saved.
+func TestBulkRetrieveResolvesInterruptedSessionStart(t *testing.T) {
+	t.Run("PUT landed then failed: the session is adopted", func(t *testing.T) {
+		fake, newManager := bulkRetrieveSessionTestFixture(t)
+		fake.putErrAfterLanding = fakeUnavailableErr()
+
+		m := newManager()
+		dispatched, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		require.True(t, result.Reschedule)
+		require.Zero(t, dispatched)
+		require.True(t, fake.active)
+		require.False(t, m.state.SessionStartingAt.IsZero(), "a failed PUT must leave the marker")
+		require.NoError(t, m.closeState())
+
+		fake.putErrAfterLanding = nil
+		m = newManager()
+		dispatched, result = bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		assert.Equal(t, 3, dispatched)
+		assert.Equal(t, 1, fake.starts, "the adopted session must not be started again")
+		assert.Equal(t, fake.id, m.state.SessionRetrieveId)
+		assert.Equal(t, int64(0), m.state.SessionJobStart)
+		assert.Equal(t, int64(3), m.state.SessionJobEnd)
+		assert.True(t, m.state.SessionStartingAt.IsZero())
+	})
+
+	missing := []struct {
+		name string
+		// missing is the object the gateway leaves out of the session.
+		missing string
+		// wantCovered is how many requests the adopted session covers, or 0 when the session
+		// reads as foreign.
+		wantCovered int64
+	}{
+		// No listed key follows /c, so /c is ignored and left to the next session.
+		{name: "after the last listed key: the session is adopted", missing: "/c", wantCovered: 2},
+		// Leaving out /b lowers the count to 2, so /c falls past the first n. This is a known
+		// limit of matching on the first n pending requests.
+		{name: "between listed keys: the session reads as foreign", missing: "/b"},
+	}
+	for _, tt := range missing {
+		t.Run("gateway left out a missing object "+tt.name, func(t *testing.T) {
+			fake, newManager := bulkRetrieveSessionTestFixture(t)
+			fake.missing = map[string]bool{tt.missing: true}
+			fake.putErrAfterLanding = fakeUnavailableErr()
+
+			m := newManager()
+			_, result := bulkRetrieveExecuteOnce(t, m)
+			require.NoError(t, result.Err)
+			require.True(t, fake.active)
+			require.NotContains(t, fake.ids, tt.missing)
+			require.NoError(t, m.closeState())
+
+			fake.putErrAfterLanding = nil
+			m = newManager()
+			_, result = bulkRetrieveExecuteOnce(t, m)
+			require.NoError(t, result.Err)
+			assert.Equal(t, 1, fake.starts)
+			assert.True(t, m.state.SessionStartingAt.IsZero())
+			if tt.wantCovered == 0 {
+				assert.Empty(t, m.state.SessionRetrieveId)
+				assert.True(t, fake.active, "a session read as foreign must not be ended")
+				return
+			}
+			assert.Equal(t, fake.id, m.state.SessionRetrieveId)
+			assert.Equal(t, int64(0), m.state.SessionJobStart)
+			assert.Equal(t, tt.wantCovered, m.state.SessionJobEnd)
+		})
+	}
+
+	t.Run("PUT never landed: the marker is cleared and a session started", func(t *testing.T) {
+		fake, newManager := bulkRetrieveSessionTestFixture(t)
+		fake.putErr = fakeUnavailableErr()
+
+		m := newManager()
+		_, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		require.True(t, result.Reschedule)
+		require.False(t, fake.active)
+		require.NoError(t, m.closeState())
+
+		fake.putErr = nil
+		m = newManager()
+		dispatched, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		assert.Equal(t, 3, dispatched)
+		assert.Equal(t, 1, fake.starts)
+		assert.True(t, m.state.SessionStartingAt.IsZero())
+	})
+
+	foreign := []struct {
+		name string
+		ids  []string
+	}{
+		{name: "holds a key that is not pending", ids: []string{"/a", "/x"}},
+		{name: "holds more keys than are pending", ids: []string{"/a", "/b", "/c", "/d"}},
+		// /b exists, so a session of ours would have listed it.
+		{name: "leaves out an object that exists", ids: []string{"/a", "/c"}},
+	}
+	for _, tt := range foreign {
+		t.Run("foreign session "+tt.name+": the marker is cleared and the session waited out", func(t *testing.T) {
+			fake, newManager := bulkRetrieveSessionTestFixture(t)
+			m := newManager()
+			attempt := time.Now().UTC().Truncate(time.Second)
+			m.state.SessionStartingAt = attempt
+			require.NoError(t, m.saveManagerState())
+			fake.active, fake.id, fake.ids, fake.started = true, "other-retrieve-id", tt.ids, attempt
+
+			dispatched, result := bulkRetrieveExecuteOnce(t, m)
+			require.NoError(t, result.Err)
+			assert.True(t, result.Reschedule)
+			assert.Zero(t, dispatched)
+			assert.True(t, m.state.SessionStartingAt.IsZero())
+			assert.Empty(t, m.state.SessionRetrieveId)
+			assert.Equal(t, "other-retrieve-id", fake.id, "a foreign session must not be ended")
+		})
+	}
+
+	t.Run("matching session not yet published: waits, then fails naming the session", func(t *testing.T) {
+		fake, newManager := bulkRetrieveSessionTestFixture(t)
+		fake.putErrAfterLanding = fakeUnavailableErr()
+		m := newManager()
+		_, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		require.NoError(t, m.closeState())
+		fake.putErrAfterLanding = nil
+		fake.hideBatchList = true
+
+		m = newManager()
+		dispatched, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		assert.True(t, result.Reschedule)
+		assert.Zero(t, dispatched)
+		assert.False(t, m.state.SessionStartingAt.IsZero())
+		require.NoError(t, m.closeState())
+
+		m = newManager()
+		attempt := m.state.SessionStartingAt
+		m.now = func() time.Time { return attempt.Add(sessionStartUndecidedLimit) }
+		_, result = bulkRetrieveExecuteOnce(t, m)
+		require.ErrorContains(t, result.Err, fake.id)
+		assert.False(t, isRetryableS3Error(result.Err))
+	})
+
+	t.Run("cancel ends an unrecorded session that is ours", func(t *testing.T) {
+		fake, newManager := bulkRetrieveSessionTestFixture(t)
+		fake.putErrAfterLanding = fakeUnavailableErr()
+		m := newManager()
+		_, result := bulkRetrieveExecuteOnce(t, m)
+		require.NoError(t, result.Err)
+		require.True(t, fake.active)
+		require.NoError(t, m.closeState())
+
+		m = newManager()
+		walkCh, wait, err := m.Cancel(context.Background(), errors.New("test"))
+		require.NoError(t, err)
+		cancelled := 0
+		for range walkCh {
+			cancelled++
+		}
+		require.NoError(t, wait())
+		assert.Equal(t, 3, cancelled)
+		assert.False(t, fake.active, "cancel must end the session the interrupted start created")
+	})
+}
+
+// TestBulkRetrieveIgnoresForeignSessionWithoutId checks that a session the gateway reports with no
+// id is not taken for ours before this manager has started any session.
+func TestBulkRetrieveIgnoresForeignSessionWithoutId(t *testing.T) {
+	fake, newManager := bulkRetrieveSessionTestFixture(t)
+	fake.active, fake.id, fake.ids, fake.started = true, "", []string{"/a"}, time.Now()
+
+	m := newManager()
+	dispatched, result := bulkRetrieveExecuteOnce(t, m)
+	require.NoError(t, result.Err)
+	assert.True(t, result.Reschedule)
+	assert.Zero(t, dispatched)
+	assert.Equal(t, 0, fake.starts)
 }
