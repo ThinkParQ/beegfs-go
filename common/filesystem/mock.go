@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -65,9 +66,9 @@ func (fs MockFS) CreateOrResizeFile(path string, size int64, overwrite bool) err
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	return file.Truncate(size)
+	truncErr := file.Truncate(size)
+	return errors.Join(truncErr, file.Close())
 }
 
 func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {

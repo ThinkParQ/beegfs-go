@@ -229,13 +229,11 @@ func (fs BeeGFS) CreateOrResizeFile(path string, size int64, overwrite bool) err
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	if err := file.Truncate(size); err != nil {
-		return err
-	}
-
-	return nil
+	// On BeeGFS, closing a file opened for writing is a call to the metadata server, which can fail.
+	// The size is only known to be set once that call succeeds.
+	truncErr := file.Truncate(size)
+	return errors.Join(truncErr, file.Close())
 }
 
 func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
