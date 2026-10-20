@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -230,4 +231,24 @@ func TestValidateStateRoot(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "job.state-root is invalid")
 	})
+}
+
+// An optional enum field is a pointer, and the pointer type also satisfies protoEnumType. The hook
+// must leave it to mapstructure, which unwraps the pointer and calls the hook again with the enum.
+func TestStringToProtoEnumHookOptionalEnum(t *testing.T) {
+	var target struct {
+		Operation *flex.RemoteStorageTarget_XtreemStore_BulkOperation_Operation
+	}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: StringToProtoEnumHook(),
+		Result:     &target,
+	})
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		err = decoder.Decode(map[string]any{"operation": "efficient-retrieve"})
+	})
+	require.NoError(t, err)
+	require.NotNil(t, target.Operation)
+	assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, *target.Operation)
 }

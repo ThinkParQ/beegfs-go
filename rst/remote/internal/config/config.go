@@ -233,7 +233,10 @@ var protoEnumType = reflect.TypeFor[protoreflect.Enum]()
 // when it validates its configuration.
 func StringToProtoEnumHook() mapstructure.DecodeHookFuncType {
 	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
-		if f.Kind() != reflect.String || !t.Implements(protoEnumType) {
+		// An optional enum field has a pointer type which also implements protoEnumType because
+		// value methods are in the pointer's method set. mapstructure calls the hook again with the
+		// element type once it unwraps the pointer, so the pointer is passed through untouched here.
+		if f.Kind() != reflect.String || t.Kind() == reflect.Pointer || !t.Implements(protoEnumType) {
 			return data, nil
 		}
 
