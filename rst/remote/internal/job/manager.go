@@ -1576,8 +1576,9 @@ func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
 	path = rst.NormalizePath(path)
 	pathEntry, commitAndReleasePath, pathEntryErr := m.pathStore.GetAndLockEntry(path)
 	if pathEntryErr != nil {
-		if errors.Is(pathEntryErr, kvstore.ErrEntryNotInDB) {
-			// Path entry no longer exists so there's nothing left to cancel.
+		if errors.Is(pathEntryErr, kvstore.ErrEntryNotInDB) || errors.Is(pathEntryErr, kvstore.ErrEntryAlreadyDeleted) {
+			// Path entry no longer exists so there's nothing left to cancel. ErrEntryAlreadyDeleted
+			// means it was deleted while this call waited for its lock.
 			return nil
 		}
 		return pathEntryErr

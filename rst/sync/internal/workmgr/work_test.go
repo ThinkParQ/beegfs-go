@@ -259,3 +259,15 @@ func TestGetBuilderResultsReserved(t *testing.T) {
 		assert.False(t, hasErrors)
 	})
 }
+
+// A builder request can arrive without a Cfg, and its work then ends with no counters set. Building
+// the "no matches" message must not dereference the missing Cfg.
+func TestGetBuilderResultsNilCfg(t *testing.T) {
+	var message string
+	var hasErrors bool
+	require.NotPanics(t, func() {
+		message, hasErrors = getBuilderResults(flex.BuilderJob_builder{}.Build())
+	})
+	assert.Contains(t, message, "no matches found")
+	assert.True(t, hasErrors)
+}

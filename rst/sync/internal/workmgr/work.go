@@ -694,14 +694,16 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 	// --remote-cooldown asked, even though it submitted no job request.
 	if jobsProcessed == 0 && dirsConfigured == 0 {
 		hasErrors = true
-		if cfg.Download {
+		// cfg is nil for a builder request that arrived without one, so only nil-safe getters are
+		// used here.
+		if cfg.GetDownload() {
 			if rst.WalkLocalPathInsteadOfRemote(cfg) {
-				parts = append(parts, fmt.Sprintf("walked local path since --%s was not provided; No matches found in path: %s", rst.RemotePathFlag, cfg.Path))
+				parts = append(parts, fmt.Sprintf("walked local path since --%s was not provided; No matches found in path: %s", rst.RemotePathFlag, cfg.GetPath()))
 			} else {
-				parts = append(parts, fmt.Sprintf("no matches found in remote path: %s", cfg.RemotePath))
+				parts = append(parts, fmt.Sprintf("no matches found in remote path: %s", cfg.GetRemotePath()))
 			}
 		} else {
-			parts = append(parts, fmt.Sprintf("no matches found in local path: %s", cfg.Path))
+			parts = append(parts, fmt.Sprintf("no matches found in local path: %s", cfg.GetPath()))
 		}
 	}
 

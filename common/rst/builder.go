@@ -491,5 +491,5 @@ func (c *JobBuilderClient) getPathsFn(cfg *flex.JobRequestCfg) (requestPathResol
 }
 
 func WalkLocalPathInsteadOfRemote(cfg *flex.JobRequestCfg) bool {
-	return cfg.RemotePath == ""
+	return cfg.GetRemotePath() == ""
 }
