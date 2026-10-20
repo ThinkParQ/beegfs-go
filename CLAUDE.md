@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is the BeeGFS Go repository — a single [Go module](https://go.dev/blog/using-go-modules)
 (`github.com/thinkparq/beegfs-go`) that serves two purposes:
 
-- **Applications** — the `beegfs` CLI, the RST services (`beegfs-remote`, `beegfs-sync`), and
-  `beegfs-watch`.
+- **Applications** — the `beegfs` CLI, the RST services (`beegfs-remote`, `beegfs-sync`),
+  `beegfs-watch`, and `beegfs-index-updater`.
 - **Reusable libraries** — packages under `common/` (and the `pkg/` trees) that external Go projects
   import to interact with BeeGFS.
 
@@ -36,6 +36,7 @@ Layout](https://github.com/golang-standards/project-layout):
 | `ctl/` | `beegfs` CLI binary + public control libraries |
 | `rst/` | Remote Storage Targets — `beegfs-remote` coordinator and `beegfs-sync` worker |
 | `watch/` | `beegfs-watch` filesystem event streaming daemon |
+| `index/` | `beegfs-index-updater`: keeps a GUFI metadata index in step with Watch events |
 
 ### Binaries
 
@@ -45,6 +46,7 @@ Layout](https://github.com/golang-standards/project-layout):
 | `beegfs-remote` | `rst/remote/cmd/beegfs-remote/` | RST coordinator service (gRPC) |
 | `beegfs-sync` | `rst/sync/cmd/beegfs-sync/` | RST worker that moves data to/from S3 |
 | `beegfs-watch` | `watch/cmd/beegfs-watch/` | Filesystem event listener / gRPC router |
+| `beegfs-index-updater` | `index/cmd/beegfs-index-updater/` | Watch subscriber that applies file system changes to a GUFI index |
 
 ## Commands
 
@@ -56,7 +58,7 @@ Toolchain versions are pinned in `go.mod` (currently Go 1.26.4). Dev tools (`sta
 go run ./ctl/cmd/beegfs             # Build & run directly (best for debugging)
 go install ./ctl/cmd/beegfs        # Install to $GOBIN
 make install                       # Install all binaries to $HOME/go/bin
-make install-ctl                   # Install one binary (also: -remote, -sync, -watch)
+make install-ctl                   # Install one binary (also: -remote, -sync, -watch, -index-updater)
 make uninstall / uninstall-<name>  # Remove
 ```
 
@@ -111,8 +113,8 @@ The CLI is deliberately layered so the logic is reusable as a library:
   formatting), `config`, `util`.
 
 Backend packages talk to daemons over two protocols: **BeeMsg** (via `common/beemsg`, to
-meta/storage) and **gRPC** (via `protobuf/go/{beegfs,management,beeremote,flex,license}` clients, to
-mgmtd/remote).
+meta/storage) and **gRPC** (via `protobuf/go/{beegfs,management,beeremote,flex,license,beeindex}`
+clients, to mgmtd, remote and the index updater).
 
 ### `common/` — shared foundation
 
@@ -151,6 +153,19 @@ Replaces the deprecated C++ `beegfs-event-listener` in `beegfs-core`.
 - `internal/subscriber/`, `internal/subscribermgr/` — subscriber lifecycle and management.
 - `pkg/dispatch/` — event dispatch with rate limiting and ignore rules.
 - `pkg/subscriber/` — gRPC server exposing the event stream to subscribers, with acks.
+
+### `index/` — GUFI index updates (`beegfs-index-updater`)
+
+A Watch subscriber that applies file system changes to an index built by `beegfs index create`.
+It shells out to the GUFI binaries (`gufi_query`, `gufi_sqlite3`, `gufi_incremental_update`,
+`gufi_treesummary`).
+- `internal/collector/` — gRPC server: the Watch subscriber endpoint and the `IndexUpdater`
+  service, batching, acknowledgements, and gap detection in sequence IDs.
+- `internal/markwalk/` — turns one batch of events into a GUFI suspect file, using only the index.
+- `internal/updater/` — runs `gufi_incremental_update` on a schedule or on request, and full
+  repairs after Watch lost events.
+- The CLI side is `beegfs index update` (`ctl/internal/cmd/index/update.go`). The service
+  definition is `protobuf/proto/beeindex.proto`.
 
 ## Conventions
 
