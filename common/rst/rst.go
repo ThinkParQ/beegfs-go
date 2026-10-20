@@ -536,8 +536,34 @@ func GetWorkResultsState(workResults []*flex.Work) flex.Work_State {
 
 // BuildJobRequestWithFailedPrecondition returns a job request with failed precondition
 // GenerationStatus with the specified message.
+//
+// client is nil when no provider exists for cfg's rstId, either because the rstId is unknown or
+// because the file has none. A plain sync request then carries the error. Remote rejects a request
+// with no type, and it records a FAILED_PRECONDITION for an rstId it does not know as a job with the
+// error instead of rejecting it.
 func BuildJobRequestWithFailedPrecondition(client Provider, cfg *flex.JobRequestCfg, message string) *beeremote.JobRequest {
-	request := client.GetJobRequest(cfg)
+	var request *beeremote.JobRequest
+	if client == nil {
+		operation := flex.SyncJob_UPLOAD
+		if cfg.GetDownload() {
+			operation = flex.SyncJob_DOWNLOAD
+		}
+		request = &beeremote.JobRequest{
+			Path:                cfg.GetPath(),
+			RemoteStorageTarget: cfg.GetRemoteStorageTarget(),
+			Priority:            cfg.GetPriority(),
+			Type: &beeremote.JobRequest_Sync{
+				Sync: &flex.SyncJob{
+					Operation:  operation,
+					RemotePath: cfg.GetRemotePath(),
+					LockedInfo: cfg.GetLockedInfo(),
+				},
+			},
+		}
+	} else {
+		request = client.GetJobRequest(cfg)
+	}
+
 	status := &beeremote.JobRequest_GenerationStatus{
 		State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 		Message: message,

@@ -200,6 +200,7 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
 		assert.Equal(t, "/foo", request.GetPath())
 		assert.Equal(t, uint32(7), request.GetRemoteStorageTarget())
+		assert.True(t, request.HasSync(), "remote rejects a request with no type before it records the failed precondition")
 	})
 
 	t.Run("failedPrecondition produces a failed precondition request", func(t *testing.T) {
@@ -1098,6 +1099,41 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "", nil)
 		require.NoError(t, err)
 		assert.Zero(t, activeJobSubmissions)
+	})
+
+	t.Run("a path issue on a file without rstIds is submitted under rstId 0", func(t *testing.T) {
+		// No request is built for a file without rstIds, so the path issue is sent on its own
+		// request. Remote records a FAILED_PRECONDITION for an unknown rstId as a job with the
+		// error.
+		w := newBuilder()
+		w.builderCfg = &flex.JobRequestCfg{Download: true, RemotePath: "prefix/key"}
+		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+			return PathState{
+				LockedInfo:   &flex.JobLockedInfo{Exists: true, Mtime: timestamppb.Now()},
+				LockAcquired: true,
+			}, ErrOffloadFileNotReadable
+		}
+		cleared := false
+		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
+			cleared = true
+			return nil
+		}
+
+		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "prefix/key", nil)
+		require.NoError(t, err)
+		assert.Zero(t, activeJobSubmissions, "a failed precondition is terminal on arrival")
+		assert.True(t, cleared, "the lock this call took must be released")
+
+		requests := submissions.all()
+		require.Len(t, requests, 1)
+		request := requests[0]
+		assert.Equal(t, "/some/path", request.GetPath())
+		assert.Zero(t, request.GetRemoteStorageTarget())
+		require.True(t, request.HasSync(), "remote rejects a request with no type")
+		assert.Equal(t, flex.SyncJob_DOWNLOAD, request.GetSync().GetOperation())
+		assert.Equal(t, "prefix/key", request.GetSync().GetRemotePath())
+		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
+		assert.Contains(t, request.GetGenerationStatus().GetMessage(), ErrOffloadFileNotReadable.Error())
 	})
 
 	t.Run("lock is cleared once processing completes without in-flight work", func(t *testing.T) {

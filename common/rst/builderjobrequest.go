@@ -143,6 +143,21 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		}
 	}()
 
+	if len(pathState.RstCfg.RSTIDs) == 0 && failedPrecondition != nil {
+		// There are no rstIds with the failed precondition so in order to communicate the issue to
+		// the user, submit the request with a generation status under the invalid rstId 0. No job
+		// will be created just a record of the failure.
+		checkpoint(checkpointGrace)
+		cfg := w.buildJobRequestCfg(inMountPath, remotePath, 0, pathState.LockedInfo, w.builderCfg)
+		request := BuildJobRequestWithFailedPrecondition(nil, cfg, failedPrecondition.Error())
+		canReleaseLock, _, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
+		if !canReleaseLock {
+			keepLock = true
+		}
+		err = processErr
+		return
+	}
+
 	for _, cfg := range w.buildJobRequestCfgs(inMountPath, remotePath, pathState.RstCfg.RSTIDs, pathState.LockedInfo, w.builderCfg) {
 		// Each rstId is an independent round of remote work, so it earns its own grace.
 		checkpoint(checkpointGrace)
@@ -420,14 +435,7 @@ func (w *jobRequestBuilder) buildRequest(ctx context.Context, cfg *flex.JobReque
 		// either removed after the file was configured, or was set incorrectly. Return a
 		// FAILED_PRECONDITION so remote submits the job with the error message rather than
 		// rejecting the job.
-		return &beeremote.JobRequest{
-			Path:                cfg.Path,
-			RemoteStorageTarget: cfg.GetRemoteStorageTarget(),
-			GenerationStatus: &beeremote.JobRequest_GenerationStatus{
-				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-				Message: fmt.Sprintf("failed to build job request: %s: rstId %d", ErrConfigRSTTypeIsUnknown.Error(), rstId),
-			},
-		}
+		return BuildJobRequestWithFailedPrecondition(nil, cfg, fmt.Sprintf("failed to build job request: %s: rstId %d", ErrConfigRSTTypeIsUnknown.Error(), rstId))
 	}
 
 	if failedPrecondition != nil {

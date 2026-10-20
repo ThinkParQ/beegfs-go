@@ -25,6 +25,7 @@ import (
 type fakeBulkOperation struct {
 	addRequestErr        error
 	closeErr             error
+	closeCalls           int
 	destroyErr           error
 	destroyCalls         int
 	updateBulkRequestErr error
@@ -60,6 +61,7 @@ func (f *fakeBulkOperation) Cancel(ctx context.Context, reason error) (<-chan *B
 }
 
 func (f *fakeBulkOperation) Close(ctx context.Context) error {
+	f.closeCalls++
 	return f.closeErr
 }
 
@@ -624,10 +626,32 @@ func TestBulkOperationRegistry_InitFinishesInterruptedDestroy(t *testing.T) {
 	assert.NotContains(t, managers, "1-retrieve", "an interrupted teardown must not be registered as a live operation")
 	assert.Contains(t, managers, "2-retrieve", "an untouched operation must still be reopened")
 	assert.Equal(t, 1, torndown.destroyCalls, "the interrupted teardown must be finished")
+	assert.Equal(t, 1, torndown.closeCalls, "the handles opened to finish the teardown must be closed")
 
 	entries := readTestBulkOperationEntries(t, mountPath, "job-1")
 	assert.NotContains(t, entries, "1-retrieve", "finishing the teardown must remove the entry")
 	assert.Contains(t, entries, "2-retrieve")
+}
+
+// A teardown that fails again must still close the handles opening it took, because the manager is
+// never registered and registry.Close cannot reach it.
+func TestBulkOperationRegistry_InitClosesAFailedDestroy(t *testing.T) {
+	mountPath := t.TempDir()
+	saveTestBulkOperationEntry(t, mountPath, "job-1", &bulkOperationEntry{RstId: 1, Operation: "retrieve", Destroying: true})
+
+	torndown := &fakeBulkOperation{destroyErr: errors.New("destroy failed")}
+	client := &MockClient{}
+	client.On("OpenBulkOperation", mock.Anything, ".beegfs-rst/v1/job/job-1/1/retrieve", "retrieve").Return(torndown, nil)
+
+	registry := &bulkOperationRegistry{
+		managers:     make(map[string]*bulkOperationManager),
+		mountPath:    mountPath,
+		stateRoot:    DefaultStateRoot,
+		rstMap:       map[uint32]Provider{1: client},
+		builderJobId: "job-1",
+	}
+	require.ErrorContains(t, registry.Init(context.Background()), "destroy failed")
+	assert.Equal(t, 1, torndown.closeCalls, "the handles must be closed even though the teardown failed")
 }
 
 func TestBulkOperationRegistry_Init(t *testing.T) {

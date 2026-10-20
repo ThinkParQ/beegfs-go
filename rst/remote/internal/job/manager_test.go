@@ -1276,6 +1276,18 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
 	require.NotNil(t, result)
 
+	// A builder that has no provider for a path, because the file has no rstIds or names one that
+	// does not exist, builds the request without a client. Remote must record it as a job carrying
+	// the error rather than reject it, so the user can see why the path was not synced.
+	noClientCfg := flex.JobRequestCfg_builder{Path: "/test/no-rst", RemotePath: "key"}.Build()
+	testNoClientJobRequest := rst.BuildJobRequestWithFailedPrecondition(nil, noClientCfg, "stub file is not readable")
+	result, err = jobManager.SubmitJobRequest(testNoClientJobRequest, "")
+	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+	require.NotNil(t, result)
+	require.Equal(t, beeremote.Job_CANCELLED, result.Job.Status.State)
+	require.Contains(t, result.Job.Status.GetMessage(), "stub file is not readable")
+	require.Zero(t, result.Job.Request.GetRemoteStorageTarget())
+
 	// Test an error is creating job request that is not a failed-precondition.
 	testFailedJobRequest := proto.Clone(baseTestJobRequest).(*beeremote.JobRequest)
 	testFailedJobRequest.Type = &beeremote.JobRequest_Mock{

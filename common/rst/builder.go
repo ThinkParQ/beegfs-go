@@ -121,6 +121,12 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 			return
 		}
 
+		// Err ends the job, so it wins over a reschedule the controller asked for. SchedulingResult
+		// treats the two as exclusive. The job will not run again, so the walk and failed
+		// operation errors have to be reported with it now.
+		if result.Err != nil {
+			result.Reschedule = false
+		}
 		if !result.Reschedule {
 			result.Err = appendErrors(result.Err, controller.GetWalkErrors(), registry.GetFailedOperationErrors())
 			return

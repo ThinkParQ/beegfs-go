@@ -244,9 +244,15 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 		if entry.Destroying {
 			// An earlier Destroy was interrupted, so whatever provider state is left belongs to an
 			// operation whose requests were already resolved. Finishing the teardown reclaims it.
-			if destroyErr := manager.Destroy(ctx); destroyErr != nil {
-				return fmt.Errorf("failed to finish destroying bulk operation %s: %w", manager.Key(), destroyErr)
+			// The manager is never registered, so registry.Close cannot reach it. Destroy only
+			// deletes the state, so the handles opening it took are closed here.
+			destroyErr := manager.Destroy(ctx)
+			closeErr := manager.Close(ctx)
+			if destroyErr != nil {
+				return fmt.Errorf("failed to finish destroying bulk operation %s: %w", manager.Key(), errors.Join(destroyErr, closeErr))
 			}
+			// A close error after a successful Destroy is dropped. The state is already gone, so the
+			// failure leaks at most a handle, and failing the registry here would end the builder job.
 			continue
 		}
 
