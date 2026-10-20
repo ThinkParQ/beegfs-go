@@ -630,6 +630,8 @@ func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignme
 	builder := workRequest.GetBuilder()
 	status := workResult.GetStatus()
 
+	// Every submission has returned by now, so the counters need no lock.
+	builder.DirsConfigured += result.DirsConfigured
 	builderMessage, builderHasErrors := getBuilderResults(builder)
 	defer func() {
 		status.SetMessage(appendMessage(status.Message, builderMessage))
@@ -684,10 +686,13 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
 	jobsAlreadyExist := builder.GetJobsAlreadyExist()
 	jobsReserved := builder.GetJobsReserved()
+	dirsConfigured := builder.GetDirsConfigured()
 
 	var parts []string
 	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsNotReserved + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist + jobsReserved
-	if jobsProcessed == 0 {
+	// A walk that only configured directories found matches. It did what --update or
+	// --remote-cooldown asked, even though it submitted no job request.
+	if jobsProcessed == 0 && dirsConfigured == 0 {
 		hasErrors = true
 		if cfg.Download {
 			if rst.WalkLocalPathInsteadOfRemote(cfg) {
@@ -700,6 +705,9 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 		}
 	}
 
+	if dirsConfigured > 0 {
+		parts = append(parts, fmt.Sprintf("%d director(ies) configured", dirsConfigured))
+	}
 	if jobsSubmitted > 0 {
 		parts = append(parts, fmt.Sprintf("%d job request(s) submitted", jobsSubmitted))
 	}

@@ -99,6 +99,10 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 	controller := c.newRequestBuildController(shutdownCtx, workCtx, requestBuilder, workerSaturation)
 
 	defer func() {
+		// Every walk worker has returned by now, so the count is final. It is reported even when
+		// the round reschedules, because a path the walk dispatched is never walked again.
+		result.DirsConfigured = requestBuilder.dirsConfigured.Load()
+
 		if closeErr := registry.Close(workCtx); closeErr != nil {
 			// Close only releases resources, so a failure here means an operation's handles could not
 			// be closed cleanly, not that any of its state was lost. Every write is already durable

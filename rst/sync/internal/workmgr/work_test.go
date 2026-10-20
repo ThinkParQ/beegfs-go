@@ -245,6 +245,14 @@ func TestGetBuilderResultsReserved(t *testing.T) {
 		assert.True(t, hasErrors)
 	})
 
+	t.Run("configured directories alone are not reported as no matches", func(t *testing.T) {
+		// An --update walk over a tree with no eligible files configures every directory and
+		// submits nothing. That walk did what was asked, so it must not end with errors.
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: &flex.JobRequestCfg{Path: "/dir"}, DirsConfigured: 3}.Build())
+		assert.Equal(t, "3 director(ies) configured", message)
+		assert.False(t, hasErrors)
+	})
+
 	t.Run("no line is added once every reservation is claimed", func(t *testing.T) {
 		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: cfg, Submitted: 4446}.Build())
 		assert.Equal(t, "4446 job request(s) submitted", message)

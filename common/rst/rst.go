@@ -256,6 +256,10 @@ type SchedulingResult struct {
 	// failures: problems with an individual job request are counted on flex.BuilderJob by the
 	// submission itself and surface through the work status message, never here.
 	Err error
+	// DirsConfigured is how many directories this round had their RST configuration updated by
+	// --update or --remote-cooldown. The caller adds it to flex.BuilderJob. Unlike the submission
+	// counters, it is not counted there directly, because configuring a directory submits nothing.
+	DirsConfigured int32
 }
 
 // BulkExecuteResult reports how a single bulk operation's execution ended.

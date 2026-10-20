@@ -1038,6 +1038,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		assert.Zero(t, activeJobSubmissions)
 		assert.Equal(t, "/some/dir", configured, "the directory should have its rst config applied")
 		assert.Zero(t, submissions.len(), "a directory has no data to sync so it must not submit a job")
+		assert.Equal(t, int32(1), w.dirsConfigured.Load(), "a configured directory must be counted")
 	})
 
 	t.Run("a directory with no rstIds still receives its rst config", func(t *testing.T) {
@@ -1080,6 +1081,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/dir", "", nil)
 		require.ErrorIs(t, err, wantErr)
 		assert.Zero(t, activeJobSubmissions)
+		assert.Zero(t, w.dirsConfigured.Load(), "a directory that failed to configure must not be counted")
 	})
 
 	t.Run("skip from resolvePathStateForRequest returns without clearing the lock", func(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"math"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,6 +46,9 @@ type jobRequestBuilder struct {
 	planFileState     planFileStateForWorkRequestsFn
 	clearAccessFlags  clearAccessFlagsFn
 	setDirRstConfig   setDirRstConfigFn
+	// dirsConfigured counts the directories whose RST configuration this builder updated. A
+	// directory submits no job request, so no submission counter records it.
+	dirsConfigured atomic.Int32
 }
 
 func (w *jobRequestBuilder) init() {
@@ -104,7 +108,9 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		checkpoint(checkpointGrace)
 		// Return any errors to fail the builder job since beegfs was unable to set the directory's
 		// rst configuration. The underlining issue is likely systemic.
-		err = w.setDirRstConfig(workCtx, inMountPath)
+		if err = w.setDirRstConfig(workCtx, inMountPath); err == nil {
+			w.dirsConfigured.Add(1)
+		}
 		return
 	}
 
