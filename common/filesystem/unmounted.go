@@ -53,10 +53,6 @@ func (fs UnmountedFS) Remove(path string) error {
 	return ErrUnmounted
 }
 
-func (fs UnmountedFS) RemoveAll(path string) error {
-	return ErrUnmounted
-}
-
 func (fs UnmountedFS) Open(path string) (io.ReadCloser, error) {
 	return nil, ErrUnmounted
 }

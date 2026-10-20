@@ -61,8 +61,6 @@ type Provider interface {
 	CreateWriteClose(name string, buf []byte, mode uint32, overwrite bool) error
 	// Removes the file specified by name.
 	Remove(name string) error
-	// Removes the specified path and any children it contains.
-	RemoveAll(name string) error
 	// Opens the file specified by name and returns it as an io.ReadCloser. The caller must close the
 	// file when it is no longer required.
 	Open(name string) (io.ReadCloser, error)
@@ -263,10 +261,6 @@ func (fs BeeGFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrit
 
 func (fs BeeGFS) Remove(path string) error {
 	return os.Remove(filepath.Join(fs.MountPoint, path))
-}
-
-func (fs BeeGFS) RemoveAll(path string) error {
-	return os.RemoveAll(filepath.Join(fs.MountPoint, path))
 }
 
 func (fs BeeGFS) Open(path string) (io.ReadCloser, error) {

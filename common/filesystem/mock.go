@@ -92,10 +92,6 @@ func (fs MockFS) Remove(path string) error {
 	return fs.Fs.Remove(path)
 }
 
-func (fs MockFS) RemoveAll(path string) error {
-	return fs.Fs.RemoveAll(path)
-}
-
 func (fs MockFS) Open(path string) (io.ReadCloser, error) {
 	return fs.Fs.Open(path)
 }
