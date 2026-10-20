@@ -620,9 +620,14 @@ func FileCreatedByJob(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && !lockedInfo.Exists && lockedInfo.GetMtime() != nil
 }
 
-// IsFileAlreadySynced returns whether the file is already synced with remote storage target
+// IsFileAlreadySynced returns whether the file is already synced with remote storage target. A nil
+// Mtime or RemoteMtime means that side does not exist so the file is not synced. The nil check
+// matters because AsTime turns a nil timestamp into the Unix epoch which would compare equal.
 func IsFileAlreadySynced(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo != nil && lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
+	if lockedInfo == nil || lockedInfo.Mtime == nil || lockedInfo.RemoteMtime == nil {
+		return false
+	}
+	return lockedInfo.Size == lockedInfo.RemoteSize && lockedInfo.Mtime.AsTime().Equal(lockedInfo.RemoteMtime.AsTime())
 }
 
 // IsFileOffloaded returns whether the file exists and is offloaded.

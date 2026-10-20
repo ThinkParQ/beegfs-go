@@ -916,6 +916,32 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 	}
 }
 
+// TestIsFileAlreadySynced checks that a missing side is never synced. AsTime turns a nil timestamp
+// into the Unix epoch, so without the nil checks an empty file with an epoch mtime would match a
+// missing object, and so would a missing file.
+func TestIsFileAlreadySynced(t *testing.T) {
+	epoch := func() *timestamppb.Timestamp { return &timestamppb.Timestamp{} }
+	tests := []struct {
+		name   string
+		info   *flex.JobLockedInfo
+		synced bool
+	}{
+		{"nil locked info", nil, false},
+		{"remote missing and empty local file with epoch mtime", flex.JobLockedInfo_builder{Exists: true, Mtime: epoch()}.Build(), false},
+		{"local and remote both missing", flex.JobLockedInfo_builder{}.Build(), false},
+		{"local missing and empty remote object with epoch mtime", flex.JobLockedInfo_builder{RemoteMtime: epoch()}.Build(), false},
+		{"size and mtime match", flex.JobLockedInfo_builder{Exists: true, Size: 10, RemoteSize: 10, Mtime: &timestamppb.Timestamp{Seconds: 1000}, RemoteMtime: &timestamppb.Timestamp{Seconds: 1000}}.Build(), true},
+		{"empty file and empty object at epoch", flex.JobLockedInfo_builder{Exists: true, Mtime: epoch(), RemoteMtime: epoch()}.Build(), true},
+		{"mtime differs", flex.JobLockedInfo_builder{Exists: true, Size: 10, RemoteSize: 10, Mtime: &timestamppb.Timestamp{Seconds: 1000}, RemoteMtime: &timestamppb.Timestamp{Seconds: 1001}}.Build(), false},
+		{"size differs", flex.JobLockedInfo_builder{Exists: true, Size: 10, RemoteSize: 11, Mtime: &timestamppb.Timestamp{Seconds: 1000}, RemoteMtime: &timestamppb.Timestamp{Seconds: 1000}}.Build(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.synced, IsFileAlreadySynced(tt.info))
+		})
+	}
+}
+
 // A state root that does not exist yet is created owner-only, and only when asked to. Reading state
 // must never create the tree, so nodes that never run a bulk operation never get one.
 func TestOpenStateRootCreatesOnlyWhenAsked(t *testing.T) {
