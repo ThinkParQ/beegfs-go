@@ -89,19 +89,19 @@ func (c *requestBuildController) RunWalk() {
 		return
 	}
 
-	group := new(errgroup.Group)
-
 	walk, stopWalk, err := c.getWalk()
 	if err != nil {
 		c.addWalkError(err)
 		return
 	}
-	c.runWalk(group, walk, stopWalk, maxRequests)
+	c.runWalk(walk, stopWalk, maxRequests)
 }
 
-func (c *requestBuildController) runWalk(group *errgroup.Group, walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), maxRequests int64) {
+func (c *requestBuildController) runWalk(walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), maxRequests int64) {
 	submissions := atomic.Int64{}
 	walkDrained := false
+
+	group := new(errgroup.Group)
 
 	maxRequestsExtension := max(1, int64(float64(maxRequests)*walkContinuationMaxRequestExtensionMultiplier))
 	group.Go(func() error {

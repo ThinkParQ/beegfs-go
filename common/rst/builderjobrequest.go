@@ -102,7 +102,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 
 	if pathState.IsDir() {
 		checkpoint(checkpointGrace)
-		// Return any errors to abort the builder job since beegfs was unable to set the directory's
+		// Return any errors to fail the builder job since beegfs was unable to set the directory's
 		// rst configuration. The underlining issue is likely systemic.
 		err = w.setDirRstConfig(workCtx, inMountPath)
 		return
@@ -219,9 +219,10 @@ func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMo
 	var pathStateErr error
 	pathState, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
-		// Returning err from this function aborts the entire builder job, so only fatal path
-		// state errors are returned here. Non-fatal path state errors are attached to the
-		// generated request when an rstId is available, allowing the builder job to continue.
+		// Returning err from this function fails the builder job once its walk and bulk operations
+		// finish, so only fatal path state errors are returned here. Non-fatal path state errors
+		// are attached to the generated request when an rstId is available, allowing the builder
+		// job to continue.
 		err = pathStateErr
 		return
 	}

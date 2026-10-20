@@ -20,7 +20,6 @@ import (
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -56,7 +55,7 @@ func requireWalkComplete(t *testing.T, controller *requestBuildController) error
 // so a test can supply the walk results directly. It blocks until the walk and everything it
 // dispatched has finished.
 func runTestWalk(controller *requestBuildController, walkCh <-chan *filesystem.StreamPathResult, stopWalk func(), maxRequests int64) {
-	controller.runWalk(new(errgroup.Group), walkCh, stopWalk, maxRequests)
+	controller.runWalk(walkCh, stopWalk, maxRequests)
 }
 
 func TestRequestBuildController_RunWalkProcessesPathsAndSubmitsRequests(t *testing.T) {
