@@ -312,6 +312,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("stopped before the work request started because the node is shutting down (it will resume)")
 		entry.ExecuteAfter = time.Time{}
+		w.sendWorkResult(shutdownCtx, work, result.Work)
 		return
 	} else if work.ctx.Err() != nil {
 		status.SetState(flex.Work_CANCELLED)
@@ -422,6 +423,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			if shutdownCtx.Err() != nil {
 				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
 				entry.ExecuteAfter = time.Time{}
+				w.sendWorkResult(shutdownCtx, work, result.Work)
 				return
 			}
 			status.SetMessage("stopped before all parts were synced")
@@ -450,6 +452,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
 		entry.ExecuteAfter = time.Time{}
+		w.sendWorkResult(shutdownCtx, work, result.Work)
 		return
 	} else if work.ctx.Err() != nil {
 		status.SetState(flex.Work_CANCELLED)
