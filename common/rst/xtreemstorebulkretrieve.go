@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/google/uuid"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"golang.org/x/sync/errgroup"
@@ -218,6 +219,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	}
 	if !request.HasReserveJobId() {
 		return fmt.Errorf("missing request reserveJobId")
+	}
+	if jobId := request.GetReserveJobId(); len(jobId) != JobIdLen || uuid.Validate(jobId) != nil {
+		return fmt.Errorf("reservedJobId %q is not a valid %d-character uuid", jobId, JobIdLen)
 	}
 
 	inMountPath := request.GetPath()

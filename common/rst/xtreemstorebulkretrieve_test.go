@@ -1438,3 +1438,36 @@ func TestBulkRetrieveIgnoresForeignSessionWithoutId(t *testing.T) {
 	assert.Zero(t, dispatched)
 	assert.Equal(t, 0, fake.starts)
 }
+
+// The record stores the reserved job ID in a fixed JobIdLen field. An ID of another width must be
+// refused before anything is written, rather than padded or cut and then rejected on every read.
+func TestBulkRetrieveAddRequestRejectsMalformedJobId(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient:    &fakeS3ApiClient{},
+		rstId:          1,
+		mountPath:      tmpDir,
+		stateRoot:      DefaultStateRoot,
+		stateMountPath: testStateMountPath,
+		operation:      flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String(),
+		state:          &xtreemstoreS3BulkRetrieveManagerState{},
+	}
+	require.NoError(t, m.openState())
+	defer func() { require.NoError(t, m.closeState()) }()
+
+	for _, jobId := range []string{
+		"not-a-uuid",
+		strings.ReplaceAll(uuid.NewString(), "-", ""),
+		"urn:uuid:" + uuid.NewString(),
+		strings.Repeat("a", JobIdLen),
+	} {
+		req := &beeremote.JobRequest{
+			Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: "/a"}},
+			BulkInfo:     &flex.BulkJobRequestInfo{},
+			ReserveJobId: &jobId,
+		}
+		assert.Error(t, m.AddRequest(context.Background(), req), "job ID %q must be refused", jobId)
+	}
+	assert.Zero(t, m.includedJobs, "a refused request must not take an index")
+	assert.Zero(t, m.recordBytes, "a refused request must not write its path")
+}
