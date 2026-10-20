@@ -71,6 +71,23 @@ builds:
       - arm64
     main: watch/cmd/beegfs-watch/main.go
 
+  - id: beegfs_index_updater
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.binaryName=beegfs-index-updater
+      - -X main.commit={{ .Commit }}
+      - -X main.buildTime={{ .Date }}
+    binary: beegfs-index-updater
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: index/cmd/beegfs-index-updater/main.go
+
 nfpms:
   - id: beegfs_tools
     ids:
@@ -187,6 +204,38 @@ nfpms:
         dst: /usr/share/doc/beegfs-watch/NOTICE.md
       - src: LICENSE.md
         dst: /usr/share/doc/beegfs-watch/LICENSE.md
+
+  - id: beegfs_index_updater
+    ids:
+      - beegfs_index_updater
+    package_name: beegfs-index-updater
+    file_name_template: "beegfs-index-updater-{{ .Version }}-{{ .Os }}.{{ .Arch }}"
+    vendor: "ThinkparQ GmbH"
+    homepage: https://www.beegfs.io
+    maintainer: BeeGFS Maintainers <packages@beegfs.com>
+    description: BeeGFS Index Updater (keeps a GUFI index in step with BeeGFS Watch events)
+    license: BeeGFS License Agreement
+    formats:
+      - rpm
+      - deb
+    # The GUFI binaries and the BeeGFS indexing plugin.
+    dependencies:
+      - beegfs-index
+    epoch: "20"
+    bindir: /opt/beegfs/sbin/
+    contents:
+      - src: /opt/beegfs/sbin/beegfs-index-updater
+        dst: /usr/sbin/beegfs-index-updater
+        type: "symlink"
+      - src: index/build/beegfs-index-updater.service
+        dst: /usr/lib/systemd/system/beegfs-index-updater.service
+      - src: index/build/beegfs-index-updater.toml
+        dst: /etc/beegfs/beegfs-index-updater.toml
+        type: "config|noreplace"
+      - src: index/NOTICE.md
+        dst: /usr/share/doc/beegfs-index-updater/NOTICE.md
+      - src: LICENSE.md
+        dst: /usr/share/doc/beegfs-index-updater/LICENSE.md
 
 # TODO (https://github.com/ThinkParQ/bee-watch/issues/31): Add support for building multi-platform
 # (amd64+arm64) images using GitHub Actions.
