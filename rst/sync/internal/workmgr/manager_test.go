@@ -547,6 +547,109 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 	mockBeeRemote.AssertExpectations(t)
 }
 
+// Verifies that a builder round asking to reschedule does not run again when remote answers its
+// RESCHEDULED update with NotFound. Remote answers that way when the job was deleted, for example
+// by a force delete while sync was unreachable. The worker must drop the request and its entries
+// instead of scheduling another round.
+func TestBuilderRescheduleDiscardedWhenRemoteJobIsGone(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(rst.JobBuilderRstId, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	builderRequest := flex.WorkRequest_builder{
+		JobId:               "builder-gone-job",
+		RequestId:           "0",
+		ExternalId:          "builder-extid",
+		Path:                "/builder/source",
+		RemoteStorageTarget: rst.JobBuilderRstId,
+		Builder: flex.BuilderJob_builder{
+			Cfg: flex.JobRequestCfg_builder{
+				Path:                "/builder/source",
+				RemoteStorageTarget: 0,
+				RemotePath:          "remote/builder-source",
+			}.Build(),
+		}.Build(),
+	}.Build()
+
+	// The expectations have no call limit so a second round, if one runs, is counted below instead
+	// of panicking inside the worker goroutine.
+	roundDelay := workDelayMinimum + 500*time.Millisecond
+	rescheduleSent := make(chan struct{})
+	var rescheduleOnce sync.Once
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("builder-gone-job", "0")).Return(true, time.Duration(0), nil)
+	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("builder-gone-job", "0"), mock.Anything).
+		Return(true, roundDelay, nil, nil)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("builder-gone-job", "0", flex.Work_RUNNING)).Return(nil)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("builder-gone-job", "0", flex.Work_RESCHEDULED)).
+		Run(func(mock.Arguments) { rescheduleOnce.Do(func() { close(rescheduleSent) }) }).
+		Return(status.Error(codes.NotFound, "job not found"))
+
+	_, err = mgr.SubmitWorkRequest(builderRequest)
+	require.NoError(t, err)
+
+	select {
+	case <-rescheduleSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the builder reschedule update")
+	}
+	require.Eventually(t, func() bool { return assertDBEntriesLenForTesting(mgr, 0) == nil }, 2*time.Second, 25*time.Millisecond)
+
+	// Wait past the round delay so a wrongly scheduled second round has time to start.
+	time.Sleep(2 * roundDelay)
+	mockRST.AssertNumberOfCalls(t, "ExecuteJobBuilderRequest", 1)
+}
+
+// Verifies that a request waiting to become ready does not run again when remote answers its
+// RESCHEDULED update with NotFound. The worker must drop the request and its entries instead of
+// checking readiness again after the delay.
+func TestNotReadyRescheduleDiscardedWhenRemoteJobIsGone(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	// The expectations have no call limit so a second readiness check, if one runs, is counted
+	// below instead of panicking inside the worker goroutine.
+	rescheduleSent := make(chan struct{})
+	var rescheduleOnce sync.Once
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(false, workDelayMinimum, nil)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_RESCHEDULED)).
+		Run(func(mock.Arguments) { rescheduleOnce.Do(func() { close(rescheduleSent) }) }).
+		Return(status.Error(codes.NotFound, "job not found"))
+
+	_, err = mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.NoError(t, err)
+
+	select {
+	case <-rescheduleSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the not ready reschedule update")
+	}
+	require.Eventually(t, func() bool { return assertDBEntriesLenForTesting(mgr, 0) == nil }, 2*time.Second, 25*time.Millisecond)
+
+	// Wait past the delay so a wrongly scheduled second check has time to start.
+	time.Sleep(2 * workDelayMinimum)
+	mockRST.AssertNumberOfCalls(t, "IsWorkRequestReady", 1)
+	mockRST.AssertNotCalled(t, "ExecuteWorkRequestPart", mock.Anything, mock.Anything, mock.Anything)
+}
+
 // Verifies that if a builder execution submits one or more bulk child jobs and then reports an
 // error, the worker still forwards the already-emitted child jobs, marks the builder work as
 // cancelled because the bulk operation did not finish, and cleans up the local work state.
