@@ -102,7 +102,7 @@ func (s *WorkerNodeServer) ListenAndServe(errChan chan<- error) {
 // run now and only falls back to it once every online node in its pool has declined a request. A
 // request accepted then cannot run before the restart, but it is journaled and replayed afterwards,
 // which beats failing a job that has nowhere else to go. Requests are refused outright only once the
-// work manager stops accepting them, see Manager.Accepting.
+// work manager stops accepting them, see Manager.admitRPC.
 //
 // Drain should be called before stopping the work manager. It does not wait for the work already
 // underway to finish; that is the caller's responsibility, as is calling Stop() once it has. Draining

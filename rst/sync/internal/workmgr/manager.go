@@ -315,6 +315,12 @@ func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemote
 // admitRPC runs at the start of every call made on behalf of Remote. It decides whether the call may
 // touch the job store and work journal which stay open until the returned release function is
 // called. Calls are admitted for as long as the journal is open.
+//
+// Admission puts no cap on how many requests are journaled, including while the node drains. A cap
+// is not needed for two reasons:
+//   - Remote sends a draining node new work only after every online node in its pool has declined.
+//   - The journal is on disk and is built to hold millions of requests so only ActiveWorkQueueSize
+//     of them are ever held in memory.
 func (m *Manager) admitRPC() (release func(), err error) {
 	m.rpcMu.RLock()
 	if m.stopping {
