@@ -313,7 +313,9 @@ func rebaseUnderIndexRoot(indexRoot, fsPath, mountPath string, remote bool) (str
 
 // indexMountBase returns the mount-name subdirectory under the index root (layout
 // is <index-root>/<mount-name>/...): the basename of mountPath when set,
-// otherwise the single subdirectory present under the index root.
+// otherwise the single subdirectory present under the index root. Hidden
+// directories are skipped, such as the parking lot beegfs-index-updater keeps
+// beside the index.
 func indexMountBase(indexRoot, mountPath string) (string, error) {
 	if mountPath != "" && mountPath != "/" {
 		return filepath.Base(mountPath), nil
@@ -325,7 +327,7 @@ func indexMountBase(indexRoot, mountPath string) (string, error) {
 	}
 	var dirs []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			dirs = append(dirs, e.Name())
 		}
 	}

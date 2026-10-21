@@ -1,0 +1,23 @@
+[Unit]
+Description=BeeGFS Index Updater (keeps a GUFI index in step with BeeGFS Watch events)
+Documentation=http://www.beegfs.com/content/documentation/
+After=remote-fs.target beegfs-client.service
+Wants=basic.target
+
+[Service]
+Type=simple
+ExecStart=/opt/beegfs/sbin/beegfs-index-updater --cfg-file=/etc/beegfs/beegfs-index-updater.toml
+
+# Stopping does not wait for the batch in progress: events not yet acknowledged stay in Watch and
+# are delivered again on the next start. It kills a running update too. The next start deletes what
+# that update left in its parking lot and queues a full repair, which indexes those directories
+# again.
+TimeoutStopSec=30
+
+# The service exits only on a startup failure, such as management or the index being unreachable.
+# Those clear up without a code change, so keep trying.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

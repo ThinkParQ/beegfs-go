@@ -61,6 +61,10 @@ type GlobalCfg struct {
 	// remote index). 0 makes the executors omit the flag so the GUFI binaries
 	// use their own default.
 	Threads int
+	// UpdaterAddr is the address (host:port) of the beegfs-index-updater service
+	// that applies collected changes to this index, from --updater-addr or the
+	// .beegfs.index "updater" entry. Only `beegfs index update` uses it.
+	UpdaterAddr string
 }
 
 type dotIndexConfig struct {
@@ -72,6 +76,7 @@ type dotIndexEntry struct {
 	Root    string `toml:"root"`
 	Addr    string `toml:"addr"`
 	Threads int    `toml:"threads"`
+	Updater string `toml:"updater"`
 }
 
 // loadDotIndex reads and parses the .beegfs.index file at mountPath. It returns
@@ -94,7 +99,7 @@ func loadDotIndex(mountPath string) (dotIndexConfig, error) {
 		return cfg, fmt.Errorf("reading %s: %w", path, err)
 	}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parsing %s: %w (expected a single [index] table with path/root/addr/threads keys)", path, err)
+		return cfg, fmt.Errorf("parsing %s: %w (expected a single [index] table with path/root/addr/threads/updater keys)", path, err)
 	}
 	return cfg, nil
 }
@@ -117,7 +122,7 @@ func DotIndexPath(mountPath string) (string, error) {
 // unreadable file also leaves cfg unchanged here; it is reported up front by the
 // index command's PersistentPreRunE, so this path need not surface it again.
 func ApplyDotIndexOverrides(cfg GlobalCfg, mountPath string) GlobalCfg {
-	if cfg.IndexRoot != "" && cfg.IndexAddr != "" && cfg.Threads > 0 {
+	if cfg.IndexRoot != "" && cfg.IndexAddr != "" && cfg.Threads > 0 && cfg.UpdaterAddr != "" {
 		return cfg
 	}
 	fileCfg, err := loadDotIndex(mountPath)
@@ -133,6 +138,9 @@ func ApplyDotIndexOverrides(cfg GlobalCfg, mountPath string) GlobalCfg {
 	}
 	if cfg.Threads <= 0 && e.Threads > 0 {
 		cfg.Threads = e.Threads
+	}
+	if cfg.UpdaterAddr == "" {
+		cfg.UpdaterAddr = e.Updater
 	}
 	return cfg
 }
