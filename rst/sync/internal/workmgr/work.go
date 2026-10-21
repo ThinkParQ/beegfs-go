@@ -27,6 +27,29 @@ const (
 	workDelayMinimum         time.Duration = time.Second
 )
 
+// sendOutcome is what sendWorkResult learned about the work result.
+type sendOutcome int
+
+const (
+	// sendDelivered means remote accepted the work result.
+	sendDelivered sendOutcome = iota
+	// sendDiscarded means remote no longer knows the work request, for example after a force delete
+	// while sync was unreachable. There is nothing left to update and nothing left to resume.
+	sendDiscarded
+	// sendJobCancelled means the user cancelled the work request before the result reached
+	// remote. The journal entry must stay because the cancel path waits for it and cleans it up.
+	sendJobCancelled
+	// sendFailedSyncShutDown means the node is shutting down and the one allowed attempt failed. The
+	// journal entry must stay so the replay after the restart sends the result again.
+	sendFailedSyncShutDown
+)
+
+// settled reports whether remote either has the work result or no longer wants it. A settled
+// result leaves nothing for the journal entry to do, so a request in a final state can delete it.
+func (o sendOutcome) settled() bool {
+	return o == sendDelivered || o == sendDiscarded
+}
+
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
 func init() {
@@ -289,7 +312,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("unable to execute work request: invalid starting state " + state.String())
 		}
-		if w.sendWorkResult(shutdownCtx, work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
@@ -300,7 +323,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		log.Debug("work request specifies an unknown RST")
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("work request specifies an unknown RST")
-		if w.sendWorkResult(shutdownCtx, work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
@@ -312,7 +335,9 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("stopped before the work request started because the node is shutting down (it will resume)")
 		entry.ExecuteAfter = time.Time{}
-		w.sendWorkResult(shutdownCtx, work, result.Work)
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+		}
 		return
 	} else if work.ctx.Err() != nil {
 		status.SetState(flex.Work_CANCELLED)
@@ -321,7 +346,7 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 	} else if err != nil {
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("failed to determine if work request is ready: " + err.Error())
-		if w.sendWorkResult(shutdownCtx, work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
@@ -332,7 +357,10 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		entry.ExecuteAfter = time.Now().Add(workDelay)
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
-		w.sendWorkResult(shutdownCtx, work, result.Work)
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+			return
+		}
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -411,7 +439,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			} else {
 				status.SetMessage("error transferring part: " + err.Error())
 			}
-			if w.sendWorkResult(shutdownCtx, work, result.Work) {
+			if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 				cleanupEntries = true
 			}
 			return
@@ -423,12 +451,17 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 			if shutdownCtx.Err() != nil {
 				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
 				entry.ExecuteAfter = time.Time{}
-				w.sendWorkResult(shutdownCtx, work, result.Work)
+				if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+					cleanupEntries = true
+				}
 				return
 			}
 			status.SetMessage("stopped before all parts were synced")
 			entry.ExecuteAfter = time.Now().Add(partResult.Delay)
-			w.sendWorkResult(shutdownCtx, work, result.Work)
+			if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+				cleanupEntries = true
+				return
+			}
 			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 			w.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
@@ -452,7 +485,9 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
 		entry.ExecuteAfter = time.Time{}
-		w.sendWorkResult(shutdownCtx, work, result.Work)
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+		}
 		return
 	} else if work.ctx.Err() != nil {
 		status.SetState(flex.Work_CANCELLED)
@@ -465,7 +500,7 @@ func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, c
 		status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
 	}
 
-	if w.sendWorkResult(shutdownCtx, work, result.Work) {
+	if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 		cleanupEntries = true
 	}
 	return
@@ -486,10 +521,9 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	return w.updateBuilderJob(shutdownCtx, work, entry, result)
 }
 
-// Returns true if the work result was sent, or for some reason cannot be sent but the overall state
-// is such we should not keep retrying and the work result is no longer needed (this should only
-// happen if the job was deleted on BeeRemote so there is nothing to update).
-func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment, workResult *flex.Work) bool {
+// sendWorkResult reports a work result to remote and returns the outcome. The caller decides what
+// to do with the journal entry based on the returned sendOutcome.
+func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment, workResult *flex.Work) sendOutcome {
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID))
 
 	for work.ctx.Err() == nil || shutdownCtx.Err() != nil {
@@ -500,14 +534,14 @@ func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment
 		cancel()
 
 		if err == nil {
-			return true
+			return sendDelivered
 		} else if !canRetry {
-			log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on remote?)")
-			return true
+			log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on remote?)", zap.Error(err))
+			return sendDiscarded
 		} else if shutdownCtx.Err() != nil {
 			// Only allowed shutdown one attempt and it failed so keep the entries.
 			log.Warn("error sending work result to remote", zap.Error(err))
-			return false
+			return sendFailedSyncShutDown
 		}
 
 		log.Warn("error sending work result to remote (retrying indefinitely)", zap.Error(err))
@@ -523,8 +557,8 @@ func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment
 		}
 	}
 
-	// The work request was cancelled by user
-	return false
+	// The user cancelled the work request. The cancel path owns the journal entry from here.
+	return sendJobCancelled
 }
 
 // sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
@@ -636,17 +670,29 @@ func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignme
 	// Every submission has returned by now, so the counters need no lock.
 	builder.DirsConfigured += result.DirsConfigured
 	builderMessage, builderHasErrors := getBuilderResults(builder)
+
+	shuttingDown := shutdownCtx.Err() != nil
 	defer func() {
 		status.SetMessage(appendMessage(status.Message, builderMessage))
-		if w.sendWorkResult(shutdownCtx, work, workResult.Work) && !result.Reschedule {
+		outcome := w.sendWorkResult(shutdownCtx, work, workResult.Work)
+		if outcome == sendDiscarded {
+			cleanupEntries = true
+		} else if shuttingDown {
+			// Keep the entry so the journal replay after the restart resumes the builder job.
+		} else if result.Reschedule {
+			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("rescheduled"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
+		} else if outcome.settled() {
 			cleanupEntries = true
 		}
 	}()
 
-	if shutdownCtx.Err() != nil {
-		// Worker is shutting down so reschedule so the job can finished after it's started
-		// again. If not, then the job will be cancelled which will be failed after the restart.
-		result.Reschedule = true
+	if shuttingDown {
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for builder job to continue because the node is shutting down (it will resume)")
 		entry.ExecuteAfter = time.Time{}
@@ -659,13 +705,6 @@ func (w *worker) updateBuilderJob(shutdownCtx context.Context, work workAssignme
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for builder job to continue")
 		entry.ExecuteAfter = time.Now().Add(result.Delay)
-		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
-		w.metrics.workRequests.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attrState.String("rescheduled"),
-				attrPriority.Int(normalizedPriority(request.GetPriority())),
-			),
-		)
 	} else if builderHasErrors {
 		status.SetState(flex.Work_CANCELLED)
 		status.SetMessage("completed with errors")
