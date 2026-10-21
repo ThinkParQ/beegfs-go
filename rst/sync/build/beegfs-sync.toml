@@ -210,6 +210,11 @@ tls-disable = false
 # Remote node), however some per-worker configuration such as TLS settings may need to be specified.
 # These settings affect how the Sync node connects to the Remote node to provide work results.
 
+# Two other things arrive the same way and have no setting here. The remote storage targets are one.
+# The other is the directory where bulk operations keep the state they need to resume, which is the
+# job.state-root setting on the Remote node. Every Sync node is given the same value so that a bulk
+# operation started on one node can be picked up by another.
+
 # tls-cert-file: Specify the path to a certificate used to verify the identity of the BeeGFS Remote
 # node and to encrypt communication. If this parameter is left empty, the application will use the
 # system's default certificate pool. This parameter is ignored if tls-disable is set.

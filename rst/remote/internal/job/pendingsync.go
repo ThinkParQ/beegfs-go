@@ -220,6 +220,27 @@ func (t *pendingSyncTracker) drainReady(ctx context.Context) {
 	}
 }
 
+// rearm pushes a fresh heap entry for a drained path so its upload is retried after another
+// cooldown. Callers use it when the submit was refused for a reason that clears on its own, so the
+// deferred upload must not be dropped. The drained entry has already been removed from t.entries by
+// drainReady(), and nothing else re-adds it.
+//
+// If a concurrent Mark() created a newer entry for the path while we were submitting, that entry is
+// left alone and no new one is pushed. Its heap entry fires instead and carries the RSTs the caller
+// wanted.
+func (t *pendingSyncTracker) rearm(d drained) {
+	t.mu.Lock()
+	if _, exists := t.entries[d.path]; !exists {
+		t.nextSeq++
+		seq := t.nextSeq
+		readyAt := t.now().Add(d.cooldown)
+		t.entries[d.path] = &pendingSync{cooldown: d.cooldown, readyAt: readyAt, rstIDs: d.rstIDs, seq: seq}
+		heap.Push(&t.heap, heapEntry{path: d.path, readyAt: readyAt, seq: seq})
+	}
+	t.mu.Unlock()
+	t.signalWake()
+}
+
 // processOne takes a drained entry (i.e., cooldown expired) and attempts to trigger a job for it.
 // Because we only guarantee we'll honor the cooldown on the initial close after write, if the file
 // is reopened the cooldown is not initially reset and instead processOne() is responsible for
@@ -254,19 +275,19 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 		if errors.Is(err, beegfs.OpsErr_INUSE) {
 			t.log.Debug("automatic sync deferred — file is currently in use",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Duration("retryIn", d.cooldown))
-			t.mu.Lock()
-			// Only re-arm if no concurrent Mark already created a newer entry while we were
-			// submitting. If one exists, let its heap entry fire instead.
-			if _, exists := t.entries[d.path]; !exists {
-				t.nextSeq++
-				seq := t.nextSeq
-				readyAt := t.now().Add(d.cooldown)
-				t.entries[d.path] = &pendingSync{cooldown: d.cooldown, readyAt: readyAt, rstIDs: d.rstIDs, seq: seq}
-				heap.Push(&t.heap, heapEntry{path: d.path, readyAt: readyAt, seq: seq})
-			}
-			t.mu.Unlock()
-			t.signalWake()
+			t.rearm(d)
 			t.recordResult(actionDeferred, reasonFileInUse)
+			return
+		}
+
+		// An active job holds this path, either for this RST or for another one. The block clears on
+		// its own when that job finishes, so bail out and retry after another cooldown rather than
+		// dropping the upload. The retry resubmits for every RST.
+		if errors.Is(err, rst.ErrJobBlockedByActiveJob) {
+			t.log.Debug("automatic sync deferred — an active job holds this path",
+				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Duration("retryIn", d.cooldown), zap.Error(err))
+			t.rearm(d)
+			t.recordResult(actionDeferred, reasonBlockedByActiveJob)
 			return
 		}
 
@@ -289,10 +310,12 @@ func (t *pendingSyncTracker) processOne(ctx context.Context, d drained) {
 			continue
 		}
 
-		// ErrJobNotAllowed means a previous failed job is blocking submission. Warn so the
-		// operator knows auto-sync is stuck; manual intervention (clear the failed job) is needed.
+		// ErrJobNotAllowed means an inactive job is blocking submission, such as a failed job or a
+		// job reserved for this RST. Neither clears on its own, so do not retry. Warn so the operator
+		// knows auto-sync is stuck and that clearing the blocking job resumes it. The error names
+		// which job it was.
 		if errors.Is(err, rst.ErrJobNotAllowed) {
-			t.log.Warn("automatic sync blocked — a failed job already exists for RST; clear it to resume auto-sync",
+			t.log.Warn("automatic sync blocked — a job that is not running is blocking this path; clear it to resume auto-sync",
 				zap.String("path", d.path), zap.Uint32("rstId", rstID), zap.Error(err))
 			t.recordResult(actionError, reasonBlockedByFailedJob)
 			continue

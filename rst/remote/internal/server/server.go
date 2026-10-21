@@ -115,7 +115,7 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 	defer s.wg.Done()
 
 	var status beeremote.SubmitJobResponse_ResponseStatus = beeremote.SubmitJobResponse_CREATED
-	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest())
+	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest(), request.GetOriginNodeId())
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyComplete) {
 			status = beeremote.SubmitJobResponse_ALREADY_COMPLETE
@@ -127,6 +127,12 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 			status = beeremote.SubmitJobResponse_FAILED_PRECONDITION
 		} else if errors.Is(err, rst.ErrJobNotAllowed) {
 			status = beeremote.SubmitJobResponse_NOT_ALLOWED
+		} else if errors.Is(err, rst.ErrReservationMissing) {
+			// Checked before ErrJobNotReserved, which it unwraps to, so a missing reservation is not
+			// reported as one that exists and cannot be claimed. Neither is retried by the caller.
+			status = beeremote.SubmitJobResponse_RESERVATION_MISSING
+		} else if errors.Is(err, rst.ErrJobNotReserved) {
+			status = beeremote.SubmitJobResponse_NOT_RESERVED
 		} else {
 			return nil, err
 		}
@@ -141,24 +147,33 @@ func (s *BeeRemoteServer) GetJobs(request *beeremote.GetJobsRequest, stream beer
 	s.wg.Add(1)
 	defer s.wg.Done()
 
+	streamCtx := stream.Context()
 	responses := make(chan *beeremote.GetJobsResponse, 1024)
+
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 	sendResponses:
-		for {
-			resp, ok := <-responses
-			if !ok {
-				break sendResponses
+		for streamCtx.Err() == nil {
+			select {
+			case <-streamCtx.Done():
+			case resp, ok := <-responses:
+				if !ok {
+					break sendResponses
+				}
+				// No reason to check the error because even if the stream breaks we need to continue
+				// reading from the channel until it is closed. Otherwise the sender side may become
+				// blocked permanently trying to send with no receiver if the channel is full and will
+				// never get a chance to check if the context is cancelled.
+				stream.Send(resp)
 			}
-			// No reason to check the error because even if the stream breaks we need to continue
-			// reading from the channel until it is closed. Otherwise the sender side may become
-			// blocked permanently trying to send with no receiver if the channel is full and will
-			// never get a chance to check if the context is cancelled.
-			stream.Send(resp)
+		}
+
+		// Drain any remaining responses so sender is never blocked
+		for range responses {
 		}
 	})
 
-	err := s.jobMgr.GetJobs(stream.Context(), request, responses)
+	err := s.jobMgr.GetJobs(streamCtx, request, responses)
 	wg.Wait()
 	if err != nil {
 		if errors.Is(err, kvstore.ErrEntryNotInDB) {
@@ -173,14 +188,15 @@ func (s *BeeRemoteServer) UpdatePaths(request *beeremote.UpdatePathsRequest, str
 	s.wg.Add(1)
 	defer s.wg.Done()
 
+	streamCtx := stream.Context()
 	responses := make(chan *beeremote.UpdatePathsResponse, 1024)
+
 	wg := sync.WaitGroup{}
 	wg.Go(func() {
 	sendResponses:
-		for {
+		for streamCtx.Err() == nil {
 			select {
-			case <-stream.Context().Done():
-				return
+			case <-streamCtx.Done():
 			case resp, ok := <-responses:
 				if !ok {
 					break sendResponses
@@ -188,9 +204,13 @@ func (s *BeeRemoteServer) UpdatePaths(request *beeremote.UpdatePathsRequest, str
 				stream.Send(resp)
 			}
 		}
+
+		// Drain any remaining responses so sender is never blocked
+		for range responses {
+		}
 	})
 
-	err := s.jobMgr.UpdatePaths(stream.Context(), request, responses)
+	err := s.jobMgr.UpdatePaths(streamCtx, request, responses)
 	wg.Wait()
 	if err != nil {
 		return err
@@ -232,6 +252,8 @@ func (s *BeeRemoteServer) UpdateWork(ctx context.Context, request *beeremote.Upd
 }
 
 func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremote.GetStubContentsRequest) (*beeremote.GetStubContentsResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
 	id, url, err := s.jobMgr.GetStubContents(request.Path)
 	if err != nil {
 		return &beeremote.GetStubContentsResponse{}, err
@@ -240,6 +262,8 @@ func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremot
 }
 
 func (s *BeeRemoteServer) GetCapabilities(ctx context.Context, request *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
 	return &flex.GetCapabilitiesResponse{
 		BuildInfo:      s.registry.GetBuildInfo(),
 		Features:       s.registry.GetCapabilities(),

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -97,9 +98,6 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	cfg.SetPath(pathInfo.Path)
-	if !cfg.Download && cfg.RemotePath == "" {
-		cfg.SetRemotePath(pathInfo.Path)
-	}
 
 	if cfg.Priority == nil {
 		cfg.Priority = new(int32(scheduler.DefaultPriority))
@@ -133,28 +131,31 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		}
 	}
 
+	// Determine whether the request should create jobs.
 	jobBuilder := false
 	if pathInfo.IsGlob {
+		if cfg.Download && !WalkLocalPathInsteadOfRemote(cfg) {
+			return nil, fmt.Errorf("unable to download to path containing a glob pattern: %s", cfg.Path)
+		}
 		jobBuilder = true
 	} else if pathInfo.IsDir {
+		// The inMountPath directory with the relative remote path may correspond to a file. If it
+		// does, update cfg.Path to the file and skip creating a builder job.
 		jobBuilder = true
-		if cfg.Download {
-			// Check if the downloaded file already exists
-			remotePathDir, _ := GetDownloadRemotePathDirectory(cfg.RemotePath)
-			inMountPath, err := GetDownloadInMountPath(cfg.Path, cfg.RemotePath, remotePathDir, false, true, cfg.Flatten)
-			if err != nil {
-				// This should never happen since both remotePath and remotePathDir come directly
-				// from cfg.RemotePath, so any error here indicates a bug in the walking logic.
-				return nil, err
-			}
-			inMountPathInfo, err := getMountPathInfo(mountPoint, inMountPath)
-			if err == nil && inMountPathInfo.Exists && !inMountPathInfo.IsDir {
-				pathInfo = inMountPathInfo
-				cfg.SetPath(pathInfo.Path)
-				jobBuilder = false
+		if cfg.Download && !WalkLocalPathInsteadOfRemote(cfg) && !strings.HasSuffix(cfg.RemotePath, "/") {
+			remotePathDir, remotePathIsGlob := GetDownloadRemotePathDirectory(cfg.RemotePath)
+			if !remotePathIsGlob {
+				inMountPath := GetDownloadInMountPath(cfg.Path, cfg.RemotePath, remotePathDir, remotePathIsGlob, true, cfg.Flatten)
+				inMountPathInfo, err := getMountPathInfo(mountPoint, inMountPath)
+				if err == nil && inMountPathInfo.Exists && !inMountPathInfo.IsDir {
+					pathInfo = inMountPathInfo
+					cfg.SetPath(pathInfo.Path)
+					jobBuilder = false
+				}
 			}
 		}
 	} else if !pathInfo.Exists {
+		// The local path does not exist so let job builder walk the remote path to create job requests.
 		if !cfg.Download {
 			return nil, fmt.Errorf("unable to upload file: %w", os.ErrNotExist)
 		}
@@ -165,8 +166,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	}
 
 	if jobBuilder {
-		client := NewJobBuilderClient(ctx, nil, nil)
-		request := client.GetJobRequest(cfg)
+		request := GetBuilderJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
 	}
 
@@ -219,8 +219,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 			return []*beeremote.JobRequest{request}, nil
 		}
 
-		client := NewJobBuilderClient(ctx, nil, nil)
-		request := client.GetJobRequest(cfg)
+		request := GetBuilderJobRequest(cfg)
 		return []*beeremote.JobRequest{request}, nil
 	}
 
@@ -261,7 +260,7 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 		if !errors.Is(err, os.ErrNotExist) {
 			return result, err
 		}
-		result.IsGlob = filesystem.IsGlobPattern(path)
+		result.IsGlob = filesystem.IsGlobPattern(pathInMount)
 		return result, nil
 	}
 	result.Exists = true

@@ -165,7 +165,7 @@ Example: Pull an object from Remote Storage Target 1 into BeeGFS
 		},
 	}
 	cmd.Flags().Uint32VarP(&backendCfg.RemoteStorageTarget, rst.RemoteTargetFlag, "r", 0, "The ID of the Remote Storage Target where the file should be pulled from.")
-	cmd.Flags().BoolVar(&backendCfg.Overwrite, "overwrite", false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
+	cmd.Flags().BoolVar(&backendCfg.Overwrite, rst.OverwriteFlag, false, "Overwrite existing files in BeeGFS. Note this only overwrites the file's contents, metadata including any configured RSTs will remain.")
 	cmd.Flags().StringVarP(&backendCfg.RemotePath, rst.RemotePathFlag, "p", "", "The name/path of the object/file in the remote target you wish to download. If absent, the in-mount path will be used.")
 	cmd.Flags().BoolVarP(&backendCfg.StubLocal, rst.StubLocalFlag, "s", false, "Create stub files for the remote objects or files.")
 	cmd.Flags().BoolVar(&backendCfg.Flatten, "flatten", false, "Flatten the remote directory structure. The directory delimiter will be replaced with an underscore.")
