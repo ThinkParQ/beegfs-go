@@ -3224,3 +3224,57 @@ func TestSubmitJobRequestRejectsStateRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestAnyJobNeedsFileLock lists every job state so that a new state fails the test until someone
+// decides whether a job in that state still relies on the content lock.
+func TestAnyJobNeedsFileLock(t *testing.T) {
+	type want struct {
+		job     bool // a sync job in this state keeps the lock
+		builder bool // a builder job in this state keeps the lock
+	}
+	needsLock := map[beeremote.Job_State]want{
+		beeremote.Job_UNSPECIFIED: {job: true, builder: false},
+		beeremote.Job_UNKNOWN:     {job: true, builder: false},
+		beeremote.Job_UNASSIGNED:  {job: true, builder: false},
+		beeremote.Job_RESERVED:    {job: true, builder: false},
+		beeremote.Job_SCHEDULED:   {job: true, builder: true},
+		beeremote.Job_RUNNING:     {job: true, builder: true},
+		beeremote.Job_ERROR:       {job: true, builder: false},
+		beeremote.Job_FAILED:      {job: true, builder: false},
+		beeremote.Job_CANCELLED:   {job: false, builder: false},
+		beeremote.Job_COMPLETED:   {job: false, builder: false},
+		beeremote.Job_OFFLOADED:   {job: false, builder: false},
+	}
+
+	newJob := func(state beeremote.Job_State) *Job {
+		return &Job{Job: beeremote.Job_builder{
+			Request: beeremote.JobRequest_builder{Sync: &flex.SyncJob{}}.Build(),
+			Status:  beeremote.Job_Status_builder{State: state}.Build(),
+		}.Build()}
+	}
+	newBuilderJob := func(state beeremote.Job_State) *Job {
+		return &Job{Job: beeremote.Job_builder{
+			Request: beeremote.JobRequest_builder{Builder: &flex.BuilderJob{}}.Build(),
+			Status:  beeremote.Job_Status_builder{State: state}.Build(),
+		}.Build()}
+	}
+
+	for name, value := range beeremote.Job_State_value {
+		state := beeremote.Job_State(value)
+		t.Run(name, func(t *testing.T) {
+			want, ok := needsLock[state]
+			require.True(t, ok, "add job state %s to this test", name)
+
+			// The state decides alone, and a job that needs the lock is found among jobs that do not.
+			assert.Equal(t, want.job, anyJobNeedsFileLock(map[string]*Job{"1": newJob(state)}), "sync job")
+			assert.Equal(t, want.job, anyJobNeedsFileLock(map[string]*Job{
+				"1": newJob(beeremote.Job_COMPLETED),
+				"2": newJob(state),
+				"3": newJob(beeremote.Job_CANCELLED),
+			}), "sync job among finished jobs")
+			assert.Equal(t, want.builder, anyJobNeedsFileLock(map[string]*Job{"1": newBuilderJob(state)}), "builder job")
+		})
+	}
+
+	assert.False(t, anyJobNeedsFileLock(nil), "a path with no jobs does not need the lock")
+}
