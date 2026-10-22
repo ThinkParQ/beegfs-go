@@ -261,7 +261,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -292,7 +292,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -340,7 +340,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
-					return true, noopUndo, GetErrJobAlreadyCompleteWithMtime(time.Unix(0, 0))
+					return true, nil, GetErrJobAlreadyCompleteWithMtime(time.Unix(0, 0))
 				}, false, nil
 			},
 		}
@@ -368,7 +368,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return errors.New("bulk add failed")
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -409,7 +409,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99, LockedInfo: &flex.JobLockedInfo{}}
@@ -441,7 +441,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return nil
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -488,7 +488,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 					planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 						return func(context.Context, *PathState) (bool, undoFn, error) {
 							t.Fatal("a path whose reservation was refused must not have its file state prepared")
-							return false, noopUndo, nil
+							return false, nil, nil
 						}, true, nil
 					},
 				}
@@ -532,7 +532,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				return markErr
 			},
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -557,7 +557,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -647,7 +647,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					applyCalls++
-					return true, noopUndo, nil
+					return true, nil, nil
 				}, true, nil
 			},
 		}
@@ -816,7 +816,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					shutdown()
-					return true, noopUndo, nil
+					return true, nil, nil
 				}, true, nil
 			},
 		}
@@ -846,7 +846,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					cancel()
-					return true, noopUndo, nil
+					return true, nil, nil
 				}, true, nil
 			},
 		}
@@ -878,7 +878,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
 		}
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
@@ -1230,7 +1230,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.addToBulkRequest = requireNoBulkRequest(t)
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-			return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 		}
 		withForeignLockPathState(w)
 
@@ -1259,7 +1259,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		}
 		w.addToBulkRequest = requireNoBulkRequest(t)
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-			return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")
@@ -1541,7 +1541,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 			}, nil
 		}
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-			return func(context.Context, *PathState) (bool, undoFn, error) { return true, noopUndo, nil }, true, nil
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 		}
 		w.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
 			t.Fatal("clearAccessFlags should not be called while work is in flight")

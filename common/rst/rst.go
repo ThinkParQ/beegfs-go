@@ -693,7 +693,7 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 	defer func() {
 		if failedPrecondition != nil {
 			apply = func(context.Context, *PathState) (bool, undoFn, error) {
-				return false, noopUndo, fmt.Errorf("%w: %w", failedPrecondition, ErrJobFailedPrecondition)
+				return false, nil, fmt.Errorf("%w: %w", failedPrecondition, ErrJobFailedPrecondition)
 			}
 			return
 		}
@@ -791,11 +791,20 @@ func createWithParentDir(mountPoint filesystem.Provider, path string, create fun
 	return create()
 }
 
+// undoFn reverts the changes a plan step made to a file. A nil undoFn means the step changed
+// nothing, so there is nothing to undo. Callers use run, which treats nil as a successful undo, so
+// they can tell "something to undo" from "nothing to undo" by checking for nil.
 type undoFn func(ctx context.Context) error
 type applyPlanFn func(ctx context.Context, pathState *PathState) (applied bool, undo undoFn, err error)
 type applyFn func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error)
 
-var noopUndo = func(context.Context) error { return nil }
+// run calls the undo, or returns nil if there is nothing to undo.
+func (u undoFn) run(ctx context.Context) error {
+	if u == nil {
+		return nil
+	}
+	return u(ctx)
+}
 
 // newApplyPlan builds a plan whose steps all run with the context handed to apply, rather than one
 // captured while the plan was being built. The plan is a critical section, so that context must be
@@ -822,14 +831,20 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 		var applyErr error
 		for _, applyStep := range applySteps {
 			undoStep, applyErr = applyStep(ctx, pathState, applyErr)
-			undoSteps = append(undoSteps, undoStep)
+			if undoStep != nil {
+				undoSteps = append(undoSteps, undoStep)
+			}
 		}
 
 		if applyErr != nil && !IsErrJobTerminalSentinel(applyErr) {
 			if undoErr := undo(ctx); undoErr != nil {
 				return true, undo, fmt.Errorf("%w: failed to rollback changes: %w", applyErr, undoErr)
 			}
-			return false, noopUndo, fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
+			return false, nil, fmt.Errorf("%w: %w", applyErr, ErrJobFailedPrecondition)
+		}
+		if len(undoSteps) == 0 {
+			// No step changed anything, so there is nothing for the caller to undo.
+			return true, nil, applyErr
 		}
 		return true, undo, applyErr
 	}
@@ -840,13 +855,13 @@ func newApplyPlan() (add func(applyFn), apply applyPlanFn) {
 func prepareAlreadyComplete(cfg *flex.JobRequestCfg) applyFn {
 	lockedInfo := cfg.LockedInfo
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
-		return noopUndo, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
+		return nil, GetErrJobAlreadyCompleteWithMtime(lockedInfo.Mtime.AsTime())
 	}
 }
 
 func prepareAlreadyOffloaded(cfg *flex.JobRequestCfg) applyFn {
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
-		undo := noopUndo
+		var undo undoFn
 		if cfg.HasRestorePolicy() {
 			state := restorePolicyToDataState(cfg.GetRestorePolicy())
 			ownerNode := pathState.OwnerNode
@@ -882,7 +897,7 @@ func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobReques
 	lockedInfo := cfg.LockedInfo
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
-			return noopUndo, appliedErr
+			return nil, appliedErr
 		}
 
 		var undo undoFn
@@ -902,7 +917,7 @@ func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobReques
 			})
 			if err != nil {
 				if errors.Is(err, fs.ErrExist) {
-					return noopUndo, fmt.Errorf("unable to create stub file: %w", err)
+					return nil, fmt.Errorf("unable to create stub file: %w", err)
 				}
 				return undo, fmt.Errorf("unable to create stub file: %w", err)
 			}
@@ -959,20 +974,20 @@ func prepareDownloadRestoreDataState(cfg *flex.JobRequestCfg) applyFn {
 		ownerNode := pathState.OwnerNode
 		entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
 		if entryInfoMsg == nil {
-			return noopUndo, errors.New("original entry info unavailable: refusing to proceed with restoring file contents")
+			return nil, errors.New("original entry info unavailable: refusing to proceed with restoring file contents")
 		}
 
 		originalDataState, dataStateErr := entry.GetFileDataStateWithEntryInfo(ctx, cfg.Path, *entryInfoMsg, ownerNode)
 		if dataStateErr != nil {
-			return noopUndo, fmt.Errorf("unable to determine original file data state: %w", dataStateErr)
+			return nil, fmt.Errorf("unable to determine original file data state: %w", dataStateErr)
 		}
 
 		if appliedErr != nil {
-			return noopUndo, appliedErr
+			return nil, appliedErr
 		}
 
 		if err := entry.SetFileDataStateWithEntryInfo(ctx, cfg.Path, beegfs.DataStateAvailable, *entryInfoMsg, ownerNode); err != nil {
-			return noopUndo, fmt.Errorf("unable to set the data state to available: %w", err)
+			return nil, fmt.Errorf("unable to set the data state to available: %w", err)
 		}
 
 		undo := func(ctx context.Context) error {
@@ -989,11 +1004,11 @@ func prepareDownloadExpandFile(mountPoint filesystem.Provider, cfg *flex.JobRequ
 	lockedInfo := cfg.LockedInfo
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
-			return noopUndo, appliedErr
+			return nil, appliedErr
 		}
 
 		if err := mountPoint.CreateOrResizeFile(cfg.Path, lockedInfo.RemoteSize, allowOverwrite); err != nil {
-			return noopUndo, fmt.Errorf("unable to preallocate additional space for file: %w", err)
+			return nil, fmt.Errorf("unable to preallocate additional space for file: %w", err)
 		}
 
 		undo := func(context.Context) error {
@@ -1015,7 +1030,7 @@ func prepareDownloadEmptyObject(mountPoint filesystem.Provider, cfg *flex.JobReq
 	lockedInfo := cfg.LockedInfo
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
-			return noopUndo, appliedErr
+			return nil, appliedErr
 		}
 
 		// Truncating discards the original contents, which only a stub file can be rebuilt from.
@@ -1068,7 +1083,7 @@ func prepareDownloadEmptyObject(mountPoint filesystem.Provider, cfg *flex.JobReq
 func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) applyFn {
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undoFn, error) {
 		if appliedErr != nil {
-			return noopUndo, appliedErr
+			return nil, appliedErr
 		}
 
 		lockedInfo := cfg.LockedInfo
@@ -1084,7 +1099,7 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 		})
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
-				return noopUndo, fmt.Errorf("unable to preallocate space for file: %w", err)
+				return nil, fmt.Errorf("unable to preallocate space for file: %w", err)
 			}
 			return undo, fmt.Errorf("unable to preallocate space for file: %w", err)
 		}
@@ -1106,7 +1121,6 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 
 func prepareUpdateFileRstPattern(cfg *flex.JobRequestCfg) applyFn {
 	return func(ctx context.Context, pathState *PathState, appliedErr error) (undo undoFn, err error) {
-		undo = noopUndo
 		if !(appliedErr == nil || IsErrJobTerminalSentinel(appliedErr)) {
 			err = appliedErr
 			return
