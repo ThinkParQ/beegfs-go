@@ -556,7 +556,7 @@ func (m *Manager) GetJobs(ctx context.Context, request *beeremote.GetJobsRequest
 // originNodeID is the worker node that submitted this request, or empty when the submitter is not a
 // worker node. It is passed through to the worker manager as a hint for where to place the resulting
 // work requests and has no effect on the job itself.
-func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string) (*beeremote.JobResult, error) {
+func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string) (result *beeremote.JobResult, err error) {
 
 	job, err := New(jr)
 	if err != nil {
@@ -591,26 +591,45 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		}
 	}()
 
-	var reservedJobId string
-	if jr.HasReserveJobId() {
-		jobId, err := uuid.Parse(jr.GetReserveJobId())
-		if err != nil {
-			return nil, fmt.Errorf("unable to claim reserved job: %w", err)
+	// Store the answer on the job this call records, so a request replayed with the same job_id
+	// gets the same answer. A replay returns an existing job rather than job, so it never
+	// overwrites the answer the first request stored.
+	defer func() {
+		if recorded, ok := pathEntry.Value[job.GetId()]; ok && recorded == job {
+			status, _ := SubmitStatus(err)
+			job.SetSubmitStatus(status)
 		}
-		reservedJobId = fmt.Sprint(jobId)
-	}
+	}()
 
-	isClaimedReservation := !jr.GetReserve() && jr.HasReserveJobId()
+	// jobId is the caller's ID for this request's job, or empty if the caller left it to remote.
+	var jobId string
+	if jr.HasJobId() {
+		parsed, err := uuid.Parse(jr.GetJobId())
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid job ID %q: %w", rst.ErrJobNotAllowed, jr.GetJobId(), err)
+		}
+		jobId = fmt.Sprint(parsed)
+	} else if jr.GetReservation() != beeremote.JobRequest_NO_RESERVATION {
+		return nil, fmt.Errorf("%w: a %s request must name the reserved job with job_id", rst.ErrJobNotAllowed, jr.GetReservation())
+	}
+	reservedJobId := jobId
+
+	isClaimedReservation := jr.GetReservation() == beeremote.JobRequest_CLAIM
 	if isClaimedReservation {
 		reserved, ok := pathEntry.Value[reservedJobId]
 		if !ok {
 			// Distinct from the state check below only so the message says there is no record. Both
 			// are final, because a missing ID may belong to a job that was cancelled and deleted.
 			return nil, fmt.Errorf("%w: no job %s exists for path %s", rst.ErrReservationMissing, reservedJobId, jr.GetPath())
-		} else if !reserved.InReservedState() && !reserved.Request.GetReserve() {
+		} else if !reserved.InReservedState() && reserved.Request.GetReservation() == beeremote.JobRequest_CLAIM {
 			// A claim replaces the job's reserve request with itself, so this job was already
-			// claimed. The caller is replaying a claim whose response it never received.
-			return &beeremote.JobResult{Job: reserved.Get()}, fmt.Errorf("%w: job %s for path %s was already claimed", rst.ErrJobAlreadyExists, reservedJobId, jr.GetPath())
+			// claimed. The caller is replaying a claim whose response it never received. Only a
+			// claim that was accepted answers "already exists", which the caller treats as success.
+			// Any other claim gets back the answer it got the first time.
+			if !submitRefused(reserved) {
+				return &beeremote.JobResult{Job: reserved.Get()}, fmt.Errorf("%w: job %s for path %s was already claimed", rst.ErrJobAlreadyExists, reservedJobId, jr.GetPath())
+			}
+			return &beeremote.JobResult{Job: reserved.Get()}, storedSubmitError(reserved)
 		} else if !reserved.InReservedState() {
 			return nil, fmt.Errorf("%w: job %s for path %s is %s", rst.ErrJobNotReserved, reservedJobId, jr.GetPath(), reserved.GetStatus().GetState())
 		} else if reserved.Request.GetRemoteStorageTarget() != jr.GetRemoteStorageTarget() {
@@ -619,7 +638,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		job = reserved
 		job.Request = jr
 		job.Segments = nil
-	} else if jr.GetReserve() && jr.HasReserveJobId() {
+	} else if jr.GetReservation() == beeremote.JobRequest_RESERVE {
 		if existing, ok := pathEntry.Value[reservedJobId]; ok {
 			// The caller is replaying a reserve whose response it never received. Any other job
 			// holding this ID must not be replaced.
@@ -628,6 +647,20 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}
 			return nil, fmt.Errorf("%w: job %s already exists for path %s in state %s", rst.ErrJobNotAllowed, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
 		}
+	} else if jobId != "" {
+		if existing, ok := pathEntry.Value[jobId]; ok {
+			// The caller is replaying a request whose response it never received. It gets back the
+			// job the first request recorded and the answer that request got.
+			if isReplayOf(jr, existing) {
+				return beeremote.JobResult_builder{
+					Job:          existing.Get(),
+					WorkRequests: rst.RecreateWorkRequests(existing.Get(), existing.GetSegments()),
+					WorkResults:  getProtoWorkResults(existing.WorkResults),
+				}.Build(), storedSubmitError(existing)
+			}
+			return nil, fmt.Errorf("%w: job ID %s for path %s already names a job for a different request", rst.ErrJobNotAllowed, jobId, jr.GetPath())
+		}
+		job.Job.SetId(jobId)
 	}
 
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
@@ -758,10 +791,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		}
 	}
 
-	if jr.GetReserve() {
-		if !jr.HasReserveJobId() {
-			return nil, fmt.Errorf("unable to reserve job from job request: reserveJobId must be specified")
-		}
+	if jr.GetReservation() == beeremote.JobRequest_RESERVE {
 		job.Job.SetId(reservedJobId)
 		job.Job.GetStatus().SetState(beeremote.Job_RESERVED)
 		job.Job.GetStatus().SetMessage("reserved")

@@ -185,6 +185,33 @@ func (j *Job) ConflictsWith(existingJob *Job) bool {
 	return existingJob.effectiveRST() == j.effectiveRST()
 }
 
+// isReplayOf reports whether request is the request that created existing, sent again under the
+// same job_id after its submitter lost the response. Remote keys jobs by path, so both are for the
+// same path already. They must also agree on:
+//   - the RST;
+//   - the request type, and for a sync request its operation;
+//   - being a plain request. A reserved or claimed job is replayed through the reservation
+//     handling instead.
+//
+// The generation status is not compared. A submitter may learn more about the file between two
+// attempts, and the job the first attempt recorded is still the answer.
+func isReplayOf(request *beeremote.JobRequest, existing *Job) bool {
+	recorded := existing.GetRequest()
+	if recorded.GetReservation() != beeremote.JobRequest_NO_RESERVATION || request.GetReservation() != beeremote.JobRequest_NO_RESERVATION {
+		return false
+	}
+	if recorded.GetRemoteStorageTarget() != request.GetRemoteStorageTarget() {
+		return false
+	}
+	if recorded.WhichType() != request.WhichType() {
+		return false
+	}
+	if request.HasSync() && recorded.GetSync().GetOperation() != request.GetSync().GetOperation() {
+		return false
+	}
+	return true
+}
+
 type selectedConflict struct {
 	job         *Job
 	isReserved  bool // is the job in the reserved state

@@ -13,7 +13,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
-	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -114,28 +113,10 @@ func (s *BeeRemoteServer) SubmitJob(ctx context.Context, request *beeremote.Subm
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	var status beeremote.SubmitJobResponse_ResponseStatus = beeremote.SubmitJobResponse_CREATED
 	result, err := s.jobMgr.SubmitJobRequest(request.GetRequest(), request.GetOriginNodeId())
-	if err != nil {
-		if errors.Is(err, rst.ErrJobAlreadyComplete) {
-			status = beeremote.SubmitJobResponse_ALREADY_COMPLETE
-		} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
-			status = beeremote.SubmitJobResponse_ALREADY_OFFLOADED
-		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
-			status = beeremote.SubmitJobResponse_EXISTING
-		} else if errors.Is(err, rst.ErrJobFailedPrecondition) {
-			status = beeremote.SubmitJobResponse_FAILED_PRECONDITION
-		} else if errors.Is(err, rst.ErrJobNotAllowed) {
-			status = beeremote.SubmitJobResponse_NOT_ALLOWED
-		} else if errors.Is(err, rst.ErrReservationMissing) {
-			// Checked before ErrJobNotReserved, which it unwraps to, so a missing reservation is not
-			// reported as one that exists and cannot be claimed. Neither is retried by the caller.
-			status = beeremote.SubmitJobResponse_RESERVATION_MISSING
-		} else if errors.Is(err, rst.ErrJobNotReserved) {
-			status = beeremote.SubmitJobResponse_NOT_RESERVED
-		} else {
-			return nil, err
-		}
+	status, ok := job.SubmitStatus(err)
+	if !ok {
+		return nil, err
 	}
 	return beeremote.SubmitJobResponse_builder{
 		Result: result,

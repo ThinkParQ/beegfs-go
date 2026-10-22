@@ -143,6 +143,8 @@ func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobR
 		return rst.ErrJobAlreadyOffloaded
 	case beeremote.SubmitJobResponse_EXISTING:
 		return rst.ErrJobAlreadyExists
+	case beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
+		return rst.ErrJobBlockedByActiveJob
 	case beeremote.SubmitJobResponse_NOT_ALLOWED:
 		return rst.ErrJobNotAllowed
 	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:

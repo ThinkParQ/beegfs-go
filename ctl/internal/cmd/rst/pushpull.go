@@ -241,7 +241,9 @@ writeResponses:
 				syncCompleted++
 			case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
 				syncOffloaded++
-			case beeremote.SubmitJobResponse_EXISTING:
+			case beeremote.SubmitJobResponse_EXISTING, beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
+				// BLOCKED_BY_ACTIVE_JOB means another unfinished job holds the path. Like EXISTING,
+				// the work is already in progress and the request can be retried once it finishes.
 				syncInProgress++
 			case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
 				errStartingSync++

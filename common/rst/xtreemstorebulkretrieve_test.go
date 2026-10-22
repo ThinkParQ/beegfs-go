@@ -231,9 +231,9 @@ func TestBulkRetrieveExecuteStopsReschedulingOnceAllComplete(t *testing.T) {
 		// the reserved job ID.
 		reservedJobId := uuid.NewString()
 		req := &beeremote.JobRequest{
-			Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
-			BulkInfo:     &flex.BulkJobRequestInfo{},
-			ReserveJobId: &reservedJobId,
+			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
+			BulkInfo: &flex.BulkJobRequestInfo{},
+			JobId:    &reservedJobId,
 		}
 		require.NoError(t, m.AddRequest(context.Background(), req))
 	}
@@ -555,7 +555,7 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 			RemoteStorageTarget: 1,
 			Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_DOWNLOAD, RemotePath: remotePath}.Build(),
 			BulkInfo:            &flex.BulkJobRequestInfo{StateMountPath: bulkInfo.StateMountPath, Operation: bulkInfo.Operation},
-			ReserveJobId:        &jobId,
+			JobId:               &jobId,
 		}.Build())
 	}
 
@@ -743,7 +743,7 @@ func bulkRetrieveTestManager(t *testing.T, tmpDir string) (
 			RemoteStorageTarget: 1,
 			Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_DOWNLOAD, RemotePath: remotePath}.Build(),
 			BulkInfo:            &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: operation},
-			ReserveJobId:        &jobId,
+			JobId:               &jobId,
 		}.Build())
 	}
 	return
@@ -1153,9 +1153,9 @@ func TestBulkRetrieveExecuteHandlesSessionEndedOutsideOperation(t *testing.T) {
 			for _, p := range []string{"/a", "/b", "/c"} {
 				reservedJobId := uuid.NewString()
 				require.NoError(t, m.AddRequest(context.Background(), &beeremote.JobRequest{
-					Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
-					BulkInfo:     &flex.BulkJobRequestInfo{},
-					ReserveJobId: &reservedJobId,
+					Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
+					BulkInfo: &flex.BulkJobRequestInfo{},
+					JobId:    &reservedJobId,
 				}))
 			}
 			require.NoError(t, m.closeState())
@@ -1236,9 +1236,9 @@ func bulkRetrieveSessionTestFixture(t *testing.T) (fake *fakeS3ApiClient, newMan
 	for _, p := range []string{"/a", "/b", "/c"} {
 		reservedJobId := uuid.NewString()
 		require.NoError(t, m.AddRequest(context.Background(), &beeremote.JobRequest{
-			Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
-			BulkInfo:     &flex.BulkJobRequestInfo{},
-			ReserveJobId: &reservedJobId,
+			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: p}},
+			BulkInfo: &flex.BulkJobRequestInfo{},
+			JobId:    &reservedJobId,
 		}))
 	}
 	require.NoError(t, m.closeState())
@@ -1462,9 +1462,9 @@ func TestBulkRetrieveAddRequestRejectsMalformedJobId(t *testing.T) {
 		strings.Repeat("a", JobIdLen),
 	} {
 		req := &beeremote.JobRequest{
-			Type:         &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: "/a"}},
-			BulkInfo:     &flex.BulkJobRequestInfo{},
-			ReserveJobId: &jobId,
+			Type:     &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{RemotePath: "/a"}},
+			BulkInfo: &flex.BulkJobRequestInfo{},
+			JobId:    &jobId,
 		}
 		assert.Error(t, m.AddRequest(context.Background(), req), "job ID %q must be refused", jobId)
 	}

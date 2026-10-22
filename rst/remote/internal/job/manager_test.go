@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -2769,33 +2770,34 @@ func newReservationManager(t *testing.T) *Manager {
 }
 
 // newReservationRequest builds the request the builder sends for a path a bulk operation handles.
-// reserve true asks remote to create the reservation, false claims one that already exists. Both
-// name the job with reserveJobId, which the builder mints rather than learning from remote.
-func newReservationRequest(reserve bool, reserveJobId string) *beeremote.JobRequest {
+// reserve true asks remote to create the reservation, false with a jobId claims one that already
+// exists. Both name the job with jobId, which the builder mints rather than learning from remote.
+// reserve false with no jobId builds an ordinary request.
+func newReservationRequest(reserve bool, jobId string) *beeremote.JobRequest {
 	request := beeremote.JobRequest_builder{
 		Path:                "/test/bulkfile",
 		Name:                "bulk job",
 		RemoteStorageTarget: 1,
 		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
-		Reserve:             reserve,
 	}.Build()
-	if reserveJobId != "" {
-		request.SetReserveJobId(reserveJobId)
+	if reserve {
+		request.SetReservation(beeremote.JobRequest_RESERVE)
+	} else if jobId != "" {
+		request.SetReservation(beeremote.JobRequest_CLAIM)
+	}
+	if jobId != "" {
+		request.SetJobId(jobId)
 	}
 	return request
 }
 
-// TestSubmitJobRequestReservations pins how SubmitJobRequest reads the two reservation fields.
-// reserve has no presence, so only four combinations exist and each one means something different:
+// TestSubmitJobRequestReservations pins how SubmitJobRequest reads the reservation action and
+// job_id:
 //
-//   - reserve=true with a reserve_job_id creates the reservation under that ID.
-//   - reserve=true with no reserve_job_id is refused, because remote no longer mints the ID.
-//   - reserve=false with a reserve_job_id claims the job that ID names.
-//   - reserve=false with no reserve_job_id is an ordinary request and is covered elsewhere.
-//
-// The claim case matters most. A claim is distinguished from a new job only by reserve being false
-// while the ID is set, so a builder that sets the ID and forgets the flag, or clears the flag and
-// leaves the ID behind, silently gets the wrong branch.
+//   - RESERVE with a job_id creates the reservation under that ID.
+//   - RESERVE with no job_id is refused, because remote does not mint reservation IDs.
+//   - CLAIM with a job_id claims the job that ID names.
+//   - NO_RESERVATION is an ordinary request, with or without a job_id, and is covered elsewhere.
 func TestSubmitJobRequestReservations(t *testing.T) {
 	t.Run("a request that reserves creates the job under the ID it supplied", func(t *testing.T) {
 		m := newReservationManager(t)
@@ -2814,7 +2816,7 @@ func TestSubmitJobRequestReservations(t *testing.T) {
 
 		_, err := m.SubmitJobRequest(newReservationRequest(true, ""), "")
 
-		require.ErrorContains(t, err, "reserveJobId must be specified")
+		require.ErrorContains(t, err, "must name the reserved job with job_id")
 	})
 
 	t.Run("a request that claims takes over the reserved job rather than making a new one", func(t *testing.T) {
@@ -3136,6 +3138,210 @@ func TestUpdateJobsReleasesLockBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, lockReleases)
 	assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+}
+
+// TestSubmitJobRequestReplays checks that a request sent again under the same job_id, after its
+// submitter lost the response, gets back the job and the answer the first request got. Remote
+// commits the path entry before it replies, so a lost reply does not mean nothing was recorded.
+func TestSubmitJobRequestReplays(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	plainWithId := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		return request
+	}
+	jobsOnPath := func(t *testing.T, m *Manager) int {
+		t.Helper()
+		entry, err := m.pathStore.GetEntry(path)
+		require.NoError(t, err)
+		return len(entry.Value)
+	}
+
+	t.Run("a replayed request gets its job back instead of a second job", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		first, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		require.Equal(t, jobId, first.GetJob().GetId(), "the job must be created under the caller's ID")
+
+		replay, err := m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+		assert.Equal(t, 1, jobsOnPath(t, m))
+		assert.Equal(t, beeremote.SubmitJobResponse_CREATED, getReservationTestJob(t, m, jobId).GetSubmitStatus())
+	})
+
+	t.Run("a replayed refusal gets the same refusal back", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		refused := func() *beeremote.JobRequest {
+			request := plainWithId(jobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: "the file changed",
+			})
+			return request
+		}
+		_, err := m.SubmitJobRequest(refused(), "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+
+		replay, err := m.SubmitJobRequest(refused(), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+		assert.Equal(t, 1, jobsOnPath(t, m))
+	})
+
+	t.Run("a job ID that names a different request is refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+
+		other := plainWithId(jobId)
+		other.SetRemoteStorageTarget(2)
+		_, err = m.SubmitJobRequest(other, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.ErrorContains(t, err, "already names a job for a different request")
+		assert.Equal(t, 1, jobsOnPath(t, m))
+	})
+
+	t.Run("a claim without a job ID is refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		claim := newReservationRequest(false, "")
+		claim.SetReservation(beeremote.JobRequest_CLAIM)
+
+		_, err := m.SubmitJobRequest(claim, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.ErrorContains(t, err, "must name the reserved job with job_id")
+	})
+
+	t.Run("a replayed claim that was accepted answers already exists", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+		require.NoError(t, err)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobAlreadyExists, "the sync node treats this answer to a claim as success")
+	})
+
+	t.Run("a replayed claim that was refused gets its refusal back", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		claim := func() *beeremote.JobRequest {
+			request := newReservationRequest(false, reservedJobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: "object no longer exists",
+			})
+			return request
+		}
+		_, err = m.SubmitJobRequest(claim(), "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+
+		_, err = m.SubmitJobRequest(claim(), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.NotErrorIs(t, err, rst.ErrJobAlreadyExists, "a refused claim must not be reported as claimed")
+	})
+}
+
+// TestSubmitJobRequestReplaysWithoutStoredAnswer checks replays of jobs that have no stored submit
+// answer. Remote records INVALID when a request fails with an error that has no status of its own.
+// Such a job answers from its state, so a job that was not refused never replays as a refusal.
+func TestSubmitJobRequestReplaysWithoutStoredAnswer(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	// withoutStoredAnswer rewrites a stored job to have no submit answer and the given state.
+	withoutStoredAnswer := func(t *testing.T, m *Manager, jobId string, state beeremote.Job_State) {
+		t.Helper()
+		entry, commit, err := m.pathStore.GetAndLockEntry(path)
+		require.NoError(t, err)
+		job := entry.Value[jobId]
+		job.SetSubmitStatus(beeremote.SubmitJobResponse_INVALID)
+		job.GetStatus().SetState(state)
+		require.NoError(t, commit())
+	}
+	plainWithId := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		return request
+	}
+
+	t.Run("a job that was not refused replays as accepted", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		withoutStoredAnswer(t, m, jobId, beeremote.Job_SCHEDULED)
+
+		replay, err := m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.NoError(t, err, "a job with no stored answer must not be read as refused, or the builder would undo under it")
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+	})
+
+	t.Run("a job that failed replays as refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		withoutStoredAnswer(t, m, jobId, beeremote.Job_FAILED)
+
+		_, err = m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "was not accepted")
+	})
+}
+
+// TestSubmitStatus checks the mapping between submit errors and wire statuses, and that a stored
+// status rebuilds an error that maps back to the same status.
+func TestSubmitStatus(t *testing.T) {
+	tests := []struct {
+		err  error
+		want beeremote.SubmitJobResponse_ResponseStatus
+	}{
+		{nil, beeremote.SubmitJobResponse_CREATED},
+		{rst.ErrJobAlreadyComplete, beeremote.SubmitJobResponse_ALREADY_COMPLETE},
+		{rst.ErrJobAlreadyOffloaded, beeremote.SubmitJobResponse_ALREADY_OFFLOADED},
+		{rst.ErrJobAlreadyExists, beeremote.SubmitJobResponse_EXISTING},
+		{rst.ErrJobFailedPrecondition, beeremote.SubmitJobResponse_FAILED_PRECONDITION},
+		// ErrJobBlockedByActiveJob unwraps to ErrJobNotAllowed and must keep its own status.
+		{rst.ErrJobBlockedByActiveJob, beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB},
+		{rst.ErrJobNotAllowed, beeremote.SubmitJobResponse_NOT_ALLOWED},
+		// ErrReservationMissing unwraps to ErrJobNotReserved and must keep its own status.
+		{rst.ErrReservationMissing, beeremote.SubmitJobResponse_RESERVATION_MISSING},
+		{rst.ErrJobNotReserved, beeremote.SubmitJobResponse_NOT_RESERVED},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want.String(), func(t *testing.T) {
+			got, ok := SubmitStatus(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+
+			job := &Job{Job: beeremote.Job_builder{
+				Id:           "job",
+				Status:       beeremote.Job_Status_builder{Message: "detail"}.Build(),
+				SubmitStatus: got,
+			}.Build()}
+			roundTrip, ok := SubmitStatus(storedSubmitError(job))
+			require.True(t, ok)
+			assert.Equal(t, tt.want, roundTrip, "a replay must get the same status as the first request")
+		})
+	}
+
+	status, ok := SubmitStatus(errors.New("an unexpected failure"))
+	assert.False(t, ok, "other errors are returned to the caller as gRPC errors")
+	assert.Equal(t, beeremote.SubmitJobResponse_INVALID, status)
 }
 
 // TestSubmitJobRequestRejectsAlreadyExistsFromGeneration checks that generating work requests can't
