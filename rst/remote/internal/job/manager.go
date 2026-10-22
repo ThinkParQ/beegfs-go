@@ -1607,8 +1607,8 @@ func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
 		return fmt.Errorf("unable to cancel reserved job %s for path %s: %s", jobId, path, message)
 	}
 
-	// Release only once the cancel is confirmed. releaseUnusedFileLockFunc only looks for jobs in an
-	// active state, so it would clear the lock on a job left UNKNOWN.
+	// Release only once the cancel is confirmed. A job left UNKNOWN may still have a node writing
+	// the file, so it keeps the lock until it is cancelled.
 	if releaseLockErr := m.releaseUnusedFileLockFunc(path, pathEntry.Value); releaseLockErr != nil {
 		err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", releaseLockErr))
 	}
@@ -1675,12 +1675,52 @@ func jobStateString(state beeremote.Job_State) string {
 	return "unrecognized"
 }
 
+// jobNeedsFileLock reports whether one job still relies on the content lock of its path. A job
+// needs the lock until it reaches a terminal state:
+//   - SCHEDULED, RUNNING and ERROR jobs have work requests on the sync nodes that read or write
+//     the file. ERROR work requests are still being retried.
+//   - RESERVED jobs were locked by the builder before the reservation. The bulk operation that
+//     claims the job expects the file to be unchanged since then.
+//   - UNASSIGNED jobs were locked by the submitter and are about to be scheduled.
+//   - FAILED jobs keep their external IDs, such as a multipart upload, and only release the lock
+//     once the user cancels them.
+//   - UNKNOWN jobs may still have work on a node that did not confirm it stopped.
+//   - UNSPECIFIED only happens through a bug, so the lock is kept to be safe.
+//   - COMPLETED, CANCELLED and OFFLOADED jobs are history. An offloaded file keeps its lock through
+//     the data state check in getDefaultReleaseUnusedFileLock, not through its job. Counting
+//     OFFLOADED would leave a restored file locked forever.
+//
+// Builder jobs follow a narrower rule. A builder locks a file only during its own pass over that
+// file, and it either clears the lock or hands it to the job it submits. So a builder counts only
+// while it is SCHEDULED or RUNNING, because its pass may be holding the lock at that moment. A
+// builder that stopped must not count, because a job it spawned may run on the builder's own path.
+// That job would then never release its lock.
+func jobNeedsFileLock(job *Job) bool {
+	if job.Request.HasBuilder() {
+		return job.InActiveState()
+	}
+
+	return !job.InTerminalState()
+}
+
+// anyJobNeedsFileLock runs before remote clears the content lock on a path. It reports whether any
+// job recorded for the path still relies on that lock, in which case the lock must be kept. The
+// lock is one flag on the file, not one per job. Read-only uploads of one file to different RSTs
+// can run side by side and share it, so the job that finishes last must not clear it while another
+// job still needs it. See jobNeedsFileLock for the rule applied to each job.
+func anyJobNeedsFileLock(pathEntryJobs map[string]*Job) bool {
+	for _, pathEntryJob := range pathEntryJobs {
+		if jobNeedsFileLock(pathEntryJob) {
+			return true
+		}
+	}
+	return false
+}
+
 func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {
 	return func(path string, pathEntryJobs map[string]*Job) error {
-		for _, pathEntryJob := range pathEntryJobs {
-			if pathEntryJob.InActiveState() || pathEntryJob.InReservedState() {
-				return nil
-			}
+		if anyJobNeedsFileLock(pathEntryJobs) {
+			return nil
 		}
 
 		if dataState, err := entry.GetFileDataState(ctx, path); err != nil {
