@@ -166,9 +166,21 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 				time.Sleep(time.Duration(n.config.RetryInterval) * time.Second)
 				continue
 			} else if rpcStatus.Code() == codes.AlreadyExists {
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/39
-				// Ideally don't panic here and figure out how to handle more gracefully.
-				panic("work request already exists on node, this should never happen unless something is misconfigured or there is a new bug: " + err.Error())
+				// The node already tracks this request. This happens when a job is submitted again
+				// under the same job ID after remote lost the commit that recorded the first
+				// submission, so the same work request reaches the node twice. The node keeps
+				// running its copy and reports progress through UpdateWork, so the request is
+				// treated as scheduled here.
+				n.log.Warn("work request was already submitted to this node, treating it as scheduled", zap.String("jobId", request.GetJobId()), zap.String("requestId", request.GetRequestId()))
+				return flex.Work_builder{
+					Path:      request.GetPath(),
+					JobId:     request.GetJobId(),
+					RequestId: request.GetRequestId(),
+					Status: flex.Work_Status_builder{
+						State:   flex.Work_SCHEDULED,
+						Message: "the node already had this work request",
+					}.Build(),
+				}.Build(), nil
 			}
 		}
 		break

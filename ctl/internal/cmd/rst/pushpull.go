@@ -243,11 +243,22 @@ writeResponses:
 				syncOffloaded++
 			case beeremote.SubmitJobResponse_EXISTING:
 				syncInProgress++
+			case beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
+				// Another unfinished job holds the path, so nothing was started for this request.
+				// It counts as an error so the command exits 2, and the row says which path to
+				// retry once that job finishes.
+				errStartingSync++
+				tbl.MinimalRow(resp.Path, "blocked by an unfinished job for this path (retry once it finishes)")
+				continue
 			case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
 				errStartingSync++
 			case beeremote.SubmitJobResponse_NOT_ALLOWED:
-				// This indicates the last job failed and requires manual intervention. Always print
-				// these jobs as the user will likely want to see them anyway.
+				// Remote refused the request for a reason that does not clear by itself. Examples:
+				//   - the last job for the path and RST failed and needs manual intervention;
+				//   - a job builder's reservation for the same RST holds the path;
+				//   - an inactive job for another RST holds the path;
+				//   - a forced request met an active job, or the path is in the RST state root.
+				// Always print these jobs as the user will likely want to see them anyway.
 				syncNotAllowed++
 				tbl.Row(resp.Result)
 				continue

@@ -213,7 +213,8 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	request := w.buildRequest(workCtx, cfg, failedPrecondition)
 	request.SetRemoteStorageTarget(result.RstId)
 	request.SetBulkInfo(result.BulkInfo)
-	request.SetReserveJobId(result.ReservedJobId)
+	request.SetJobId(result.ReservedJobId)
+	request.SetReservation(beeremote.JobRequest_CLAIM)
 
 	canReleaseLock, _, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 	if !canReleaseLock {
@@ -309,6 +310,16 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 	return request
 }
 
+// jobIdFor derives the job ID for a request from the builder job ID, the request's path and its
+// RST. The same builder job always derives the same ID for the same path and RST. So when a request
+// is sent again, after a lost response or after a rescheduled builder job replays from an older
+// resume token, remote recognizes it and answers with the job the first request created instead of
+// creating a second one. A reservation and its claim share this ID too.
+func (w *jobRequestBuilder) jobIdFor(request *beeremote.JobRequest) string {
+	name := binary.BigEndian.AppendUint32([]byte(request.GetPath()), request.GetRemoteStorageTarget())
+	return uuid.NewSHA1(w.builderJobId, name).String()
+}
+
 // processRequest builds, prepares, and submits the job request for cfg. canReleaseLock is
 // returned true only when this path produced no in-flight work that still depends on the lock.
 func (w *jobRequestBuilder) processRequest(
@@ -320,6 +331,10 @@ func (w *jobRequestBuilder) processRequest(
 ) (canReleaseLock bool, submitted bool, err error) {
 	wasOffloaded := IsFileOffloaded(pathState.LockedInfo)
 	canReleaseLock = !wasOffloaded
+
+	if !request.HasJobId() {
+		request.SetJobId(w.jobIdFor(request))
+	}
 
 	var applyPlan applyPlanFn
 	var workRequired bool
@@ -386,7 +401,7 @@ func (w *jobRequestBuilder) processRequest(
 					zap.Uint32("rstId", request.GetRemoteStorageTarget()),
 					zap.String("operation", request.GetBulkInfo().GetOperation()),
 					zap.Int64("jobIndex", request.GetBulkInfo().GetJobIndex()),
-					zap.String("reservedJobId", request.GetReserveJobId()),
+					zap.String("reservedJobId", request.GetJobId()),
 					zap.Error(submitErr))
 			}
 			wg.Go(func() {
@@ -470,19 +485,15 @@ func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint
 		return
 	}
 
-	// Derive the reserved jobId from the builder jobId, path and rstId so that replaying from an
-	// older resume token after a crash reserves the same job instead of conflicting with its own
-	// reservation.
-	name := binary.BigEndian.AppendUint32([]byte(request.GetPath()), request.GetRemoteStorageTarget())
-	jobId := uuid.NewSHA1(w.builderJobId, name)
-	request.SetReserveJobId(jobId.String())
-	request.SetReserve(true)
+	// The reservation uses the request's own job ID, so the later claim names the same job.
+	request.SetJobId(w.jobIdFor(request))
+	request.SetReservation(beeremote.JobRequest_RESERVE)
 
 	// The request joins the bulk operation before its job is reserved. Remote never reads the bulk
 	// info when it reserves a job, so either order would work. This order is chosen because each
 	// failure between the two steps is cheaper to undo:
-	//   - The add fails. Nothing is reserved yet, so the request drops its reservation fields and
-	//     is submitted on its own with a failed precondition.
+	//   - The add fails. Nothing is reserved yet, so the request drops its reservation and is
+	//     submitted on its own with a failed precondition, under the same jobId.
 	//   - Remote refuses the reservation. The operation marks the request failed, which is a local
 	//     write. The other order would need a call to remote to release the reservation.
 	//   - The builder stops between the two steps. The operation holds a request with no
@@ -490,8 +501,7 @@ func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint
 	//     leave a reserved job that nothing claims, and it would block every later job for the path.
 	checkpoint(checkpointGrace)
 	if addErr := w.addToBulkRequest(ctx, request, operation); addErr != nil {
-		request.SetReserve(false)
-		request.ClearReserveJobId()
+		request.SetReservation(beeremote.JobRequest_NO_RESERVATION)
 		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 			Message: fmt.Sprintf("failed to add request to bulk operation %q: %s", operation, addErr.Error()),

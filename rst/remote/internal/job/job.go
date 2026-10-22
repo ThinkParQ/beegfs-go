@@ -185,6 +185,33 @@ func (j *Job) ConflictsWith(existingJob *Job) bool {
 	return existingJob.effectiveRST() == j.effectiveRST()
 }
 
+// isReplayOf reports whether request is the request that created existing, sent again under the
+// same job_id after its submitter lost the response. Remote keys jobs by path, so both are for the
+// same path already. They must also agree on:
+//   - the RST;
+//   - the request type, and for a sync request its operation;
+//   - being a plain request. A reserved or claimed job is replayed through the reservation
+//     handling instead.
+//
+// The generation status is not compared. A submitter may learn more about the file between two
+// attempts, and the job the first attempt recorded is still the answer.
+func isReplayOf(request *beeremote.JobRequest, existing *Job) bool {
+	recorded := existing.GetRequest()
+	if recorded.GetReservation() != beeremote.JobRequest_NO_RESERVATION || request.GetReservation() != beeremote.JobRequest_NO_RESERVATION {
+		return false
+	}
+	if recorded.GetRemoteStorageTarget() != request.GetRemoteStorageTarget() {
+		return false
+	}
+	if recorded.WhichType() != request.WhichType() {
+		return false
+	}
+	if request.HasSync() && recorded.GetSync().GetOperation() != request.GetSync().GetOperation() {
+		return false
+	}
+	return true
+}
+
 type selectedConflict struct {
 	job         *Job
 	isReserved  bool // is the job in the reserved state
@@ -319,13 +346,15 @@ func (j *Job) CompleteBuilder(ctx context.Context, client rst.Provider, abort bo
 // New is the standard way to generate a Job from a JobRequest.
 func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 
-	// Generate a random UUID for the job ID. Note the chance of collisions is very very (very) low,
-	// but not nil. Currently if we ended up with a duplicate job ID this causes problems in two
-	// places: (1) if the duplicate job ID happened to be for the same path then we would reject the
-	// job, and (2) if we tried to schedule a work request for a duplicate job ID to a worker node
-	// already handling a work request with the same job+request ID, the worker would reject the
-	// request and BeeRemote will panic. So we already gracefully handle this very unlikely event.
-	// If this happens, buy a lottery ticket.
+	// Generate a random UUID for the job ID. SubmitJobRequest replaces it with the caller's job_id
+	// when the request carries one. The job builder sets one on every request it makes for a path.
+	// A CLI push or pull, and the request that starts a builder job, carry none, so they keep this
+	// random ID. A random ID can collide in two ways:
+	//   - It names another job on the same path. SubmitJobRequest's conflict scan compares every job
+	//     on the path with the new one's ID and refuses the request as a bug.
+	//   - It names a job on another path. Nothing checks this. Sync keys work by job ID, so it
+	//     would treat the new work as already scheduled.
+	// A random version 4 UUID makes either case unlikely enough to ignore.
 	jobID := uuid.New()
 
 	// Normalize all paths so they start with a slash. This means if the user wants to get jobs for

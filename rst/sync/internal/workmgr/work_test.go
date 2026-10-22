@@ -25,13 +25,13 @@ import (
 // outcome, while JobsReserved tracks the reservations whose claim has not been answered yet.
 func TestSendBuilderJobRequestCounters(t *testing.T) {
 	reserve := func() *pbr.JobRequest {
-		request := pbr.JobRequest_builder{Path: "/f", Reserve: true}.Build()
-		request.SetReserveJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
+		request := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_RESERVE}.Build()
+		request.SetJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
 		return request
 	}
 	claim := func() *pbr.JobRequest {
-		request := pbr.JobRequest_builder{Path: "/f"}.Build()
-		request.SetReserveJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
+		request := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build()
+		request.SetJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
 		return request
 	}
 	plain := func() *pbr.JobRequest {
@@ -214,7 +214,8 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 			builder := &flex.BuilderJob{}
 			request := pbr.JobRequest_builder{Path: "/f"}.Build()
 			if tc.claim {
-				request.SetReserveJobId("00000000-0000-0000-0000-000000000001")
+				request.SetJobId("00000000-0000-0000-0000-000000000001")
+				request.SetReservation(pbr.JobRequest_CLAIM)
 			}
 			gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, request)
 			if tc.wantErr == nil {

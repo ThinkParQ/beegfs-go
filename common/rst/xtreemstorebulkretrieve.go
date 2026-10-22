@@ -217,10 +217,10 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	if !request.HasBulkInfo() {
 		return fmt.Errorf("missing request bulkInfo")
 	}
-	if !request.HasReserveJobId() {
-		return fmt.Errorf("missing request reserveJobId")
+	if !request.HasJobId() {
+		return fmt.Errorf("missing request jobId")
 	}
-	if jobId := request.GetReserveJobId(); len(jobId) != JobIdLen || uuid.Validate(jobId) != nil {
+	if jobId := request.GetJobId(); len(jobId) != JobIdLen || uuid.Validate(jobId) != nil {
 		return fmt.Errorf("reservedJobId %q is not a valid %d-character uuid", jobId, JobIdLen)
 	}
 
@@ -259,7 +259,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	// the three, after which every later record would be read against the wrong index.
 	var record [xtreemstoreS3BulkRecordLen]byte
 	record[0] = byte(xtreemstoreS3BulkRequestAdded)
-	copy(record[xtreemstoreS3BulkJobIdOffset:], request.GetReserveJobId())
+	copy(record[xtreemstoreS3BulkJobIdOffset:], request.GetJobId())
 	binary.BigEndian.PutUint64(record[xtreemstoreS3BulkPathsOffsetOffset:], uint64(pathOffset))
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkInMountPathLenOffset:], uint16(len(inMountPath)))
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkRemotePathLenOffset:], uint16(len(remotePath)))

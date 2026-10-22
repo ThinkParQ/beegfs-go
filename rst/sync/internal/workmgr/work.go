@@ -615,8 +615,8 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 			}
 		}
 
-		isReserve := request.GetReserve()
-		isClaim := !isReserve && request.HasReserveJobId()
+		isReserve := request.GetReservation() == pbr.JobRequest_RESERVE
+		isClaim := request.GetReservation() == pbr.JobRequest_CLAIM
 
 		if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
 			// Remote answers a claim this way only when the reserved job was already claimed by

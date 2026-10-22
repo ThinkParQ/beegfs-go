@@ -272,8 +272,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, submitted)
 		require.Len(t, submissions.all(), 1)
-		assert.False(t, submissions.all()[0].GetReserve(), "a request no operation takes must not reserve a job")
-		assert.False(t, submissions.all()[0].HasReserveJobId())
+		assert.Equal(t, beeremote.JobRequest_NO_RESERVATION, submissions.all()[0].GetReservation(), "a request no operation takes must not reserve a job")
+		assert.True(t, submissions.all()[0].HasJobId(), "every submission carries a job ID so remote can recognize a replay")
 	})
 
 	t.Run("a bulk request reserves a job, keeps the lock, and is not submitted", func(t *testing.T) {
@@ -314,7 +314,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// path is visible to the user and blocks a competing request for the same path.
 		require.Len(t, submissions.all(), 1)
 		reservation := submissions.all()[0]
-		assert.True(t, reservation.GetReserve())
+		assert.Equal(t, beeremote.JobRequest_RESERVE, reservation.GetReservation())
 		assert.Equal(t, "/foo", reservation.GetPath())
 
 		// The builder mints the reserved job ID rather than learning it from remote, so the request
@@ -322,8 +322,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// records the ID now and submits a separate request claiming it on a later walk.
 		require.Same(t, request, offered, "the reserved request is the one the operation takes")
 		assert.Equal(t, "retrieve", offeredOperation)
-		assert.Equal(t, reservation.GetReserveJobId(), offered.GetReserveJobId())
-		assert.Len(t, offered.GetReserveJobId(), JobIdLen, "the operation needs the reserved job ID to claim it later")
+		assert.Equal(t, reservation.GetJobId(), offered.GetJobId())
+		assert.Len(t, offered.GetJobId(), JobIdLen, "the operation needs the reserved job ID to claim it later")
 	})
 
 	// A plan that ends in a terminal sentinel moves no data, so a bulk operation has nothing to do
@@ -352,7 +352,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, submitted)
 		require.Len(t, submissions.all(), 1)
-		assert.False(t, submissions.all()[0].GetReserve(), "a request that needs no work must not reserve a job")
+		assert.Equal(t, beeremote.JobRequest_NO_RESERVATION, submissions.all()[0].GetReservation(), "a request that needs no work must not reserve a job")
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, submissions.all()[0].GetGenerationStatus().GetState(), submissions.all()[0].GetGenerationStatus().GetMessage())
 	})
 
@@ -388,12 +388,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// request, so a rejected request never reserved anything on remote. It must drop the
 		// reservation it prepared and be submitted once as an ordinary request carrying the
 		// failure, because a request that still asked to reserve would leave remote holding a job
-		// in RESERVED that nothing can ever claim.
+		// in RESERVED that nothing can ever claim. It keeps its job ID, which names no job yet.
 		require.Len(t, submissions.all(), 1)
 		submission := submissions.all()[0]
-		assert.False(t, submission.GetReserve())
-		assert.False(t, submission.HasReserveJobId())
-		assert.False(t, request.HasReserveJobId())
+		assert.Equal(t, beeremote.JobRequest_NO_RESERVATION, submission.GetReservation())
+		assert.True(t, submission.HasJobId())
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, submission.GetGenerationStatus().GetState())
 		assert.Contains(t, submission.GetGenerationStatus().GetMessage(), "bulk add failed")
 	})
@@ -507,7 +506,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				// The refused reservation is the only submission. Falling through to the normal submit
 				// would send a second reserve that remote refuses and the counters record again.
 				require.Len(t, submissions.all(), 1)
-				assert.True(t, submissions.all()[0].GetReserve())
+				assert.Equal(t, beeremote.JobRequest_RESERVE, submissions.all()[0].GetReservation())
 				// The operation recorded the request before the reserve, so it has to be told to stop
 				// waiting on it. Otherwise the restore runs and the batch waits on a path with no job.
 				assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
@@ -1389,7 +1388,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		request := submissions.all()[0]
 		assert.Equal(t, uint32(1), request.GetRemoteStorageTarget())
 		assert.Equal(t, bulkInfo, request.GetBulkInfo())
-		assert.Equal(t, reservedJobId, request.GetReserveJobId(), "the request must take over the job the operation reserved for the path")
+		assert.Equal(t, reservedJobId, request.GetJobId(), "the request must take over the job the operation reserved for the path")
+		assert.Equal(t, beeremote.JobRequest_CLAIM, request.GetReservation())
 	})
 
 	t.Run("a request remote refuses is rolled back and released from its bulk operation", func(t *testing.T) {
@@ -1460,7 +1460,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Len(t, submissions.all(), 1, "a missing reservation must not be reserved again")
-		assert.False(t, submissions.all()[0].GetReserve())
+		assert.Equal(t, beeremote.JobRequest_CLAIM, submissions.all()[0].GetReservation(), "a missing reservation must be claimed, not reserved again")
 		assert.Equal(t, 1, undoCalls, "the applied file state plan must be rolled back")
 		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
 	})
@@ -1676,4 +1676,23 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		require.Equal(t, []BulkRequestState{BulkRequestAccepted}, reportedStates)
 		require.Len(t, submissions.all(), 1)
 	})
+}
+
+// TestJobRequestBuilder_JobIdFor checks that the builder derives the same job ID for the same
+// request every time. Remote recognizes a request sent again only by that ID, so a request that
+// got a new ID on every attempt would create a second job when a response is lost.
+func TestJobRequestBuilder_JobIdFor(t *testing.T) {
+	builderJobId := uuid.New()
+	w := &jobRequestBuilder{builderJobId: builderJobId}
+	request := func(path string, rstId uint32) *beeremote.JobRequest {
+		return beeremote.JobRequest_builder{Path: path, RemoteStorageTarget: rstId}.Build()
+	}
+
+	first := w.jobIdFor(request("/a/file", 1))
+	require.NoError(t, uuid.Validate(first))
+	assert.Equal(t, first, w.jobIdFor(request("/a/file", 1)), "the same path and RST must give the same ID")
+	assert.Equal(t, first, (&jobRequestBuilder{builderJobId: builderJobId}).jobIdFor(request("/a/file", 1)), "a rescheduled builder job must give the same ID")
+	assert.NotEqual(t, first, w.jobIdFor(request("/a/file", 2)), "each RST gets its own job")
+	assert.NotEqual(t, first, w.jobIdFor(request("/a/other", 1)), "each path gets its own job")
+	assert.NotEqual(t, first, (&jobRequestBuilder{builderJobId: uuid.New()}).jobIdFor(request("/a/file", 1)), "another builder job is a new request")
 }
