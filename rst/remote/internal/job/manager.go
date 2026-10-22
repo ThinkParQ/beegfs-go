@@ -1075,8 +1075,12 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 		Results: make([]*beeremote.JobResult, 0),
 	}.Build()
 
+	// attemptToClearLock is set when an update leaves a job COMPLETED or CANCELLED. The release
+	// itself runs just before the path entry is committed, while the entry is still held. Run any
+	// later, a SubmitJob for the same path could record a job and take the lock in between, and the
+	// release would check a map that no longer matches the entry.
 	attemptToClearLock := false
-	defer func() {
+	releaseUnusedFileLock := func() {
 		if !attemptToClearLock {
 			return
 		}
@@ -1091,7 +1095,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 			response.SetOk(false)
 			response.SetMessage(appendMessage(response.Message, "unable to clear lock: "+err.Error()))
 		}
-	}()
+	}
 
 	// applyUpdate is the common way to apply the update to a particular job and modify the response
 	// with the result. Most of the heavy lifting is done by updateJobState(). This could
@@ -1161,6 +1165,9 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 			delete(pathEntry.Value, deletedJobID)
 		}
 	}
+
+	releaseUnusedFileLock()
+
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_DELETED && len(pathEntry.Value) == 0 {
 		// Only clean up the path entry if there are no more jobs left for it.
 		// We want to delete the entry before releasing the lock, otherwise its

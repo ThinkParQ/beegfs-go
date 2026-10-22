@@ -3278,3 +3278,36 @@ func TestAnyJobNeedsFileLock(t *testing.T) {
 
 	assert.False(t, anyJobNeedsFileLock(nil), "a path with no jobs does not need the lock")
 }
+
+// TestUpdateJobsReleasesLockBeforeCommit checks that UpdateJobs decides the lock release while it
+// still holds the path entry. The stub reads the committed entry during the release. If the release
+// ran after the commit, as it once did from a defer, the committed job would already be CANCELLED.
+func TestUpdateJobsReleasesLockBeforeCommit(t *testing.T) {
+	m := newReservationManager(t)
+	path := newReservationRequest(false, "").GetPath()
+	reservedJobId := uuid.NewString()
+	_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+	require.NoError(t, err)
+
+	var lockReleases int
+	m.releaseUnusedFileLockFunc = func(releasePath string, jobs map[string]*Job) error {
+		lockReleases++
+		assert.Equal(t, beeremote.Job_CANCELLED, jobs[reservedJobId].GetStatus().GetState(), "the release must see the update it follows")
+
+		committed, err := m.pathStore.GetEntry(releasePath)
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_RESERVED, committed.Value[reservedJobId].GetStatus().GetState(), "the release must run before the entry is committed")
+		return nil
+	}
+
+	_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+		Path:        path,
+		JobId:       new(reservedJobId),
+		NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+		ForceUpdate: true,
+	}.Build())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, lockReleases)
+	assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+}
