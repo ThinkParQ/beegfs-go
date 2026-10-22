@@ -411,7 +411,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 	ctx, cancel, _ := WithCancellationDelay(workCtx, time.Minute)
 	defer cancel()
 
-	undoAppliedPlan := noopUndo
+	var undoAppliedPlan undoFn
 	lockAcquired := IsFileLocked(sync.LockedInfo)
 	defer func() {
 		if err == nil {
@@ -419,7 +419,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 		}
 
 		if !IsErrJobTerminalSentinel(err) {
-			if undoErr := undoAppliedPlan(ctx); undoErr != nil {
+			if undoErr := undoAppliedPlan.run(ctx); undoErr != nil {
 				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
 			} else {
 				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
@@ -485,7 +485,6 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastJob *beerem
 // first time GenerateWorkRequests runs for a given job; callers should skip it once
 // sync.LockedInfo indicates the lock was already acquired by an earlier call.
 func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (planApplied bool, undoAppliedPlan undoFn, lockAcquired bool, err error) {
-	undoAppliedPlan = noopUndo
 	cfg := r.getJobRequestCfg(request)
 
 	var pathState PathState

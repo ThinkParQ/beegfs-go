@@ -412,7 +412,7 @@ func TestPrepareDownloadExpandFile(t *testing.T) {
 
 		assert.ErrorIs(t, err, earlier)
 		assert.Equal(t, original, readFile(t, mountPoint, path))
-		assert.NoError(t, undo(context.Background()))
+		assert.Nil(t, undo, "the step changed nothing, so it must report nothing to undo")
 	})
 }
 
@@ -1139,4 +1139,64 @@ func TestBulkStateLeavesOtherLayoutsAlone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte{0}, status, "another layout's state must be left as it was found")
 	assert.DirExists(t, otherLayout)
+}
+
+// TestApplyPlanUndo checks how a plan combines the undo of its steps. A nil undo means nothing was
+// changed. The builder relies on that to tell a request that must be undone from one that need not.
+func TestApplyPlanUndo(t *testing.T) {
+	changesNothing := func(context.Context, *PathState, error) (undoFn, error) { return nil, nil }
+	var undone []string
+	changes := func(name string) applyFn {
+		return func(context.Context, *PathState, error) (undoFn, error) {
+			return func(context.Context) error { undone = append(undone, name); return nil }, nil
+		}
+	}
+	fails := func(context.Context, *PathState, error) (undoFn, error) { return nil, errors.New("step failed") }
+
+	t.Run("a plan whose steps change nothing has nothing to undo", func(t *testing.T) {
+		add, apply := newApplyPlan()
+		add(changesNothing)
+		add(changesNothing)
+
+		applied, undo, err := apply(context.Background(), &PathState{})
+
+		require.NoError(t, err)
+		assert.True(t, applied)
+		assert.Nil(t, undo)
+	})
+
+	t.Run("a plan with one change undoes only that change", func(t *testing.T) {
+		undone = nil
+		add, apply := newApplyPlan()
+		add(changesNothing)
+		add(changes("second"))
+		add(changesNothing)
+
+		_, undo, err := apply(context.Background(), &PathState{})
+
+		require.NoError(t, err)
+		require.NotNil(t, undo)
+		require.NoError(t, undo.run(context.Background()))
+		assert.Equal(t, []string{"second"}, undone)
+	})
+
+	t.Run("a failed plan rolls back its changes in reverse order and leaves nothing to undo", func(t *testing.T) {
+		undone = nil
+		add, apply := newApplyPlan()
+		add(changes("first"))
+		add(changes("second"))
+		add(fails)
+
+		applied, undo, err := apply(context.Background(), &PathState{})
+
+		require.ErrorIs(t, err, ErrJobFailedPrecondition)
+		assert.False(t, applied)
+		assert.Nil(t, undo)
+		assert.Equal(t, []string{"second", "first"}, undone)
+	})
+
+	t.Run("run treats a nil undo as success", func(t *testing.T) {
+		var undo undoFn
+		assert.NoError(t, undo.run(context.Background()))
+	})
 }

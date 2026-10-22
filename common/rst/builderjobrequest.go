@@ -347,7 +347,7 @@ func (w *jobRequestBuilder) processRequest(
 	}
 
 	planApplied := false
-	applyUndo := noopUndo
+	var applyUndo undoFn
 	terminalOutcome := false
 	if !request.HasGenerationStatus() {
 		planApplied, applyUndo, terminalOutcome, canReleaseLock = w.prepareJobRequest(ctx, checkpoint, cfg, pathState, request, applyPlan)
@@ -363,7 +363,7 @@ func (w *jobRequestBuilder) processRequest(
 
 		if planApplied && !terminalOutcome {
 			wg.Go(func() {
-				undoPlanErr = applyUndo(ctx)
+				undoPlanErr = applyUndo.run(ctx)
 				if undoPlanErr != nil {
 					w.log.Warn("unable to revert what was prepared for a job request that could not be submitted, the entry is left modified and its lock retained",
 						zap.String("path", cfg.GetPath()),
@@ -571,7 +571,7 @@ func (w *jobRequestBuilder) prepareJobRequest(
 		message := fmt.Sprintf("failed to generate external id: %s", externalErr.Error())
 
 		checkpoint(checkpointGrace)
-		if undoErr := applyUndo(ctx); undoErr != nil {
+		if undoErr := applyUndo.run(ctx); undoErr != nil {
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_ERROR,
 				Message: fmt.Sprintf("%s; rollback also failed: %s", message, undoErr.Error()),
