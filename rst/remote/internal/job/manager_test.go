@@ -3311,3 +3311,25 @@ func TestUpdateJobsReleasesLockBeforeCommit(t *testing.T) {
 	assert.Equal(t, 1, lockReleases)
 	assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
 }
+
+// TestSubmitJobRequestRejectsAlreadyExistsFromGeneration checks that generating work requests can't
+// produce an EXISTING answer. Only the conflict check may answer EXISTING, because only it can name
+// the active job the answer refers to, and a sync node counts EXISTING as success for a claim.
+func TestSubmitJobRequestRejectsAlreadyExistsFromGeneration(t *testing.T) {
+	m := newReservationManager(t)
+	mockRST, ok := m.workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	require.True(t, ok)
+	mockRST.On("GenerateWorkRequests", mock.Anything, mock.Anything).Return(nil, nil, rst.ErrJobAlreadyExists)
+
+	request := beeremote.JobRequest_builder{
+		Path:                "/test/bulkfile",
+		RemoteStorageTarget: 1,
+		Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_UPLOAD}.Build(),
+	}.Build()
+	result, err := m.SubmitJobRequest(request, "")
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, rst.ErrJobAlreadyExists, "the answer must not reach the caller as EXISTING")
+	assert.ErrorContains(t, err, "this is a bug")
+	assert.Equal(t, beeremote.Job_FAILED, result.GetJob().GetStatus().GetState(), "the request is recorded so the failure is visible")
+}

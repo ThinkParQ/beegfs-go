@@ -824,6 +824,15 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		jobSubmission, err = job.GenerateSubmission(m.ctx, lastSyncedJob, rstClient, availableWorkers)
 	}
 
+	// Only remote's conflict check above answers ErrJobAlreadyExists, and it returns the active
+	// equivalent job along with it. Generating work requests can't name that job. Passed on, the
+	// error would make remote answer EXISTING with no such job, and a sync node counts EXISTING as
+	// success for a claim. So the sentinel is dropped from the error and the request fails as a bug.
+	if errors.Is(err, rst.ErrJobAlreadyExists) {
+		m.log.Error("generating work requests returned ErrJobAlreadyExists, which only the conflict check may return (this is a bug)", zap.String("path", jr.GetPath()), zap.Uint32("rstId", jr.GetRemoteStorageTarget()), zap.Error(err))
+		err = fmt.Errorf("generating work requests for RST %d returned an answer only the conflict check may return (this is a bug): %s", jr.GetRemoteStorageTarget(), err.Error())
+	}
+
 	if err != nil {
 		if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
 			m.log.Debug("Offload is already complete", zap.Any("job", lastJob), zap.Any("err", err))
@@ -875,13 +884,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 				}.Build(), err
 			}
 
-			return beeremote.JobResult_builder{
-				Job:          lastJob.Get(),
-				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
-				WorkResults:  getProtoWorkResults(lastJob.WorkResults),
-			}.Build(), err
-		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
-			m.log.Debug("an active job already exists for the requested job, returning that job instead of creating a new one", zap.Any("job", lastJob), zap.Any("err", err))
 			return beeremote.JobResult_builder{
 				Job:          lastJob.Get(),
 				WorkRequests: rst.RecreateWorkRequests(lastJob.Get(), lastJob.GetSegments()),
