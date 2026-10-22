@@ -1678,7 +1678,7 @@ func jobStateString(state beeremote.Job_State) string {
 func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {
 	return func(path string, pathEntryJobs map[string]*Job) error {
 		for _, pathEntryJob := range pathEntryJobs {
-			if pathEntryJob.InActiveState() {
+			if pathEntryJob.InActiveState() || pathEntryJob.InReservedState() {
 				return nil
 			}
 		}
