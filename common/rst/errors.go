@@ -18,7 +18,7 @@ var (
 	ErrJobAlreadyOffloaded          = errors.New("file already offloaded to RST")
 	ErrJobFailedPrecondition        = errors.New("job failed precondition")
 	ErrJobNotAllowed                = errors.New("submitting a new job is not allowed in this state")
-	ErrJobAlreadyExists             = errors.New("no changes to entry detected since the last job")
+	ErrJobAlreadyExists             = errors.New("an equivalent job already exists for this path")
 	ErrJobNotReserved               = errors.New("the job is no longer reserved: it was cancelled or already claimed")
 	ErrRequestNotDelivered          = errors.New("job request was not delivered to remote")
 	ErrReservationMissing           = &reservationMissingError{}

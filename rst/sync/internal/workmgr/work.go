@@ -624,8 +624,8 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 			// connection that was retried above, or to a shutdown before the bulk operation
 			// replayed the claim. The job is live and owns the plan, so reporting a refusal would
 			// make the builder undo the plan and release the lock under it. For any request that is
-			// not a claim, ErrJobAlreadyExists means nothing changed since the last job, which is a
-			// real refusal.
+			// not a claim, ErrJobAlreadyExists means an equivalent job is already active on the
+			// path, which is a real refusal.
 			err = nil
 		}
 

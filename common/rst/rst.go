@@ -84,6 +84,9 @@ type Provider interface {
 	// offloaded states that require no further action. When relevant to the operation,
 	// job.StartMtime should be set.
 	//
+	// ErrJobAlreadyExists must not be returned. Remote answers it only from its own conflict check,
+	// together with the active job it found. Returned from here, it fails the request as a bug.
+	//
 	// availableWorkers is how many work requests the cluster can run concurrently as of this call,
 	// so implementations that split a job should use it to avoid generating far more requests than
 	// can ever run at once. A value of 0 or less means the count is unknown and imposes no bound.
