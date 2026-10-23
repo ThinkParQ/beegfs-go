@@ -13,7 +13,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -29,15 +28,8 @@ func newTestS3Client(t *testing.T, mountPoint filesystem.Provider, opts ...s3Pro
 
 // newTestS3ClientWithConfig builds an S3Client through newS3WithOptions, so every field is set the
 // way production sets it. Tests build clients only through this helper, never as a struct literal.
-// A literal leaves clearAccessFlags nil, and GenerateWorkRequests calls it when a locked request
-// fails.
-//
-// The client releases locks through noopClearAccessFlags, because entry.ClearAccessFlags needs a
-// mounted BeeGFS. Options in opts are applied after that, so a test can pass withClearAccessFlagsFn
-// to record the release instead.
 func newTestS3ClientWithConfig(t *testing.T, mountPoint filesystem.Provider, s3Config *flex.RemoteStorageTarget_S3, opts ...s3ProviderOption) *S3Client {
 	t.Helper()
-	opts = append([]s3ProviderOption{withClearAccessFlagsFn(noopClearAccessFlags)}, opts...)
 	client, err := newS3WithOptions(
 		context.Background(),
 		&flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
@@ -52,10 +44,6 @@ func newTestS3ClientWithConfig(t *testing.T, mountPoint filesystem.Provider, s3C
 // withTestApiClient makes the client send every S3 call to api.
 func withTestApiClient(api s3ApiClient) s3ProviderOption {
 	return withS3ApiClient(func(s3ApiClient) s3ApiClient { return api })
-}
-
-func noopClearAccessFlags(ctx context.Context, path string, flags beegfs.AccessFlags) error {
-	return nil
 }
 
 func TestGenerateWorkRequests(t *testing.T) {
@@ -120,80 +108,6 @@ func TestGenerateWorkRequests(t *testing.T) {
 	jobWithExternalID.Request.Type = &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{}}
 	_, err = testS3Client.GenerateWorkRequests(context.Background(), nil, jobWithExternalID, 1)
 	assert.ErrorIs(t, err, ErrJobAlreadyHasExternalID)
-}
-
-// TestGenerateWorkRequestsReleasesOnlyItsOwnLock checks which failures release the content lock.
-// GenerateWorkRequests owns the lock in two cases. Either the request arrived already locked,
-// because the job builder handed its lock to the job, or prepareJobRequest acquired it. A request
-// that fails before either case holds no lock of its own. For an offloaded file that lock is the
-// stub's lock, so releasing it would unlock the stub.
-//
-// Each case sends a key with a leading '/'. The key check rejects it before prepareJobRequest
-// runs, so the request never reaches BeeGFS.
-func TestGenerateWorkRequestsReleasesOnlyItsOwnLock(t *testing.T) {
-	tests := []struct {
-		name        string
-		lockedInfo  *flex.JobLockedInfo
-		wantRelease bool
-	}{
-		{
-			// The CLI sends this when --remote-target is given for an existing file.
-			name:        "no locked info",
-			lockedInfo:  nil,
-			wantRelease: false,
-		},
-		{
-			// Every size and time is zero. A check that compares local and remote state, instead
-			// of the lock bit, would wrongly treat this as locked.
-			name:        "empty locked info",
-			lockedInfo:  &flex.JobLockedInfo{},
-			wantRelease: false,
-		},
-		{
-			// The local size differs from the remote size, as for any file that needs an upload.
-			// A check that compares local and remote state would miss this lock.
-			name:        "lock handed over by the job builder",
-			lockedInfo:  &flex.JobLockedInfo{ReadWriteLocked: true, Exists: true, Size: 1023},
-			wantRelease: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var releasedPaths []string
-			var releasedFlags []beegfs.AccessFlags
-			client := newTestS3Client(t, filesystem.NewMockFS(), withClearAccessFlagsFn(
-				func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
-					releasedPaths = append(releasedPaths, path)
-					releasedFlags = append(releasedFlags, flags)
-					return nil
-				},
-			))
-
-			job := proto.Clone(baseTestJob).(*beeremote.Job)
-			job.ExternalId = ""
-			job.Request.Type = &beeremote.JobRequest_Sync{
-				Sync: &flex.SyncJob{
-					Operation:  flex.SyncJob_DOWNLOAD,
-					RemotePath: "/key",
-					LockedInfo: tt.lockedInfo,
-				},
-			}
-
-			_, err := client.GenerateWorkRequests(context.Background(), nil, job, 1)
-			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrJobFailedPrecondition)
-			assert.ErrorContains(t, err, `invalid remote path "/key"`)
-			assert.ErrorContains(t, err, `use "key" instead`)
-
-			if tt.wantRelease {
-				assert.Equal(t, []string{job.Request.Path}, releasedPaths)
-				assert.Equal(t, []beegfs.AccessFlags{beegfs.LockedContentAccessFlags}, releasedFlags)
-			} else {
-				assert.Empty(t, releasedPaths)
-			}
-		})
-	}
 }
 
 // A CLI older than beegfs-remote sends the in-mount path as the key for a single-file push. The

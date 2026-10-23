@@ -140,8 +140,8 @@ type Manager struct {
 	// A pointer to an initialized/started worker manager.
 	workerManager *workermgr.Manager
 	// function to release the file's access locks when no longer needed.
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
-	metrics                   managerMetrics
+	releaseUnusedFileLockFn releaseUnusedFileLockFn
+	metrics                 managerMetrics
 	// pendingSync holds files that received V2Event_LAST_WRITER_CLOSED and are waiting out their
 	// per-entry cooldown before an UPLOAD job is submitted.
 	pendingSync *pendingSyncTracker
@@ -151,15 +151,15 @@ type Manager struct {
 }
 
 type managerOptConfig struct {
-	releaseUnusedFileLockFunc func(path string, jobs map[string]*Job) error
+	releaseUnusedFileLockFn releaseUnusedFileLockFn
 }
 type managerOpt func(*managerOptConfig)
 
 // Should only be used for testing.
-func withIgnoreReleaseUnusedFileLockFunc() managerOpt {
+func withIgnoreReleaseUnusedFileLockFn() managerOpt {
 	return func(cfg *managerOptConfig) {
-		cfg.releaseUnusedFileLockFunc = func(path string, jobs map[string]*Job) error {
-			return nil
+		cfg.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			return false, nil
 		}
 	}
 }
@@ -171,7 +171,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 	meter := log.Meter("job")
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := &managerOptConfig{
-		releaseUnusedFileLockFunc: getDefaultReleaseUnusedFileLock(ctx),
+		releaseUnusedFileLockFn: getDefaultReleaseUnusedFileLock(ctx),
 	}
 	for _, opt := range managerOpts {
 		opt(cfg)
@@ -213,12 +213,12 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		log.Warn("failed to create dispatch results counter, metrics will be no-ops", zap.Error(err))
 	}
 	m := &Manager{
-		log:                       log,
-		ctx:                       ctx,
-		ctxCancel:                 cancel,
-		config:                    config,
-		workerManager:             workerManager,
-		releaseUnusedFileLockFunc: cfg.releaseUnusedFileLockFunc,
+		log:                     log,
+		ctx:                     ctx,
+		ctxCancel:               cancel,
+		config:                  config,
+		workerManager:           workerManager,
+		releaseUnusedFileLockFn: cfg.releaseUnusedFileLockFn,
 		metrics: managerMetrics{
 			jobRequests:     jobRequests,
 			jobTerminal:     jobTerminal,
@@ -579,25 +579,20 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		return nil, fmt.Errorf("unable to create new entry for path %s while creating jobID %s: %w", job.Request.GetPath(), job.GetId(), err)
 	}
 
+	path := job.Request.GetPath()
+	// replayed is set when this call answers with the job an earlier submission recorded. That job
+	// already holds its own answer, and a replay must not record another.
+	replayed := false
 	defer func() {
-		// If there was an error creating the job and there are no other jobs for this path, clean
-		// it up when we return.
-		if len(pathEntry.Value) == 0 {
-			if err := commitAndReleasePath(kvstore.WithDeleteEntry(true)); err != nil {
-				m.log.Error("unable to release and cleanup path entry with no jobs", zap.Error(err))
-			}
-		} else if err := commitAndReleasePath(); err != nil {
-			m.log.Error("unable to release path entry", zap.Error(err))
+		recordSubmitResponseStatus(pathEntry.Value, job, err)
+		if failed := m.releaseLockAfterSubmit(path, jr, pathEntry.Value, job, replayed, err); failed != nil {
+			result = failed
 		}
-	}()
 
-	// Store the answer on the job this call records, so a request replayed with the same job_id
-	// gets the same answer. A replay returns an existing job rather than job, so it never
-	// overwrites the answer the first request stored.
-	defer func() {
-		if recorded, ok := pathEntry.Value[job.GetId()]; ok && recorded == job {
-			status, _ := SubmitStatus(err)
-			job.SetSubmitStatus(status)
+		if commitErr := commitAndReleasePath(kvstore.WithDeleteEntry(len(pathEntry.Value) == 0)); commitErr != nil {
+			m.log.Error("unable to commit path entry", zap.String("path", path), zap.Error(commitErr), zap.NamedError("answer", err))
+			result = nil
+			err = fmt.Errorf("unable to commit the outcome for path %s (the outcome was: %v): %w", path, err, commitErr)
 		}
 	}()
 
@@ -613,6 +608,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		return nil, fmt.Errorf("%w: a %s request must name the reserved job with job_id", rst.ErrJobNotAllowed, jr.GetReservation())
 	}
 	reservedJobId := jobId
+	if jobId != "" {
+		// The job this call builds carries the caller's ID from the start. A refused request that
+		// is recorded to report a lock it could not release is then recorded under the ID its
+		// submitter knows. A replay looks its earlier job up by it.
+		job.Job.SetId(jobId)
+	}
 
 	isClaimedReservation := jr.GetReservation() == beeremote.JobRequest_CLAIM
 	if isClaimedReservation {
@@ -626,6 +627,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			// claimed. The caller is replaying a claim whose response it never received. Only a
 			// claim that was accepted answers "already exists", which the caller treats as success.
 			// Any other claim gets back the answer it got the first time.
+			replayed = true
 			if !submitRefused(reserved) {
 				return &beeremote.JobResult{Job: reserved.Get()}, fmt.Errorf("%w: job %s for path %s was already claimed", rst.ErrJobAlreadyExists, reservedJobId, jr.GetPath())
 			}
@@ -643,6 +645,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			// The caller is replaying a reserve whose response it never received. Any other job
 			// holding this ID must not be replaced.
 			if existing.InReservedState() && existing.Request.GetRemoteStorageTarget() == jr.GetRemoteStorageTarget() {
+				replayed = true
 				return &beeremote.JobResult{Job: existing.Get()}, nil
 			}
 			return nil, fmt.Errorf("%w: job %s already exists for path %s in state %s", rst.ErrJobNotAllowed, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
@@ -652,6 +655,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			// The caller is replaying a request whose response it never received. It gets back the
 			// job the first request recorded and the answer that request got.
 			if isReplayOf(jr, existing) {
+				replayed = true
 				return beeremote.JobResult_builder{
 					Job:          existing.Get(),
 					WorkRequests: rst.RecreateWorkRequests(existing.Get(), existing.GetSegments()),
@@ -660,7 +664,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}
 			return nil, fmt.Errorf("%w: job ID %s for path %s already names a job for a different request", rst.ErrJobNotAllowed, jobId, jr.GetPath())
 		}
-		job.Job.SetId(jobId)
 	}
 
 	// lastJob is a reference to the last job for this path+RST (if one exists). For request types
@@ -958,12 +961,6 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		} else {
 			job.Status.SetState(beeremote.Job_CANCELLED)
 			job.Status.SetMessage(appendMessage(message, "successfully aborted"))
-			if !job.Request.HasBuilder() {
-				if lockErr := m.releaseUnusedFileLockFunc(job.Request.GetPath(), pathEntry.Value); lockErr != nil {
-					job.Status.SetState(beeremote.Job_FAILED)
-					job.Status.SetMessage(appendMessage(message, "unable to clear lock: "+lockErr.Error()))
-				}
-			}
 		}
 	case beeremote.Job_UNKNOWN:
 		// One or more work requests could not be cancelled so a worker may still be acting on this
@@ -1119,7 +1116,7 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 			}
 		}
 
-		err := m.releaseUnusedFileLockFunc(jobUpdate.GetPath(), pathEntry.Value)
+		_, err := m.releaseUnusedFileLockFn(jobUpdate.GetPath(), pathEntry.Value)
 		if err != nil {
 			response.SetOk(false)
 			response.SetMessage(appendMessage(response.Message, "unable to clear lock: "+err.Error()))
@@ -1483,7 +1480,7 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 
 		if !job.InActiveState() {
-			if err := m.releaseUnusedFileLockFunc(workResult.GetPath(), pathEntry.Value); err != nil {
+			if _, err := m.releaseUnusedFileLockFn(workResult.GetPath(), pathEntry.Value); err != nil {
 				status.SetState(beeremote.Job_FAILED)
 				status.SetMessage(appendMessage(status.Message, "unable to clear lock: "+err.Error()))
 			}
@@ -1582,14 +1579,97 @@ func (m *Manager) completeJob(job *Job, client rst.Provider, abort bool) error {
 	return job.Complete(m.ctx, client, abort)
 }
 
+// ReleaseUnusedFileLock releases the content lock on path if no job recorded for the path still
+// needs it. A client calls it when it took the lock but gave up before any job was recorded to hold
+// it, for example when its request was refused before it reached the job store.
+//
+// The decision is the same one every release makes, so it runs while the path entry is held.
+// CreateAndLockEntry holds the entry's key even when the path has no entry, so a SubmitJob for the
+// same path can't record a job, and take the lock, between the check and the clear. An entry this
+// call had to create is removed again. An entry that already existed is committed unchanged.
+func (m *Manager) ReleaseUnusedFileLock(path string) (released bool, err error) {
+	path = rst.NormalizePath(path)
+	_, pathEntry, commitAndReleasePath, err := m.pathStore.CreateAndLockEntry(
+		path,
+		kvstore.WithAllowExisting(true),
+		kvstore.WithValue(make(map[string]*Job)),
+	)
+	createdEntry := err == nil
+	if err != nil && !errors.Is(err, kvstore.ErrEntryAlreadyExistsInDB) {
+		return false, fmt.Errorf("unable to lock path entry for %s: %w", path, err)
+	}
+
+	released, err = m.releaseUnusedFileLockFn(path, pathEntry.Value)
+
+	var commitErr error
+	if createdEntry {
+		commitErr = commitAndReleasePath(kvstore.WithDeleteEntry(true))
+	} else {
+		commitErr = commitAndReleasePath()
+	}
+	if commitErr != nil {
+		err = errors.Join(err, fmt.Errorf("unable to release path entry for %s: %w", path, commitErr))
+	}
+	return released, err
+}
+
+// recordSubmitResponseStatus stores the response status of the submission that recorded job, so a
+// request replayed with the same job_id gets the same answer. A job's state alone doesn't say what
+// it was answered, because different answers can leave a job in the same state. Nothing is stored
+// when the call recorded no job of its own, so a replay keeps the earlier answer.
+func recordSubmitResponseStatus(jobs map[string]*Job, job *Job, answer error) {
+	if recorded, ok := jobs[job.GetId()]; ok && recorded == job {
+		status, _ := SubmitResponseStatus(answer)
+		job.SetSubmitStatus(status)
+	}
+}
+
+// releaseLockAfterSubmit releases the content lock on path unless a job on the path still needs it.
+//
+// If the lock is not needed but the release fails then a job will be left behind so it can
+// be cancelled later to release the lock.
+func (m *Manager) releaseLockAfterSubmit(path string, request *beeremote.JobRequest, jobs map[string]*Job, job *Job, replayed bool, answer error) *beeremote.JobResult {
+	if request.HasBuilder() {
+		return nil
+	}
+	_, releaseErr := m.releaseUnusedFileLockFn(path, jobs)
+	if releaseErr == nil {
+		return nil
+	}
+	m.log.Warn("unable to release the content lock after the request ended", zap.String("path", path), zap.Error(releaseErr))
+
+	// The lock was no longer needed but was failed to be released. In order to avoid having an
+	// orphaned lock, add a job to cancel so the lock can be released later.
+	failed, ok := jobs[job.GetId()]
+	if !ok || (failed != job && !replayed) {
+		if ok {
+			job.Job.SetId(uuid.NewString())
+		}
+		failed = job
+		jobs[failed.GetId()] = failed
+		submitStatus, _ := SubmitResponseStatus(answer)
+		failed.SetSubmitStatus(submitStatus)
+	}
+	status := failed.GetStatus()
+	status.SetState(beeremote.Job_FAILED)
+	status.SetMessage(appendMessage(status.GetMessage(), "unable to release the content lock, cancel this job to try again: "+releaseErr.Error()))
+	status.SetUpdated(timestamppb.Now())
+	return &beeremote.JobResult{
+		Job:          failed.Get(),
+		WorkRequests: rst.RecreateWorkRequests(failed.Get(), failed.GetSegments()),
+		WorkResults:  getProtoWorkResults(failed.WorkResults),
+	}
+}
+
 // cancelClaimedReservation moves a claimed reservation to CANCELLED. SubmitJobRequest calls it
 // when it refuses a claim and returns before the job is scheduled or recorded with an outcome. job
 // is the reserved job the claim selected. It is already in the path entry, so the change is
 // committed with that entry. reason is the refusal SubmitJobRequest returns.
 //
 // The state is CANCELLED, not FAILED, because no work ran, so nothing needs cleanup. A CANCELLED
-// job does not block later jobs for the path. The builder undoes its plan and releases the access
-// lock when the claim is refused.
+// job does not block later jobs for the path, and it needs no content lock, so the release at the
+// end of the submit clears the lock unless another job still needs it. The claimer then undoes its
+// plan.
 func cancelClaimedReservation(job *Job, reason error) {
 	status := job.GetStatus()
 	status.SetState(beeremote.Job_CANCELLED)
@@ -1648,7 +1728,7 @@ func (m *Manager) cancelReservedRequest(path string, jobId string) (err error) {
 
 	// Release only once the cancel is confirmed. A job left UNKNOWN may still have a node writing
 	// the file, so it keeps the lock until it is cancelled.
-	if releaseLockErr := m.releaseUnusedFileLockFunc(path, pathEntry.Value); releaseLockErr != nil {
+	if _, releaseLockErr := m.releaseUnusedFileLockFn(path, pathEntry.Value); releaseLockErr != nil {
 		err = errors.Join(err, fmt.Errorf("unable to clear lock: %w", releaseLockErr))
 	}
 	return err
@@ -1756,26 +1836,39 @@ func anyJobNeedsFileLock(pathEntryJobs map[string]*Job) bool {
 	return false
 }
 
-func getDefaultReleaseUnusedFileLock(ctx context.Context) func(path string, jobs map[string]*Job) error {
-	return func(path string, pathEntryJobs map[string]*Job) error {
+// releaseUnusedFileLockFn clears the content lock on path when no job in jobs still needs it and
+// the file is not offloaded. jobs must be the path entry's jobs, read while the entry is held.
+// released is true when the lock is clear afterwards, including when it was already clear.
+//
+// The content lock is one flag on the file, not one per job. Read-only uploads of one file to
+// different RSTs can run at the same time and share it. So only remote decides whether it is
+// released because only remote sees every job on the path and only while it holds the path
+// entry. The last job to finish releases it.
+type releaseUnusedFileLockFn func(path string, jobs map[string]*Job) (released bool, err error)
+
+func getDefaultReleaseUnusedFileLock(ctx context.Context) releaseUnusedFileLockFn {
+	return func(path string, pathEntryJobs map[string]*Job) (bool, error) {
 		if anyJobNeedsFileLock(pathEntryJobs) {
-			return nil
+			return false, nil
 		}
 
 		if dataState, err := entry.GetFileDataState(ctx, path); err != nil {
 			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-				return nil
+				return false, nil
 			}
-			return err
+			return false, err
 		} else if beegfs.IsDataStateOffloaded(dataState) {
-			return nil
+			return false, nil
 		}
 
 		err := entry.ClearAccessFlags(ctx, path, beegfs.LockedContentAccessFlags)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
-			return fmt.Errorf("unable to write lock: %w", err)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return false, nil
 		}
-		return nil
+		if err != nil && !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
+			return false, fmt.Errorf("unable to write lock: %w", err)
+		}
+		return true, nil
 	}
 }
 
