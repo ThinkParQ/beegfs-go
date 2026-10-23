@@ -108,32 +108,37 @@ func (c *grpcProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 	return nil
 }
 
+// classifyRPCError turns a failed call to remote into the error its callers act on. Unavailable and
+// DeadlineExceeded wrap ErrUnavailable, so callers retry them. Canceled wraps context.Canceled, so
+// the caller can check its own ctx to tell its cancellation from a connection a failed config
+// update closed. Any other error is returned as is: remote decided the call, and asking again gets
+// the same answer.
+func classifyRPCError(err error) error {
+	st, ok := status.FromError(err)
+	if ok {
+		// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
+		// Note this is just a hint to the user, other error conditions may have the same
+		// message so we don't adjust behavior (i.e., treat it as fatal).
+		if strings.Contains(st.Message(), "error reading server preface: EOF") {
+			err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+		}
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	case codes.Canceled:
+		return fmt.Errorf("%w: %w", context.Canceled, err)
+	}
+	return err
+}
+
 func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
-	resp, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
+	resp, err := c.client.SubmitJob(ctx, &beeremote.SubmitJobRequest{
 		Request:      jobRequest,
 		OriginNodeId: c.nodeId,
-	}.Build())
+	})
 	if err != nil {
-		st, ok := status.FromError(err)
-		if ok {
-			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
-			// Note this is just a hint to the user, other error conditions may have the same
-			// message so we don't adjust behavior (i.e., treat it as fatal).
-			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
-			}
-		}
-
-		// Unavailable and DeadlineExceeded are retried. Canceled is returned as context.Canceled so
-		// the caller can check its own ctx to tell its cancellation from a connection a failed
-		// config update closed.
-		switch st.Code() {
-		case codes.Unavailable, codes.DeadlineExceeded:
-			return fmt.Errorf("%w: %w", ErrUnavailable, err)
-		case codes.Canceled:
-			return fmt.Errorf("%w: %w", context.Canceled, err)
-		}
-		return err
+		return classifyRPCError(err)
 	}
 
 	switch resp.GetStatus() {
@@ -160,6 +165,15 @@ func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobR
 	// builder count it as submitted.
 	if resp.GetResult().GetJob() == nil {
 		return fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
+	}
+	return nil
+}
+
+// releaseUnusedFileLock asks remote to release the content lock on path if no job still needs it.
+func (c *grpcProvider) releaseUnusedFileLock(ctx context.Context, path string) error {
+	_, err := c.client.ReleaseUnusedFileLock(ctx, beeremote.ReleaseUnusedFileLockRequest_builder{Path: path}.Build())
+	if err != nil {
+		return classifyRPCError(err)
 	}
 	return nil
 }

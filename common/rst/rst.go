@@ -149,7 +149,14 @@ type Provider interface {
 	// returning.
 	//
 	// log is used for per-path problems that must be reported without failing the builder job.
-	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult
+	//
+	// A builder that takes a file's content lock must never clear it. If no request is submitted
+	// then remote.ReleaseUnusedFileLock should be called to release an acquired lock.
+	//
+	// All requests are submitted through remote.Submit. Remote releases the lock at the end of
+	// every submit unless a job on the path still needs it. So if the submission is refused, any
+	// file changes made for the request are undone after the lock may already be gone.
+	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, remote RemoteJobCalls, workerSaturation []func() float64) *SchedulingResult
 	// CompleteJobBuilderRequest is the builder job counterpart to CompleteWorkRequests. It runs
 	// before a builder job moves to a terminal state and releases the bulk operations the builder
 	// opened through OpenBulkOperation. Providers that never run builder jobs should return
@@ -231,7 +238,7 @@ type Provider interface {
 	OpenBulkOperation(ctx context.Context, stateMountPath string, operation string) (clientBulkOperation, error)
 }
 
-// SubmitRequestFn submits a fully prepared job request to remote and returns the outcome:
+// SubmitRequestFn submits a fully prepared job request to remote and returns remote's answer:
 //   - A nil error means remote accepted the request and a job now owns the request.
 //   - An error wrapping ErrRequestNotDelivered means ctx ended before remote confirmed it saw the
 //     request. Remote may never have received it, so the caller must leave the request replayable.
@@ -248,6 +255,22 @@ type Provider interface {
 //
 // Implementations must be safe to call concurrently.
 type SubmitRequestFn func(ctx context.Context, request *beeremote.JobRequest) error
+
+// ReleaseUnusedFileLockFn asks remote to release the content lock on path if no job on the path
+// still needs it. An error wrapping ErrRequestNotDelivered means remote may not have received the
+// request. Implementations retry transient failures like SubmitRequestFn and must be safe to call
+// concurrently.
+type ReleaseUnusedFileLockFn func(ctx context.Context, path string) error
+
+// RemoteJobCalls are the calls a job builder makes to remote. Remote alone releases a file's content
+// lock, because the lock is one flag shared by every job on the path and only remote sees them all.
+// So a builder that took a lock never clears it. It submits the request, and remote decides the
+// lock at the end of the submit. When the builder submits nothing for a path, it asks remote to
+// release the lock instead.
+type RemoteJobCalls struct {
+	Submit                SubmitRequestFn
+	ReleaseUnusedFileLock ReleaseUnusedFileLockFn
+}
 
 // CancelRequestFn cancels a reserved job and returns any errors.
 //

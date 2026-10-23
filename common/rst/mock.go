@@ -138,12 +138,12 @@ func (m *MockClient) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx
 	return nil
 }
 
-func (m *MockClient) ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, submitRequest SubmitRequestFn, workerSaturation []func() float64) *SchedulingResult {
+func (m *MockClient) ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, remote RemoteJobCalls, workerSaturation []func() float64) *SchedulingResult {
 	if !m.hasExpectedCall("ExecuteJobBuilderRequest") {
 		return &SchedulingResult{Err: ErrUnsupportedOpForRST}
 	}
 
-	args := m.Called(workCtx, workRequest, submitRequest)
+	args := m.Called(workCtx, workRequest, remote)
 	delay, _ := args.Get(1).(time.Duration)
 	return &SchedulingResult{
 		Reschedule: args.Bool(0),
