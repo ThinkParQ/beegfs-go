@@ -51,3 +51,7 @@ func (c *MockProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobR
 	}
 	return err
 }
+
+func (c *MockProvider) releaseUnusedFileLock(ctx context.Context, path string) error {
+	return c.Called(path).Error(0)
+}

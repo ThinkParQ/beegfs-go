@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
@@ -74,7 +73,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 	workCtx context.Context,
 	log *zap.Logger,
 	workRequest *flex.WorkRequest,
-	submitRequest SubmitRequestFn,
+	remote RemoteJobCalls,
 	workerSaturation []func() float64,
 ) (result *SchedulingResult) {
 	result = &SchedulingResult{}
@@ -95,7 +94,7 @@ func (c *JobBuilderClient) ExecuteJobBuilderRequest(
 		return
 	}
 
-	requestBuilder := c.newJobRequestBuilder(log, builderJobId, builder.Cfg, submitRequest, registry.AddRequest, registry.UpdateBulkRequest)
+	requestBuilder := c.newJobRequestBuilder(log, builderJobId, builder.Cfg, remote, registry.AddRequest, registry.UpdateBulkRequest)
 	controller := c.newRequestBuildController(shutdownCtx, workCtx, requestBuilder, workerSaturation)
 
 	defer func() {
@@ -439,22 +438,22 @@ func (c *JobBuilderClient) newJobRequestBuilder(
 	log *zap.Logger,
 	builderJobId uuid.UUID,
 	builderCfg *flex.JobRequestCfg,
-	submitRequest SubmitRequestFn,
+	remote RemoteJobCalls,
 	addToBulkRequest addToBulkRequestFn,
 	updateBulkRequest updateBulkRequestFn,
 ) *jobRequestBuilder {
 	requestBuilder := &jobRequestBuilder{
-		log:               log,
-		mountPoint:        c.mountPoint,
-		RstMap:            c.rstMap,
-		submitRequest:     submitRequest,
-		builderJobId:      builderJobId,
-		builderCfg:        builderCfg,
-		getPathState:      GetPathState,
-		planFileState:     PlanFileStateForWorkRequests,
-		clearAccessFlags:  entry.ClearAccessFlags,
-		addToBulkRequest:  addToBulkRequest,
-		updateBulkRequest: updateBulkRequest,
+		log:                   log,
+		mountPoint:            c.mountPoint,
+		RstMap:                c.rstMap,
+		submitRequest:         remote.Submit,
+		releaseUnusedFileLock: remote.ReleaseUnusedFileLock,
+		builderJobId:          builderJobId,
+		builderCfg:            builderCfg,
+		getPathState:          GetPathState,
+		planFileState:         PlanFileStateForWorkRequests,
+		addToBulkRequest:      addToBulkRequest,
+		updateBulkRequest:     updateBulkRequest,
 	}
 	requestBuilder.init()
 

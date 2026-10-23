@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
@@ -752,8 +751,7 @@ func newTestSubmitter() *testSubmitter {
 	return &testSubmitter{}
 }
 
-// submit records request and reports the outcome the test asked for. The builder mints the job ID a
-// reserving submission carries, so an accepted submission has nothing to hand back but a nil error.
+// submit records request and reports the outcome the test asked for.
 func (s *testSubmitter) submit(ctx context.Context, request *beeremote.JobRequest) error {
 	s.mu.Lock()
 	s.requests = append(s.requests, proto.Clone(request).(*beeremote.JobRequest))
@@ -762,6 +760,34 @@ func (s *testSubmitter) submit(ctx context.Context, request *beeremote.JobReques
 		return s.result(request)
 	}
 	return nil
+}
+
+// testRemoteCalls records the builder's release calls to remote, in the order made. Each entry is
+// the call's name and its arguments. releaseErr is the error the call returns.
+type testRemoteCalls struct {
+	mu         sync.Mutex
+	calls      []string
+	releaseErr error
+}
+
+func (r *testRemoteCalls) releaseUnusedFileLock(ctx context.Context, path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, "release "+path)
+	return r.releaseErr
+}
+
+// all returns every call made so far.
+func (r *testRemoteCalls) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.calls)
+}
+
+// remoteCalls returns the calls a builder makes to remote, with submissions going to s and
+// releases recorded in r.
+func remoteCalls(s *testSubmitter, r *testRemoteCalls) RemoteJobCalls {
+	return RemoteJobCalls{Submit: s.submit, ReleaseUnusedFileLock: r.releaseUnusedFileLock}
 }
 
 // all returns every request submitted so far. Unlike draining a channel it may be called more than
@@ -801,7 +827,7 @@ func newTestRequestBuildController(t *testing.T, ctx context.Context, submission
 	}
 	// MockClient only offers a request to a bulk operation when its locked info says the file is
 	// archived. These tests build no archived paths, so no request may reach addToBulkRequest.
-	requestBuilder := client.newJobRequestBuilder(zap.NewNop(), uuid.MustParse(testJobId), workRequest.GetBuilder().GetCfg(), submissions.submit, requireNoBulkRequest(t), func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+	requestBuilder := client.newJobRequestBuilder(zap.NewNop(), uuid.MustParse(testJobId), workRequest.GetBuilder().GetCfg(), remoteCalls(submissions, &testRemoteCalls{}), requireNoBulkRequest(t), func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
 		return nil
 	})
 	controller := client.newRequestBuildController(ctx, ctx, requestBuilder, nil)
@@ -820,10 +846,6 @@ func newTestRequestBuildController(t *testing.T, ctx context.Context, submission
 	controller.requestBuilder.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 		return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 	}
-	controller.requestBuilder.clearAccessFlags = func(ctx context.Context, path string, flags beegfs.AccessFlags) error {
-		return nil
-	}
-
 	return controller
 }
 

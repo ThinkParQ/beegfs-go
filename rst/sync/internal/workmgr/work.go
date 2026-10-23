@@ -511,9 +511,17 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	builder := workRequest.GetBuilder()
 
 	var builderMu sync.Mutex
-	result := client.ExecuteJobBuilderRequest(shutdownCtx, work.ctx, log, workRequest, func(ctx context.Context, request *pbr.JobRequest) error {
-		return w.sendBuilderJobRequest(ctx, &builderMu, builder, request)
-	}, w.workerSaturation)
+	remote := rst.RemoteJobCalls{
+		Submit: func(ctx context.Context, request *pbr.JobRequest) error {
+			return w.sendBuilderJobRequest(ctx, &builderMu, builder, request)
+		},
+		ReleaseUnusedFileLock: func(ctx context.Context, path string) error {
+			return w.callRemote(ctx, path, "release the content lock", func(ctx context.Context) error {
+				return w.beeRemoteClient.ReleaseUnusedFileLock(ctx, path)
+			})
+		},
+	}
+	result := client.ExecuteJobBuilderRequest(shutdownCtx, work.ctx, log, workRequest, remote, w.workerSaturation)
 
 	if result == nil {
 		result = &rst.SchedulingResult{Err: fmt.Errorf("job builder returned unexpected scheduling result")}
@@ -561,33 +569,27 @@ func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment
 	return sendJobCancelled
 }
 
-// sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns the
-// submission's outcome:
-//   - A nil error means remote accepted the request and a job now owns everything the builder
-//     prepared for it. A claim remote reports as already claimed is also accepted, because remote
-//     only says that when an earlier attempt of this same claim landed and its reply was lost.
+// callRemote makes one call to remote for the builder, retrying while remote is unavailable, and
+// returns the call's final error:
+//   - nil, or any error remote answered with, is returned as is. Asking again gets the same answer.
 //   - An error wrapping rst.ErrRequestNotDelivered means ctx ended before remote confirmed it saw
-//     the request. The builder must leave the request replayable.
-//   - Any other error means remote refused the request, so no job will ever run it and the builder
-//     should revert its changes.
+//     the call, either while it was in flight or while remote was unreachable. Remote may or may
+//     not have acted on it.
 //
-// builder's counters are incremented under mu because requests are submitted concurrently from
-// every goroutine building a path for the same builder job. These counters are only updated when
-// the journal entry is committed; so, if the sync node crashes before committing them then they
-// will be incorrect.
-func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
+// path and label is an arbitrary name used for the call.
+func (w *worker) callRemote(ctx context.Context, path string, label string, call func(ctx context.Context) error) error {
 	const maxSendBuilderJobDelay = 60 * time.Second
 	const initialDelay = 1 * time.Second
 	delay := initialDelay
 
 	for {
-		err := w.beeRemoteClient.SubmitJobRequest(ctx, request)
+		err := call(ctx)
 		switch {
 		case errors.Is(err, context.Canceled):
 			if ctx.Err() != nil {
 				// The caller cancelled the call because the job was cancelled or the node is
-				// shutting down. Nothing is wrong with the request, so it is not counted. The call
-				// was cut off in flight, so remote may or may not have received it.
+				// shutting down. The call was cut off in flight, so remote may or may not have
+				// received it.
 				return fmt.Errorf("%w: %w", rst.ErrRequestNotDelivered, err)
 			}
 			// The caller did not cancel which means the connection to remote was closed so retry.
@@ -596,7 +598,7 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 			// Retry with an exponential backoff until remote can be reached again. Only the first
 			// retry is logged, because every path the builder walks can be retrying at once.
 			if delay == initialDelay {
-				w.log.Warn("unable to submit job request, retrying until the connection to remote is restored", zap.String("path", request.GetPath()), zap.Error(err))
+				w.log.Warn("unable to reach remote, retrying until the connection is restored", zap.String("call", label), zap.String("path", path), zap.Error(err))
 			}
 			select {
 			case <-time.After(delay):
@@ -606,57 +608,80 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 				}
 				continue
 			case <-ctx.Done():
-				// Remote is still unreachable and ctx has ended, so stop retrying instead of leaving
-				// the request with its plan applied and its lock held. It is deliberately not
-				// counted, because nothing is wrong with the request itself. A request from the
-				// original walk is rebuilt when the builder job rewalks the path after a restart. A
-				// request from a bulk operation keeps its record, so the next execute replays it.
-				return fmt.Errorf("%w: unable to submit job request before ctx ended: %w", rst.ErrRequestNotDelivered, err)
+				// Remote is still unreachable and ctx has ended, so stop retrying. A request from
+				// the original walk is rebuilt when the builder job rewalks the path after a
+				// restart. A request from a bulk operation keeps its record, so the next execute
+				// replays it.
+				return fmt.Errorf("%w: unable to %s before ctx ended: %w", rst.ErrRequestNotDelivered, label, err)
 			}
 		}
-
-		isReserve := request.GetReservation() == pbr.JobRequest_RESERVE
-		isClaim := request.GetReservation() == pbr.JobRequest_CLAIM
-
-		if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
-			// Remote answers a claim this way only when the reserved job was already claimed by
-			// this request. An earlier attempt landed but its reply was lost, either to a closed
-			// connection that was retried above, or to a shutdown before the bulk operation
-			// replayed the claim. The job is live and owns the plan, so reporting a refusal would
-			// make the builder undo the plan and release the lock under it. For any request that is
-			// not a claim, ErrJobAlreadyExists means an equivalent job is already active on the
-			// path, which is a real refusal.
-			err = nil
-		}
-
-		mu.Lock()
-		// The count stops at zero. A crash loses the counters of the round that had not committed
-		// yet, including its reserves, while the claims for those reserves still arrive afterwards.
-		if isClaim && builder.JobsReserved > 0 {
-			builder.JobsReserved--
-		}
-		if err == nil {
-			if isReserve {
-				builder.JobsReserved++
-			} else {
-				builder.Submitted++
-			}
-		} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
-			builder.JobsAlreadyComplete++
-		} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
-			builder.JobsAlreadyOffloaded++
-		} else if errors.Is(err, rst.ErrJobAlreadyExists) {
-			builder.JobsAlreadyExist++
-		} else if errors.Is(err, rst.ErrJobNotAllowed) {
-			builder.JobsNotAllowed++
-		} else if errors.Is(err, rst.ErrJobNotReserved) {
-			builder.JobsNotReserved++
-		} else {
-			builder.Errors++
-		}
-		mu.Unlock()
 		return err
 	}
+}
+
+// sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns
+// remote's answer, as callRemote does:
+//   - A nil error means remote accepted the request and a job now owns everything the builder
+//     prepared for it. A claim remote reports as already claimed is also accepted, because remote
+//     only says that when an earlier attempt of this same claim landed and its reply was lost.
+//   - An error wrapping rst.ErrRequestNotDelivered means ctx ended before remote confirmed it saw
+//     the request. The builder must leave the request replayable. It is not counted, because
+//     nothing is wrong with the request itself.
+//   - Any other error means remote refused the request, so no job will ever run it and the builder
+//     should revert its changes.
+//
+// builder's counters are incremented under mu because requests are submitted concurrently from
+// every goroutine building a path for the same builder job. These counters are only updated when
+// the journal entry is committed; so, if the sync node crashes before committing them then they
+// will be incorrect.
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
+	err := w.callRemote(ctx, request.GetPath(), "submit job request", func(ctx context.Context) error {
+		return w.beeRemoteClient.SubmitJobRequest(ctx, request)
+	})
+	if errors.Is(err, rst.ErrRequestNotDelivered) {
+		return err
+	}
+
+	isReserve := request.GetReservation() == pbr.JobRequest_RESERVE
+	isClaim := request.GetReservation() == pbr.JobRequest_CLAIM
+	if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
+		// Remote answers a claim this way only when the reserved job was already claimed by
+		// this request. An earlier attempt landed but its reply was lost, either to a closed
+		// connection that was retried above, or to a shutdown before the bulk operation
+		// replayed the claim. The job is live and owns the plan, so reporting a refusal would
+		// make the builder undo the plan and release the lock under it. For any request that is
+		// not a claim, ErrJobAlreadyExists means an equivalent job is already active on the
+		// path, which is a real refusal.
+		err = nil
+	}
+
+	mu.Lock()
+	// The count stops at zero. A crash loses the counters of the round that had not committed
+	// yet, including its reserves, while the claims for those reserves still arrive afterwards.
+	if isClaim && builder.JobsReserved > 0 {
+		builder.JobsReserved--
+	}
+	if err == nil {
+		if isReserve {
+			builder.JobsReserved++
+		} else {
+			builder.Submitted++
+		}
+	} else if errors.Is(err, rst.ErrJobAlreadyComplete) {
+		builder.JobsAlreadyComplete++
+	} else if errors.Is(err, rst.ErrJobAlreadyOffloaded) {
+		builder.JobsAlreadyOffloaded++
+	} else if errors.Is(err, rst.ErrJobAlreadyExists) {
+		builder.JobsAlreadyExist++
+	} else if errors.Is(err, rst.ErrJobNotAllowed) {
+		builder.JobsNotAllowed++
+	} else if errors.Is(err, rst.ErrJobNotReserved) {
+		builder.JobsNotReserved++
+	} else {
+		builder.Errors++
+	}
+	mu.Unlock()
+	return err
 }
 
 // updateBuilderJob uses result to update the builder job's work status and state.

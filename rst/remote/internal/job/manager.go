@@ -1810,10 +1810,11 @@ func jobStateString(state beeremote.Job_State) string {
 //     OFFLOADED would leave a restored file locked forever.
 //
 // Builder jobs follow a narrower rule. A builder locks a file only during its own pass over that
-// file, and it either clears the lock or hands it to the job it submits. So a builder counts only
-// while it is SCHEDULED or RUNNING, because its pass may be holding the lock at that moment. A
-// builder that stopped must not count, because a job it spawned may run on the builder's own path.
-// That job would then never release its lock.
+// file. It hands the lock to the job it submits, or asks remote to release it when nothing was
+// submitted. It never clears the lock itself. So a builder counts only while it is SCHEDULED or
+// RUNNING, because its pass may be holding the lock at that moment. A builder that stopped must not
+// count, because a job it spawned may run on the builder's own path. That job would then never
+// release its lock.
 func jobNeedsFileLock(job *Job) bool {
 	if job.Request.HasBuilder() {
 		return job.InActiveState()

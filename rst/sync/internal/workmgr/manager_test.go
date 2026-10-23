@@ -340,7 +340,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_CompletesInSingleExecution(t 
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-job", "0")).Return(true, time.Duration(0), nil).Times(1)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source",
 				RemoteStorageTarget: 0,
@@ -441,7 +442,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-reschedule-job", "0")).Return(true, time.Duration(0), nil).Times(3)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source/first",
 				RemoteStorageTarget: 0,
@@ -469,7 +471,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_ReschedulesThenCompletes(t *t
 		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-reschedule-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source/final",
 				RemoteStorageTarget: 0,
@@ -688,7 +691,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_FailsAfterPartialSubmission(t
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-bulkerr-job", "0")).Return(true, time.Duration(0), nil).Times(1)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-bulkerr-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source/first",
 				RemoteStorageTarget: 0,
@@ -880,7 +884,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("bulk-builder-duplicate-job", "0")).Return(true, time.Duration(0), nil).Times(2)
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-duplicate-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source/duplicate",
 				RemoteStorageTarget: 0,
@@ -903,7 +908,8 @@ func TestSubmitBuilderWorkRequestWithBulkOperation_DuplicateChildSubmissionAcros
 		Return(true, workDelayMinimum+500*time.Millisecond, nil, nil).Once()
 	mockRST.On("ExecuteJobBuilderRequest", mock.Anything, matchJobAndRequestID("bulk-builder-duplicate-job", "0"), mock.Anything).
 		Run(func(args mock.Arguments) {
-			submitRequest := args.Get(2).(rst.SubmitRequestFn)
+			submit := args.Get(2).(rst.RemoteJobCalls).Submit
+			submitRequest := func(ctx context.Context, request *pbr.JobRequest) { _ = submit(ctx, request) }
 			submitRequest(context.Background(), &pbr.JobRequest{
 				Path:                "/bulk/source/duplicate",
 				RemoteStorageTarget: 0,
