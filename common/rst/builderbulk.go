@@ -28,6 +28,10 @@ type BulkStreamPathResult struct {
 	Err           error
 }
 
+// bulkOperationEntry is the saved state of one bulk operation stored as json. It has no version
+// field of its own; however, entries are saved under this build's layout directory and the name of
+// that directory is the version (see stateLayoutDir). A new field that older builds can safely
+// ignore needs no new version. Any other change to the layout needs a new stateLayoutDir.
 type bulkOperationEntry struct {
 	StateMountPath string `json:"stateMountPath"`
 	RstId          uint32 `json:"rstId"`
