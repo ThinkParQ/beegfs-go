@@ -13,11 +13,14 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -125,7 +128,14 @@ func (s *WorkerNodeServer) Stop() {
 
 func (s *WorkerNodeServer) UpdateConfig(ctx context.Context, request *flex.UpdateConfigRequest) (*flex.UpdateConfigResponse, error) {
 	s.log.Info("attempting to apply new configuration")
-	err := s.workMgr.UpdateConfig(request.GetRsts(), request.GetBeeRemote(), request.GetNodeId(), request.GetStateRoot())
+	err := s.workMgr.UpdateConfig(ctx, request.GetRsts(), request.GetBeeRemote(), request.GetNodeId(), request.GetStateRoot())
+	if errors.Is(err, beeremote.ErrUnavailable) {
+		// The node could not reach remote to check its features. Remote connects to its sync nodes
+		// before its own server listens, so this is expected while it starts. Answering with
+		// Unavailable makes remote retry the connection instead of treating it as unrecoverable.
+		s.log.Warn("unable to reach remote to check its features, waiting for remote to retry", zap.Error(err))
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	if err != nil {
 		s.log.Error("error applying new configuration", zap.Error(err))
 		return flex.UpdateConfigResponse_builder{

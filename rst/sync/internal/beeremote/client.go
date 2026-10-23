@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -108,6 +109,62 @@ func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode, nodeId string) error {
 		return nil
 	}
 	return ErrInvalidAddress
+}
+
+// RequireFeatures checks that the remote newCfg names supports every feature in required. It runs
+// before the node applies newCfg, so a remote this node can't work with is refused while the node
+// still has its previous configuration. It opens its own short-lived connection, because
+// UpdateConfig closes the current connection before it opens the new one.
+//
+// It returns:
+//   - nil when the remote supports every feature, or when newCfg names the mock remote used in
+//     tests.
+//   - an error wrapping ErrIncompatibleRemote when the remote answered but lacks a feature, or
+//     predates capabilities. Upgrading the remote is the fix.
+//   - an error wrapping ErrUnavailable when the remote could not be reached. Remote connects to
+//     its sync nodes before its own server listens, so this is expected while remote starts, and
+//     the caller should let remote retry.
+//   - any other error as is.
+func (c *Client) RequireFeatures(ctx context.Context, newCfg *flex.BeeRemoteNode, required ...string) error {
+	if newCfg == nil {
+		return ErrNilConfiguration
+	}
+	switch newCfg.GetAddress() {
+	case "mock:0":
+		return nil
+	case "":
+		return ErrInvalidAddress
+	}
+
+	c.readyMu.RLock()
+	cfg := c.config
+	c.readyMu.RUnlock()
+	cfg.dynamic = newCfg
+
+	conn, err := newClientConn(cfg)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return requireFeatures(ctx, beeremote.NewBeeRemoteClient(conn), required...)
+}
+
+// requireFeatures asks client for the remote's capabilities and checks each feature in required.
+// It maps the answer as RequireFeatures documents.
+func requireFeatures(ctx context.Context, client registry.RegistryGetter, required ...string) error {
+	remoteRegistry, _, err := registry.GetComponentRegistry(ctx, client)
+	if err != nil {
+		if errors.Is(err, registry.ErrCapabilitiesNotSupported) {
+			return fmt.Errorf("%w: %w (upgrade BeeGFS Remote)", ErrIncompatibleRemote, err)
+		}
+		return fmt.Errorf("unable to check BeeGFS Remote capabilities: %w", classifyRPCError(err))
+	}
+	for _, feature := range required {
+		if err := remoteRegistry.RequireFeature(feature); err != nil {
+			return fmt.Errorf("%w: %w (upgrade BeeGFS Remote)", ErrIncompatibleRemote, err)
+		}
+	}
+	return nil
 }
 
 // UpdateWorkRequest will forward the provided work result to BeeRemote. If the provider has not

@@ -31,13 +31,16 @@ const (
 	syncAuthFile         = "/etc/beegfs/.beegfs-sync-auth-file"
 )
 
-func (c *grpcProvider) init(cfg Config) error {
+// newClientConn opens a connection to the remote cfg names, with cfg's TLS and proxy settings. It
+// has no other side effects, so it can also open a short-lived connection to check a remote before
+// the node switches to it.
+func newClientConn(cfg Config) (*grpc.ClientConn, error) {
 	var cert []byte
 	var err error
 	if !cfg.TlsDisable && cfg.TlsCertFile != "" {
 		cert, err = os.ReadFile(cfg.TlsCertFile)
 		if err != nil {
-			return fmt.Errorf("reading certificate file failed: %w", err)
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
 	}
 	conn, err := beegrpc.NewClientConn(
@@ -48,7 +51,15 @@ func (c *grpcProvider) init(cfg Config) error {
 		beegrpc.WithProxy(cfg.UseProxy),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrUnableToConnect, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnableToConnect, err)
+	}
+	return conn, nil
+}
+
+func (c *grpcProvider) init(cfg Config) error {
+	conn, err := newClientConn(cfg)
+	if err != nil {
+		return err
 	}
 
 	c.conn = conn

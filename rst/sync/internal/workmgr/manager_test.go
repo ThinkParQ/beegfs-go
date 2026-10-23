@@ -3,6 +3,7 @@ package workmgr
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"sync"
 	"testing"
@@ -170,7 +171,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 	if err != nil {
 		return nil, deferredFuncs, err
 	}
-	err = mgr.UpdateConfig(config.rstConfigs, flex.BeeRemoteNode_builder{
+	err = mgr.UpdateConfig(context.Background(), config.rstConfigs, flex.BeeRemoteNode_builder{
 		Id:      "0",
 		Address: "mock:0",
 	}.Build(), "test-sync-node", rst.DefaultStateRoot)
@@ -207,14 +208,27 @@ func TestUpdateConfig(t *testing.T) {
 	}.Build()
 
 	// No change to the config should not return an error:
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig, "", rst.DefaultStateRoot))
+	assert.NoError(t, mgr.UpdateConfig(context.Background(), rstConfigs, equalBRConfig, "", rst.DefaultStateRoot))
 
 	// Updating BR config is allowed:
 	notEqualBRConfig := flex.BeeRemoteNode_builder{
 		Id:      "1",
 		Address: "mock:0",
 	}.Build()
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig, "", rst.DefaultStateRoot))
+	assert.NoError(t, mgr.UpdateConfig(context.Background(), rstConfigs, notEqualBRConfig, "", rst.DefaultStateRoot))
+
+	// A remote whose features can't be checked is refused, and the previous configuration is kept.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	unreachable := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	unreachableBRConfig := flex.BeeRemoteNode_builder{
+		Id:      "2",
+		Address: unreachable,
+	}.Build()
+	err = mgr.UpdateConfig(context.Background(), rstConfigs, unreachableBRConfig, "", rst.DefaultStateRoot)
+	assert.ErrorIs(t, err, beeremote.ErrUnavailable)
+	assert.True(t, mgr.beeRemoteClient.CompareConfig(notEqualBRConfig), "the previous remote configuration must be kept")
 }
 
 func TestSubmitWorkRequest(t *testing.T) {

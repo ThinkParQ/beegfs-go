@@ -16,6 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
@@ -27,6 +28,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
+
+// remoteCheckTimeout bounds the capability check UpdateConfig makes against the remote it is given.
+const remoteCheckTimeout = 10 * time.Second
+
+// requiredRemoteFeatures are the remote features this node can't run without. UpdateConfig refuses
+// a remote that lacks any of them. Remote checks this node's features the same way when it
+// connects, so a mismatch is refused from both sides.
+var requiredRemoteFeatures = []string{registry.FeatureRemoteLockRelease}
 
 var (
 	attrState    = attribute.Key("state")
@@ -278,9 +287,19 @@ func (m *Manager) IsReady() bool {
 // first restarting BeeSync. The same is true of stateRoot, which is where bulk operations persist
 // the state a builder job needs to resume.
 //
+// Before it changes anything, it checks that the remote beeRemoteConfig names supports every feature
+// in requiredRemoteFeatures. A remote that lacks one is refused, the previous configuration is
+// kept, and the node stays not ready. An error wrapping beeremote.ErrUnavailable means the remote
+// could not be reached to check, which is expected while remote starts.
+//
 // TODO: https://github.com/ThinkParQ/bee-remote/issues/29
 // Allow RST configuration to be updated dynamically.
-func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
+func (m *Manager) UpdateConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, remoteCheckTimeout)
+	defer cancel()
+	if err := m.beeRemoteClient.RequireFeatures(checkCtx, beeRemoteConfig, requiredRemoteFeatures...); err != nil {
+		return err
+	}
 
 	// A Remote predating the setting sends nothing, so fall back to the same default it would have
 	// used. Revalidating what Remote already validated costs nothing and keeps a malformed value
