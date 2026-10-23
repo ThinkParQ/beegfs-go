@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -440,5 +441,28 @@ func TestOutcomeRecordedBy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, tt.request.outcomeRecordedBy(tt.lastJob, tt.wantState, tt.mtime))
 		})
+	}
+}
+
+// TestNewCleansPath checks that New records a job under the cleaned path, so every spelling of a
+// path finds the same path entry.
+func TestNewCleansPath(t *testing.T) {
+	for given, want := range map[string]string{
+		"":                 "/",
+		"f":                "/f",
+		"/a/b":             "/a/b",
+		"/a/./b":           "/a/b",
+		"/a/x/../b":        "/a/b",
+		"//a//b/":          "/a/b",
+		"/../a":            "/a",
+		"a/b/c/../../b/./": "/a/b",
+	} {
+		job, err := New(beeremote.JobRequest_builder{
+			Path:                given,
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		}.Build())
+		require.NoError(t, err)
+		assert.Equal(t, want, job.GetRequest().GetPath(), "given %q", given)
 	}
 }

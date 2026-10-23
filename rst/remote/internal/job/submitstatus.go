@@ -17,7 +17,7 @@ import (
 //     they wrap: ErrJobBlockedByActiveJob before ErrJobNotAllowed, and ErrReservationMissing
 //     before ErrJobNotReserved.
 //   - Any other error maps to INVALID with ok false. The server returns those as gRPC errors.
-func SubmitStatus(err error) (status beeremote.SubmitJobResponse_ResponseStatus, ok bool) {
+func SubmitResponseStatus(err error) (status beeremote.SubmitJobResponse_ResponseStatus, ok bool) {
 	switch {
 	case err == nil:
 		return beeremote.SubmitJobResponse_CREATED, true

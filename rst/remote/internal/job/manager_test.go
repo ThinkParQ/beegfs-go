@@ -125,7 +125,7 @@ func TestManage(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be scheduled:
@@ -291,7 +291,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// Submit two jobs for testing:
@@ -595,7 +595,7 @@ func TestManageErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be cancelled if any work
@@ -745,7 +745,7 @@ func TestUpdateJobResults(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -936,7 +936,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -1069,7 +1069,7 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	builderRequest := beeremote.JobRequest_builder{
@@ -1211,7 +1211,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	baseTestJobRequest := &beeremote.JobRequest{
@@ -1577,7 +1577,7 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 			jobDuration: jobDuration,
 			jobActive:   jobActive,
 		},
-		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
+		releaseUnusedFileLockFn: func(string, map[string]*Job) (bool, error) { return false, nil },
 	}
 
 	cleanup := func() {
@@ -2084,7 +2084,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 			jobDuration: jobDuration,
 			jobActive:   jobActive,
 		},
-		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
+		releaseUnusedFileLockFn: func(string, map[string]*Job) (bool, error) { return false, nil },
 	}
 
 	cleanup := func() {
@@ -2938,7 +2938,7 @@ func newReservationManager(t *testing.T) *Manager {
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
-	jobManager := NewManager(log, Config{PathDBPath: tmpPathDBPath}, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, Config{PathDBPath: tmpPathDBPath}, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 	return jobManager
 }
@@ -3127,14 +3127,16 @@ func TestCancelReservedJob(t *testing.T) {
 
 	t.Run("bulk teardown cancels a reservation and releases its lock", func(t *testing.T) {
 		m := newReservationManager(t)
-		var lockReleases int
-		m.releaseUnusedFileLockFunc = func(string, map[string]*Job) error {
-			lockReleases++
-			return nil
-		}
 		reservedJobId := uuid.NewString()
 		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
 		require.NoError(t, err)
+		// Count only the releases the teardown makes. Submitting the reservation also attempts one,
+		// which the rule refuses because the reservation needs the lock.
+		var lockReleases int
+		m.releaseUnusedFileLockFn = func(string, map[string]*Job) (bool, error) {
+			lockReleases++
+			return true, nil
+		}
 
 		err = m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), reservedJobId)
 
@@ -3292,14 +3294,14 @@ func TestUpdateJobsReleasesLockBeforeCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	var lockReleases int
-	m.releaseUnusedFileLockFunc = func(releasePath string, jobs map[string]*Job) error {
+	m.releaseUnusedFileLockFn = func(releasePath string, jobs map[string]*Job) (bool, error) {
 		lockReleases++
 		assert.Equal(t, beeremote.Job_CANCELLED, jobs[reservedJobId].GetStatus().GetState(), "the release must see the update it follows")
 
 		committed, err := m.pathStore.GetEntry(releasePath)
 		require.NoError(t, err)
 		assert.Equal(t, beeremote.Job_RESERVED, committed.Value[reservedJobId].GetStatus().GetState(), "the release must run before the entry is committed")
-		return nil
+		return true, nil
 	}
 
 	_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
@@ -3498,7 +3500,7 @@ func TestSubmitStatus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.want.String(), func(t *testing.T) {
-			got, ok := SubmitStatus(tt.err)
+			got, ok := SubmitResponseStatus(tt.err)
 			require.True(t, ok)
 			assert.Equal(t, tt.want, got)
 
@@ -3507,13 +3509,13 @@ func TestSubmitStatus(t *testing.T) {
 				Status:       beeremote.Job_Status_builder{Message: "detail"}.Build(),
 				SubmitStatus: got,
 			}.Build()}
-			roundTrip, ok := SubmitStatus(storedSubmitError(job))
+			roundTrip, ok := SubmitResponseStatus(storedSubmitError(job))
 			require.True(t, ok)
 			assert.Equal(t, tt.want, roundTrip, "a replay must get the same status as the first request")
 		})
 	}
 
-	status, ok := SubmitStatus(errors.New("an unexpected failure"))
+	status, ok := SubmitResponseStatus(errors.New("an unexpected failure"))
 	assert.False(t, ok, "other errors are returned to the caller as gRPC errors")
 	assert.Equal(t, beeremote.SubmitJobResponse_INVALID, status)
 }
@@ -3538,4 +3540,219 @@ func TestSubmitJobRequestRejectsAlreadyExistsFromGeneration(t *testing.T) {
 	assert.NotErrorIs(t, err, rst.ErrJobAlreadyExists, "the answer must not reach the caller as EXISTING")
 	assert.ErrorContains(t, err, "this is a bug")
 	assert.Equal(t, beeremote.Job_FAILED, result.GetJob().GetStatus().GetState(), "the request is recorded so the failure is visible")
+}
+
+// recordLockReleases replaces the release function with one that applies the real rule but never
+// touches a file. Each call appends whether the rule kept the lock. The returned function reads
+// the decisions so far.
+func recordLockReleases(m *Manager) func() []bool {
+	var kept []bool
+	m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+		needed := anyJobNeedsFileLock(jobs)
+		kept = append(kept, needed)
+		return !needed, nil
+	}
+	return func() []bool { return kept }
+}
+
+// TestSubmitJobRequestReleasesAtEndOfCall checks that every submit ends with a release attempt
+// decided by the rule, so a refused or terminal request never leaves a lock no job needs.
+func TestSubmitJobRequestReleasesAtEndOfCall(t *testing.T) {
+	t.Run("a scheduled job keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		decisions := recordLockReleases(m)
+
+		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true}, decisions())
+	})
+
+	t.Run("a refused request releases the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		decisions := recordLockReleases(m)
+		request := newReservationRequest(false, "")
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "the file changed",
+		})
+
+		_, err := m.SubmitJobRequest(request, "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, []bool{false}, decisions(), "the CANCELLED job needs no lock")
+	})
+
+	t.Run("a refused claim releases the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		require.NoError(t, m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), jobId))
+		decisions := recordLockReleases(m)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+		assert.Equal(t, []bool{false}, decisions(), "no job needs the lock, so the claimer undoes unlocked")
+	})
+}
+
+// TestReleaseUnusedFileLock checks the release a client asks for when no job of its own was
+// recorded to hold the lock.
+func TestReleaseUnusedFileLock(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+
+	t.Run("a path with no entry is released and leaves no entry behind", func(t *testing.T) {
+		m := newReservationManager(t)
+		decisions := recordLockReleases(m)
+
+		released, err := m.ReleaseUnusedFileLock(path)
+
+		require.NoError(t, err)
+		assert.True(t, released)
+		assert.Equal(t, []bool{false}, decisions())
+		_, err = m.pathStore.GetEntry(path)
+		assert.ErrorIs(t, err, kvstore.ErrEntryNotInDB, "the entry created for the check must be removed")
+	})
+
+	t.Run("an unfinished job keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		recordLockReleases(m)
+
+		released, err := m.ReleaseUnusedFileLock(path)
+
+		require.NoError(t, err)
+		assert.False(t, released)
+	})
+
+	t.Run("another spelling of a path with an unfinished job keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		decisions := recordLockReleases(m)
+
+		for _, alias := range []string{"/test/./bulkfile", "/test/x/../bulkfile", "//test//bulkfile", "test/bulkfile"} {
+			released, err := m.ReleaseUnusedFileLock(alias)
+
+			require.NoError(t, err)
+			assert.False(t, released, "%s names the file the job holds the lock for", alias)
+		}
+		assert.Equal(t, []bool{true, true, true, true}, decisions())
+	})
+
+	t.Run("an existing entry with only finished jobs is kept", func(t *testing.T) {
+		m := newReservationManager(t)
+		m.config.MaxJobEntriesPerRST = 10
+		request := newReservationRequest(false, "")
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "the file changed",
+		})
+		_, err := m.SubmitJobRequest(request, "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		recordLockReleases(m)
+
+		released, err := m.ReleaseUnusedFileLock(path)
+
+		require.NoError(t, err)
+		assert.True(t, released)
+		entry, err := m.pathStore.GetEntry(path)
+		require.NoError(t, err)
+		assert.Len(t, entry.Value, 1, "an entry the call found must not be deleted")
+	})
+}
+
+// TestSubmitJobRequestRecordsFailedRelease checks that a release that fails at the end of a request
+// is recorded on a FAILED job of that request. The job shows the stuck lock, and cancelling it
+// retries the release.
+func TestSubmitJobRequestRecordsFailedRelease(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	// failReleases makes every release the rule allows fail, as an unreachable metadata server
+	// would.
+	failReleases := func(m *Manager) {
+		m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			if anyJobNeedsFileLock(jobs) {
+				return false, nil
+			}
+			return false, errors.New("metadata server unreachable")
+		}
+	}
+	requireFailedRelease := func(t *testing.T, m *Manager, result *beeremote.JobResult) {
+		t.Helper()
+		job := getReservationTestJob(t, m, result.GetJob().GetId())
+		assert.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+		assert.Contains(t, job.GetStatus().GetMessage(), "unable to release the content lock, cancel this job to try again")
+	}
+	refused := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "the file changed",
+		})
+		return request
+	}
+
+	t.Run("the job the request recorded is turned FAILED", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+
+		result, err := m.SubmitJobRequest(refused(jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition, "the answer is not changed")
+		require.Equal(t, jobId, result.GetJob().GetId())
+		requireFailedRelease(t, m, result)
+	})
+
+	t.Run("a request that recorded nothing gets a FAILED job under its ID", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+
+		result, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrReservationMissing)
+		require.Equal(t, jobId, result.GetJob().GetId())
+		requireFailedRelease(t, m, result)
+	})
+
+	t.Run("another request's job is left alone", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(refused(jobId), "")
+		require.Error(t, err)
+		failReleases(m)
+		other := refused(jobId)
+		other.SetRemoteStorageTarget(2)
+
+		result, err := m.SubmitJobRequest(other, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		require.NotEqual(t, jobId, result.GetJob().GetId(), "the failure must be recorded on a job of its own")
+		requireFailedRelease(t, m, result)
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+	})
+
+	t.Run("cancelling the FAILED job retries the release", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(refused(jobId), "")
+		require.Error(t, err)
+		decisions := recordLockReleases(m)
+
+		_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:     path,
+			JobId:    new(jobId),
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build())
+
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+	})
 }

@@ -90,6 +90,10 @@ type Provider interface {
 	// ErrJobAlreadyExists must not be returned. Remote answers it only from its own conflict check,
 	// together with the active job it found. Returned from here, it fails the request as a bug.
 	//
+	// A request that arrives without the lock must take it before making any file changes. However,
+	// it must never release a lock as other jobs may need it. The remote's job manager will handle
+	// releasing locks when they're no longer needed.
+	//
 	// availableWorkers is how many work requests the cluster can run concurrently as of this call,
 	// so implementations that split a job should use it to avoid generating far more requests than
 	// can ever run at once. A value of 0 or less means the count is unknown and imposes no bound.

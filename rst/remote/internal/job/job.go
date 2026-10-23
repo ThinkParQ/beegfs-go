@@ -343,6 +343,19 @@ func (j *Job) CompleteBuilder(ctx context.Context, client rst.Provider, abort bo
 	return client.CompleteJobBuilderRequest(ctx, j.Get(), workResults, cancelReservation, abort)
 }
 
+// cleanJobPath returns the key remote records a path's jobs under. It is an absolute path in the
+// mount with no ".", "..", repeated slashes or trailing slash. Each spelling of one path then finds
+// the same path entry. That matters most for the content lock: remote clears it only when no job in
+// the path entry needs it, so a spelling that found an empty entry would clear the lock under a
+// running job. Every lookup that can release the lock cleans its path with this function.
+//
+// The cleaning is lexical. It does not cover:
+//   - a ".." after a symlinked directory, which the kernel resolves against the link's target;
+//   - a path through a symlinked directory, or a hardlink, which names the same file differently.
+func cleanJobPath(path string) string {
+	return filepath.Clean("/" + path)
+}
+
 // New is the standard way to generate a Job from a JobRequest.
 func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 
@@ -361,10 +374,8 @@ func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 	// all paths (a potentially resource intensive request) they have to consciously specify "/" and
 	// BeeRemote clients can use "" as a check for invalid/no input when querying by path. This also
 	// clearly establishes all paths are specified as absolute paths (relative to the mount
-	// point/root directory).
-	if !filepath.IsAbs(jobRequest.GetPath()) {
-		jobRequest.SetPath("/" + jobRequest.GetPath())
-	}
+	// point/root directory). See cleanJobPath for why the path is also cleaned.
+	jobRequest.SetPath(cleanJobPath(jobRequest.GetPath()))
 
 	timestamp := timestamppb.Now()
 	newJob := &Job{

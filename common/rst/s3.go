@@ -139,9 +139,6 @@ type S3Client struct {
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
 	isListStartAfterKeySupportedMu sync.Mutex
-	// clearAccessFlags releases the content lock when GenerateWorkRequests fails. It is
-	// entry.ClearAccessFlags unless a test sets it with withClearAccessFlagsFn.
-	clearAccessFlags clearAccessFlagsFn
 }
 
 var _ Provider = &S3Client{}
@@ -161,15 +158,13 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 
 type s3ProviderOption func(*s3ProviderBuildCfg)
 type s3ProviderBuildCfg struct {
-	apiClient        func(base s3ApiClient) s3ApiClient
-	s3Options        []func(*s3.Options)
-	clearAccessFlags clearAccessFlagsFn
+	apiClient func(base s3ApiClient) s3ApiClient
+	s3Options []func(*s3.Options)
 }
 
 func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
 	return s3ProviderBuildCfg{
-		apiClient:        func(base s3ApiClient) s3ApiClient { return base },
-		clearAccessFlags: entry.ClearAccessFlags,
+		apiClient: func(base s3ApiClient) s3ApiClient { return base },
 	}
 }
 
@@ -177,16 +172,6 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 	return func(cfg *s3ProviderBuildCfg) {
 		if fn != nil {
 			cfg.apiClient = fn
-		}
-	}
-}
-
-// withClearAccessFlagsFn replaces entry.ClearAccessFlags, which needs a mounted BeeGFS. It is for
-// tests only. A nil fn keeps the default, as withS3ApiClient does, so the client never holds nil.
-func withClearAccessFlagsFn(fn clearAccessFlagsFn) s3ProviderOption {
-	return func(cfg *s3ProviderBuildCfg) {
-		if fn != nil {
-			cfg.clearAccessFlags = fn
 		}
 	}
 }
@@ -270,7 +255,6 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 		mountPoint:                     mountPoint,
 		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
 		isListStartAfterKeySupportedMu: sync.Mutex{},
-		clearAccessFlags:               buildCfg.clearAccessFlags,
 	}
 
 	for _, class := range s3Config.StorageClass {
@@ -412,7 +396,6 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastSyncedJob *
 	defer cancel()
 
 	var undoAppliedPlan undoFn
-	lockAcquired := IsFileLocked(sync.LockedInfo)
 	defer func() {
 		if err == nil {
 			return
@@ -423,13 +406,6 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastSyncedJob *
 				err = fmt.Errorf("%w: failed to undo changes: %w", err, undoErr)
 			} else {
 				err = fmt.Errorf("%w: %w", ErrJobFailedPrecondition, err)
-			}
-		}
-
-		if lockAcquired && !errors.Is(err, ErrJobAlreadyOffloaded) {
-			clearErr := r.clearAccessFlags(ctx, request.Path, beegfs.LockedContentAccessFlags)
-			if clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
-				err = errors.Join(err, fmt.Errorf("unable to write lock: %w", clearErr))
 			}
 		}
 	}()
@@ -468,7 +444,7 @@ func (r *S3Client) GenerateWorkRequests(workCtx context.Context, lastSyncedJob *
 	if !IsFileLocked(sync.LockedInfo) {
 		// The file access lock was not previously acquired which means the file state information
 		// has not been determine and by extension, work request in unprepared.
-		if _, undoAppliedPlan, lockAcquired, err = r.prepareJobRequest(ctx, request, sync); err != nil {
+		if _, undoAppliedPlan, err = r.prepareJobRequest(ctx, request, sync); err != nil {
 			return
 		}
 	}
@@ -505,12 +481,11 @@ func (r *S3Client) getRemotePathFromLastSyncedJob(lastSyncedJob *beeremote.Job) 
 // configuration if requested, and generates an external ID for the job. It is only called the
 // first time GenerateWorkRequests runs for a given job; callers should skip it once
 // sync.LockedInfo indicates the lock was already acquired by an earlier call.
-func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (planApplied bool, undoAppliedPlan undoFn, lockAcquired bool, err error) {
+func (r *S3Client) prepareJobRequest(ctx context.Context, request *beeremote.JobRequest, sync *flex.SyncJob) (planApplied bool, undoAppliedPlan undoFn, err error) {
 	cfg := r.getJobRequestCfg(request)
 
 	var pathState PathState
 	pathState, err = r.getLockedInfo(ctx, cfg)
-	lockAcquired = IsFileLocked(pathState.LockedInfo) && pathState.LockAcquired
 	if err != nil {
 		return
 	}
