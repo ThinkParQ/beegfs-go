@@ -22,6 +22,10 @@ on:
         description: "beegfs-go ref to build"
         required: true
         type: string
+      artifact-suffix:
+        description: "Suffix for the uploaded artifact names"
+        required: false
+        type: string
 
 permissions:
   # Deliberately read-only: this workflow must never be able to create a release.
@@ -30,6 +34,9 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    env:
+      # Uses inputs.artifact-suffix if set, otherwise <sha>_<run_number>.
+      ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix || format('{0}_{1}', github.sha, github.run_number) }}
     steps:
       - name: Set up build environment
         uses: $/.github/actions/setup-build
@@ -56,12 +63,12 @@ jobs:
       - name: Upload x86_64 packages
         uses: actions/upload-artifact@v4
         with:
-          name: x86_64_go_${{ github.sha }}_${{ github.run_number }}
+          name: x86_64_go_${{ env.ARTIFACT_SUFFIX }}
           path: dist/amd64
           retention-days: 7
       - name: Upload aarch64 packages
         uses: actions/upload-artifact@v4
         with:
-          name: aarch64_go_${{ github.sha }}_${{ github.run_number }}
+          name: aarch64_go_${{ env.ARTIFACT_SUFFIX }}
           path: dist/arm64
           retention-days: 7
