@@ -6,15 +6,16 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/user"
 	"strconv"
 
 	"github.com/dsnet/golib/unitconv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
+	"github.com/thinkparq/beegfs-go/common/build"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/pool"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/internal/nssresolver"
 	"github.com/thinkparq/beegfs-go/ctl/internal/util"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	poolBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/pool"
@@ -209,13 +210,15 @@ func runSetLimitsCmd(cmd *cobra.Command, args []string, cfg setLimitsCmdConfig) 
 	return quota.SetLimits(cmd.Context(), &pm.SetQuotaLimitsRequest{
 		Limits: limits,
 	})
-
 }
 
 type listLimitsConfig struct {
 	userIds  []string
 	groupIds []string
 	pool     beegfs.EntityId
+	users    []string
+	groups   []string
+	nss      bool
 }
 
 func newListLimitsCmd() *cobra.Command {
@@ -235,12 +238,19 @@ func newListLimitsCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.userIds, "uids", []string{}, "User ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
+	cmd.Flags().StringSliceVar(&cfg.users, "users", []string{}, "User names to query. Resolved to IDs and added to --uids.")
+	cmd.Flags().StringSliceVar(&cfg.groups, "groups", []string{}, "Group names to query. Resolved to IDs and added to --gids.")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
 
 func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 	req := pm.GetQuotaLimitsRequest_builder{}.Build()
+
+	if err := appendNames(&cfg.userIds, cfg.users, &cfg.groupIds, cfg.groups, cfg.nss); err != nil {
+		return err
+	}
 
 	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
 		cfg.userIds = append(cfg.userIds, "current")
@@ -268,6 +278,8 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		[]string{"name", "id", "type", "pool", "space", "inode"},
 		[]string{"name", "id", "type", "pool", "space", "inode"},
 	)
+	// Only the first failed name lookup is reported, the rows keep printing with numeric IDs.
+	warned := false
 
 	for {
 		resp, err := stream.Recv()
@@ -311,9 +323,10 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 			return err
 		}
 
-		name, err := idToName(*limits.QuotaId, idTypeStr)
-		if err != nil {
-			return err
+		name, err := nssresolver.IdToName(*limits.QuotaId, idTypeStr, cfg.nss)
+		if err != nil && !warned {
+			cmdfmt.Printf("WARNING: %s, printing IDs that did not resolve numerically.\n", err)
+			warned = true
 		}
 
 		if viper.GetBool(config.DebugKey) {
@@ -321,7 +334,6 @@ func runListLimitsCmd(cmd *cobra.Command, cfg listLimitsConfig) error {
 		} else {
 			tbl.AddItem(name, *limits.QuotaId, idTypeStr, pool.Alias.String(), space, inode)
 		}
-
 	}
 
 	tbl.PrintRemaining()
@@ -338,6 +350,9 @@ type listUsageConfig struct {
 	groupIds []string
 	pool     beegfs.EntityId
 	exceeded bool
+	users    []string
+	groups   []string
+	nss      bool
 }
 
 func newListUsageCmd() *cobra.Command {
@@ -358,12 +373,19 @@ func newListUsageCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&cfg.groupIds, "gids", []string{}, "Group ids to query. Can be either a single id, a range in the form `<min>-<max>`, a comma separated list of ids, 'current' or 'all'.")
 	cmd.Flags().Var(beegfs.NewEntityIdPFlag(&cfg.pool, 16, beegfs.Storage), "pool", "Storage pool to query")
 	cmd.Flags().BoolVar(&cfg.exceeded, listUsageExceededKey, false, "List only entries that exceed their limit.")
+	cmd.Flags().StringSliceVar(&cfg.users, "users", []string{}, "User names to query. Resolved to IDs and added to --uids.")
+	cmd.Flags().StringSliceVar(&cfg.groups, "groups", []string{}, "Group names to query. Resolved to IDs and added to --gids.")
+	addNSSFlag(cmd, &cfg.nss)
 
 	return cmd
 }
 
 func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 	req := pm.GetQuotaUsageRequest_builder{}.Build()
+
+	if err := appendNames(&cfg.userIds, cfg.users, &cfg.groupIds, cfg.groups, cfg.nss); err != nil {
+		return err
+	}
 
 	if len(cfg.userIds) == 0 && len(cfg.groupIds) == 0 {
 		cfg.userIds = append(cfg.userIds, "current")
@@ -399,6 +421,8 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 		[]string{"name", "id", "type", "pool", "space", "inode"},
 		[]string{"name", "id", "type", "pool", "space", "inode"},
 	)
+	// Only the first failed name lookup is reported, the rows keep printing with numeric IDs.
+	warned := false
 
 	for {
 		resp, err := stream.Recv()
@@ -484,9 +508,10 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 			return err
 		}
 
-		name, err := idToName(*entry.QuotaId, idTypeStr)
-		if err != nil {
-			return err
+		name, err := nssresolver.IdToName(*entry.QuotaId, idTypeStr, cfg.nss)
+		if err != nil && !warned {
+			cmdfmt.Printf("WARNING: %s, printing IDs that did not resolve numerically.\n", err)
+			warned = true
 		}
 
 		if viper.GetBool(config.DebugKey) {
@@ -507,7 +532,7 @@ func runListUsageCmd(cmd *cobra.Command, cfg listUsageConfig) error {
 }
 
 func parseLimit(s string) (*int64, error) {
-	var res = new(int64)
+	res := new(int64)
 	if s == "unlimited" {
 		*res = math.MaxInt64
 	} else if s == "reset" {
@@ -619,46 +644,79 @@ func parseGroupIdsInto(
 	return nil
 }
 
+// getCurrentGroupIds returns the real GID and supplementary groups of this process, as the kernel
+// holds them. Login resolved these through NSS, LDAP and SSSD groups included, so they are
+// complete even in a CGO_ENABLED=0 build, where os/user would only find groups in /etc/group. The
+// real rather than the effective GID, because the beegfs binary is installed setgid.
 func getCurrentGroupIds() ([]uint32, error) {
-	user, err := user.Current()
+	groups, err := os.Getgroups()
 	if err != nil {
 		return nil, err
 	}
 
-	gidStrs, err := user.GroupIds()
-	if err != nil {
-		return nil, err
-	}
-
-	gids := []uint32{}
-	for _, gid := range gidStrs {
-		gid, err := strconv.ParseUint(gid, 10, 32)
-		if err != nil {
-			return nil, err
+	gids := []uint32{uint32(os.Getgid())}
+	for _, gid := range groups {
+		// Whether the primary group is also listed as a supplementary one varies.
+		if uint32(gid) != gids[0] {
+			gids = append(gids, uint32(gid))
 		}
-		gids = append(gids, uint32(gid))
 	}
 
 	return gids, nil
 }
 
-// converts a user or group ID to its corresponding username or groupname
-// Fetched from the operating system's user and group database. If not found returns the ID as string.
-func idToName(id uint32, idType string) (string, error) {
-	switch idType {
-	case "user":
-		userName, err := user.LookupId(strconv.Itoa(int(id)))
-		if err == nil {
-			return userName.Username, nil
-		}
-	case "group":
-		groupName, err := user.LookupGroupId(strconv.Itoa(int(id)))
-		if err == nil {
-			return groupName.Name, nil
-		}
-	default:
-		return "", fmt.Errorf("invalid idType: %s", idType)
+const nssFlag = "nss"
+
+// addNSSFlag defines nssFlag for the commands that resolve IDs to names.
+func addNSSFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVar(target, nssFlag, false, `Resolve UIDs and GIDs using the system's name service (NSS), which includes LDAP, SSSD and AD.
+	By default only local /etc/passwd and /etc/group entries are resolved and other IDs are printed numerically.`)
+	if build.CGO {
+		// A CGO enabled build already resolves through NSS in os/user, so the flag does nothing.
+		// It stays defined rather than omitted so command lines that pass it keep working against
+		// both builds.
+		cmd.Flags().MarkHidden(nssFlag)
+	}
+}
+
+// appendNames resolves the --users and --groups values and appends them to the numeric ID lists,
+// so that parseUserIdsInto and parseGroupIdsInto need no knowledge of names. It must run before
+// the callers default an empty selection to "current".
+func appendNames(userIds *[]string, users []string, groupIds *[]string, groups []string, nss bool) error {
+	if err := rejectUnmergeableIds("uids", *userIds, users); err != nil {
+		return err
+	}
+	if err := rejectUnmergeableIds("gids", *groupIds, groups); err != nil {
+		return err
 	}
 
-	return fmt.Sprintf("%d", id), nil
+	ids, err := nssresolver.NamesToIds(users, "user", nss)
+	if err != nil {
+		return err
+	}
+	*userIds = append(*userIds, ids...)
+
+	ids, err = nssresolver.NamesToIds(groups, "group", nss)
+	if err != nil {
+		return err
+	}
+	*groupIds = append(*groupIds, ids...)
+
+	return nil
+}
+
+// rejectUnmergeableIds errors when names are combined with anything but plain numeric IDs.
+// Appending resolved names makes parseUserIdsInto take its list branch, which accepts only plain
+// IDs, so keywords like "all" or "current" and ranges like 1000-2000 would otherwise fail with a
+// confusing message further down.
+func rejectUnmergeableIds(idFlag string, ids []string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		if _, err := strconv.ParseUint(id, 10, 32); err != nil {
+			return fmt.Errorf("--%s %q cannot be combined with names", idFlag, id)
+		}
+	}
+	return nil
 }
