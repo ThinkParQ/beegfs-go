@@ -15,7 +15,6 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	backend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/health"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/license"
-	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/stats"
 	tgtBackend "github.com/thinkparq/beegfs-go/ctl/pkg/ctl/target"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -24,6 +23,8 @@ import (
 const (
 	watchFlag              = "watch"
 	ignoreFailedChecksFlag = "ignore-failed-checks"
+	queuedReqsDegradedFlag = "queued-requests-degraded"
+	queuedReqsCriticalFlag = "queued-requests-critical"
 )
 
 var statusIconMap = map[backend.Status]struct {
@@ -57,6 +58,18 @@ type checkCfg struct {
 	ignoreFailedChecks      bool
 	connectionTimeout       time.Duration
 	forceConnections        bool
+	queuedReqsDegraded      uint32
+	queuedReqsCritical      uint32
+}
+
+// validate checks flag values Cobra cannot check on its own. It only covers flags the frontend
+// uses. Collect checks the flags it is passed, such as the queued request thresholds.
+func (c checkCfg) validate() error {
+	// time.NewTicker panics on an interval that is not positive.
+	if c.watchInterval <= 0 {
+		return fmt.Errorf("--%s must be greater than 0 (got %s)", watchFlag, c.watchInterval)
+	}
+	return nil
 }
 
 func newCheckCmd() *cobra.Command {
@@ -78,6 +91,10 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outputType := config.OutputType(viper.GetString(config.OutputKey))
+
+			if err := frontendCfg.validate(); err != nil {
+				return err
+			}
 
 			if !cmd.Flags().Changed(watchFlag) {
 				return runHealthCheck(cmd.Context(), args, frontendCfg, outputType)
@@ -121,8 +138,10 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 	cmd.Flags().BoolVar(&frontendCfg.printNetworkConnections, "print-net", false, "By default network connections are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.printDF, "print-df", false, "By default available disk capacity and inodes are only printed whenever an issue is detected. Optionally they can always be printed.")
 	cmd.Flags().BoolVar(&frontendCfg.noHints, "no-hints", false, "Disable printing additional hints.")
-	cmd.Flags().DurationVar(&frontendCfg.watchInterval, watchFlag, 1*time.Second, "Periodically re-run the health check until cancelled with Ctrl+C or a check fails. Set --ignore-failed-checks to continue running event if checks are failing.")
+	cmd.Flags().DurationVar(&frontendCfg.watchInterval, watchFlag, 1*time.Second, "Periodically re-run the health check until cancelled with Ctrl+C or a check fails. Set --ignore-failed-checks to continue running even if checks are failing.")
 	cmd.Flags().BoolVar(&frontendCfg.ignoreFailedChecks, ignoreFailedChecksFlag, false, "Don't return a non-zero exit code when checks fail.")
+	cmd.Flags().Uint32Var(&frontendCfg.queuedReqsDegraded, queuedReqsDegradedFlag, backend.DefaultQueuedReqsDegradedThreshold, fmt.Sprintf("Number of queued requests a metadata or storage node must exceed to be considered degraded by the busy nodes check. Must be less than --%s.", queuedReqsCriticalFlag))
+	cmd.Flags().Uint32Var(&frontendCfg.queuedReqsCritical, queuedReqsCriticalFlag, backend.DefaultQueuedReqsCriticalThreshold, "Number of queued requests a metadata or storage node must exceed to be considered critical by the busy nodes check.")
 
 	return cmd
 }
@@ -131,9 +150,11 @@ Optionally specify one or more <mount-paths> to limit the connection checks.
 // output (JSON/NDJSON) goes to stdout; operational messages always go to stderr.
 func runHealthCheck(ctx context.Context, filterByMounts []string, cfg checkCfg, outputType config.OutputType) error {
 	report, err := backend.Collect(ctx, backend.CollectConfig{
-		ConnectionTimeout: cfg.connectionTimeout,
-		ForceConnections:  cfg.forceConnections,
-		FilterByMounts:    filterByMounts,
+		ConnectionTimeout:           cfg.connectionTimeout,
+		ForceConnections:            cfg.forceConnections,
+		FilterByMounts:              filterByMounts,
+		QueuedReqsDegradedThreshold: cfg.queuedReqsDegraded,
+		QueuedReqsCriticalThreshold: cfg.queuedReqsCritical,
 	})
 	if err != nil {
 		return err
@@ -190,7 +211,7 @@ func renderHuman(ctx context.Context, report *backend.Report, cfg checkCfg) {
 					anyBusy = true
 					fmt.Print("\n\n")
 					if bd, ok := c.Detail.(backend.BusyDetail); ok {
-						printBusyNodes(bd.Raw)
+						printBusyNodes(bd)
 					}
 				}
 			}
@@ -252,7 +273,7 @@ func emitConnNotices(report *backend.Report, cfg checkCfg) {
 	if report.ConnCheckErr != nil {
 		cmdfmt.Printf("Error establishing new connections, further connection checks may be incomplete or skipped: %s (ignoring)\n", report.ConnCheckErr)
 		if !cfg.noHints {
-			cmdfmt.Printf("HINT: Try increasing the '--%s' flag or setting '--%s=false` to skip establishing new connections.\n\n", connectionTimeoutFlag, forceConnectionsFlag)
+			cmdfmt.Printf("HINT: Try increasing the '--%s' flag or setting '--%s=false' to skip establishing new connections.\n\n", connectionTimeoutFlag, forceConnectionsFlag)
 		}
 	}
 	results := connectionClients(report)
@@ -276,12 +297,18 @@ func connectionClients(report *backend.Report) []backend.ClientConn {
 	return nil
 }
 
-func printBusyNodes(nodes []stats.NodeStats) {
+// printBusyNodes prints the nodes whose stats could not be read and the nodes that are at least
+// degraded, using the same threshold the check itself was evaluated against.
+func printBusyNodes(detail backend.BusyDetail) {
+	nodes := detail.Raw
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].Node.Id.NumId < nodes[j].Node.Id.NumId
 	})
 	for _, n := range nodes {
-		if n.Stats.QueuedRequests > backend.QueuedReqsDegradedThreshold {
+		switch {
+		case n.Err != nil:
+			fmt.Printf("* %s [%s] stats could not be read: %s\n", n.Node.Alias, n.Node.Id, n.Err)
+		case n.Stats.QueuedRequests > detail.DegradedThreshold:
 			fmt.Printf("* %s [%s] has %d queued requests\n", n.Node.Alias, n.Node.Id, n.Stats.QueuedRequests)
 		}
 	}

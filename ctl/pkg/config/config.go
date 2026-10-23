@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +39,11 @@ const (
 	BeeRemoteAddrKey = "remote-addr"
 	// A BeeGFS mount point on the local file system
 	BeeGFSMountPointKey = "mount"
+	// Use a mount even when CTL cannot verify which filesystem it belongs to, for example where CTL
+	// cannot read /proc/fs/beegfs. Without it, such a mount is an error when it selects the
+	// filesystem to manage. It never allows a mount that belongs to another filesystem than the
+	// management node serves.
+	AllowUnverifiedMountKey = "allow-unverified-mount"
 	// The timeout for a single connection attempt
 	ConnTimeoutKey = "conn-timeout"
 	// Disable BeeMsg and gRPC client to server authentication
@@ -96,13 +100,6 @@ const (
 	BeeGFSMountPointNone  = "none"
 	BeeGFSMgmtdAddrAuto   = "auto"
 	BeeGFSAuthDefaultPath = "/etc/beegfs/conn.auth"
-)
-
-// BeeGFS procfs configuration keys.
-const (
-	procfsMgmtdHost = "sysMgmtdHost"
-	procfsMgmtdGrpc = "connMgmtdGrpcPort"
-	procfsCfgFile   = "cfgFile"
 )
 
 // OutputType is used to control what type of structured output should be printed.
@@ -242,14 +239,43 @@ func InitViperFromExternal(cfg GlobalConfig) error {
 	return nil
 }
 
-// The global config singleton
+// globalMount is the BeeGFS mount, or the unmounted filesystem for --mount "none". BeeGFSClient()
+// sets it once, and it is read-only afterwards. It has no lock, like mgmtClient: commands resolve
+// it before they start parallel work, for example on the goroutine that walks the paths.
 var globalMount filesystem.Provider
 
 var mgmtClient *beegrpc.Mgmtd
 
+// mgmtClientFsUUID is the filesystem UUID that ManagementClient() checked mgmtClient serves. It is
+// empty when nothing was checked, for example for an explicit --mgmtd-addr without --mount. Only
+// ManagementClient() sets it, at the same time as mgmtClient, and it is read-only afterwards. So it
+// needs no more synchronization than mgmtClient itself.
+var mgmtClientFsUUID string
+
 // Try to establish a connection to the managements gRPC service. This also handles any automatic
 // configuration such as determining the mgmtd address and authentication secret if those were not
 // explicitly configured.
+//
+// It applies these rules, in this order. mgmtdaddr.go explains the client facts behind them.
+//   - An explicit --mgmtd-addr is dialed as it is.
+//   - An automatic --mgmtd-addr comes from the local clients.
+//   - A mount selects the filesystem: --mount, or else the mount that BeeGFSClient() already
+//     resolved from a path argument. Only the client that serves it counts, matched by its mount
+//     ID. This is how one filesystem is picked when several are mounted. A --mount that is neither
+//     "none" nor an absolute path is an error.
+//   - The client of a selecting mount must be found and registered, with any --mgmtd-addr.
+//     Otherwise it is an error. The hidden --allow-unverified-mount flag lets an explicit
+//     --mgmtd-addr skip this, for places where CTL cannot read /proc/fs/beegfs.
+//   - Without --mount or a resolved path, an automatic --mgmtd-addr takes the filesystem from the
+//     current directory, when a registered client serves the mount that holds it. This is best
+//     effort, so a directory elsewhere changes nothing. An explicit --mgmtd-addr ignores the
+//     directory, so a user can manage another filesystem from inside a mount.
+//   - Without a mount, an automatic --mgmtd-addr needs the registered clients to belong to one
+//     filesystem. The first registered client selects it and supplies the address, so the user
+//     sets --mgmtd-addr to use another.
+//   - When a filesystem was selected, the management node must serve it. An auto-configured
+//     address that reaches another filesystem is replaced by the kernel address.
+//   - BeeGFSClient() applies the same check to a mount it resolves after this function ran.
 func ManagementClient() (*beegrpc.Mgmtd, error) {
 	if mgmtClient != nil {
 		return mgmtClient, nil
@@ -266,107 +292,105 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 		}
 	}
 
-	var authSecret []byte
-	// authFileFromAutoClient is used to auto configure the conn auth file when the management
-	// address is auto configured from a client mount and the default auth file does not exist.
-	var authFileFromAutoClient string
-
 	mgmtdAddr := viper.GetString(ManagementAddrKey)
-	if mgmtdAddr == BeeGFSMgmtdAddrAuto {
+	autoConfigured := mgmtdAddr == BeeGFSMgmtdAddrAuto
+
+	// mount optionally selects the filesystem to manage: --mount, or else the mount of a path
+	// argument, see selectedMount(). When set, only the client that serves it counts, which is how
+	// one filesystem is picked when several are mounted. When empty, nothing selects one. Both
+	// sources name the filesystem the user works in, so both are checked the same way, whatever
+	// --mgmtd-addr is. selectedBy names the source in messages.
+	mount, selectedBy, err := selectedMount()
+	if err != nil {
+		return nil, err
+	}
+
+	// The local clients are needed to auto-configure the address, and to learn which filesystem
+	// the mount selects.
+	var clients []procfs.Client
+	if autoConfigured || mount != "" {
+		clientsCfg := procfs.GetBeeGFSClientsConfig{}
+		if mount != "" {
+			// Only the client that serves the mount, even when other filesystems are mounted.
+			clientsCfg.FilterByMounts = []string{mount}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration(ConnTimeoutKey))
-		defer cancel()
-		clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{}, log)
+		clients, err = procfs.GetBeeGFSClients(ctx, clientsCfg, log)
+		cancel()
+		// GetBeeGFSClients() only fails when asked to force connections, which this call does
+		// not. Unreadable procfs shows up as missing clients, which the checks below handle.
 		if err != nil {
 			return nil, err
 		}
-		if len(clients) == 0 {
-			return nil, fmt.Errorf("unable to auto-configure the management address: BeeGFS does not appear to be mounted, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage", ManagementAddrKey)
-		}
-		for _, c := range clients {
-			sysMgmtdHostFromProcfs, ok := c.Config[procfsMgmtdHost]
-			if !ok {
-				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s, manually specify --%s <hostname|ip>:<grpc-port> for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdHost, ManagementAddrKey)
-			}
-
-			// The client mount script handles DNS resolution if the sysMgmtdAddr in the config file
-			// is a hostname so the mgmtd address in procfs is always an IP. This can cause problems
-			// if the mgmtd's TLS certificate is only valid for the hostname and not the IP address.
-			// This attempts to extract the user configured sysMgmtdAddr from the client config used
-			// for this client mount, and falls back on the procfs IP to maintain legacy behavior in
-			// case the client config file is not readable from the client, or is malformed.
-			sysMgmtdHostFromCfgFile := ""
-			cfgFilePath, ok := c.Config[procfsCfgFile]
-			if !ok {
-				log.Debug("unable to get client config file path from procfs, ignoring and falling back to use the management IP address from procfs")
-			} else {
-				if f, err := os.Open(cfgFilePath); err == nil {
-					defer f.Close()
-					scanner := bufio.NewScanner(f)
-					found := false
-					for scanner.Scan() {
-						line := strings.TrimSpace(scanner.Text())
-						// Ignore comments and empty lines
-						if line == "" || strings.HasPrefix(line, "#") {
-							continue
-						}
-						if strings.HasPrefix(line, procfsMgmtdHost) {
-							parts := strings.SplitN(line, "=", 2)
-							if len(parts) != 2 {
-								continue
-							}
-							sysMgmtdHostFromCfgFile = strings.TrimSpace(parts[1])
-							found = true
-						}
-					}
-					if !found {
-						log.Debug(fmt.Sprintf("client config file does not appear to contain a %s line, ignoring and falling back to use the management IP address from procfs", procfsMgmtdHost), zap.Any(procfsCfgFile, cfgFilePath))
-					}
-				} else {
-					log.Debug("unable to open client config file from procfs, ignoring and falling back to use the management IP address from procfs", zap.Any(procfsCfgFile, cfgFilePath), zap.Error(err))
-				}
-			}
-			connMgmtdGrpcPort, ok := c.Config[procfsMgmtdGrpc]
-			if !ok {
-				return nil, fmt.Errorf("unable to auto-configure the management address: configuration at %s/config does not appear to contain a %s , manually specify --%s <hostname|ip>:<grpc-port>for the file system to manage (this is likely a bug)", c.ProcDir, procfsMgmtdGrpc, ManagementAddrKey)
-			}
-
-			selectedMgmtdAddr := net.JoinHostPort(sysMgmtdHostFromProcfs, connMgmtdGrpcPort)
-			if sysMgmtdHostFromCfgFile != "" {
-				selectedMgmtdAddr = net.JoinHostPort(sysMgmtdHostFromCfgFile, connMgmtdGrpcPort)
-			}
-			log.Debug("found client mount point",
-				zap.String("selectedMgmtdAddr", selectedMgmtdAddr),
-				zap.String("mountPoint", c.Mount.Path),
-				zap.String("procfsDir", c.ProcDir),
-				zap.String("sysMgmtdHostFromProcfs", sysMgmtdHostFromProcfs),
-				zap.String(procfsCfgFile, cfgFilePath),
-				zap.String("sysMgmtdHostFromCfgFile", sysMgmtdHostFromCfgFile),
-			)
-			if mgmtdAddr == BeeGFSMgmtdAddrAuto {
-				mgmtdAddr = selectedMgmtdAddr
-			} else if len(clients) > 1 {
-				// Generally CTL shouldn't care if the same BeeGFS is mounted multiple times. The
-				// only time it might matter is if someone tries to run a command against multiple
-				// paths in different BeeGFS mount points. But that needs to be handled elsewhere
-				// anyway since users can always manually configure the mgmtd and do the same thing.
-				if mgmtdAddr != selectedMgmtdAddr {
-					// Note the mgmtd address extracted from procfs should always be an IP address
-					// because when the client is mounted it handles resolving any hostnames first.
-					// However if the mgmtd service was available to this machine from multiple IPs
-					// this would not work. We could use the UUID here instead, but then we'd need
-					// to decide which hostname/port to use. Better for now to just ask the user.
-					return nil, fmt.Errorf("unable to auto-configure the management address: multiple client mount points with different %s:%s configurations were found, manually specify --%s for the file system to manage", procfsMgmtdHost, procfsMgmtdGrpc, ManagementAddrKey)
-				}
-			}
-			if connAuthFile, ok := c.Config["connAuthFile"]; ok {
-				authFileFromAutoClient = connAuthFile
-			}
-		}
-		log.Debug("attempting to use auto configured management address", zap.String("mgmtdAddr", mgmtdAddr))
-	} else {
-		log.Debug("attempting to use user defined management address", zap.String("mgmtdAddr", mgmtdAddr))
 	}
 
+	// An automatic address with nothing selecting a mount may take the filesystem from the current
+	// directory. Only that client then counts. When the directory selects nothing, all clients
+	// count as before. --mount none is set but selects no mount, so it is excluded explicitly.
+	if autoConfigured && mount == "" && !viper.IsSet(BeeGFSMountPointKey) {
+		if c, ok := registeredClientOfWorkingDir(clients, log); ok {
+			clients = []procfs.Client{c}
+		}
+	}
+
+	// selected is the client that selects the filesystem to manage. wantFsUUID is its UUID, which
+	// the management node must serve. Both stay empty only for an explicit address that no mount
+	// checks, and then the address is used as it is.
+	var selected procfs.Client
+	var wantFsUUID string
+	// mountedAt names the selected client, see describeMount(). It is only used in messages.
+	var mountedAt string
+	// kernelAddr and cfgFile are only set when the address was auto-configured.
+	var kernelAddr, cfgFile string
+	// autoAuthFile is the connAuthFile of the client an auto-configured address came from.
+	var autoAuthFile string
+
+	// The clients must select one registered client of one filesystem, see registeredClientOf().
+	// Only an explicit address without a mount skips this, because then nothing selects a
+	// filesystem.
+	if autoConfigured || mount != "" {
+		selected, err = registeredClientOf(clients)
+		switch {
+		case err == nil:
+			wantFsUUID = selected.FsUUID
+			mountedAt = describeMount(selected)
+		case autoConfigured:
+			// An automatic address comes from the selected client, so without one there is no
+			// address to use. allow-unverified-mount cannot help here.
+			return nil, fmt.Errorf("unable to auto-configure the management address: %s", whyNoClientSelected(err, selectedBy, clients, log))
+		case !viper.GetBool(AllowUnverifiedMountKey):
+			// An explicit address with a mount that cannot be verified. Using it anyway would be
+			// unsafe: requests about entries in the mount could go to another filesystem, and
+			// EntryIDs such as "root" exist in every filesystem.
+			return nil, fmt.Errorf("%s (hint: if CTL cannot read /proc/fs/beegfs where it runs, set --%s to use --%s %s without checking that it serves this filesystem)", whyNoClientSelected(err, selectedBy, clients, log), AllowUnverifiedMountKey, ManagementAddrKey, mgmtdAddr)
+		default:
+			// The user accepted an explicit address that cannot be verified against the mount.
+			log.Warn("unable to verify the filesystem of the mount, using the management address unchecked because allow-unverified-mount is set", zap.String("mgmtdAddr", mgmtdAddr), zap.String("reason", whyNoClientSelected(err, selectedBy, clients, log)))
+		}
+	}
+
+	if autoConfigured {
+		// The first registered client, in procfs order, supplies the address. A user who wants
+		// another address sets --mgmtd-addr. The config file's sysMgmtdHost is preferred over the
+		// kernel address, because TLS may only accept the hostname. describeMounts() lists
+		// addresses with the same preference, so keep it in sync when this rule changes.
+		host, port, err := kernelMgmtdAddr(selected)
+		if err != nil {
+			return nil, err
+		}
+		kernelAddr = net.JoinHostPort(host, port)
+		mgmtdAddr = kernelAddr
+		cfgFile = selected.Config[procfsCfgFile]
+		if cfgFileHost := mgmtdHostFromCfgFile(cfgFile, log); cfgFileHost != "" {
+			mgmtdAddr = net.JoinHostPort(cfgFileHost, port)
+		}
+		autoAuthFile = selected.Config[procfsAuthFile]
+		log.Debug("attempting to use auto configured management address", zap.String("mgmtdAddr", mgmtdAddr), zap.String("kernelAddr", kernelAddr), zap.String("fsUUID", wantFsUUID), zap.String("mountPoint", selected.Mount.Path), zap.String("procfsDir", selected.ProcDir), zap.String(procfsCfgFile, cfgFile))
+	} else {
+		log.Debug("attempting to use user defined management address", zap.String("mgmtdAddr", mgmtdAddr), zap.String("fsUUID", wantFsUUID))
+	}
+
+	var authSecret []byte
 	if !viper.GetBool(AuthDisableKey) {
 		authFilePath := viper.GetString(AuthFileKey)
 		if authSecret, err = os.ReadFile(authFilePath); err != nil {
@@ -376,29 +400,72 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 			if !errors.Is(err, os.ErrNotExist) {
 				return nil, fmt.Errorf("couldn't read default auth file at %q: %w", authFilePath, err)
 			}
-			if authFileFromAutoClient == "" {
+			if autoAuthFile == "" {
 				return nil, fmt.Errorf("couldn't read default auth file at %q: %w, and no auto-configured client auth file was found", authFilePath, err)
 			}
-			log.Debug("default auth file path does not exist but the management address was auto-configured, attempting to also auto-configure the auth file", zap.String("authFileFromAutoClient", authFileFromAutoClient))
+			log.Debug("default auth file path does not exist but the management address was auto-configured, attempting to also auto-configure the auth file", zap.String("authFileFromAutoClient", autoAuthFile))
 			var autoErr error
-			if authSecret, autoErr = os.ReadFile(authFileFromAutoClient); autoErr != nil {
+			if authSecret, autoErr = os.ReadFile(autoAuthFile); autoErr != nil {
 				return nil, fmt.Errorf("default auth file does not exist and falling back to auto-configuring the auth file from the client failed due to an error reading the client's auth file at %q: %w",
-					authFileFromAutoClient, autoErr)
+					autoAuthFile, autoErr)
 			}
-			viper.Set(AuthFileKey, authFileFromAutoClient)
+			viper.Set(AuthFileKey, autoAuthFile)
 		}
 	}
 
-	mgmtClient, err = beegrpc.NewMgmtd(
-		mgmtdAddr,
-		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),
-		beegrpc.WithTLSDisableVerification(viper.GetBool(TlsDisableVerificationKey)),
-		beegrpc.WithTLSCaCert(cert),
-		beegrpc.WithAuthSecret(authSecret),
-		beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
-	)
+	if wantFsUUID == "" {
+		mgmtClient, err = newMgmtdClient(mgmtdAddr, cert, authSecret)
+		return mgmtClient, err
+	}
 
-	return mgmtClient, err
+	// A filesystem was selected, so the management node must serve it. ManagementClient() takes
+	// no context, so the caller cannot cancel this check. CTL sets no deadline on gRPC calls, so the
+	// check has none either. Passing a context into ManagementClient() would let the caller cancel.
+	ctx := context.Background()
+	mgmtd, servedFsUUID, err := connectAndGetFsUUID(ctx, mgmtdAddr, cert, authSecret)
+	if err != nil {
+		// An error reaching the node is returned, and the kernel address is not tried. That keeps
+		// the behavior from before the check. With a certificate that only lists the hostname, the
+		// IP would fail as well and hide this error.
+		return nil, fmt.Errorf("connecting to the management node at %s: %w", mgmtdAddr, err)
+	}
+	if servedFsUUID == wantFsUUID {
+		mgmtClient, mgmtClientFsUUID = mgmtd, wantFsUUID
+		return mgmtClient, nil
+	}
+	mgmtd.Cleanup()
+
+	// An explicit address only reaches this point when a mount selected a filesystem, and the
+	// address serves another one. The mount is --mount or the mount of a path argument, and
+	// selectedBy says which, so the message points at the right input.
+	//
+	// The error is returned here, and the fallback below is not tried. The user chose this address,
+	// so CTL must not swap it for another one. The fallback only repairs an auto-configured address
+	// whose config file host no longer matches the mount.
+	if !autoConfigured {
+		return nil, fmt.Errorf("--%s %s is the management node of filesystem %s, but %s is filesystem %s (hint: specify the management node of the filesystem mounted at %s, or set --%s to %q to use the one the mounted client is using)", ManagementAddrKey, mgmtdAddr, servedFsUUID, selectedBy, wantFsUUID, mountedAt, ManagementAddrKey, BeeGFSMgmtdAddrAuto)
+	}
+
+	// The config file's sysMgmtdHost reaches the management node of another filesystem. The file
+	// probably changed after the mount, so fall back to the kernel address.
+	if mgmtdAddr != kernelAddr {
+		log.Warn("the sysMgmtdHost in the client config file is not the management node the mounted client is using, falling back to the management IP the client kernel module is using", zap.String(procfsCfgFile, cfgFile), zap.String("cfgFileAddr", mgmtdAddr), zap.String("cfgFileAddrFsUUID", servedFsUUID), zap.String("kernelAddr", kernelAddr), zap.String("fsUUID", wantFsUUID))
+		cfgFileAddr, cfgFileFsUUID := mgmtdAddr, servedFsUUID
+		mgmtd, servedFsUUID, err = connectAndGetFsUUID(ctx, kernelAddr, cert, authSecret)
+		if err != nil {
+			return nil, fmt.Errorf("the %s in %s (%s) is the management node of filesystem %s, not of the filesystem mounted at %s (%s). The config file was likely changed after the filesystem was mounted, so CTL fell back to the management IP the client kernel module is using (%s, with the gRPC port the management node reported), but that failed: %w (hint: the management node may not accept gRPC connections on that IP, for example if its TLS certificate only lists a hostname. Set %s in %s to the management node of the mounted filesystem, or manually specify --%s <hostname|ip>:<grpc-port>)",
+				procfsMgmtdHost, cfgFile, cfgFileAddr, cfgFileFsUUID, mountedAt, wantFsUUID, kernelAddr, err, procfsMgmtdHost, cfgFile, ManagementAddrKey)
+		}
+		if servedFsUUID == wantFsUUID {
+			mgmtClient, mgmtClientFsUUID = mgmtd, wantFsUUID
+			return mgmtClient, nil
+		}
+		mgmtd.Cleanup()
+	}
+
+	// The kernel address serves a different filesystem than the client registered with.
+	return nil, fmt.Errorf("the management node at %s serves filesystem %s, but the client mounted at %s registered with filesystem %s at that IP (this should never happen. It suggests another management service answers gRPC on that IP and port, or the management service this client registered with was reinitialized or replaced without remounting the client)", kernelAddr, servedFsUUID, mountedAt, wantFsUUID)
+
 }
 
 var beeRemoteClient beeremote.BeeRemoteClient
@@ -508,8 +575,26 @@ func beeRemoteRegistryClient() (*registry.RegistryGetter, error) {
 //     Note absolute paths only work if they are inside the same mount point as BeeGFSMountPoint.
 //   - If BeeGFSMountPoint is set to "none", then all paths are considered relative to the BeeGFS root directory.
 //   - If BeeGFSMountPoint is NOT specified, users can only use relative paths when the cwd is somewhere in BeeGFS.
+//
+// IMPORTANT: A command that takes path arguments should call this before anything contacts the
+// management node, so path(s) specified as command arguments can automatically select the
+// filesystem. The management node is contacted by ManagementClient(), but callers often call it
+// indirectly using NodeStore(), BeeRemoteClient(), util.GetMappings(), etc.
+//
+// Without a resolved mount, --mgmtd-addr auto fails when several filesystems are mounted. A backend
+// that takes a util.PathInputMethod calls its ResolveMountFromFirstPath() method instead of this
+// function. When authoring or updating operations that use BeeGFSClient() make sure you call this
+// or ResolveMountFromFirstPath() before calling anything else that might contact the management.
+//
+// If ManagementClient() already ran, a resolved BeeGFS mount must belong to the filesystem that
+// management node serves. ManagementClient() could not check a mount it did not know about yet. The
+// check is as strict as ManagementClient() check of a mount, including the --allow-unverified-mount
+// escape hatch if the user specified the mgmtd-addr manually.
 func BeeGFSClient(path string) (filesystem.Provider, error) {
 	if globalMount == nil {
+		var resolved filesystem.Provider
+		// selectedBy names the mount in messages, as ManagementClient() does.
+		var selectedBy string
 		var err error
 		if viper.IsSet(BeeGFSMountPointKey) {
 			mp := viper.GetString(BeeGFSMountPointKey)
@@ -524,15 +609,57 @@ func BeeGFSClient(path string) (filesystem.Provider, error) {
 				return globalMount, filesystem.ErrUnmounted
 			}
 			if !filepath.IsAbs(mp) {
-				return nil, fmt.Errorf("the specified value for %s does not appear to be an absolute path", BeeGFSMountPointKey)
+				return nil, errMountNotAbsolute
 			}
-			globalMount, err = filesystem.NewFromPath(mp)
+			resolved, err = filesystem.NewFromPath(mp)
+			selectedBy = fmt.Sprintf(selectedByMountFlag, mp)
 		} else {
-			globalMount, err = filesystem.NewFromPath(path)
+			resolved, err = filesystem.NewFromPath(path)
 		}
 		if err != nil {
 			return nil, err
 		}
+
+		// A management client built before this mount was known has not been checked against it,
+		// so check now. The rules match ManagementClient()'s check of a mount.
+		if bfs, ok := resolved.(filesystem.BeeGFS); ok && mgmtClient != nil {
+			if selectedBy == "" {
+				selectedBy = fmt.Sprintf(selectedByPathArg, bfs.GetMountPath())
+			}
+			log, _ := GetLogger()
+			ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration(ConnTimeoutKey))
+			clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{FilterByMounts: []string{bfs.GetMountPath()}}, log)
+			cancel()
+			// GetBeeGFSClients() only fails when asked to force connections, which this call does
+			// not. Unreadable procfs shows up as missing clients, which the checks below handle,
+			// including allow-unverified-mount.
+			if err != nil {
+				return nil, err
+			}
+			c, err := registeredClientOf(clients)
+			switch {
+			case err != nil && !viper.GetBool(AllowUnverifiedMountKey):
+				return nil, fmt.Errorf("%s (hint: if CTL cannot read /proc/fs/beegfs where it runs, set --%s to use the management node at %s without checking that it serves this filesystem)", whyNoClientSelected(err, selectedBy, clients, log), AllowUnverifiedMountKey, mgmtClient.GetAddress())
+			case err != nil:
+				log.Warn("unable to verify the filesystem of the mount, using it unchecked because allow-unverified-mount is set", zap.String("mgmtdAddr", mgmtClient.GetAddress()), zap.String("reason", whyNoClientSelected(err, selectedBy, clients, log)))
+			default:
+				servedFsUUID := mgmtClientFsUUID
+				if servedFsUUID == "" {
+					// ManagementClient() did not check the node, so ask which filesystem it serves.
+					// Like ManagementClient(), this takes no context and has no deadline. The
+					// result is not stored, because this block only runs once per process.
+					if servedFsUUID, err = mgmtClient.GetFsUUID(context.Background()); err != nil {
+						return nil, fmt.Errorf("checking which filesystem the management node at %s serves: %w", mgmtClient.GetAddress(), err)
+					}
+				}
+				// A mount of another filesystem is an error even with allow-unverified-mount, because
+				// it was verified.
+				if servedFsUUID != c.FsUUID {
+					return nil, fmt.Errorf("the filesystem mounted at %s is %s, but the management node at %s serves filesystem %s (hint: specify the --%s of the filesystem mounted at %s)", describeMount(c), c.FsUUID, mgmtClient.GetAddress(), servedFsUUID, ManagementAddrKey, bfs.GetMountPath())
+				}
+			}
+		}
+		globalMount = resolved
 	}
 	return globalMount, nil
 }
