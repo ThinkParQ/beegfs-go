@@ -432,6 +432,21 @@ func (j *Job) GobEncode() ([]byte, error) {
 		return nil, err
 	}
 
+	// Gob omits zero values even behind a pointer, so it decodes a part's Started=false as unset,
+	// and an unset Started means the part started. Record which parts have Started=false so
+	// GobDecode can restore them. Older versions stop reading before this value and ignore it.
+	notStartedParts := make(map[string][]int)
+	for id, wr := range j.WorkResults {
+		for i, part := range wr.WorkResult.GetParts() {
+			if part.HasStarted() && !part.GetStarted() {
+				notStartedParts[id] = append(notStartedParts[id], i)
+			}
+		}
+	}
+	if err := enc.Encode(notStartedParts); err != nil {
+		return nil, err
+	}
+
 	// Prefix the serialized jobData with the length as a uint16.
 	// We'll use this when decoding.
 	jobFieldLength := make([]byte, 2)
@@ -470,7 +485,26 @@ func (j *Job) GobDecode(data []byte) error {
 	if err := dec.Decode(&j.Segments); err != nil {
 		return nil
 	}
-	return dec.Decode(&j.WorkResults)
+	if err := dec.Decode(&j.WorkResults); err != nil {
+		return err
+	}
+
+	// Jobs stored by older versions have no not-started parts recorded. Development builds stored a
+	// bool here instead. Both decode with plain gob's Started values.
+	var notStartedParts map[string][]int
+	if err := dec.Decode(&notStartedParts); err != nil {
+		return nil
+	}
+	for id, indexes := range notStartedParts {
+		parts := j.WorkResults[id].WorkResult.GetParts()
+		for _, i := range indexes {
+			if i < 0 || i >= len(parts) {
+				return fmt.Errorf("work result %s lists part index %d as not started, but it has %d parts", id, i, len(parts))
+			}
+			parts[i].SetStarted(false)
+		}
+	}
+	return nil
 }
 
 // Segment is a wrapper around the protobuf defined Segment type to

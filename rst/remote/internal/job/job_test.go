@@ -1,14 +1,20 @@
 package job
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/gob"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -442,6 +448,76 @@ func TestOutcomeRecordedBy(t *testing.T) {
 			assert.Equal(t, tt.want, tt.request.outcomeRecordedBy(tt.lastJob, tt.wantState, tt.mtime))
 		})
 	}
+}
+
+// TestJobGobDecodeIgnoresTrailingValues checks that a job stored with a value after its work
+// results still decodes. Development builds stored a trailing bool there, and GobDecode must read
+// the fields it knows and stop.
+func TestJobGobDecodeIgnoresTrailingValues(t *testing.T) {
+	job, err := New(beeremote.JobRequest_builder{
+		Path:                "/test/file",
+		RemoteStorageTarget: 1,
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+	}.Build())
+	require.NoError(t, err)
+
+	jobData, err := proto.Marshal(job.Job)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	require.NoError(t, enc.Encode(job.Segments))
+	require.NoError(t, enc.Encode(job.WorkResults))
+	require.NoError(t, enc.Encode(true))
+	length := make([]byte, 2)
+	binary.BigEndian.PutUint16(length, uint16(len(jobData)))
+
+	decoded := &Job{}
+	require.NoError(t, decoded.GobDecode(slices.Concat(length, jobData, buf.Bytes())))
+	assert.Equal(t, job.GetId(), decoded.GetId())
+}
+
+// TestJobGobKeepsStarted checks that a part's Started field keeps its presence through GobEncode
+// and GobDecode. Plain gob decodes Started=false as unset, which means the part started, so a
+// cancelled download would stub its file. It also checks that an older version, which decodes the
+// work results with plain gob and stops, still reads a job this version stored.
+func TestJobGobKeepsStarted(t *testing.T) {
+	job, err := New(beeremote.JobRequest_builder{
+		Path:                "/test/file",
+		RemoteStorageTarget: 1,
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+	}.Build())
+	require.NoError(t, err)
+	job.WorkResults["0"] = worker.WorkResult{
+		AssignedNode: "node1",
+		WorkResult: flex.Work_builder{
+			RequestId: "0",
+			Parts: []*flex.Work_Part{
+				flex.Work_Part_builder{PartNumber: 1, Started: new(false)}.Build(),
+				flex.Work_Part_builder{PartNumber: 2, Started: new(true)}.Build(),
+				flex.Work_Part_builder{PartNumber: 3}.Build(),
+			},
+		}.Build(),
+	}
+	data, err := job.GobEncode()
+	require.NoError(t, err)
+
+	decoded := &Job{}
+	require.NoError(t, decoded.GobDecode(data))
+	parts := decoded.WorkResults["0"].WorkResult.GetParts()
+	require.Len(t, parts, 3)
+	assert.True(t, parts[0].HasStarted() && !parts[0].GetStarted(), "part 1 must keep Started=false")
+	assert.True(t, parts[1].HasStarted() && parts[1].GetStarted(), "part 2 must keep Started=true")
+	assert.False(t, parts[2].HasStarted(), "part 3 must keep Started unset")
+
+	// Decode the way older versions do: segments, then work results, then stop.
+	jobFieldLength := binary.BigEndian.Uint16(data[:2])
+	dec := gob.NewDecoder(bytes.NewReader(data[2+jobFieldLength:]))
+	var segments []*Segment
+	require.NoError(t, dec.Decode(&segments))
+	var workResults map[string]worker.WorkResult
+	require.NoError(t, dec.Decode(&workResults))
+	assert.Equal(t, "node1", workResults["0"].AssignedNode)
+	assert.Len(t, workResults["0"].WorkResult.GetParts(), 3)
 }
 
 // TestNewCleansPath checks that New records a job under the cleaned path, so every spelling of a

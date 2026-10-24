@@ -652,7 +652,16 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		if !ok {
 			// Distinct from the state check below only so the message says there is no record. Both
 			// are final, because a missing ID may belong to a job that was cancelled and deleted.
-			return nil, fmt.Errorf("%w: no job %s exists for path %s", rst.ErrReservationMissing, reservedJobId, jr.GetPath())
+			err := fmt.Errorf("%w: no job %s exists for path %s", rst.ErrReservationMissing, reservedJobId, jr.GetPath())
+			// The claimer may have changed the file for this claim, and no recorded job remains to
+			// undo it. So the claim's own job undoes it. It is recorded only when that fails, so
+			// it keeps the content lock and a cancel can retry the abort.
+			m.cancelClaimedReservation(job, err)
+			if job.GetStatus().GetState() == beeremote.Job_FAILED {
+				pathEntry.Value[job.GetId()] = job
+				return &beeremote.JobResult{Job: job.Get()}, err
+			}
+			return nil, err
 		} else if !reserved.InReservedState() && reserved.Request.GetReservation() == beeremote.JobRequest_CLAIM {
 			// A claim replaces the job's reserve request with itself, so this job was already
 			// claimed. The caller is replaying a claim whose response it never received. Only a
@@ -664,6 +673,10 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}
 			return &beeremote.JobResult{Job: reserved.Get()}, storedSubmitError(reserved)
 		} else if !reserved.InReservedState() {
+			// The reservation was cancelled before this claim arrived, and that cancel ran the RST
+			// abort. The claimer may have changed the file after it, so the abort runs again from
+			// the reservation's request. It is safe to repeat.
+			m.abortCancelledReservation(reserved)
 			return nil, fmt.Errorf("%w: job %s for path %s is %s", rst.ErrJobNotReserved, reservedJobId, jr.GetPath(), reserved.GetStatus().GetState())
 		} else if reserved.Request.GetRemoteStorageTarget() != jr.GetRemoteStorageTarget() {
 			return nil, fmt.Errorf("rejecting claim of job %s because it is reserved for RST %d but the claim is for RST %d (this is probably a bug)", reservedJobId, reserved.Request.GetRemoteStorageTarget(), jr.GetRemoteStorageTarget())
@@ -744,7 +757,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 				// existed first would have refused the reservation. So a claim that finds a
 				// conflict means the path entry is inconsistent.
 				err := fmt.Errorf("%w: claim of reserved job %s conflicts with job %s in state %s (this is probably a bug)", rst.ErrJobNotAllowed, job.GetId(), conflict.job.GetId(), conflict.job.GetStatus().GetState())
-				cancelClaimedReservation(job, err)
+				m.cancelClaimedReservation(job, err)
 				return &beeremote.JobResult{Job: job.Get()}, err
 			}
 
@@ -812,7 +825,8 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	var jobSubmission workermgr.JobSubmission
 	if jr.HasGenerationStatus() {
 		status := jr.GetGenerationStatus()
-		if _, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+		var ok bool
+		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
 			// A FAILED_PRECONDITION with an unknown rstId means the builder encountered a file
 			// whose RST config references an rstId that no longer exists (or never did). Treat it
 			// as ErrJobFailedPrecondition so the job gets the error rather than rejected.
@@ -821,7 +835,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			} else {
 				err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
 				if isClaimedReservation {
-					cancelClaimedReservation(job, err)
+					m.cancelClaimedReservation(job, err)
 					return &beeremote.JobResult{Job: job.Get()}, err
 				}
 				return nil, err
@@ -848,7 +862,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
 			err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
 			if isClaimedReservation {
-				cancelClaimedReservation(job, err)
+				m.cancelClaimedReservation(job, err)
 				return &beeremote.JobResult{Job: job.Get()}, err
 			}
 			return nil, err
@@ -932,7 +946,11 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			status := job.GetStatus()
 			status.Message = err.Error()
 			beeremoteJob := job.Get()
-			if errors.Is(err, rst.ErrJobFailedPrecondition) {
+			if isClaimedReservation {
+				// The claimer's changes for this request are undone here, while the path entry is
+				// held and before the release at the end of the submit.
+				m.cancelClaimedReservation(job, err)
+			} else if errors.Is(err, rst.ErrJobFailedPrecondition) {
 				status.SetState(beeremote.Job_CANCELLED)
 			} else {
 				status.SetState(beeremote.Job_FAILED)
@@ -1247,6 +1265,17 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 // will always attempt to re-abort completing the job with the remote storage target, which
 // may-or-may not be supported in an idempotent manner (i.e., an error may be returned).
 //
+// A cancel runs the RST abort, which undoes the job's changes from its request and work results and
+// is safe to repeat. Two kinds of job differ:
+//   - A reserved job is cancelled only when forced, or when releaseReservation says its bulk
+//     operation is ending. It has no work requests to stop, and the abort undoes whatever its
+//     claimer already changed.
+//   - A job whose request reported that nothing was changed is cancelled without the abort. See
+//     generationChangedNothing.
+//
+// When the abort fails, a forced cancel still moves the job to CANCELLED and leaves the file as it
+// is. Otherwise the job is FAILED, keeps the content lock, and the cancel can be repeated.
+//
 // IMPORTANT: This should only be used when the state of a job's work requests need to be modified
 // on the assigned worker nodes. To update the job state in reaction to job results returned by a
 // worker node use updateJobResults().
@@ -1297,16 +1326,8 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 		if state == beeremote.Job_CANCELLED && !forceUpdate {
 			return true, true, fmt.Sprintf("ignoring update for already cancelled job ID %s (use the force update flag to attempt anyway)", job.GetId())
 		}
-		if state == beeremote.Job_RESERVED {
-			if !forceUpdate && !releaseReservation {
-				return true, false, fmt.Sprintf("rejecting cancel for reserved job ID %s (use the force update flag to attempt anyway)", job.GetId())
-			}
-			// A reserved job has no work requests and the RST has not touched the file. There is
-			// nothing to stop on worker nodes and nothing to roll back, whoever asked.
-			status.SetState(beeremote.Job_CANCELLED)
-			status.SetMessage("reservation cancelled before it was claimed")
-			status.SetUpdated(timestamppb.Now())
-			return true, true, ""
+		if state == beeremote.Job_RESERVED && !forceUpdate && !releaseReservation {
+			return true, false, fmt.Sprintf("rejecting cancel for reserved job ID %s (use the force update flag to attempt anyway)", job.GetId())
 		}
 
 		// When returning ensure the timestamp on the job state is updated.
@@ -1314,8 +1335,18 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			status.SetUpdated(timestamppb.Now())
 		}()
 
-		// If the job is already failed we don't need to update the work requests unless the update was forced:
-		if state != beeremote.Job_FAILED || forceUpdate {
+		if generationChangedNothing(job.GetRequest()) {
+			// Such a job was never scheduled, so no node has work to stop. See
+			// generationChangedNothing for why it is not aborted.
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage(appendMessage(status.GetMessage(), "cancelled without an RST abort because the request reported that nothing was changed"))
+			return true, true, ""
+		}
+
+		// A reserved job has no work requests. Its claimer may already have changed the file, and
+		// the abort below undoes that from the locked info the reservation recorded. Neither is
+		// needed for a FAILED job unless the update is forced.
+		if state != beeremote.Job_RESERVED && (state != beeremote.Job_FAILED || forceUpdate) {
 			// If we're unable to definitively cancel on any node, success is set to false and the
 			// state of the job is failed.
 			job.WorkResults, success = m.workerManager.UpdateJob(workermgr.JobUpdate{
@@ -1335,6 +1366,8 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 				status.SetState(beeremote.Job_CANCELLED)
 				status.SetMessage("verified work requests are cancelled on all worker nodes")
 			}
+		} else if state == beeremote.Job_RESERVED {
+			status.SetMessage("reservation cancelled before it was claimed")
 		}
 
 		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
@@ -1485,6 +1518,9 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 
 		if !job.InActiveState() {
 			if _, err := m.releaseUnusedFileLockFn(workResult.GetPath(), pathEntry.Value); err != nil {
+				// FAILED keeps the job holding the content lock, and the cancel that retries the
+				// release runs the RST abort again. The abort finds the job's work finished or
+				// already undone, so it changes nothing.
 				status.SetState(beeremote.Job_FAILED)
 				status.SetMessage(appendMessage(status.Message, "unable to clear lock: "+err.Error()))
 			}
@@ -1665,19 +1701,93 @@ func (m *Manager) releaseLockAfterSubmit(path string, request *beeremote.JobRequ
 	}
 }
 
-// cancelClaimedReservation moves a claimed reservation to CANCELLED. SubmitJobRequest calls it
-// when it refuses a claim and returns before the job is scheduled or recorded with an outcome. job
-// is the reserved job the claim selected. It is already in the path entry, so the change is
-// committed with that entry. reason is the refusal SubmitJobRequest returns.
+// cancelClaimedReservation ends a claimed reservation that SubmitJobRequest refused. It runs before
+// the job is scheduled, while the path entry is held and before the content lock release at the end
+// of the submit. job is the reserved job the claim selected. It already carries the claim's request
+// and is in the path entry, so the change is committed with that entry. reason is the refusal
+// SubmitJobRequest returns.
 //
-// The state is CANCELLED, not FAILED, because no work ran, so nothing needs cleanup. A CANCELLED
-// job does not block later jobs for the path, and it needs no content lock, so the release at the
-// end of the submit clears the lock unless another job still needs it. The claimer then undoes its
-// plan.
-func cancelClaimedReservation(job *Job, reason error) {
+// The claimer may have changed the file for its request before it claimed. Remote undoes those
+// changes here with the RST abort, which reads the locked info the claimer's plan recorded in the
+// claim's request. The reservation kept the file locked until the claim, so that locked info still
+// describes the file. The rules:
+//   - A request whose generation status says nothing was changed is CANCELLED without an abort.
+//     See generationChangedNothing.
+//   - A successful abort leaves the job CANCELLED. A CANCELLED job does not need the content lock,
+//     so the release at the end of the submit clears it unless another job still needs it.
+//   - A failed abort, or an RST that remote does not know, leaves the job FAILED. A FAILED job keeps
+//     the content lock, and a cancel retries the abort.
+func (m *Manager) cancelClaimedReservation(job *Job, reason error) {
 	status := job.GetStatus()
-	status.SetState(beeremote.Job_CANCELLED)
 	status.SetMessage(reason.Error())
+	if generationChangedNothing(job.GetRequest()) {
+		status.SetState(beeremote.Job_CANCELLED)
+		return
+	}
+
+	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+	if !ok {
+		// Remote pushes its RST map to every sync node, and a builder turns an RST missing from that
+		// map into FAILED_PRECONDITION. So this RST was removed after the request was built.
+		status.SetState(beeremote.Job_FAILED)
+		status.SetMessage(appendMessage(status.GetMessage(), "unable to undo the changes made for this request because the RST no longer exists (add it back and cancel the job, or force the cancel to leave the file as it is)"))
+		return
+	}
+	if err := m.completeJob(job, rstClient, true); err != nil {
+		status.SetState(beeremote.Job_FAILED)
+		status.SetMessage(appendMessage(status.GetMessage(), "unable to undo the changes made for this request (cancel the job to try again, or force the cancel to leave the file as it is): "+err.Error()))
+		return
+	}
+	status.SetState(beeremote.Job_CANCELLED)
+}
+
+// abortCancelledReservation runs the RST abort again for job, a reservation that was cancelled
+// before anything claimed it. SubmitJobRequest calls it when a claim for that reservation arrives,
+// while the path entry is held. The claimer may have changed the file after the cancel's abort ran,
+// because it applies its plan before it claims. Only a CANCELLED reservation is aborted. A FAILED
+// one already keeps the content lock, and its own cancel retries the abort.
+//
+// A failed abort leaves the job FAILED, so it keeps the content lock and a cancel can retry it.
+func (m *Manager) abortCancelledReservation(job *Job) {
+	status := job.GetStatus()
+	if status.GetState() != beeremote.Job_CANCELLED {
+		return
+	}
+	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+	if !ok {
+		status.SetState(beeremote.Job_FAILED)
+		status.SetMessage(appendMessage(status.GetMessage(), "a claim arrived after the reservation was cancelled, and its changes could not be undone because the RST no longer exists (add it back and cancel the job, or force the cancel to leave the file as it is)"))
+		status.SetUpdated(timestamppb.Now())
+		return
+	}
+	if err := m.completeJob(job, rstClient, true); err != nil {
+		status.SetState(beeremote.Job_FAILED)
+		status.SetMessage(appendMessage(status.GetMessage(), "a claim arrived after the reservation was cancelled, and its changes could not be undone (cancel the job to try again, or force the cancel to leave the file as it is): "+err.Error()))
+		status.SetUpdated(timestamppb.Now())
+	}
+}
+
+// generationChangedNothing reports whether request's generation status says its submitter made no
+// change to the file that a job owns, so the RST abort has nothing to undo. The submitter sets the
+// status when it found the outcome before any job was needed:
+//   - ALREADY_COMPLETE and ALREADY_OFFLOADED: any change the submitter made is that outcome, such as
+//     the stub of an offloaded file. An abort would undo a correct result.
+//   - FAILED_PRECONDITION: the submitter stopped before it changed the file, or undid its own
+//     changes. A builder also uses it to cancel a reservation for a file that changed before it was
+//     locked. An abort would then act on a file the request never described.
+//
+// ERROR and requests without a status are aborted, because their submitter may have left changes.
+func generationChangedNothing(request *beeremote.JobRequest) bool {
+	if !request.HasGenerationStatus() {
+		return false
+	}
+	switch request.GetGenerationStatus().GetState() {
+	case beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+		beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
+		beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
+		return true
+	}
+	return false
 }
 
 // cancelReservedRequest cancels the job a bulk operation reserved for one path. It is the

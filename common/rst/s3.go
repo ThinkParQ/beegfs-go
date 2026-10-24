@@ -139,6 +139,9 @@ type S3Client struct {
 	storageClasses                 map[types.StorageClass]S3StorageClass
 	isListStartAfterKeySupported   *bool
 	isListStartAfterKeySupportedMu sync.Mutex
+	// isContentLocked reports whether the file at a path holds the content lock. It is
+	// IsContentLocked outside tests.
+	isContentLocked isContentLockedFn
 }
 
 var _ Provider = &S3Client{}
@@ -158,13 +161,25 @@ func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint 
 
 type s3ProviderOption func(*s3ProviderBuildCfg)
 type s3ProviderBuildCfg struct {
-	apiClient func(base s3ApiClient) s3ApiClient
-	s3Options []func(*s3.Options)
+	apiClient       func(base s3ApiClient) s3ApiClient
+	s3Options       []func(*s3.Options)
+	isContentLocked isContentLockedFn
 }
 
 func defaultS3ProviderBuildCfg() s3ProviderBuildCfg {
 	return s3ProviderBuildCfg{
-		apiClient: func(base s3ApiClient) s3ApiClient { return base },
+		apiClient:       func(base s3ApiClient) s3ApiClient { return base },
+		isContentLocked: IsContentLocked,
+	}
+}
+
+// withContentLockCheck replaces the check the client uses to learn whether a file holds the
+// content lock. Tests use it, because the default check needs a BeeGFS mount.
+func withContentLockCheck(fn isContentLockedFn) s3ProviderOption {
+	return func(cfg *s3ProviderBuildCfg) {
+		if fn != nil {
+			cfg.isContentLocked = fn
+		}
 	}
 }
 
@@ -255,6 +270,7 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 		mountPoint:                     mountPoint,
 		storageClasses:                 make(map[types.StorageClass]S3StorageClass),
 		isListStartAfterKeySupportedMu: sync.Mutex{},
+		isContentLocked:                buildCfg.isContentLocked,
 	}
 
 	for _, class := range s3Config.StorageClass {
@@ -944,47 +960,52 @@ func (r *S3Client) completeSyncWorkRequests_Upload(ctx context.Context, job *bee
 	ctx, cancel, _ := WithCancellationDelay(ctx, time.Minute)
 	defer cancel()
 
+	if abort {
+		// An abort never touches the local file. It only releases the multipart upload. A job that
+		// was never scheduled, such as a refused claim, has no job external ID yet. Its upload ID is
+		// then only in the locked info the builder planned.
+		externalId := job.ExternalId
+		if externalId == "" {
+			externalId = sync.GetLockedInfo().GetExternalId()
+		}
+		if externalId == "" {
+			return nil
+		}
+		return r.abortUpload(ctx, externalId, sync.RemotePath)
+	}
+
 	if job.ExternalId != "" {
-		if abort {
-			// When aborting there is no reason to check the mtime below and it may not have
-			// been set correctly anyway given the error check is skipped above.
-			return r.abortUpload(ctx, job.ExternalId, sync.RemotePath)
-		} else {
-			// TODO: https://github.com/thinkparq/gobee/issues/29
-			// There could be lots of parts. Look for ways to optimize this. Like if we could
-			// determine the total number of parts and make an appropriately sized slice up front.
-			// Or if we could just pass the RST method the unmodified map since it potentially has
-			// to iterate over the slice to convert it to the type it expects anyway. The drawback
-			// with the latter approach is the RST package would import a BeeRemote package and the
-			// goal has been to break this out into a standalone package to reuse for BeeSync.
-			partsToFinish := make([]*flex.Work_Part, 0)
-			for _, r := range workResults {
-				partsToFinish = append(partsToFinish, r.Parts...)
-			}
-			// If there was an error finishing the upload we should return that and not worry
-			// about checking if the file was modified.
-			if err := r.finishUpload(ctx, job.ExternalId, sync.RemotePath, partsToFinish); err != nil {
-				return err
-			}
+		// TODO: https://github.com/thinkparq/gobee/issues/29
+		// There could be lots of parts. Look for ways to optimize this. Like if we could
+		// determine the total number of parts and make an appropriately sized slice up front.
+		// Or if we could just pass the RST method the unmodified map since it potentially has
+		// to iterate over the slice to convert it to the type it expects anyway. The drawback
+		// with the latter approach is the RST package would import a BeeRemote package and the
+		// goal has been to break this out into a standalone package to reuse for BeeSync.
+		partsToFinish := make([]*flex.Work_Part, 0)
+		for _, r := range workResults {
+			partsToFinish = append(partsToFinish, r.Parts...)
+		}
+		// If there was an error finishing the upload we should return that and not worry
+		// about checking if the file was modified.
+		if err := r.finishUpload(ctx, job.ExternalId, sync.RemotePath, partsToFinish); err != nil {
+			return err
 		}
 	}
-	// Skip checking the file was modified if we were told to abort since the mtime may not have
-	// been set correctly anyway given the error check is skipped above.
-	if !abort {
-		start := job.GetStartMtime().AsTime()
-		stop := job.GetStopMtime().AsTime()
-		if !start.Equal(stop) {
-			return fmt.Errorf("successfully completed all work requests but the file appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
-				start.Format(time.RFC3339), stop.Format(time.RFC3339))
-		}
 
-		if request.StubLocal {
-			err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy()))
-			if err != nil {
-				return fmt.Errorf("upload successful but failed to create stub file: %w", err)
-			}
-			job.GetStatus().SetState(beeremote.Job_OFFLOADED)
+	start := job.GetStartMtime().AsTime()
+	stop := job.GetStopMtime().AsTime()
+	if !start.Equal(stop) {
+		return fmt.Errorf("successfully completed all work requests but the file appears to have been modified (mtime at job start: %s / mtime at job completion: %s)",
+			start.Format(time.RFC3339), stop.Format(time.RFC3339))
+	}
+
+	if request.StubLocal {
+		err = CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy()))
+		if err != nil {
+			return fmt.Errorf("upload successful but failed to create stub file: %w", err)
 		}
+		job.GetStatus().SetState(beeremote.Job_OFFLOADED)
 	}
 
 	return nil
@@ -999,72 +1020,17 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 		}
 	}
 
-	request := job.GetRequest()
-	sync := request.GetSync()
-	mtime := sync.LockedInfo.Mtime.AsTime()
-
 	// It's critical that a context cancellation doesn't prevent the following from completing so
 	// add a grace period to complete.
 	ctx, cancel, _ := WithCancellationDelay(ctx, time.Minute)
 	defer cancel()
 
 	if abort {
-		if workStarted := isWorkStarted(workResults); workStarted == nil || *workStarted {
-			// The download was incomplete so replace with a stub file for the requested resource.
-			// When workStarted == nil then the parts predate the Started field which only happens
-			// when a download was interrupted and upgraded before resuming.
-			if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy())); err != nil {
-				return fmt.Errorf("failed to replace incomplete download with stub file: %w", err)
-			}
-			return nil
-		}
-
-		if IsFileOffloaded(sync.LockedInfo) {
-			// Verify whether the existing file is not stub file before recreating the original stub file.
-			state, err := entry.GetFileDataState(ctx, request.Path)
-			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					return nil
-				}
-				return fmt.Errorf("unable to determine whether the file is still a stub: %w", err)
-			}
-
-			if !beegfs.IsDataStateOffloaded(state) {
-				if err := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.LockedInfo.StubUrlPath, sync.LockedInfo.StubUrlRstId, true, restorePolicyToDataState(request.GetRestorePolicy())); err != nil {
-					return fmt.Errorf("failed to restore original stub file: %w", err)
-				}
-			}
-			return nil
-		}
-
-		if FileCreatedByJob(sync.LockedInfo) {
-			err := r.mountPoint.Remove(request.Path)
-			if errors.Is(err, fs.ErrNotExist) {
-				// Aborting the job request does not guarantee the the non-existing file was ever created so ignore.
-				return nil
-			}
-			return err
-		}
-
-		if !FileExists(sync.LockedInfo) {
-			// The path did not exist and the plan never created it, so there is nothing to restore.
-			return nil
-		}
-
-		// File exist and no changes were made so restore the mtime and if needed, restore the file size.
-		job.SetStopMtime(sync.LockedInfo.Mtime)
-		if sync.LockedInfo.Size < sync.LockedInfo.RemoteSize {
-			// The existing file was enlarged but no changes were made to original contents so we
-			// can safely restore the contents by reducing the file to its original size.
-			if err := r.mountPoint.CreateOrResizeFile(request.Path, sync.LockedInfo.Size, true); err != nil {
-				return fmt.Errorf("failed to restore original file size: %w", err)
-			}
-		}
-		if err := r.mountPoint.Chtimes(request.Path, mtime, mtime); err != nil {
-			return fmt.Errorf("failed to restore original mtime: %w", err)
-		}
-		return nil
+		return r.abortDownload(ctx, job, workResults)
 	}
+
+	request := job.GetRequest()
+	sync := request.GetSync()
 
 	_, mtime, _, err := r.getObjectMetadata(ctx, sync.RemotePath, false)
 	if err != nil {
@@ -1103,6 +1069,133 @@ func (r *S3Client) completeSyncWorkRequests_Download(ctx context.Context, job *b
 	}
 
 	return nil
+}
+
+// abortDownload undoes a download's plan from the locked info the job was planned with. Cancel and
+// fail both call it, and so does a refused claim, so it must be safe to run more than once. Two
+// checks come first:
+//   - A job with a stop mtime needs nothing. Every abort that finishes records one, so a repeat
+//     returns here without looking at the lock, which a newer job on the path may hold by then.
+//   - A file without the content lock is left alone. The lock is what shows the file is still the
+//     job's. Remote releases it after the job ends, and a user can clear it by hand.
+//
+// It then decides from the job's work results:
+//   - No part started: the file still holds what the plan left. A stub is restored, a file the plan
+//     created is removed, and an existing file gets back its size and mtime.
+//   - Every part completed: the transfer finished, so there is nothing to undo.
+//   - Some part started but not every part completed: the file is replaced with a stub for the
+//     requested object. Part of the file holds downloaded data, so its old contents can't be
+//     restored, and a stub leaves the file offloaded so a later download can fetch it.
+//
+// A part from a sync that predates the Started field counts as started.
+func (r *S3Client) abortDownload(ctx context.Context, job *beeremote.Job, workResults []*flex.Work) (err error) {
+	request := job.GetRequest()
+	sync := request.GetSync()
+	lockedInfo := sync.GetLockedInfo()
+	if lockedInfo == nil || job.StopMtime != nil {
+		// No locked info means the request was never planned, so it changed nothing. A stop mtime
+		// means an earlier abort finished. A download's completion also records one, but only once
+		// every part completed, and such an abort has nothing to undo either.
+		return nil
+	}
+
+	// Mark the abort as finished for the check above. A job recorded before its file existed has
+	// no mtime, so this leaves its stop mtime unset.
+	defer func() {
+		if err == nil {
+			job.SetStopMtime(lockedInfo.Mtime)
+		}
+	}()
+
+	// The job's lock tells its file apart from one a user put at the path after the lock was
+	// released or cleared by hand.
+	locked, lockedErr := r.isContentLocked(ctx, request.Path)
+	if lockedErr != nil {
+		return fmt.Errorf("unable to determine whether the file is still locked for this job: %w", lockedErr)
+	}
+	if !locked {
+		// A missing file is never locked, so this also keeps the abort from recreating a file that
+		// was removed.
+		return
+	}
+
+	if workStarted := isWorkStarted(workResults); workStarted == nil || *workStarted {
+		if !isWorkCompleted(workResults) {
+			createErr := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, sync.RemotePath, request.RemoteStorageTarget, true, restorePolicyToDataState(request.GetRestorePolicy()))
+			if createErr != nil {
+				err = fmt.Errorf("failed to replace incomplete download with stub file: %w", createErr)
+			}
+		}
+		return
+	}
+
+	if IsFileOffloaded(lockedInfo) {
+		// A file that is still offloaded is the original stub, so only a file the plan restored
+		// needs the stub written back.
+		state, stateErr := entry.GetFileDataState(ctx, request.Path)
+		if stateErr != nil {
+			if !errors.Is(stateErr, fs.ErrNotExist) {
+				err = fmt.Errorf("unable to determine whether the file is still a stub: %w", stateErr)
+			}
+			return
+		}
+
+		if !beegfs.IsDataStateOffloaded(state) {
+			createErr := CreateOffloadedDataFile(ctx, r.mountPoint, request.Path, lockedInfo.StubUrlPath, lockedInfo.StubUrlRstId, true, restorePolicyToDataState(request.GetRestorePolicy()))
+			if createErr != nil {
+				err = fmt.Errorf("failed to restore original stub file: %w", createErr)
+			}
+		}
+		return
+	}
+
+	if !FileExists(lockedInfo) {
+		if removeErr := r.mountPoint.Remove(request.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			err = fmt.Errorf("failed to remove the file created for this job: %w", removeErr)
+		}
+		return
+	}
+
+	// The plan only grows a file that is smaller than the object. So the file is at the size the
+	// plan left, or at its original size when an earlier abort already shrank it back. Any other
+	// size means the file was written to, and shrinking it would discard that data.
+	stat, statErr := r.mountPoint.Lstat(request.Path)
+	if statErr != nil {
+		return fmt.Errorf("unable to check the size of %s before restoring it: %w", request.Path, statErr)
+	}
+	plannedSize := max(lockedInfo.Size, lockedInfo.RemoteSize)
+	if stat.Size() != plannedSize && stat.Size() != lockedInfo.Size {
+		return fmt.Errorf("unable to restore %s: its size is %d but the job left it at %d, so it changed since the job was planned", request.Path, stat.Size(), plannedSize)
+	}
+
+	// The file holds what the plan left, so restore its size and mtime.
+	if lockedInfo.Size < lockedInfo.RemoteSize {
+		// The existing file was enlarged but no changes were made to original contents so we
+		// can safely restore the contents by reducing the file to its original size.
+		if createErr := r.mountPoint.CreateOrResizeFile(request.Path, lockedInfo.Size, true); createErr != nil {
+			return fmt.Errorf("failed to restore original file size: %w", createErr)
+		}
+	}
+
+	mtime := lockedInfo.Mtime.AsTime()
+	if mtimeErr := r.mountPoint.Chtimes(request.Path, mtime, mtime); mtimeErr != nil {
+		err = fmt.Errorf("failed to restore original mtime: %w", mtimeErr)
+	}
+	return
+}
+
+// isWorkCompleted reports whether workResults hold at least one part and every part completed.
+func isWorkCompleted(workResults []*flex.Work) bool {
+	parts := 0
+	for _, result := range workResults {
+		for _, part := range result.GetParts() {
+			if !part.GetCompleted() {
+				return false
+			}
+			parts++
+		}
+	}
+	return parts > 0
 }
 
 // isWorkStarted returns true whenever a part indicates it was started or, in order to maintain
@@ -1246,6 +1339,9 @@ func (r *S3Client) createUpload(ctx context.Context, path string, mtime time.Tim
 	return *result.UploadId, nil
 }
 
+// abortUpload aborts the multipart upload uploadID. Some S3 providers answer NoSuchUpload for an
+// upload that was already aborted or completed. That answer counts as success, so a repeated abort
+// or release is safe.
 func (r *S3Client) abortUpload(ctx context.Context, uploadID string, remotePath string) error {
 	abortMultipartUploadInput := &s3.AbortMultipartUploadInput{
 		UploadId: aws.String(uploadID),
@@ -1254,6 +1350,9 @@ func (r *S3Client) abortUpload(ctx context.Context, uploadID string, remotePath 
 	}
 
 	_, err := r.apiClient.AbortMultipartUpload(ctx, abortMultipartUploadInput)
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok && apiErr.ErrorCode() == "NoSuchUpload" {
+		return nil
+	}
 	return err
 }
 

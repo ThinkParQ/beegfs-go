@@ -3,6 +3,9 @@ package rst
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -329,13 +332,41 @@ type abortFS struct {
 	removed    []string
 	resized    map[string]int64
 	chtimes    map[string]time.Time
+	// sizes holds the size Lstat reports for each path. A path missing from it does not exist.
+	sizes map[string]int64
+	// mtimes holds the mtime Lstat reports for each path in sizes.
+	mtimes map[string]time.Time
+	lstats int
 }
 
 var errStubWritten = errors.New("stub write reached")
 
 func newAbortFS() *abortFS {
-	return &abortFS{resized: map[string]int64{}, chtimes: map[string]time.Time{}}
+	return &abortFS{resized: map[string]int64{}, chtimes: map[string]time.Time{}, sizes: map[string]int64{}, mtimes: map[string]time.Time{}}
 }
+
+func (f *abortFS) Lstat(path string) (os.FileInfo, error) {
+	f.lstats++
+	size, ok := f.sizes[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrNotExist}
+	}
+	return sizedFileInfo{name: filepath.Base(path), size: size, mtime: f.mtimes[path]}, nil
+}
+
+// sizedFileInfo is a regular file that reports only a name, a size and an mtime.
+type sizedFileInfo struct {
+	name  string
+	size  int64
+	mtime time.Time
+}
+
+func (i sizedFileInfo) Name() string       { return i.name }
+func (i sizedFileInfo) Size() int64        { return i.size }
+func (i sizedFileInfo) Mode() fs.FileMode  { return 0644 }
+func (i sizedFileInfo) ModTime() time.Time { return i.mtime }
+func (i sizedFileInfo) IsDir() bool        { return false }
+func (i sizedFileInfo) Sys() any           { return nil }
 
 func (f *abortFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
 	f.stubWrites = append(f.stubWrites, string(buf))
@@ -374,33 +405,59 @@ func newDownloadAbortJob(lockedInfo *flex.JobLockedInfo) *beeremote.Job {
 	}
 }
 
+// contentLock is a content lock check for tests. It reports locked for the paths it holds, and
+// returns err for every path when err is set.
+type contentLock struct {
+	locked map[string]bool
+	err    error
+}
+
+func (c contentLock) check(ctx context.Context, path string) (bool, error) {
+	return c.locked[path], c.err
+}
+
 // TestCompleteSyncWorkRequestsDownloadAbort covers how an aborted download resolves the local file.
-// The recovery branches below the started check were unreachable while parts were built without
-// Started, because a nil Started reads as "work began" and stubbed the file instead.
+// The abort decides from the work results first, then from the locked info the job was planned
+// with. It must be safe to run again on a file it already resolved.
 func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
+	const path = "/mnt/dest/file"
 	mtime := timestamppb.New(time.Unix(1700000000, 0))
 	notStarted := []*flex.Work{{Parts: []*flex.Work_Part{{Started: new(false)}}}}
+	locked := contentLock{locked: map[string]bool{path: true}}
+	unlocked := contentLock{}
 
-	t.Run("a download that never began removes a file it created", func(t *testing.T) {
+	t.Run("a download that never began removes the locked file created for it", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
-		// The path did not exist before the job, so nothing local is worth keeping. This is the
-		// state prepareDownloadNoFile leaves: the new file's attributes, with Exists still false.
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		// The path did not exist before the job. This is the state prepareDownloadNoFile leaves:
+		// the new file's attributes, with Exists still false.
 		job := newDownloadAbortJob(&flex.JobLockedInfo{
 			Exists: false, ReadWriteLocked: true, Size: 500, RemoteSize: 500, Mtime: mtime,
 		})
 
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
-		assert.Equal(t, []string{"/mnt/dest/file"}, fs.removed)
+		assert.Equal(t, []string{path}, fs.removed)
 		assert.Empty(t, fs.stubWrites, "an untouched file must not be replaced with a stub")
 	})
 
-	t.Run("a download whose plan never created the file leaves the path alone", func(t *testing.T) {
+	t.Run("a reservation removes its locked placeholder", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
-		// The path did not exist and the job aborted before its plan created the file.
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		// A RESERVED job's request was built before the placeholder existed, so it records no
+		// attributes for the file. A RESERVED job has no work results.
 		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, RemoteSize: 500})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, nil, true))
+
+		assert.Equal(t, []string{path}, fs.removed)
+	})
+
+	t.Run("an unlocked file at a path that had no file is left alone", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs, withContentLockCheck(unlocked.check))
+		// Someone else put this file there, or there is no file at all. Neither is the job's.
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, ReadWriteLocked: true, RemoteSize: 500, Mtime: mtime})
 
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
@@ -410,9 +467,21 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 		assert.Empty(t, fs.stubWrites)
 	})
 
+	t.Run("a lock check that fails removes nothing", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs, withContentLockCheck(contentLock{err: errors.New("meta unreachable")}.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, RemoteSize: 500})
+
+		err := r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true)
+
+		require.ErrorContains(t, err, "meta unreachable")
+		assert.Empty(t, fs.removed)
+	})
+
 	t.Run("a download that never began restores an enlarged file", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
+		fs.sizes[path] = 500
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
 		// The file was preallocated out to the remote object's size but no bytes were written, so
 		// truncating back to its original size restores the original contents.
 		job := newDownloadAbortJob(&flex.JobLockedInfo{
@@ -421,73 +490,257 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
-		assert.Equal(t, map[string]int64{"/mnt/dest/file": 100}, fs.resized)
-		assert.Equal(t, mtime.AsTime(), fs.chtimes["/mnt/dest/file"])
+		assert.Equal(t, map[string]int64{path: 100}, fs.resized)
+		assert.Equal(t, mtime.AsTime(), fs.chtimes[path])
 		assert.Empty(t, fs.stubWrites)
 		assert.Empty(t, fs.removed)
 	})
 
 	t.Run("a download that never began leaves a file that was not enlarged at its size", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
+		fs.sizes[path] = 800
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
 		job := newDownloadAbortJob(&flex.JobLockedInfo{
-			Exists: true, Size: 500, RemoteSize: 500, Mtime: mtime,
+			Exists: true, Size: 800, RemoteSize: 500, Mtime: mtime,
 		})
 
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
 		assert.Empty(t, fs.resized, "a file that was never enlarged must not be resized")
-		assert.Equal(t, mtime.AsTime(), fs.chtimes["/mnt/dest/file"])
+		assert.Equal(t, mtime.AsTime(), fs.chtimes[path])
 	})
 
-	t.Run("a download that began is replaced with a stub", func(t *testing.T) {
+	t.Run("an abort that runs again restores a file it already shrank", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
-		started := []*flex.Work{{Parts: []*flex.Work_Part{{Started: new(false)}, {Started: new(true)}}}}
-		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime})
+		// An earlier abort shrank the file back to its original size.
+		fs.sizes[path] = 100
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
 
-		err := r.completeSyncWorkRequests_Download(context.Background(), job, started, true)
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
-		require.ErrorIs(t, err, errStubWritten)
-		assert.ErrorContains(t, err, "failed to replace incomplete download with stub file")
-		require.Len(t, fs.stubWrites, 1)
-		assert.Equal(t, "rst://2:/bucket/key\n", fs.stubWrites[0])
-		assert.Empty(t, fs.resized, "partially written contents must not be passed off as the original")
+		assert.Equal(t, mtime.AsTime(), fs.chtimes[path])
 	})
 
-	t.Run("a download of unknown progress is treated as begun", func(t *testing.T) {
+	t.Run("an unlocked existing file that an earlier abort restored is left alone", func(t *testing.T) {
 		fs := newAbortFS()
-		r := newTestS3Client(t, fs)
-		// Parts predating the Started field. Whether bytes were written is unknowable, so the file
-		// is stubbed rather than restored, which would present partial contents as the original.
-		legacy := []*flex.Work{{Parts: []*flex.Work_Part{{Started: nil}}}}
-		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime})
+		r := newTestS3Client(t, fs, withContentLockCheck(unlocked.check))
+		// The earlier abort set the stop mtime, and remote then released the lock.
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
+		job.SetStopMtime(mtime)
 
-		err := r.completeSyncWorkRequests_Download(context.Background(), job, legacy, true)
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
-		require.ErrorIs(t, err, errStubWritten)
-		require.Len(t, fs.stubWrites, 1)
+		assert.Zero(t, fs.lstats, "a restored file must not be checked again")
 		assert.Empty(t, fs.resized)
+		assert.Empty(t, fs.chtimes)
+		assert.Empty(t, fs.removed)
 	})
 
-	// Dropping this the offloaded-restore branch lost its unit coverage because entry.GetFileDataState needs a live client.
-	// t.Run("an offloaded file that was never downloaded is restored to its original stub", func(t *testing.T) {
-	// 	fs := newAbortFS()
-	// 	r := newTestS3Client(t, fs)
-	// 	// Overwrite lets the stub point somewhere other than the download source, so the original
-	// 	// url has to be restored rather than the job's.
-	// 	job := newDownloadAbortJob(&flex.JobLockedInfo{
-	// 		Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
-	// 		StubUrlRstId: 7, StubUrlPath: "/other-bucket/original-key",
-	// 	})
+	t.Run("an unlocked existing file in its original state is left alone", func(t *testing.T) {
+		fs := newAbortFS()
+		fs.sizes[path] = 100
+		fs.mtimes[path] = mtime.AsTime()
+		r := newTestS3Client(t, fs, withContentLockCheck(unlocked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
 
-	// 	err := r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true)
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
 
-	// 	require.ErrorIs(t, err, errStubWritten)
-	// 	assert.ErrorContains(t, err, "failed to restore original stub file")
-	// 	require.Len(t, fs.stubWrites, 1)
-	// 	assert.Equal(t, "rst://7:/other-bucket/original-key\n", fs.stubWrites[0])
-	// })
+		assert.Equal(t, mtime.AsTime(), job.GetStopMtime().AsTime())
+		assert.Empty(t, fs.resized)
+		assert.Empty(t, fs.chtimes)
+	})
+
+	t.Run("an unlocked existing file that was removed is left alone", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs, withContentLockCheck(unlocked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
+
+		assert.True(t, job.HasStopMtime(), "a later abort must see this one finished")
+		assert.Empty(t, fs.resized, "an abort must not create the file")
+		assert.Empty(t, fs.chtimes)
+	})
+
+	t.Run("an unlocked existing file that changed is left alone", func(t *testing.T) {
+		fs := newAbortFS()
+		fs.sizes[path] = 500
+		fs.mtimes[path] = mtime.AsTime()
+		r := newTestS3Client(t, fs, withContentLockCheck(unlocked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true))
+
+		assert.Empty(t, fs.resized, "a file without the lock is not the job's to change")
+		assert.Empty(t, fs.chtimes)
+	})
+
+	t.Run("an existing file whose size changed is not restored", func(t *testing.T) {
+		fs := newAbortFS()
+		// Neither the size the plan left (500) nor the original size (100).
+		fs.sizes[path] = 700
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
+
+		err := r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true)
+
+		require.ErrorContains(t, err, "its size is 700 but the job left it at 500")
+		assert.Empty(t, fs.resized, "data written to the file must not be truncated")
+		assert.Empty(t, fs.chtimes)
+	})
+
+	t.Run("an existing file that is gone is not restored", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{
+			Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime,
+		})
+
+		err := r.completeSyncWorkRequests_Download(context.Background(), job, notStarted, true)
+
+		require.ErrorIs(t, err, os.ErrNotExist)
+		assert.Empty(t, fs.resized, "an abort must not create the file")
+		assert.Empty(t, fs.chtimes)
+	})
+
+	for _, tc := range []struct {
+		name    string
+		results []*flex.Work
+	}{
+		{"a download that began", []*flex.Work{{Parts: []*flex.Work_Part{{Started: new(false)}, {Started: new(true), Completed: true}}}}},
+		// Parts predating the Started field. Whether bytes were written is unknowable.
+		{"a download of unknown progress", []*flex.Work{{Parts: []*flex.Work_Part{{Started: nil}}}}},
+	} {
+		t.Run(tc.name+" but did not finish is replaced with a stub", func(t *testing.T) {
+			fs := newAbortFS()
+			r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+			job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: true, Size: 100, RemoteSize: 500, Mtime: mtime})
+
+			err := r.completeSyncWorkRequests_Download(context.Background(), job, tc.results, true)
+
+			// abortFS fails every stub write, so the error shows the stub branch was taken.
+			require.ErrorIs(t, err, errStubWritten)
+			assert.ErrorContains(t, err, "failed to replace incomplete download with stub file")
+			require.Len(t, fs.stubWrites, 1)
+			assert.Equal(t, "rst://2:/bucket/key\n", fs.stubWrites[0])
+			assert.Empty(t, fs.resized, "partially written contents must not be passed off as the original")
+			assert.Empty(t, fs.removed)
+		})
+	}
+
+	t.Run("a download that finished is left as it is", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		// A finished download whose job was relabelled FAILED to keep the lock, then cancelled.
+		finished := []*flex.Work{
+			{Parts: []*flex.Work_Part{{Started: new(true), Completed: true}}},
+			{Parts: []*flex.Work_Part{{Started: new(true), Completed: true}}},
+		}
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, ReadWriteLocked: true, Size: 500, RemoteSize: 500, Mtime: mtime})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, finished, true))
+
+		assert.Empty(t, fs.stubWrites, "a finished download must not be stubbed again")
+		assert.Empty(t, fs.removed)
+		assert.Empty(t, fs.resized)
+		assert.Empty(t, fs.chtimes)
+	})
+
+	t.Run("a request that was never planned changes nothing", func(t *testing.T) {
+		fs := newAbortFS()
+		r := newTestS3Client(t, fs)
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), newDownloadAbortJob(nil), nil, true))
+
+		assert.Empty(t, fs.removed)
+		assert.Empty(t, fs.chtimes)
+	})
+}
+
+// abortUploadClient answers AbortMultipartUpload with err and records the upload IDs it was asked
+// to abort.
+type abortUploadClient struct {
+	s3ApiClient
+	err     error
+	aborted []string
+}
+
+func (c *abortUploadClient) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	c.aborted = append(c.aborted, aws.ToString(params.UploadId))
+	return &s3.AbortMultipartUploadOutput{}, c.err
+}
+
+// TestCompleteSyncWorkRequestsUploadAbort covers the upload abort. It never touches the local file.
+// It releases the multipart upload and must be safe to repeat.
+func TestCompleteSyncWorkRequestsUploadAbort(t *testing.T) {
+	newUploadJob := func(jobExternalId string, plannedExternalId string) *beeremote.Job {
+		return &beeremote.Job{
+			ExternalId: jobExternalId,
+			Request: &beeremote.JobRequest{
+				Path: "/mnt/src/file",
+				Type: &beeremote.JobRequest_Sync{Sync: &flex.SyncJob{
+					Operation:  flex.SyncJob_UPLOAD,
+					RemotePath: "key",
+					LockedInfo: &flex.JobLockedInfo{ExternalId: plannedExternalId},
+				}},
+			},
+			Status: &beeremote.Job_Status{},
+		}
+	}
+
+	t.Run("a scheduled job aborts its own upload", func(t *testing.T) {
+		api := &abortUploadClient{}
+		r := newTestS3Client(t, filesystem.NewMockFS(), withTestApiClient(api))
+
+		require.NoError(t, r.completeSyncWorkRequests_Upload(context.Background(), newUploadJob("upload-1", "upload-1"), nil, true))
+
+		assert.Equal(t, []string{"upload-1"}, api.aborted)
+	})
+
+	t.Run("a refused claim aborts the upload its plan created", func(t *testing.T) {
+		api := &abortUploadClient{}
+		r := newTestS3Client(t, filesystem.NewMockFS(), withTestApiClient(api))
+
+		require.NoError(t, r.completeSyncWorkRequests_Upload(context.Background(), newUploadJob("", "upload-2"), nil, true))
+
+		assert.Equal(t, []string{"upload-2"}, api.aborted)
+	})
+
+	t.Run("an upload that is already gone counts as aborted", func(t *testing.T) {
+		api := &abortUploadClient{err: &smithy.GenericAPIError{Code: "NoSuchUpload"}}
+		r := newTestS3Client(t, filesystem.NewMockFS(), withTestApiClient(api))
+
+		require.NoError(t, r.completeSyncWorkRequests_Upload(context.Background(), newUploadJob("upload-3", "upload-3"), nil, true))
+	})
+
+	t.Run("other provider errors are returned", func(t *testing.T) {
+		api := &abortUploadClient{err: &smithy.GenericAPIError{Code: "AccessDenied"}}
+		r := newTestS3Client(t, filesystem.NewMockFS(), withTestApiClient(api))
+
+		require.Error(t, r.completeSyncWorkRequests_Upload(context.Background(), newUploadJob("upload-4", "upload-4"), nil, true))
+	})
+
+	t.Run("an upload without a multipart upload has nothing to abort", func(t *testing.T) {
+		api := &abortUploadClient{}
+		r := newTestS3Client(t, filesystem.NewMockFS(), withTestApiClient(api))
+
+		require.NoError(t, r.completeSyncWorkRequests_Upload(context.Background(), newUploadJob("", ""), nil, true))
+
+		assert.Empty(t, api.aborted)
+	})
 }
 
 // cancellingRestoreClient answers HeadObject with an archived object and, when RestoreObject is

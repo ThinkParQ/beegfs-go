@@ -674,15 +674,6 @@ func FileExists(lockedInfo *flex.JobLockedInfo) bool {
 	return lockedInfo != nil && lockedInfo.Exists
 }
 
-// FileCreatedByJob returns whether the job's plan created the file. Use it on the lockedInfo
-// persisted with a job, after the plan was applied. prepareDownloadNoFile creates the file and
-// records the new file's attributes, but leaves Exists false so an abort knows to remove the file.
-// The lockedInfo of a path that does not exist is left empty, so a set Mtime means the plan
-// created the file.
-func FileCreatedByJob(lockedInfo *flex.JobLockedInfo) bool {
-	return lockedInfo != nil && !lockedInfo.Exists && lockedInfo.GetMtime() != nil
-}
-
 // IsFileAlreadySynced returns whether the file is already synced with remote storage target. A nil
 // Mtime or RemoteMtime means that side does not exist so the file is not synced. The nil check
 // matters because AsTime turns a nil timestamp into the Unix epoch which would compare equal.
@@ -1216,6 +1207,27 @@ func prepareUpdateFileRstPattern(cfg *flex.JobRequestCfg) applyFn {
 		}
 		return undo, nil
 	}
+}
+
+// isContentLockedFn reports whether the file at path holds the content lock.
+type isContentLockedFn func(ctx context.Context, path string) (bool, error)
+
+// IsContentLocked reports whether the file at path holds the content lock. A path that does not
+// exist is not locked. Remote and its builders lock a file only for a job recorded on its path, and
+// that job refuses every conflicting job there. So a locked file at a path that had no file when
+// its job was planned was created for that job.
+func IsContentLocked(ctx context.Context, path string) (bool, error) {
+	entryInfo, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{Verbose: false}, path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if entryInfo.Entry.Details == nil {
+		return false, fmt.Errorf("entry details unavailable for %s (%s)", path, entryInfo.Entry.EntryInfoPopulated)
+	}
+	return entryInfo.Entry.Details.FileState.IsReadWriteLocked(), nil
 }
 
 type PathStateMode int
