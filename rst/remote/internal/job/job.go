@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/gob"
+	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"time"
@@ -31,6 +33,25 @@ type Job struct {
 	// requests on-disk as they contain a lot of duplicate information that can be regenerated as
 	// needed from the job request and segments.
 	WorkResults map[string]worker.WorkResult
+	// nothingToAbort is set when the RST holds nothing of this job's to roll back, because the
+	// job's work never ran or already finished. A cancel then skips the RST abort, even a forced
+	// one. The abort undoes a transfer from the file's state when the job was planned. Run on such
+	// a job, it would re-stub a file a finished download restored, or remove whatever file is now
+	// at a path the refused download had planned to create. It is set in four places:
+	//   - releaseLockAfterSubmit, on the job it records or fails because a submit could not
+	//     release the content lock. Remote attempts that release only when no job on the path
+	//     needs the lock, so no job there has unfinished RST work.
+	//   - UpdateWork, when the lock release after a finished job fails. The job's work requests
+	//     all ended, and the RST completed or aborted them.
+	//   - cancelClaimedReservation, on a claim remote refused. Its work never ran, and the
+	//     claimer undoes its own plan.
+	//   - SubmitJobRequest, on a job for a request whose generation status is FAILED_PRECONDITION,
+	//     ALREADY_COMPLETE or ALREADY_OFFLOADED. Remote never schedules such a job. ERROR is left
+	//     out, because its contract asks for CompleteWorkRequests to clean up.
+	//
+	// In the first two cases the job is FAILED only to keep the content lock until a user cancels
+	// it, and that cancel retries the release.
+	nothingToAbort bool
 	// IMPORTANT: When adding fields update the gob serialization and deserialization methods.
 }
 
@@ -419,6 +440,10 @@ func (j *Job) GobEncode() ([]byte, error) {
 		return nil, err
 	}
 
+	if err := enc.Encode(j.nothingToAbort); err != nil {
+		return nil, err
+	}
+
 	// Prefix the serialized jobData with the length as a uint16.
 	// We'll use this when decoding.
 	jobFieldLength := make([]byte, 2)
@@ -457,7 +482,15 @@ func (j *Job) GobDecode(data []byte) error {
 	if err := dec.Decode(&j.Segments); err != nil {
 		return nil
 	}
-	return dec.Decode(&j.WorkResults)
+	if err := dec.Decode(&j.WorkResults); err != nil {
+		return err
+	}
+	// Jobs stored before nothingToAbort existed end after WorkResults. They keep it false, so a
+	// cancel runs the RST abort as it did when they were stored.
+	if err := dec.Decode(&j.nothingToAbort); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // Segment is a wrapper around the protobuf defined Segment type to

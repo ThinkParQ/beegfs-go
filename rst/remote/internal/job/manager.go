@@ -807,6 +807,12 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	if jr.HasGenerationStatus() {
 		status := jr.GetGenerationStatus()
 		if _, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+			// Set for every status, including ERROR, whose contract asks for CompleteWorkRequests
+			// to clean up. Only FAILED_PRECONDITION is recorded as a job here. Any other status
+			// returns unrecorded, unless releaseLockAfterSubmit or cancelClaimedReservation records
+			// it, and both set the flag anyway.
+			job.nothingToAbort = true
+
 			// A FAILED_PRECONDITION with an unknown rstId means the builder encountered a file
 			// whose RST config references an rstId that no longer exists (or never did). Treat it
 			// as ErrJobFailedPrecondition so the job gets the error rather than rejected.
@@ -827,10 +833,13 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 				// mark the job as complete so ignore the err.
 				mtime, _ := smithytime.ParseDateTime(status.Message)
 				err = rst.GetErrJobAlreadyCompleteWithMtime(mtime)
+				job.nothingToAbort = true
 			case beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED:
 				err = rst.ErrJobAlreadyOffloaded
+				job.nothingToAbort = true
 			case beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION:
 				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+				job.nothingToAbort = true
 			case beeremote.JobRequest_GenerationStatus_ERROR:
 				err = errors.New(status.Message)
 			default:
@@ -1242,6 +1251,9 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 // will always attempt to re-abort completing the job with the remote storage target, which
 // may-or-may not be supported in an idempotent manner (i.e., an error may be returned).
 //
+// A job with nothingToAbort set is cancelled without the RST abort, forced or not, because its
+// work never ran or already finished.
+//
 // IMPORTANT: This should only be used when the state of a job's work requests need to be modified
 // on the assigned worker nodes. To update the job state in reaction to job results returned by a
 // worker node use updateJobResults().
@@ -1300,6 +1312,15 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			// nothing to stop on worker nodes and nothing to roll back, whoever asked.
 			status.SetState(beeremote.Job_CANCELLED)
 			status.SetMessage("reservation cancelled before it was claimed")
+			status.SetUpdated(timestamppb.Now())
+			return true, true, ""
+		}
+		if job.nothingToAbort {
+			// The job's work never ran or already finished, so no node has work to stop and the
+			// RST has nothing to roll back. The abort would undo the file's current contents
+			// instead. See Job.nothingToAbort.
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage(appendMessage(status.GetMessage(), "cancelled without an RST abort because the job's work never ran or already finished"))
 			status.SetUpdated(timestamppb.Now())
 			return true, true, ""
 		}
@@ -1481,6 +1502,9 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 
 		if !job.InActiveState() {
 			if _, err := m.releaseUnusedFileLockFn(workResult.GetPath(), pathEntry.Value); err != nil {
+				// The RST already completed or aborted this job, so the cancel that retries the
+				// release must not abort it again.
+				job.nothingToAbort = true
 				status.SetState(beeremote.Job_FAILED)
 				status.SetMessage(appendMessage(status.Message, "unable to clear lock: "+err.Error()))
 			}
@@ -1650,6 +1674,9 @@ func (m *Manager) releaseLockAfterSubmit(path string, request *beeremote.JobRequ
 		submitStatus, _ := SubmitResponseStatus(answer)
 		failed.SetSubmitStatus(submitStatus)
 	}
+	// The release ran because no job on the path needs the lock, so failed has no RST work left
+	// to abort. A cancel only retries the release.
+	failed.nothingToAbort = true
 	status := failed.GetStatus()
 	status.SetState(beeremote.Job_FAILED)
 	status.SetMessage(appendMessage(status.GetMessage(), "unable to release the content lock, cancel this job to try again: "+releaseErr.Error()))
@@ -1670,7 +1697,11 @@ func (m *Manager) releaseLockAfterSubmit(path string, request *beeremote.JobRequ
 // job does not block later jobs for the path, and it needs no content lock, so the release at the
 // end of the submit clears the lock unless another job still needs it. The claimer then undoes its
 // plan.
+//
+// The job now carries the claim's request and its plan, so a forced cancel would otherwise run the
+// RST abort for that plan. nothingToAbort stops it, because the claimer already undoes the plan.
 func cancelClaimedReservation(job *Job, reason error) {
+	job.nothingToAbort = true
 	status := job.GetStatus()
 	status.SetState(beeremote.Job_CANCELLED)
 	status.SetMessage(reason.Error())

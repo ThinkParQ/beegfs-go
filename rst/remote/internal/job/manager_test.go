@@ -3567,3 +3567,176 @@ func TestSubmitJobRequestRecordsFailedRelease(t *testing.T) {
 		assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
 	})
 }
+
+// abortRecorder wraps an RST and counts the aborts remote asks it for. A test reads aborts to
+// prove a cancel did or did not reach the RST abort.
+type abortRecorder struct {
+	rst.Provider
+	aborts int
+}
+
+func (r *abortRecorder) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if abort {
+		r.aborts++
+	}
+	return r.Provider.CompleteWorkRequests(ctx, job, workResults, abort)
+}
+
+// recordAborts replaces RST 1 of m with an abortRecorder and returns it.
+func recordAborts(m *Manager) *abortRecorder {
+	recorder := &abortRecorder{Provider: m.workerManager.RemoteStorageTargets[1]}
+	m.workerManager.RemoteStorageTargets[1] = recorder
+	return recorder
+}
+
+// TestCancelJobWithNothingToAbort checks that a cancel never runs the RST abort on a job whose
+// work never ran or already finished. Such a job is FAILED or CANCELLED only to keep a lock that
+// remote could not release. The abort would undo the file's current contents: it re-stubs a
+// restored download, or removes a file a refused download had planned to create.
+func TestCancelJobWithNothingToAbort(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	failReleases := func(m *Manager) {
+		m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			if anyJobNeedsFileLock(jobs) {
+				return false, nil
+			}
+			return false, errors.New("metadata server unreachable")
+		}
+	}
+	cancel := func(t *testing.T, m *Manager, jobId string, force bool) {
+		t.Helper()
+		response, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:        path,
+			JobId:       new(jobId),
+			NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+			ForceUpdate: force,
+		}.Build())
+		require.NoError(t, err)
+		require.True(t, response.GetOk(), response.GetMessage())
+	}
+
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a refused submit whose release failed (force=%t)", force), func(t *testing.T) {
+			m := newReservationManager(t)
+			failReleases(m)
+			jobId := uuid.NewString()
+			// A claim of a job that does not exist is refused before any job is recorded, and it
+			// carries no generation status. So only the failed release can mark the job.
+			_, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+			require.ErrorIs(t, err, rst.ErrReservationMissing)
+			require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			decisions := recordLockReleases(m)
+			recorder := recordAborts(m)
+
+			cancel(t, m, jobId, force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, 0, recorder.aborts, "the refused submit ran no work, so there is nothing to abort")
+			assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+		})
+
+		t.Run(fmt.Sprintf("a finished job whose release failed (force=%t)", force), func(t *testing.T) {
+			m := newReservationManager(t)
+			result, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+			require.NoError(t, err)
+			jobId := result.GetJob().GetId()
+			failReleases(m)
+			for _, work := range result.GetWorkResults() {
+				require.NoError(t, m.UpdateWork(flex.Work_builder{
+					Path:      path,
+					JobId:     jobId,
+					RequestId: work.GetWork().GetRequestId(),
+					Status:    flex.Work_Status_builder{State: flex.Work_COMPLETED}.Build(),
+					Parts:     []*flex.Work_Part{},
+				}.Build()))
+			}
+			job := getReservationTestJob(t, m, jobId)
+			require.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+			require.Contains(t, job.GetStatus().GetMessage(), "unable to clear lock")
+			decisions := recordLockReleases(m)
+			recorder := recordAborts(m)
+
+			cancel(t, m, jobId, force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, 0, recorder.aborts, "the transfer finished, so an abort would undo it")
+			assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+		})
+	}
+
+	t.Run("a forced cancel of a refused claim", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		// Remote refuses the claim because RST 1 is gone, then the RST is configured again.
+		provider := m.workerManager.RemoteStorageTargets[1]
+		delete(m.workerManager.RemoteStorageTargets, 1)
+		_, err = m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+		require.Error(t, err)
+		m.workerManager.RemoteStorageTargets[1] = provider
+		require.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		recorder := recordAborts(m)
+
+		cancel(t, m, jobId, true)
+
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		assert.Equal(t, 0, recorder.aborts, "the claimer undoes its own plan, so remote must not abort it")
+	})
+
+	// A request that carries a generation status is never scheduled. Its status decides whether a
+	// cancel may run the RST abort. ERROR is defined as needing CompleteWorkRequests to clean up,
+	// so it keeps the abort. The release at the end of these submits succeeds, so only the
+	// generation status can mark the job.
+	for _, tc := range []struct {
+		state      beeremote.JobRequest_GenerationStatus_State
+		message    string
+		recorded   beeremote.Job_State
+		force      bool
+		wantAborts int
+	}{
+		{beeremote.JobRequest_GenerationStatus_ERROR, "rollback also failed", beeremote.Job_FAILED, false, 1},
+		{beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, "the file changed", beeremote.Job_CANCELLED, true, 0},
+		{beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, "", beeremote.Job_COMPLETED, true, 0},
+	} {
+		t.Run(fmt.Sprintf("a request with generation status %s", tc.state), func(t *testing.T) {
+			m := newReservationManager(t)
+			recordLockReleases(m)
+			jobId := uuid.NewString()
+			request := newReservationRequest(false, "")
+			request.SetJobId(jobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{State: tc.state, Message: tc.message})
+			_, err := m.SubmitJobRequest(request, "")
+			require.Error(t, err)
+			require.Equal(t, tc.recorded, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			recorder := recordAborts(m)
+
+			cancel(t, m, jobId, tc.force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, tc.wantAborts, recorder.aborts)
+		})
+	}
+
+	t.Run("a job that failed after its work ran is still aborted", func(t *testing.T) {
+		m := newReservationManager(t)
+		result, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		jobId := result.GetJob().GetId()
+		for _, work := range result.GetWorkResults() {
+			require.NoError(t, m.UpdateWork(flex.Work_builder{
+				Path:      path,
+				JobId:     jobId,
+				RequestId: work.GetWork().GetRequestId(),
+				Status:    flex.Work_Status_builder{State: flex.Work_FAILED}.Build(),
+				Parts:     []*flex.Work_Part{},
+			}.Build()))
+		}
+		require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		recorder := recordAborts(m)
+
+		cancel(t, m, jobId, true)
+
+		assert.Equal(t, 1, recorder.aborts, "work ran and failed, so the RST may hold partial results")
+	})
+}

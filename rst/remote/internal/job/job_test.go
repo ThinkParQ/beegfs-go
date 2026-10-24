@@ -1,13 +1,19 @@
 package job
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/gob"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -441,4 +447,49 @@ func TestOutcomeRecordedBy(t *testing.T) {
 			assert.Equal(t, tt.want, tt.request.outcomeRecordedBy(tt.lastJob, tt.wantState, tt.mtime))
 		})
 	}
+}
+
+// TestJobGobNothingToAbort checks that nothingToAbort survives the database round trip, and that a
+// job stored before the field existed decodes with it false. Such a job keeps the RST abort on
+// cancel, as it had when it was stored.
+func TestJobGobNothingToAbort(t *testing.T) {
+	newJob := func() *Job {
+		job, err := New(beeremote.JobRequest_builder{
+			Path:                "/test/file",
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		}.Build())
+		require.NoError(t, err)
+		return job
+	}
+
+	t.Run("a set value is kept", func(t *testing.T) {
+		job := newJob()
+		job.nothingToAbort = true
+		data, err := job.GobEncode()
+		require.NoError(t, err)
+
+		decoded := &Job{}
+		require.NoError(t, decoded.GobDecode(data))
+		assert.True(t, decoded.nothingToAbort)
+		assert.Equal(t, job.GetId(), decoded.GetId())
+	})
+
+	t.Run("a job stored before the field existed decodes as false", func(t *testing.T) {
+		job := newJob()
+		// The layout GobEncode wrote before nothingToAbort was added.
+		jobData, err := proto.Marshal(job.Job)
+		require.NoError(t, err)
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		require.NoError(t, enc.Encode(job.Segments))
+		require.NoError(t, enc.Encode(job.WorkResults))
+		length := make([]byte, 2)
+		binary.BigEndian.PutUint16(length, uint16(len(jobData)))
+
+		decoded := &Job{}
+		require.NoError(t, decoded.GobDecode(slices.Concat(length, jobData, buf.Bytes())))
+		assert.False(t, decoded.nothingToAbort)
+		assert.Equal(t, job.GetId(), decoded.GetId())
+	})
 }
