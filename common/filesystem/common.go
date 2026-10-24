@@ -72,11 +72,12 @@ func readFilePart(file io.ReadSeeker, offsetStart int64, offsetStop int64) ([]by
 	}
 
 	// Read and return the bytes from this part of the file into memory to avoid needing to re-read
-	// from disk again.
+	// from disk again. A single Read may return fewer bytes than asked for, for example when the
+	// part is larger than the kernel returns from one read. ReadFull keeps reading until the buffer
+	// is full. A file that ends before the part does returns an error instead of a zero-padded part.
 	buf := make([]byte, (offsetStop-offsetStart)+1)
-	_, err = file.Read(buf)
-	if err != nil {
-		return nil, err
+	if _, err = io.ReadFull(file, buf); err != nil {
+		return nil, fmt.Errorf("unable to read bytes %d-%d of the file: %w", offsetStart, offsetStop, err)
 	}
 	return buf, nil
 }
