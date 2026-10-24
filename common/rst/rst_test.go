@@ -1200,3 +1200,16 @@ func TestApplyPlanUndo(t *testing.T) {
 		assert.NoError(t, undo.run(context.Background()))
 	})
 }
+
+// TestGetOffloadedUrlPartsFromFile checks that a stub, which is always shorter than the longest
+// key it can hold, is read and parsed.
+func TestGetOffloadedUrlPartsFromFile(t *testing.T) {
+	mountPoint := filesystem.NewMockFS()
+	require.NoError(t, mountPoint.CreateWriteClose("/stub", []byte("rst://3:dir/object.bin\n"), 0644, false))
+
+	rstId, key, err := GetOffloadedUrlPartsFromFile(mountPoint, "/stub")
+
+	require.NoError(t, err)
+	assert.Equal(t, uint32(3), rstId)
+	assert.Equal(t, "dir/object.bin", key)
+}

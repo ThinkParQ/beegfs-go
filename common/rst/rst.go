@@ -1373,15 +1373,16 @@ func CreateOffloadedDataFile(ctx context.Context, mountPoint filesystem.Provider
 }
 
 func GetOffloadedUrlPartsFromFile(beegfs filesystem.Provider, path string) (uint32, string, error) {
-	// Amazon s3 allows object key names to be up to 1024 bytes in length. Note that this is a
-	// byte limit, so if your key contains multi-byte UTF-8 characters, the number of characters
-	// may be fewer than 1024. The extra 0 bytes on the right will be trimmed.
-	reader, _, err := beegfs.ReadFilePart(path, 0, 1024)
+	// S3 allows object key names up to 1024 bytes. That is a byte limit, so a key with multi-byte
+	// UTF-8 characters holds fewer than 1024 characters. A stub is shorter than the limit, so it is
+	// read with Open rather than ReadFilePart, which fails on a file that ends before the part.
+	file, err := beegfs.Open(path)
 	if err != nil {
 		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
+	defer file.Close()
 
-	rstUrl, err := io.ReadAll(reader)
+	rstUrl, err := io.ReadAll(io.LimitReader(file, 1025))
 	if err != nil {
 		return 0, "", fmt.Errorf("stub file was not readable: %w", err)
 	}
