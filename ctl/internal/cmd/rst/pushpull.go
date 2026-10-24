@@ -241,10 +241,15 @@ writeResponses:
 				syncCompleted++
 			case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
 				syncOffloaded++
-			case beeremote.SubmitJobResponse_EXISTING, beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
-				// BLOCKED_BY_ACTIVE_JOB means another unfinished job holds the path. Like EXISTING,
-				// the work is already in progress and the request can be retried once it finishes.
+			case beeremote.SubmitJobResponse_EXISTING:
 				syncInProgress++
+			case beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
+				// Another unfinished job holds the path, so nothing was started for this request.
+				// It counts as an error so the command exits 2, and the row says which path to
+				// retry once that job finishes.
+				errStartingSync++
+				tbl.MinimalRow(resp.Path, "blocked by an unfinished job for this path (retry once it finishes)")
+				continue
 			case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
 				errStartingSync++
 			case beeremote.SubmitJobResponse_NOT_ALLOWED:
