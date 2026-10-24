@@ -493,3 +493,26 @@ func TestJobGobNothingToAbort(t *testing.T) {
 		assert.Equal(t, job.GetId(), decoded.GetId())
 	})
 }
+
+// TestNewCleansPath checks that New records a job under the cleaned path, so every spelling of a
+// path finds the same path entry.
+func TestNewCleansPath(t *testing.T) {
+	for given, want := range map[string]string{
+		"":                 "/",
+		"f":                "/f",
+		"/a/b":             "/a/b",
+		"/a/./b":           "/a/b",
+		"/a/x/../b":        "/a/b",
+		"//a//b/":          "/a/b",
+		"/../a":            "/a",
+		"a/b/c/../../b/./": "/a/b",
+	} {
+		job, err := New(beeremote.JobRequest_builder{
+			Path:                given,
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		}.Build())
+		require.NoError(t, err)
+		assert.Equal(t, want, job.GetRequest().GetPath(), "given %q", given)
+	}
+}

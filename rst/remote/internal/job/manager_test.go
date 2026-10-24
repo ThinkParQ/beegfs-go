@@ -3454,6 +3454,21 @@ func TestReleaseUnusedFileLock(t *testing.T) {
 		assert.False(t, released)
 	})
 
+	t.Run("another spelling of a path with an unfinished job keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		decisions := recordLockReleases(m)
+
+		for _, alias := range []string{"/test/./bulkfile", "/test/x/../bulkfile", "//test//bulkfile", "test/bulkfile"} {
+			released, err := m.ReleaseUnusedFileLock(alias)
+
+			require.NoError(t, err)
+			assert.False(t, released, "%s names the file the job holds the lock for", alias)
+		}
+		assert.Equal(t, []bool{true, true, true, true}, decisions())
+	})
+
 	t.Run("an existing entry with only finished jobs is kept", func(t *testing.T) {
 		m := newReservationManager(t)
 		m.config.MaxJobEntriesPerRST = 10
