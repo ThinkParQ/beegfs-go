@@ -56,7 +56,9 @@ type Provider interface {
 	Open(name string) (io.ReadCloser, error)
 	// ReadFilePart reads the part of the named file from offsetStart up to and including offsetStop
 	// into a new bytes buffer, calculates the sha256 checksum, then returns an io.Reader that
-	// allows limited access to the file and the base64 encoded sha256 checksum of the part.
+	// allows limited access to the file and the base64 encoded sha256 checksum of the part. It
+	// returns an error if the file ends before offsetStop. To read a file of unknown length up to a
+	// limit, use Open.
 	ReadFilePart(name string, offsetStart int64, offsetStop int64) (reader io.Reader, checksumSHA256 string, err error)
 	// Recursively create any missing portion of the directory structure.
 	CreateDir(path string, mode uint32) error

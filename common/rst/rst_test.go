@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/protobuf/proto"
@@ -242,4 +243,17 @@ func TestIsFileAlreadySynced(t *testing.T) {
 			assert.Equal(t, tt.synced, IsFileAlreadySynced(tt.info))
 		})
 	}
+}
+
+// TestGetOffloadedUrlPartsFromFile checks that a stub, which is always shorter than the longest
+// key it can hold, is read and parsed.
+func TestGetOffloadedUrlPartsFromFile(t *testing.T) {
+	mountPoint := filesystem.NewMockFS()
+	require.NoError(t, mountPoint.CreateWriteClose("/stub", []byte("rst://3:dir/object.bin\n"), 0644, false))
+
+	rstId, key, err := GetOffloadedUrlPartsFromFile(mountPoint, "/stub")
+
+	require.NoError(t, err)
+	assert.Equal(t, uint32(3), rstId)
+	assert.Equal(t, "dir/object.bin", key)
 }
