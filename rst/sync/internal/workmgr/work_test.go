@@ -41,6 +41,8 @@ func TestSendBuilderJobRequestCounters(t *testing.T) {
 	type submission struct {
 		request *pbr.JobRequest
 		err     error
+		// job is the job remote answers with, when the case needs one.
+		job *pbr.Job
 	}
 	cases := []struct {
 		name        string
@@ -49,40 +51,62 @@ func TestSendBuilderJobRequestCounters(t *testing.T) {
 	}{
 		{
 			name:        "an accepted reserve is held, not submitted",
-			submissions: []submission{{reserve(), nil}},
+			submissions: []submission{{reserve(), nil, nil}},
 			want:        flex.BuilderJob_builder{JobsReserved: 1}.Build(),
 		},
 		{
 			name:        "an accepted claim releases its reservation and counts as submitted",
-			submissions: []submission{{reserve(), nil}, {claim(), nil}},
+			submissions: []submission{{reserve(), nil, nil}, {claim(), nil, nil}},
 			want:        flex.BuilderJob_builder{Submitted: 1}.Build(),
 		},
 		{
 			name:        "a refused claim releases its reservation and counts its refusal",
-			submissions: []submission{{reserve(), nil}, {claim(), rst.ErrReservationMissing}},
+			submissions: []submission{{reserve(), nil, nil}, {claim(), rst.ErrReservationMissing, nil}},
 			want:        flex.BuilderJob_builder{JobsNotReserved: 1}.Build(),
 		},
 		{
 			name:        "a claim that fails for another reason still releases its reservation",
-			submissions: []submission{{reserve(), nil}, {claim(), rst.ErrJobFailedPrecondition}},
+			submissions: []submission{{reserve(), nil, nil}, {claim(), rst.ErrJobFailedPrecondition, nil}},
 			want:        flex.BuilderJob_builder{Errors: 1}.Build(),
 		},
 		{
 			// The reserve never held anything, so nothing is waiting on a claim.
 			name:        "a refused reserve counts its refusal and holds nothing",
-			submissions: []submission{{reserve(), rst.ErrJobNotAllowed}},
+			submissions: []submission{{reserve(), rst.ErrJobNotAllowed, nil}},
 			want:        flex.BuilderJob_builder{JobsNotAllowed: 1}.Build(),
 		},
 		{
 			// A crash loses the counters of a round that had not committed, including its reserves,
 			// while the claims for them still arrive. The count must not go negative.
 			name:        "a claim with no counted reservation leaves the count at zero",
-			submissions: []submission{{claim(), nil}},
+			submissions: []submission{{claim(), nil, nil}},
 			want:        flex.BuilderJob_builder{Submitted: 1}.Build(),
 		},
 		{
+			// A rescheduled builder job reserves its paths again under the same IDs. A path whose
+			// reservation an earlier pass claimed comes back with the claimed job, and that claim was
+			// counted when it was answered.
+			name: "a replayed reserve of a job already claimed is not counted again",
+			submissions: []submission{{reserve(), nil, pbr.Job_builder{
+				Id:      reserve().GetJobId(),
+				Request: pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build(),
+			}.Build()}},
+			want: &flex.BuilderJob{},
+		},
+		{
+			// Remote answers a refused reserve with the job that blocked it, which is claimed when
+			// it is an earlier run's job still running on the path. Its ID is not this request's, so
+			// the refusal is counted like any other.
+			name: "a reserve refused by another job's claim is counted as refused",
+			submissions: []submission{{reserve(), rst.ErrJobNotAllowed, pbr.Job_builder{
+				Id:      "11111111-1111-1111-1111-111111111111",
+				Request: pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build(),
+			}.Build()}},
+			want: flex.BuilderJob_builder{JobsNotAllowed: 1}.Build(),
+		},
+		{
 			name:        "a request outside any bulk operation does not touch the count",
-			submissions: []submission{{reserve(), nil}, {plain(), nil}},
+			submissions: []submission{{reserve(), nil, nil}, {plain(), nil, nil}},
 			want:        flex.BuilderJob_builder{JobsReserved: 1, Submitted: 1}.Build(),
 		},
 	}
@@ -100,8 +124,8 @@ func TestSendBuilderJobRequestCounters(t *testing.T) {
 			builder := &flex.BuilderJob{}
 			mu := &sync.Mutex{}
 			for _, s := range tc.submissions {
-				call := mockRemote.On("submitJob", mock.Anything).Return(s.err).Once()
-				gotErr := w.sendBuilderJobRequest(context.Background(), mu, builder, s.request)
+				call := mockRemote.On("submitJob", mock.Anything).Return(s.err, s.job).Once()
+				_, gotErr := w.sendBuilderJobRequest(context.Background(), mu, builder, s.request)
 				if s.err == nil {
 					require.NoError(t, gotErr)
 				} else {
@@ -217,7 +241,7 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 				request.SetJobId("00000000-0000-0000-0000-000000000001")
 				request.SetReservation(pbr.JobRequest_CLAIM)
 			}
-			gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, request)
+			_, gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, request)
 			if tc.wantErr == nil {
 				require.NoError(t, gotErr)
 			} else {
@@ -227,6 +251,96 @@ func TestSendBuilderJobRequestRetries(t *testing.T) {
 
 			mockRemote.AssertNumberOfCalls(t, "submitJob", len(tc.results))
 			assert.Equal(t, tc.want.GetSubmitted(), builder.GetSubmitted(), "submitted")
+			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
+		})
+	}
+}
+
+// TestCancelBuilderReservation pins how sync ends a reservation the builder will not claim, because
+// the file changed or could not be locked. The cancel is a claim carrying FAILED_PRECONDITION, which
+// remote records as CANCELLED. Remote's FAILED_PRECONDITION answer means the cancel landed, so it
+// is not reported as an error. The reservation leaves JobsReserved, and the path is counted once:
+// as changed when the file changed, and as an error otherwise.
+func TestCancelBuilderReservation(t *testing.T) {
+	unavailable := fmt.Errorf("%w: %w", beeremote.ErrUnavailable, status.Error(codes.Unavailable, "connection refused"))
+	changed := fmt.Errorf("%w: its size changed", rst.ErrFileChangedDuringBuild)
+
+	cases := []struct {
+		name          string
+		reason        error
+		callerCancels bool
+		answer        error
+		wantErr       error
+		want          *flex.BuilderJob
+	}{
+		{
+			name:   "a file that changed is counted as changed",
+			reason: changed,
+			answer: rst.ErrJobFailedPrecondition,
+			want:   flex.BuilderJob_builder{JobsChangedDuringBuild: 1}.Build(),
+		},
+		{
+			name:   "a file that could not be locked is counted as an error",
+			reason: errors.New("unable to lock /f"),
+			answer: rst.ErrJobFailedPrecondition,
+			want:   flex.BuilderJob_builder{Errors: 1}.Build(),
+		},
+		{
+			// A user cancelled the reservation first. Remote's release at the end of the call still
+			// decided the lock, so the cancel is done.
+			name:   "a reservation something else already ended is done",
+			reason: changed,
+			answer: rst.ErrJobNotReserved,
+			want:   flex.BuilderJob_builder{JobsChangedDuringBuild: 1}.Build(),
+		},
+		{
+			name:          "a cancel remote may not have seen is returned and not counted",
+			reason:        changed,
+			callerCancels: true,
+			answer:        unavailable,
+			wantErr:       rst.ErrRequestNotDelivered,
+			want:          flex.BuilderJob_builder{JobsReserved: 1}.Build(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := beeremote.New(beeremote.Config{})
+			require.NoError(t, err)
+			// The address "mock:0" is what makes the client use the mock provider.
+			require.NoError(t, client.UpdateConfig(flex.BeeRemoteNode_builder{Address: "mock:0"}.Build(), "0"))
+			mockRemote, ok := client.Provider.(*beeremote.MockProvider)
+			require.True(t, ok)
+			var sent *pbr.JobRequest
+			mockRemote.On("submitJob", mock.Anything).Run(func(args mock.Arguments) {
+				sent = args.Get(0).(*pbr.JobRequest)
+			}).Return(tc.answer).Once()
+			w := &worker{beeRemoteClient: client, log: zaptest.NewLogger(t)}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.callerCancels {
+				cancel()
+			}
+
+			reserved := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_RESERVE}.Build()
+			reserved.SetJobId("00000000-0000-0000-0000-000000000001")
+			builder := flex.BuilderJob_builder{JobsReserved: 1}.Build()
+			gotErr := w.cancelBuilderReservation(ctx, &sync.Mutex{}, builder, reserved, tc.reason)
+
+			if tc.wantErr == nil {
+				require.NoError(t, gotErr)
+			} else {
+				require.ErrorIs(t, gotErr, tc.wantErr)
+			}
+			require.NotNil(t, sent)
+			assert.Equal(t, pbr.JobRequest_CLAIM, sent.GetReservation(), "the cancel claims the reservation")
+			assert.Equal(t, reserved.GetJobId(), sent.GetJobId())
+			assert.Equal(t, pbr.JobRequest_GenerationStatus_FAILED_PRECONDITION, sent.GetGenerationStatus().GetState())
+			assert.Equal(t, tc.reason.Error(), sent.GetGenerationStatus().GetMessage())
+			assert.Equal(t, pbr.JobRequest_RESERVE, reserved.GetReservation(), "the builder's request must not change")
+			assert.Equal(t, tc.want.GetJobsReserved(), builder.GetJobsReserved(), "reserved")
+			assert.Equal(t, tc.want.GetJobsChangedDuringBuild(), builder.GetJobsChangedDuringBuild(), "changed")
 			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
 		})
 	}
@@ -253,6 +367,13 @@ func TestGetBuilderResultsReserved(t *testing.T) {
 		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: &flex.JobRequestCfg{Path: "/dir"}, DirsConfigured: 3}.Build())
 		assert.Equal(t, "3 director(ies) configured", message)
 		assert.False(t, hasErrors)
+	})
+
+	t.Run("files that changed during the build are reported as errors", func(t *testing.T) {
+		// Nothing ran for them, so the push is incomplete until it runs again.
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: cfg, Submitted: 3, JobsChangedDuringBuild: 2}.Build())
+		assert.Equal(t, "3 job request(s) submitted; 2 changed while the job was being built and were skipped", message)
+		assert.True(t, hasErrors)
 	})
 
 	t.Run("no line is added once every reservation is claimed", func(t *testing.T) {

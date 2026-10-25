@@ -686,13 +686,28 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 		job.Segments = nil
 	} else if jr.GetReservation() == beeremote.JobRequest_RESERVE {
 		if existing, ok := pathEntry.Value[reservedJobId]; ok {
-			// The caller is replaying a reserve whose response it never received. Any other job
-			// holding this ID must not be replaced.
-			if existing.InReservedState() && existing.Request.GetRemoteStorageTarget() == jr.GetRemoteStorageTarget() {
-				replayed = true
-				return &beeremote.JobResult{Job: existing.Get()}, nil
+			// The caller is replaying a reserve, either because it never received the response or
+			// because its builder job was rescheduled and walked the path again. It gets the job back
+			// in whatever state it reached, so it can resume from there. A job under this ID for
+			// another RST, or one that is not a reservation, is a collision and is never replaced.
+			isReservation := existing.Request.GetReservation() != beeremote.JobRequest_NO_RESERVATION
+			if !isReservation || existing.Request.GetRemoteStorageTarget() != jr.GetRemoteStorageTarget() {
+				return nil, fmt.Errorf("%w: job %s already exists for path %s in state %s", rst.ErrJobNotAllowed, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
 			}
-			return nil, fmt.Errorf("%w: job %s already exists for path %s in state %s", rst.ErrJobNotAllowed, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
+			replayed = true
+			result := &beeremote.JobResult{Job: existing.Get()}
+			switch {
+			case existing.InReservedState():
+				// Still waiting for its claim.
+				return result, nil
+			case existing.Request.GetReservation() == beeremote.JobRequest_CLAIM:
+				// Already claimed. The caller gets the answer the claim got, so an accepted claim
+				// answers nil and the caller can tell it from a reservation by the job's request.
+				return result, storedSubmitError(existing)
+			default:
+				// Cancelled before anyone claimed it.
+				return result, fmt.Errorf("%w: job %s for path %s is %s", rst.ErrJobNotReserved, reservedJobId, jr.GetPath(), existing.GetStatus().GetState())
+			}
 		}
 	} else if jobId != "" {
 		if existing, ok := pathEntry.Value[jobId]; ok {
@@ -1619,40 +1634,6 @@ func (m *Manager) completeJob(job *Job, client rst.Provider, abort bool) error {
 	return job.Complete(m.ctx, client, abort)
 }
 
-// ReleaseUnusedFileLock releases the content lock on path if no job recorded for the path still
-// needs it. A client calls it when it took the lock but gave up before any job was recorded to hold
-// it, for example when its request was refused before it reached the job store.
-//
-// The decision is the same one every release makes, so it runs while the path entry is held.
-// CreateAndLockEntry holds the entry's key even when the path has no entry, so a SubmitJob for the
-// same path can't record a job, and take the lock, between the check and the clear. An entry this
-// call had to create is removed again. An entry that already existed is committed unchanged.
-func (m *Manager) ReleaseUnusedFileLock(path string) (released bool, err error) {
-	path = cleanJobPath(path)
-	_, pathEntry, commitAndReleasePath, err := m.pathStore.CreateAndLockEntry(
-		path,
-		kvstore.WithAllowExisting(true),
-		kvstore.WithValue(make(map[string]*Job)),
-	)
-	createdEntry := err == nil
-	if err != nil && !errors.Is(err, kvstore.ErrEntryAlreadyExistsInDB) {
-		return false, fmt.Errorf("unable to lock path entry for %s: %w", path, err)
-	}
-
-	released, err = m.releaseUnusedFileLockFn(path, pathEntry.Value)
-
-	var commitErr error
-	if createdEntry {
-		commitErr = commitAndReleasePath(kvstore.WithDeleteEntry(true))
-	} else {
-		commitErr = commitAndReleasePath()
-	}
-	if commitErr != nil {
-		err = errors.Join(err, fmt.Errorf("unable to release path entry for %s: %w", path, commitErr))
-	}
-	return released, err
-}
-
 // recordSubmitResponseStatus stores the response status of the submission that recorded job, so a
 // request replayed with the same job_id gets the same answer. A job's state alone doesn't say what
 // it was answered, because different answers can leave a job in the same state. Nothing is stored
@@ -1912,8 +1893,10 @@ func jobStateString(state beeremote.Job_State) string {
 // needs the lock until it reaches a terminal state:
 //   - SCHEDULED, RUNNING and ERROR jobs have work requests on the sync nodes that read or write
 //     the file. ERROR work requests are still being retried.
-//   - RESERVED jobs were locked by the builder before the reservation. The bulk operation that
-//     claims the job expects the file to be unchanged since then.
+//   - RESERVED jobs are locked by the builder right after remote records the reservation. The
+//     builder or bulk operation that claims the job expects the file to be unchanged since then.
+//     A reservation keeps the lock even before the builder sets it, so nothing on the path can
+//     clear a lock the builder is about to rely on.
 //   - UNASSIGNED jobs were locked by the submitter and are about to be scheduled.
 //   - FAILED jobs keep their external IDs, such as a multipart upload, and only release the lock
 //     once the user cancels them.
@@ -1923,10 +1906,11 @@ func jobStateString(state beeremote.Job_State) string {
 //     the data state check in getDefaultReleaseUnusedFileLock, not through its job. Counting
 //     OFFLOADED would leave a restored file locked forever.
 //
-// Builder jobs follow a narrower rule. A builder locks a file only during its own pass over that
-// file. It hands the lock to the job it submits, or asks remote to release it when nothing was
-// submitted. It never clears the lock itself. So a builder counts only while it is SCHEDULED or
-// RUNNING, because its pass may be holding the lock at that moment. A builder that stopped must not
+// Builder jobs follow a narrower rule. A builder locks a file only after reserving a job for it,
+// and hands the lock to that job when it claims or cancels the reservation. It clears the lock
+// itself only when it just set it for a request that writes the file, and the file had changed. So
+// a builder counts only while it is SCHEDULED or RUNNING, because its pass may be holding the lock
+// at that moment. A builder that stopped must not
 // count, because a job it spawned may run on the builder's own path. That job would then never
 // release its lock.
 func jobNeedsFileLock(job *Job) bool {

@@ -888,23 +888,31 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 		cfg          *flex.JobRequestCfg
 		workRequired bool
 		failed       bool
+		// unchanged is what planLeavesFileUnchanged must report. It is only checked for a plan with
+		// no work and no failed precondition, because the builder only asks then.
+		unchanged bool
 	}{
-		{"upload of an out of sync file", flex.JobRequestCfg_builder{LockedInfo: outOfSync()}.Build(), true, false},
-		{"upload of an in sync file", flex.JobRequestCfg_builder{LockedInfo: inSync()}.Build(), false, false},
-		{"upload of a missing file", flex.JobRequestCfg_builder{LockedInfo: missing(0)}.Build(), false, true},
-		{"upload of a stub", flex.JobRequestCfg_builder{LockedInfo: stub()}.Build(), false, true},
-		{"download over an out of sync file", flex.JobRequestCfg_builder{Download: true, Overwrite: true, LockedInfo: outOfSync()}.Build(), true, false},
-		{"download over an out of sync file without overwrite", flex.JobRequestCfg_builder{Download: true, LockedInfo: outOfSync()}.Build(), false, true},
-		{"download of an in sync file", flex.JobRequestCfg_builder{Download: true, LockedInfo: inSync()}.Build(), false, false},
-		{"download into a stub", flex.JobRequestCfg_builder{Download: true, RemoteStorageTarget: 1, RemotePath: "key", LockedInfo: stub()}.Build(), true, false},
-		{"download of an empty object over a file", flex.JobRequestCfg_builder{Download: true, Overwrite: true, LockedInfo: emptyRemote()}.Build(), false, false},
-		{"download to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(10)}.Build(), true, false},
-		{"download of an empty object to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(0)}.Build(), false, false},
-		{"stub-local upload of an out of sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: outOfSync()}.Build(), true, false},
-		{"stub-local upload of an in sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: inSync()}.Build(), false, false},
-		{"stub-local download to a new path", flex.JobRequestCfg_builder{StubLocal: true, Download: true, LockedInfo: missing(10)}.Build(), false, false},
-		{"stub-local download of a correct stub", flex.JobRequestCfg_builder{StubLocal: true, Download: true, RemoteStorageTarget: 1, RemotePath: "key", LockedInfo: stub()}.Build(), false, false},
-		{"stub-local download over a file without overwrite", flex.JobRequestCfg_builder{StubLocal: true, Download: true, LockedInfo: outOfSync()}.Build(), false, true},
+		{"upload of an out of sync file", flex.JobRequestCfg_builder{LockedInfo: outOfSync()}.Build(), true, false, false},
+		{"upload of an in sync file", flex.JobRequestCfg_builder{LockedInfo: inSync()}.Build(), false, false, true},
+		{"upload of a missing file", flex.JobRequestCfg_builder{LockedInfo: missing(0)}.Build(), false, true, false},
+		{"upload of a stub", flex.JobRequestCfg_builder{LockedInfo: stub()}.Build(), false, true, false},
+		{"download over an out of sync file", flex.JobRequestCfg_builder{Download: true, Overwrite: true, LockedInfo: outOfSync()}.Build(), true, false, false},
+		{"download over an out of sync file without overwrite", flex.JobRequestCfg_builder{Download: true, LockedInfo: outOfSync()}.Build(), false, true, false},
+		{"download of an in sync file", flex.JobRequestCfg_builder{Download: true, LockedInfo: inSync()}.Build(), false, false, true},
+		{"download into a stub", flex.JobRequestCfg_builder{Download: true, RemoteStorageTarget: 1, RemotePath: "key", LockedInfo: stub()}.Build(), true, false, false},
+		{"download of an empty object over a file", flex.JobRequestCfg_builder{Download: true, Overwrite: true, LockedInfo: emptyRemote()}.Build(), false, false, false},
+		{"download to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(10)}.Build(), true, false, false},
+		{"download of an empty object to a new path", flex.JobRequestCfg_builder{Download: true, LockedInfo: missing(0)}.Build(), false, false, false},
+		{"stub-local upload of an out of sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: outOfSync()}.Build(), true, false, false},
+		{"stub-local upload of an in sync file", flex.JobRequestCfg_builder{StubLocal: true, LockedInfo: inSync()}.Build(), false, false, false},
+		{"stub-local download to a new path", flex.JobRequestCfg_builder{StubLocal: true, Download: true, LockedInfo: missing(10)}.Build(), false, false, false},
+		{"stub-local download of a correct stub", flex.JobRequestCfg_builder{StubLocal: true, Download: true, RemoteStorageTarget: 1, RemotePath: "key", LockedInfo: stub()}.Build(), false, false, true},
+		{"stub-local download over a file without overwrite", flex.JobRequestCfg_builder{StubLocal: true, Download: true, LockedInfo: outOfSync()}.Build(), false, true, false},
+		// --update and a cooldown only set the file's RST pattern, which the content lock does not
+		// protect, so they never make the builder reserve or lock a file.
+		{"upload of an in sync file with --update", flex.JobRequestCfg_builder{Update: new(true), RemoteStorageTarget: 1, LockedInfo: inSync()}.Build(), false, false, true},
+		{"upload of an in sync file with a cooldown", flex.JobRequestCfg_builder{CooldownSecs: new(uint32(60)), LockedInfo: inSync()}.Build(), false, false, true},
+		{"stub-local download of a correct stub with a restore policy", flex.JobRequestCfg_builder{StubLocal: true, Download: true, RemoteStorageTarget: 1, RemotePath: "key", RestorePolicy: new(flex.RestorePolicy_RESTORE_POLICY_AUTO), LockedInfo: stub()}.Build(), false, false, false},
 	}
 
 	for _, tt := range tests {
@@ -912,6 +920,9 @@ func TestPlanFileStateForWorkRequestsWorkRequired(t *testing.T) {
 			_, workRequired, failedPrecondition := PlanFileStateForWorkRequests(nil, tt.cfg)
 			assert.Equal(t, tt.failed, failedPrecondition != nil, "failed precondition: %v", failedPrecondition)
 			assert.Equal(t, tt.workRequired, workRequired)
+			if !tt.workRequired && failedPrecondition == nil {
+				assert.Equal(t, tt.unchanged, planLeavesFileUnchanged(tt.cfg), "the builder locks a file only when its plan changes it")
+			}
 		})
 	}
 }

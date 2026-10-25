@@ -242,17 +242,6 @@ func (s *BeeRemoteServer) GetStubContents(ctx context.Context, request *beeremot
 	return &beeremote.GetStubContentsResponse{RstId: &id, Url: &url}, nil
 }
 
-func (s *BeeRemoteServer) ReleaseUnusedFileLock(ctx context.Context, request *beeremote.ReleaseUnusedFileLockRequest) (*beeremote.ReleaseUnusedFileLockResponse, error) {
-	s.wg.Add(1)
-	defer s.wg.Done()
-
-	released, err := s.jobMgr.ReleaseUnusedFileLock(request.GetPath())
-	if err != nil {
-		return nil, err
-	}
-	return beeremote.ReleaseUnusedFileLockResponse_builder{Released: released}.Build(), nil
-}
-
 func (s *BeeRemoteServer) GetCapabilities(ctx context.Context, request *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
 	s.wg.Add(1)
 	defer s.wg.Done()

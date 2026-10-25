@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -19,6 +19,10 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
+
+// terminalJobIdSuffix keeps the ID of a terminal request apart from the ID of a reservation for
+// the same path and RST. terminalJobIdFor defines a terminal request.
+const terminalJobIdSuffix = "\x00terminal"
 
 // addToBulkRequestFn offers a request to the bulk operation that handles its remote storage target.
 // addedToBulk is true when an operation took the request. The operation then owns it and the caller
@@ -30,21 +34,51 @@ type getPathStateFn func(ctx context.Context, mountPoint filesystem.Provider, in
 type planFileStateForWorkRequestsFn func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error)
 type setDirRstConfigFn func(ctx context.Context, inMountPath string) error
 
+// setContentLockFn sets the content lock on the file at path. pathState is the builder's read of
+// the path, and its entry info and owner spare the lock a second lookup. It is setContentLock
+// outside tests. It returns entry.ErrAccessFlagsUnchanged when the lock was already set, and an
+// error wrapping beegfs.OpsErr_INUSE when a client has the file open in a way the lock conflicts
+// with.
+type setContentLockFn func(ctx context.Context, path string, pathState PathState) error
+
+// setContentLock sets LockedContentAccessFlags with entry.SetAccessFlagsWithEntryInfo, using the
+// entry info and owner in pathState.
+func setContentLock(ctx context.Context, path string, pathState PathState) error {
+	entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+	if entryInfoMsg == nil {
+		return fmt.Errorf("original entry info is unavailable")
+	}
+	return entry.SetAccessFlagsWithEntryInfo(ctx, path, beegfs.LockedContentAccessFlags, *entryInfoMsg, pathState.OwnerNode)
+}
+
+// clearContentLock clears what setContentLock set, using the same entry info and owner.
+func clearContentLock(ctx context.Context, path string, pathState PathState) error {
+	entryInfoMsg := pathState.EntryInfo.GetOrigEntryInfo()
+	if entryInfoMsg == nil {
+		return fmt.Errorf("original entry info is unavailable")
+	}
+	return entry.ClearAccessFlagsWithEntryInfo(ctx, path, beegfs.LockedContentAccessFlags, *entryInfoMsg, pathState.OwnerNode)
+}
+
 type jobRequestBuilder struct {
 	log        *zap.Logger
 	mountPoint filesystem.Provider
 	RstMap     map[uint32]Provider
-	// submitRequest and releaseUnusedFileLock are the builder's calls to remote, as RemoteJobCalls
-	// describes. The builder never clears a content lock itself.
-	submitRequest         SubmitRequestFn
-	releaseUnusedFileLock ReleaseUnusedFileLockFn
-	builderJobId          uuid.UUID
-	builderCfg            *flex.JobRequestCfg
-	addToBulkRequest      addToBulkRequestFn
-	updateBulkRequest     updateBulkRequestFn
-	getPathState          getPathStateFn
-	planFileState         planFileStateForWorkRequestsFn
-	setDirRstConfig       setDirRstConfigFn
+	// submitRequest, reserveRequest and cancelReservation are the builder's calls to remote, as
+	// RemoteJobCalls describes. The builder clears a content lock itself only in
+	// lockAndCheckUnchanged, and only for a lock it just set for a request that writes the file.
+	submitRequest     SubmitRequestFn
+	reserveRequest    ReserveRequestFn
+	cancelReservation CancelReservationFn
+	setContentLock    setContentLockFn
+	clearContentLock  setContentLockFn
+	builderJobId      uuid.UUID
+	builderCfg        *flex.JobRequestCfg
+	addToBulkRequest  addToBulkRequestFn
+	updateBulkRequest updateBulkRequestFn
+	getPathState      getPathStateFn
+	planFileState     planFileStateForWorkRequestsFn
+	setDirRstConfig   setDirRstConfigFn
 	// dirsConfigured counts the directories whose RST configuration this builder updated. A
 	// directory submits no job request, so no submission counter records it.
 	dirsConfigured atomic.Int32
@@ -100,12 +134,6 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 	var pathIssue error
 	checkpoint(checkpointGrace)
 	pathState, skip, pathIssue, err = w.resolvePathStateForRequest(workCtx, inMountPath)
-
-	lockAcquired := FileExists(pathState.LockedInfo) && pathState.LockAcquired
-	outcome := notSubmitted
-	defer func() {
-		err = appendErrors(err, w.releaseIfNothingSubmitted(workCtx, checkpoint, inMountPath, lockAcquired, outcome))
-	}()
 	if skip || err != nil {
 		return
 	}
@@ -124,19 +152,6 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		failedPrecondition = appendErrors(failedPrecondition, pathIssue)
 	}
 
-	if FileExists(pathState.LockedInfo) && !pathState.LockAcquired && !IsFileOffloaded(pathState.LockedInfo) {
-		if w.builderCfg.Download || w.builderCfg.StubLocal {
-			// This job intends to alter the state by downloading or offloading a file and it did
-			// not acquire the lock. Therefore, the lock must fail because it will conflict with any
-			// existing job.
-			if w.builderCfg.Overwrite {
-				failedPrecondition = appendErrors(failedPrecondition, errors.New("unable to overwrite the file because its access lock is already held (wait for the job holding it, or clear the lock if no job does)"))
-			} else {
-				failedPrecondition = appendErrors(failedPrecondition, fmt.Errorf("%w and its access lock is already held (wait for the job holding it, or clear the lock if no job does)", fs.ErrExist))
-			}
-		}
-	}
-
 	if len(pathState.RstCfg.RSTIDs) == 0 && failedPrecondition != nil {
 		// There are no rstIds and there is a failed precondition. So, in order to communicate the issue to
 		// the user, submit the request with a generation status under the invalid rstId 0. No job
@@ -144,9 +159,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		checkpoint(checkpointGrace)
 		cfg := w.buildJobRequestCfg(inMountPath, remotePath, 0, pathState.LockedInfo, w.builderCfg)
 		request := BuildJobRequestWithFailedPrecondition(nil, cfg, failedPrecondition.Error())
-		var requestOutcome submitOutcome
-		requestOutcome, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
-		outcome = outcome.combine(requestOutcome)
+		_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 		return
 	}
 
@@ -154,8 +167,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		// Each rstId is an independent round of remote work, so it earns its own grace.
 		checkpoint(checkpointGrace)
 		request := w.buildRequest(workCtx, cfg, failedPrecondition)
-		requestOutcome, submitted, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
-		outcome = outcome.combine(requestOutcome)
+		_, submitted, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 		if processErr != nil {
 			err = processErr
 			return
@@ -178,20 +190,18 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	workCtx, cancel, checkpoint := WithCancellationDelay(ctx, checkpointGrace)
 	defer cancel()
 
+	// The reservation pass locked the file after remote recorded the reservation and checked the
+	// file had not changed. The RESERVED job has kept the lock since, so no client could open the
+	// file to change it, and the claim needs no second check. Two cases find no lock:
+	//   - A file that did not exist when it was reserved, such as the target of a download. The
+	//     plan creates it and locks it.
+	//   - An existing file found unlocked. The reservation is gone or the lock was cleared by hand.
+	//     The lock is taken again and logged, and the claim is most likely refused. Remote's release
+	//     at the end of that claim clears the lock again, so this pass never has to release it.
 	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, result.InMountPath, PathStateWithLock)
 	if pathState.LockAcquired {
-		// A reserved job keeps the lock the reservation took so finding it unset means the
-		// reservation is gone or the lock was cleared by hand. The claim will most likely be refused.
 		w.log.Warn("content lock was not held when claiming a reserved request, so it was taken again", zap.String("path", result.InMountPath), zap.String("jobId", result.ReservedJobId))
 	}
-
-	// If the file exists and is not offloaded then it is uncertain whether the lock was acquired so
-	// assume it was. This is safe since remote only releases the lock when no job needs it.
-	lockAcquired := FileExists(pathState.LockedInfo) && !IsFileOffloaded(pathState.LockedInfo)
-	outcome := notSubmitted
-	defer func() {
-		err = appendErrors(err, w.releaseIfNothingSubmitted(workCtx, checkpoint, result.InMountPath, lockAcquired, outcome))
-	}()
 
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		err = pathStateErr
@@ -209,40 +219,16 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	request.SetJobId(result.ReservedJobId)
 	request.SetReservation(beeremote.JobRequest_CLAIM)
 
-	outcome, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
+	_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
 	return
 }
 
-// releaseIfNothingSubmitted runs when the builder is done with a path. It asks remote to release
-// the content lock when this pass took it and no request for the path reached remote, because then
-// no job relies on it. In every other case remote already decided: it released the lock at the end
-// of each request if no job needed it, or a job holds it. If remote may not have received a
-// request, the lock is kept, because a job may rely on it. The release is remote's to decide, so it
-// can't pull the lock from a job that needs it.
-func (w *jobRequestBuilder) releaseIfNothingSubmitted(ctx context.Context, checkpoint CancellationCheckpoint, inMountPath string, lockAcquired bool, outcome submitOutcome) error {
-	if !lockAcquired || outcome != notSubmitted {
-		return nil
-	}
-	checkpoint(checkpointGrace)
-	if err := w.releaseUnusedFileLock(ctx, inMountPath); err != nil {
-		if errors.Is(err, ErrRequestNotDelivered) {
-			// releaseUnusedFileLock retries until remote answers so this is only reached when the
-			// builder's context ended; Sync is shutting down or the builder job was cancelled, and
-			// the grace period expired. Remote may not have seen the call. If it didn't, the lock
-			// stays set with no job until a later request for the path reaches remote, or until a
-			// job that shares the lock finishes and its release clears it.
-			w.log.Warn("unable to ask remote to release the content lock, it is kept until a later release", zap.String("path", inMountPath), zap.Error(err))
-			return nil
-		}
-		return fmt.Errorf("unable to release lock: %w", err)
-	}
-	return nil
-}
-
-// resolvePathStateForRequest retrieves the current path's state information and then updates its
-// rstIds list before returning. If the builder job did not provide an rstId then the file's own rst
-// configuration will be used; and if the configured rstIds list is empty, skip will be true so no
-// request is created and the builder job does not fail.
+// resolvePathStateForRequest retrieves the current path's state information without taking the
+// content lock, and then updates its rstIds list before returning. The lock is taken later, and
+// only for a file whose plan changes it, once remote has reserved a job for it. If the builder job
+// did not provide an rstId then the file's own rst configuration will be used; and if the
+// configured rstIds list is empty, skip will be true so no request is created and the builder job
+// does not fail.
 //
 // Directories are the exception since they return early with skip false and their rstIds untouched.
 //
@@ -250,7 +236,7 @@ func (w *jobRequestBuilder) releaseIfNothingSubmitted(ctx context.Context, check
 // conflicts. All fatal errors will be reported via err.
 func (w *jobRequestBuilder) resolvePathStateForRequest(ctx context.Context, inMountPath string) (pathState PathState, skip bool, pathIssue error, err error) {
 	var pathStateErr error
-	pathState, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateWithLock)
+	pathState, pathStateErr = w.getPathState(ctx, w.mountPoint, inMountPath, PathStateNoLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		// Returning err from this function fails the builder job once its walk and bulk operations
 		// finish, so only fatal path state errors are returned here. Non-fatal path state errors
@@ -321,24 +307,38 @@ func (w *jobRequestBuilder) buildJobRequestCfg(
 	return request
 }
 
-// jobIdFor derives the job ID for a request from the builder job ID, the request's path and its
+// jobIdFor derives the job ID of a reservation from the builder job ID, the request's path and its
 // RST. The same builder job always derives the same ID for the same path and RST. So when a request
 // is sent again, after a lost response or after a rescheduled builder job replays from an older
 // resume token, remote recognizes it and answers with the job the first request created instead of
-// creating a second one. A reservation and its claim share this ID too.
+// creating a second one. A reservation and its claim share this ID, and so does its cancel.
 func (w *jobRequestBuilder) jobIdFor(request *beeremote.JobRequest) string {
 	name := binary.BigEndian.AppendUint32([]byte(request.GetPath()), request.GetRemoteStorageTarget())
 	return uuid.NewSHA1(w.builderJobId, name).String()
 }
 
+// terminalJobIdFor derives the job ID of a terminal request. A terminal request is one the builder
+// submits without a reservation, because it carries an outcome rather than work: already
+// complete, already offloaded, or a failed precondition. Remote may record it as a finished job,
+// but it never runs work and never holds the lock.
+//
+// The ID is deterministic like jobIdFor, so a replay of the same terminal request gets the same
+// answer. It differs from jobIdFor because one path can get both kinds within one builder job. For
+// example, a pass reserves and claims an upload, the builder job is rescheduled after a crash, and
+// its rewalk finds the file already complete. Remote refuses a terminal request under the claimed
+// job's ID as a collision, so the path would be miscounted as not allowed.
+func (w *jobRequestBuilder) terminalJobIdFor(request *beeremote.JobRequest) string {
+	name := binary.BigEndian.AppendUint32([]byte(request.GetPath()), request.GetRemoteStorageTarget())
+	return uuid.NewSHA1(w.builderJobId, append(name, terminalJobIdSuffix...)).String()
+}
+
 // submitOutcome says what remote knows about a path's requests once the builder is done with them.
-// It decides whether the builder must ask remote to release a lock it took for the path.
+// The builder takes a lock only under a reservation, so the outcome never decides a lock release.
+// Tests use it to check which call ended the path.
 type submitOutcome int
 
-// The submitOutcome values are ordered intentionally so combine returns the highest ranked value.
 const (
-	// notSubmitted means no request for the path reached remote so no job relies on a lock the
-	// builder took. The builder asks remote to release it.
+	// notSubmitted means no request for the path reached remote.
 	notSubmitted submitOutcome = iota
 	// answered means remote answered every request. Remote released the lock at the end of each
 	// call if no job still needed it.
@@ -348,17 +348,17 @@ const (
 	notDelivered
 )
 
-// combine returns the outcome of a path that produced both o and other. A request that may not
-// have reached remote outranks one remote answered which outranks one that was never sent.
-func (o submitOutcome) combine(other submitOutcome) submitOutcome {
-	return max(o, other)
-}
-
 // processRequest prepares the job request for cfg and submits it. It returns what remote knows
 // about the request, and whether remote accepted it.
 //
-// If remote refuses the request, the builder undoes whatever its plan changed in the file. Remote
-// decides the content lock at the end of the submit, so the builder never clears it itself.
+// A request whose plan changes the file is reserved and locked first, by reserveAndLock, and then
+// submitted as the claim of that reservation. A request whose plan changes nothing, or that already
+// carries a generation status, is submitted as it is, without a lock. A claim from a bulk operation
+// arrives with its reservation's lock already held.
+//
+// If remote refuses a claim, remote undoes whatever the plan changed in the file before it decides
+// the content lock at the end of the submit. The builder never undoes a submitted plan, and never
+// clears the lock itself.
 func (w *jobRequestBuilder) processRequest(
 	ctx context.Context,
 	checkpoint CancellationCheckpoint,
@@ -367,7 +367,8 @@ func (w *jobRequestBuilder) processRequest(
 	request *beeremote.JobRequest,
 ) (outcome submitOutcome, submitted bool, err error) {
 	if !request.HasJobId() {
-		request.SetJobId(w.jobIdFor(request))
+		// A request that reserves takes the reservation's ID in reserveAndLock instead.
+		request.SetJobId(w.terminalJobIdFor(request))
 	}
 
 	var applyPlan applyPlanFn
@@ -382,25 +383,18 @@ func (w *jobRequestBuilder) processRequest(
 		}
 	}
 
-	// A request with bulk info was already added to a bulk operation and are being submitted.
-	// Ignore when a request's path equals the builder's since there would only be one path for the
-	// bulk operation.
-	if workRequired && !request.HasGenerationStatus() && !request.HasBulkInfo() && cfg.GetPath() != w.builderCfg.GetPath() {
-		accepted, reserveOutcome, bulkErr := w.offerToBulkOperation(ctx, checkpoint, request)
-		if bulkErr != nil || accepted || reserveOutcome != notSubmitted {
-			return reserveOutcome, false, bulkErr
+	changesFile := workRequired || !planLeavesFileUnchanged(cfg)
+	if changesFile && !request.HasGenerationStatus() && request.GetReservation() == beeremote.JobRequest_NO_RESERVATION {
+		done, reserveOutcome, reserveErr := w.reserveAndLock(ctx, checkpoint, cfg, pathState, request, workRequired)
+		if done {
+			return reserveOutcome, false, reserveErr
 		}
 	}
 
-	var applyUndo undoFn
-	terminalOutcome := false
 	if !request.HasGenerationStatus() {
-		applyUndo, terminalOutcome = w.prepareJobRequest(ctx, checkpoint, cfg, pathState, request, applyPlan)
+		w.prepareJobRequest(ctx, checkpoint, cfg, pathState, request, applyPlan)
 	}
 
-	// A plan that ends in a terminal outcome, such as already offloaded, keeps its changes, because
-	// they are that outcome. Only a plan that prepared for a job has changes to undo.
-	planToUndo := applyUndo != nil && !terminalOutcome
 	checkpoint(checkpointGrace)
 	submitErr := w.submitRequest(ctx, request)
 	if submitErr == nil {
@@ -434,75 +428,13 @@ func (w *jobRequestBuilder) processRequest(
 		return notDelivered, false, err
 	}
 
-	// Remote refused the request, so no job will ever run it. Revert what the builder prepared
-	// for it, and release the external ID it created for the request. The lock is not the
-	// builder's to release: remote decided it at the end of the submit.
-	//
-	// The undo is a recovery step, not a guarantee. It puts the file back as it was before the plan
-	// when remote refuses and the builder keeps running to the end of the undo. It does not cover
-	// every failure, and does not try to:
-	//   - Remote released the lock at the end of the submit if no other job needed it, so the undo
-	//     runs unlocked. A client write in that window can race the undo. A new job, from a user or
-	//     from watch, can also take the lock and start in that window. The undo can then delete,
-	//     truncate or re-stub that job's file.
-	//   - An error that hides remote's decision is treated as a refusal. If remote accepted the
-	//     request and the answer was lost, the undo runs under that job. Releasing the external ID
-	//     then aborts that job's upload. One such error is remote failing to commit its path entry
-	//     after it dispatched the work.
-	//   - A crash, or a shutdown that outlasts the grace period, stops the undo partway. The undo
-	//     lives only in memory, so a restarted builder can't finish it, and the file stays partly
-	//     changed.
-	//   - An undo that fails is logged, and the file stays as the plan left it.
-	//
-	// These risks are accepted for three reasons:
-	//   - Remote refuses few requests after the plan has run, because a pass that would change a
-	//     file another job has locked is refused before any plan runs. A failure inside the undo
-	//     that follows is rarer still.
-	//   - Every plan step makes a change the user asked for. A download creates the file, restores
-	//     a stub, or replaces a regular file only when the user set overwrite. stub_local turns the
-	//     file into a stub. A file left partly changed is a failed request the user can retry.
-	//   - Closing these gaps needs remote to record the job before the plan runs, and the undo
-	//     written to a journal. That cost lands on every request to protect against a rare one.
-	checkpoint(checkpointGrace)
-	wg := sync.WaitGroup{}
-	var undoErr, resolveBulkRequestErr error
-	if planToUndo {
-		wg.Go(func() {
-			undoErr = applyUndo.run(ctx)
-			if undoErr != nil {
-				w.log.Warn("unable to revert what was prepared for a job request that was refused, the entry is left modified",
-					zap.String("path", cfg.GetPath()),
-					zap.Uint32("rstId", request.GetRemoteStorageTarget()),
-					zap.NamedError("submitError", submitErr),
-					zap.Error(undoErr))
-			}
-		})
-	}
+	// Remote refused the request, so no job will ever run it. The builder changes the file only for
+	// a claim, and remote undoes a refused claim's changes with the RST abort before it decides the
+	// lock. That abort also releases the external ID. So only the bulk operation is left to tell.
 	if request.HasBulkInfo() {
-		wg.Go(func() {
-			resolveBulkRequestErr = w.updateBulkRequest(ctx, request, BulkRequestFailed)
-		})
+		checkpoint(checkpointGrace)
+		err = w.updateBulkRequest(ctx, request, BulkRequestFailed)
 	}
-	lockedInfo := cfg.GetLockedInfo()
-	if lockedInfo.ExternalId != "" {
-		wg.Go(func() {
-			client := w.RstMap[request.GetRemoteStorageTarget()]
-			if err := client.ReleaseExternalId(ctx, cfg, lockedInfo.ExternalId); err != nil {
-				// Leaked remote state for one path, which is not worth failing the builder job
-				// over, but it may need to be cleaned up manually.
-				w.log.Warn("unable to release external id",
-					zap.String("path", cfg.GetPath()),
-					zap.Uint32("rstId", request.GetRemoteStorageTarget()),
-					zap.String("externalId", lockedInfo.ExternalId),
-					zap.Error(err))
-				return
-			}
-			lockedInfo.SetExternalId("")
-		})
-	}
-	wg.Wait()
-	err = appendErrors(undoErr, resolveBulkRequestErr)
-
 	return answered, false, err
 }
 
@@ -523,21 +455,42 @@ func (w *jobRequestBuilder) buildRequest(ctx context.Context, cfg *flex.JobReque
 	return BuildJobRequest(ctx, client, cfg)
 }
 
-// offerToBulkOperation offers the request to the bulk operation that handles its remote storage
-// target, and reserves the job that operation will later claim for the path.
+// reserveAndLock runs for a request whose plan changes the file, before the plan is applied. It
+// reserves the request's job with remote, takes the content lock, and checks that the file is still
+// the one the request was built from. Remote records the job before the lock is set, so every lock
+// the builder takes has a job that keeps it until the reservation is claimed or cancelled.
 //
-// accepted is true only when an operation took the request. The operation then owns the path and
-// resubmits it through its own walk, so the caller must not submit it. outcome says whether the
-// reservation reached remote. notSubmitted when no reservation was sent, answered when remote
-// reserved or refused it, and notDelivered when remote may not have received it.
+// Its inputs:
+//   - cfg and request were built from pathState, which the builder read without the lock.
+//   - workRequired says the plan needs a transfer. Only such a request can join a bulk operation.
 //
-// A non-nil err stops the builder job, so it is reserved for the failures that make every later
-// path fail the same way: a target with no client, and a reservation the caller could not submit.
-// An operation that refuses the request is not one of them. That is recorded on the request as a
-// failed precondition and left for the caller to submit, because the next path may still be taken
-// by a different operation, and an operation that failed for good is reported once at the end of
+// The rules, in order:
+//   - A request that needs a transfer is offered to a bulk operation first. One the operation
+//     takes is reserved with its bulk info, and is claimed later by the operation's own walk. One
+//     the operation can't add is left with a failed precondition, and the caller submits it
+//     without a reservation or a lock.
+//   - A reservation remote refuses ends the path. Remote answered, and nothing was locked for it.
+//   - A replayed reservation that was already claimed or cancelled ends the path. Its job already
+//     holds the outcome, and the builder must not change the file under it.
+//   - A file that changed before the lock was set, or that a client has open, gets its reservation
+//     cancelled. Remote then releases the lock unless another job on the path needs it.
+//   - Otherwise the request now carries CLAIM, and the caller applies the plan and claims the job.
+//
+// done is true when the path ends here, and outcome then says what remote knows. A non-nil err
+// stops the builder job, so it is kept for failures that make every later path fail the same way:
+// a target with no client, and a reservation remote answered with something other than a refusal.
+// A bulk operation that refuses the request is not one of them, because the next path may still be
+// taken by another operation, and an operation that failed for good is reported once at the end of
 // the builder job by the registry's GetFailedOperationErrors.
-func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint CancellationCheckpoint, request *beeremote.JobRequest) (accepted bool, outcome submitOutcome, err error) {
+func (w *jobRequestBuilder) reserveAndLock(
+	ctx context.Context,
+	checkpoint CancellationCheckpoint,
+	cfg *flex.JobRequestCfg,
+	pathState PathState,
+	request *beeremote.JobRequest,
+	workRequired bool,
+) (done bool, outcome submitOutcome, err error) {
+	done = true
 	rstId := request.GetRemoteStorageTarget()
 	client, ok := w.RstMap[rstId]
 	if !ok {
@@ -545,52 +498,198 @@ func (w *jobRequestBuilder) offerToBulkOperation(ctx context.Context, checkpoint
 		return
 	}
 
-	checkpoint(checkpointGrace)
-	include, operation := client.IncludeRequestInBulkOperation(ctx, request)
-	if !include {
-		return
-	}
-
-	// The reservation uses the request's own job ID, so the later claim names the same job.
+	// The reservation uses the request's own job ID, so the claim names the same job.
 	request.SetJobId(w.jobIdFor(request))
 	request.SetReservation(beeremote.JobRequest_RESERVE)
 
-	// The request joins the bulk operation before its job is reserved. The add assigns the
-	// request's index in the operation, so the reserve request carries complete bulk info and
-	// remote stores it on the reserved job. This provides remote with the information needed to
-	// update the bulk operation when the request is cancelled.
-	checkpoint(checkpointGrace)
-	if addErr := w.addToBulkRequest(ctx, request, operation); addErr != nil {
-		request.SetReservation(beeremote.JobRequest_NO_RESERVATION)
-		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: fmt.Sprintf("failed to add request to bulk operation %q: %s", operation, addErr.Error()),
-		})
-		return
-	}
-
-	checkpoint(checkpointGrace)
-	reserveErr := w.submitRequest(ctx, request)
-	outcome = answered
-	if errors.Is(reserveErr, ErrRequestNotDelivered) {
-		outcome = notDelivered
-	}
-	if reserveErr != nil {
-		if errors.Is(reserveErr, ErrJobAlreadyExists) || errors.Is(reserveErr, ErrJobNotAllowed) {
-			// Remote refused the reservation because another job for this path conflicts with it.
-			// The refusal is about this path alone, so only its request in the operation is failed.
-			if markErr := w.updateBulkRequest(ctx, request, BulkRequestFailed); markErr != nil {
-				err = fmt.Errorf("unable to release %s from bulk operation %q after its reservation was refused: %w", request.GetPath(), operation, markErr)
+	// A request joins its bulk operation before its job is reserved. The add assigns the request's
+	// index in the operation, so the reservation carries complete bulk info and remote stores it on
+	// the reserved job. A request on the builder's own path never joins one, because the operation
+	// would hold that one path alone.
+	operation := ""
+	if workRequired && !request.HasBulkInfo() && cfg.GetPath() != w.builderCfg.GetPath() {
+		checkpoint(checkpointGrace)
+		include, includeOperation := client.IncludeRequestInBulkOperation(ctx, request)
+		if include {
+			checkpoint(checkpointGrace)
+			if addErr := w.addToBulkRequest(ctx, request, includeOperation); addErr != nil {
+				// Nothing was reserved, and the request now carries a failed precondition, so it goes
+				// out as a terminal request under the terminal ID.
+				request.SetReservation(beeremote.JobRequest_NO_RESERVATION)
+				request.SetJobId(w.terminalJobIdFor(request))
+				request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+					State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+					Message: fmt.Sprintf("failed to add request to bulk operation %q: %s", includeOperation, addErr.Error()),
+				})
+				done = false
+				return
 			}
-		} else {
-			// Failure to reserve a remote job is a systemic issue so fail the builder job.
-			err = fmt.Errorf("failed to reserve job for bulk operation %q: %w", operation, reserveErr)
+			operation = includeOperation
 		}
+	}
+
+	checkpoint(checkpointGrace)
+	job, reserveErr := w.reserveRequest(ctx, request)
+	outcome = answered
+	switch {
+	case errors.Is(reserveErr, ErrRequestNotDelivered):
+		// Remote may hold the reservation. The builder took no lock. Only a crash replays the path:
+		// the rescheduled builder job finds the reservation under the same ID and resumes from it.
+		// After a shutdown or a cancel the walk has moved past the path, and the reservation stays
+		// until a user runs `beegfs remote job cancel --force`.
+		outcome = notDelivered
+		return
+	case IsClaimedReplay(request, job):
+		// A replay of a reservation an earlier pass already claimed. The claim's job owns the file,
+		// and sync counted the claim's answer when the claim was made.
+		return
+	case reserveErr != nil:
+		if errors.Is(reserveErr, ErrJobAlreadyExists) || errors.Is(reserveErr, ErrJobNotAllowed) || errors.Is(reserveErr, ErrJobNotReserved) {
+			// Another job on the path conflicts with this one, or this reservation was cancelled
+			// before anything claimed it. Either way the refusal is about this path alone.
+			err = w.failBulkRequest(ctx, request, operation)
+			return
+		}
+		err = fmt.Errorf("failed to reserve job for %s: %w", request.GetPath(), reserveErr)
 		return
 	}
 
-	accepted = true
+	// A replay checks the file against the request remote stored, because the file must still
+	// match what the reservation was made for. A first reservation stored this request, and remote
+	// may answer without echoing it, so the request's own locked info stands in.
+	reserved := requestLockedInfo(job.GetRequest())
+	if reserved == nil {
+		reserved = cfg.GetLockedInfo()
+	}
+	checkpoint(checkpointGrace)
+	if reason := w.lockAndCheckUnchanged(ctx, cfg, pathState, reserved); reason != nil {
+		checkpoint(checkpointGrace)
+		cancelErr := w.cancelReservation(ctx, request, reason)
+		if errors.Is(cancelErr, ErrRequestNotDelivered) {
+			// The reservation stays RESERVED. For a request that writes the file,
+			// lockAndCheckUnchanged already cleared the lock it set. A read-only request keeps its
+			// lock until the reservation ends. Only a crash replays the path, so after a shutdown or
+			// a cancel the reservation stays until a user cancels it with --force.
+			outcome = notDelivered
+			w.log.Warn("unable to cancel the reservation of a file that changed, the reservation stays until the builder job is resumed after a crash or a user runs 'beegfs remote job cancel --force'", zap.String("path", request.GetPath()), zap.String("jobId", request.GetJobId()), zap.NamedError("reason", reason), zap.Error(cancelErr))
+		} else if cancelErr != nil {
+			// Remote refuses a claim of a reservation it no longer holds, and its release at the end
+			// of that call decided the lock. An error from before that release, such as a path store
+			// failure, leaves the reservation RESERVED and the file locked until a user cancels it
+			// with --force.
+			w.log.Warn("remote refused to cancel the reservation of a file that changed", zap.String("path", request.GetPath()), zap.String("jobId", request.GetJobId()), zap.NamedError("reason", reason), zap.Error(cancelErr))
+		}
+		err = w.failBulkRequest(ctx, request, operation)
+		return
+	}
+
+	if operation != "" {
+		// The operation claims the job later through its own walk.
+		return
+	}
+	request.SetReservation(beeremote.JobRequest_CLAIM)
+	done = false
 	return
+}
+
+// IsClaimedReplay reports whether job, which remote answered a RESERVE for request with, is
+// request's own reservation and was already claimed. Remote answers a replayed RESERVE with the
+// job under the same ID. It also answers a RESERVE it refuses with the job that blocked it, and
+// that job is another builder's or an earlier run's, often claimed too. Only the job ID tells the
+// two apart, so a refusal is never mistaken for a replay and skipped without being counted.
+func IsClaimedReplay(request *beeremote.JobRequest, job *beeremote.Job) bool {
+	return job.GetId() != "" && job.GetId() == request.GetJobId() && job.GetRequest().GetReservation() == beeremote.JobRequest_CLAIM
+}
+
+// failBulkRequest tells the bulk operation that took request that no job will run it. It does
+// nothing when operation is empty, because no operation took the request.
+func (w *jobRequestBuilder) failBulkRequest(ctx context.Context, request *beeremote.JobRequest, operation string) error {
+	if operation == "" {
+		return nil
+	}
+	if err := w.updateBulkRequest(ctx, request, BulkRequestFailed); err != nil {
+		return fmt.Errorf("unable to release %s from bulk operation %q after its reservation ended: %w", request.GetPath(), operation, err)
+	}
+	return nil
+}
+
+// lockAndCheckUnchanged runs after remote reserved a job for the file at cfg's path. It takes the
+// content lock and then checks that the file is the one the reservation was made for. It returns
+// nil when the file is locked and unchanged, and otherwise the reason the reservation must be
+// cancelled. A reason wraps ErrFileChangedDuringBuild when the file changed or a client has it
+// open.
+//
+// When the check fails, a lock this call set is cleared again for a request that writes the file,
+// a download or an upload that leaves a stub. The file is not the one the reservation was made
+// for, so the lock would otherwise sit on a file no job owns. If the cancel is then not delivered,
+// a forced cancel's abort would find that lock and change the file. Clearing it is safe because
+// remote refuses every other job on a path while a request that writes it holds a reservation, so
+// no other job can rely on this lock. A lock is kept in two cases:
+//   - The lock was already set. It is not this call's to clear. An offloaded file keeps its lock
+//     for good, and an earlier pass of the same reservation may have set it.
+//   - The request only reads the file. Remote lets read-only jobs to other RSTs share the path, so
+//     one may have found this call's lock already set and relied on it. Its abort never changes
+//     the file, so the lock does no harm. The rule mirrors Job.IsReadOnly in remote.
+func (w *jobRequestBuilder) lockAndCheckUnchanged(ctx context.Context, cfg *flex.JobRequestCfg, pathState PathState, reserved *flex.JobLockedInfo) (reason error) {
+	path := cfg.GetPath()
+	lockedInfo := cfg.GetLockedInfo()
+	if FileExists(pathState.LockedInfo) {
+		lockErr := w.setContentLock(ctx, path, pathState)
+		if lockErr == nil && (cfg.GetDownload() || cfg.GetStubLocal()) {
+			// Clears the lock again if the check below fails. See the function comment.
+			defer func() {
+				if reason == nil {
+					return
+				}
+				if clearErr := w.clearContentLock(ctx, path, pathState); clearErr != nil && !errors.Is(clearErr, entry.ErrAccessFlagsUnchanged) {
+					w.log.Warn("unable to clear the content lock set on a file that changed", zap.String("path", path), zap.NamedError("reason", reason), zap.Error(clearErr))
+				}
+			}()
+		}
+
+		switch {
+		case lockErr == nil, errors.Is(lockErr, entry.ErrAccessFlagsUnchanged):
+		case errors.Is(lockErr, beegfs.OpsErr_INUSE):
+			return fmt.Errorf("%w: a client has it open: %w", ErrFileChangedDuringBuild, lockErr)
+		default:
+			return fmt.Errorf("unable to lock %s: %w", path, lockErr)
+		}
+		lockedInfo.SetReadWriteLocked(true)
+	}
+
+	stat, statErr := w.mountPoint.Lstat(path)
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return fmt.Errorf("unable to check %s after locking it: %w", path, statErr)
+	}
+	exists := statErr == nil
+	switch {
+	case exists != FileExists(reserved):
+		return fmt.Errorf("%w: it was created or removed", ErrFileChangedDuringBuild)
+	case !exists:
+		return nil
+	case stat.Size() != reserved.GetSize():
+		return fmt.Errorf("%w: its size changed from %d to %d", ErrFileChangedDuringBuild, reserved.GetSize(), stat.Size())
+	case !stat.ModTime().Equal(reserved.GetMtime().AsTime()):
+		return fmt.Errorf("%w: its mtime changed from %s to %s", ErrFileChangedDuringBuild, reserved.GetMtime().AsTime(), stat.ModTime())
+	case uint32(stat.Mode()) != reserved.GetMode():
+		return fmt.Errorf("%w: its mode changed from %s to %s", ErrFileChangedDuringBuild, fs.FileMode(reserved.GetMode()), stat.Mode())
+	}
+	if ino := statIno(stat); ino != 0 && pathState.Ino != 0 && ino != pathState.Ino {
+		return fmt.Errorf("%w: the path now names another file", ErrFileChangedDuringBuild)
+	}
+	return nil
+}
+
+// requestLockedInfo returns the locked info a job request carries, or nil for a request type that
+// carries none.
+func requestLockedInfo(request *beeremote.JobRequest) *flex.JobLockedInfo {
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetLockedInfo()
+	case beeremote.JobRequest_Mock_case:
+		return request.GetMock().GetLockedInfo()
+	}
+	return nil
 }
 
 func (w *jobRequestBuilder) prepareJobRequest(
@@ -600,30 +699,33 @@ func (w *jobRequestBuilder) prepareJobRequest(
 	pathState PathState,
 	request *beeremote.JobRequest,
 	applyPlan applyPlanFn,
-) (applyUndo undoFn, terminalOutcome bool) {
+) {
 	lockedInfo := cfg.GetLockedInfo()
 
-	var applyErr error
 	checkpoint(checkpointGrace)
-	_, applyUndo, applyErr = applyPlan(ctx, &pathState)
+	_, applyUndo, applyErr := applyPlan(ctx, &pathState)
 	if applyErr != nil {
-		terminalOutcome = IsErrJobTerminalSentinel(applyErr)
-
-		if errors.Is(applyErr, ErrJobAlreadyComplete) {
+		// applyPlan undoes its own changes when a step fails, and returns an undo only when that
+		// rollback failed too. The file may then be left changed, so the request reports ERROR,
+		// and remote runs the RST abort on it. FAILED_PRECONDITION would tell remote that nothing
+		// was changed.
+		rollbackFailed := applyUndo != nil && !IsErrJobTerminalSentinel(applyErr)
+		switch {
+		case errors.Is(applyErr, ErrJobAlreadyComplete):
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
 				Message: lockedInfo.Mtime.AsTime().Format(time.RFC3339),
 			})
-		} else if errors.Is(applyErr, ErrJobAlreadyOffloaded) {
+		case errors.Is(applyErr, ErrJobAlreadyOffloaded):
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
 			})
-		} else if errors.Is(applyErr, ErrJobFailedPrecondition) {
+		case errors.Is(applyErr, ErrJobFailedPrecondition) && !rollbackFailed:
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 				Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
 			})
-		} else {
+		default:
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 				State:   beeremote.JobRequest_GenerationStatus_ERROR,
 				Message: fmt.Sprintf("failed to prepare file state: %s", applyErr.Error()),
@@ -639,6 +741,8 @@ func (w *jobRequestBuilder) prepareJobRequest(
 	if externalErr != nil {
 		message := fmt.Sprintf("failed to generate external id: %s", externalErr.Error())
 
+		// Nothing was submitted yet, so the builder undoes its own plan here, under the lock the
+		// reservation holds.
 		checkpoint(checkpointGrace)
 		if undoErr := applyUndo.run(ctx); undoErr != nil {
 			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
@@ -648,7 +752,6 @@ func (w *jobRequestBuilder) prepareJobRequest(
 			return
 		}
 
-		applyUndo = nil
 		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 			Message: message,
@@ -657,5 +760,4 @@ func (w *jobRequestBuilder) prepareJobRequest(
 	}
 
 	lockedInfo.SetExternalId(externalId)
-	return
 }

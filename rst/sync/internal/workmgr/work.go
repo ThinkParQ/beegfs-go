@@ -513,12 +513,14 @@ func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment
 	var builderMu sync.Mutex
 	remote := rst.RemoteJobCalls{
 		Submit: func(ctx context.Context, request *pbr.JobRequest) error {
+			_, err := w.sendBuilderJobRequest(ctx, &builderMu, builder, request)
+			return err
+		},
+		Reserve: func(ctx context.Context, request *pbr.JobRequest) (*pbr.Job, error) {
 			return w.sendBuilderJobRequest(ctx, &builderMu, builder, request)
 		},
-		ReleaseUnusedFileLock: func(ctx context.Context, path string) error {
-			return w.callRemote(ctx, path, "release the content lock", func(ctx context.Context) error {
-				return w.beeRemoteClient.ReleaseUnusedFileLock(ctx, path)
-			})
+		Cancel: func(ctx context.Context, request *pbr.JobRequest, reason error) error {
+			return w.cancelBuilderReservation(ctx, &builderMu, builder, request, reason)
 		},
 	}
 	result := client.ExecuteJobBuilderRequest(shutdownCtx, work.ctx, log, workRequest, remote, w.workerSaturation)
@@ -620,7 +622,8 @@ func (w *worker) callRemote(ctx context.Context, path string, label string, call
 }
 
 // sendBuilderJobRequest submits request to remote, retrying while it's unavailable, and returns
-// remote's answer, as callRemote does:
+// the job remote answered with, which may be nil for a refusal, and remote's answer, as callRemote
+// does:
 //   - A nil error means remote accepted the request and a job now owns everything the builder
 //     prepared for it. A claim remote reports as already claimed is also accepted, because remote
 //     only says that when an earlier attempt of this same claim landed and its reply was lost.
@@ -634,24 +637,33 @@ func (w *worker) callRemote(ctx context.Context, path string, label string, call
 // every goroutine building a path for the same builder job. These counters are only updated when
 // the journal entry is committed; so, if the sync node crashes before committing them then they
 // will be incorrect.
-func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) error {
+func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest) (*pbr.Job, error) {
+	var job *pbr.Job
 	err := w.callRemote(ctx, request.GetPath(), "submit job request", func(ctx context.Context) error {
-		return w.beeRemoteClient.SubmitJobRequest(ctx, request)
+		var submitErr error
+		job, submitErr = w.beeRemoteClient.SubmitJobRequest(ctx, request)
+		return submitErr
 	})
 	if errors.Is(err, rst.ErrRequestNotDelivered) {
-		return err
+		return job, err
 	}
 
 	isReserve := request.GetReservation() == pbr.JobRequest_RESERVE
 	isClaim := request.GetReservation() == pbr.JobRequest_CLAIM
+	if isReserve && rst.IsClaimedReplay(request, job) {
+		// A replayed reservation that an earlier pass of this builder job already claimed. The
+		// answer is that claim's, and the claim was counted when it was answered. A refused
+		// reserve also comes back with a job, the one that blocked it, and is counted below.
+		return job, err
+	}
 	if isClaim && errors.Is(err, rst.ErrJobAlreadyExists) {
-		// Remote answers a claim this way only when the reserved job was already claimed by
-		// this request. An earlier attempt landed but its reply was lost, either to a closed
-		// connection that was retried above, or to a shutdown before the bulk operation
-		// replayed the claim. The job is live and owns the plan, so reporting a refusal would
-		// make the builder undo the plan and release the lock under it. For any request that is
-		// not a claim, ErrJobAlreadyExists means an equivalent job is already active on the
-		// path, which is a real refusal.
+		// Remote answers a claim this way only when the reserved job was already claimed by this
+		// request. An earlier attempt landed but its reply was lost, either to a closed connection
+		// that was retried above, or to a shutdown before the bulk operation replayed the claim.
+		// The job is live and owns the plan, so reporting a refusal would count a running job as
+		// refused and tell its bulk operation the request failed. For any request that is not a
+		// claim, ErrJobAlreadyExists means an equivalent job is already active on the path, which
+		// is a real refusal.
 		err = nil
 	}
 
@@ -677,6 +689,52 @@ func (w *worker) sendBuilderJobRequest(ctx context.Context, mu *sync.Mutex, buil
 		builder.JobsNotAllowed++
 	} else if errors.Is(err, rst.ErrJobNotReserved) {
 		builder.JobsNotReserved++
+	} else {
+		builder.Errors++
+	}
+	mu.Unlock()
+	return job, err
+}
+
+// cancelBuilderReservation ends the reservation request made, for a file the builder will not
+// change after all. It claims the reservation with a FAILED_PRECONDITION that carries reason.
+// Remote records that claim as a CANCELLED job and releases the content lock, unless another job
+// on the path still needs it. It retries while remote is unavailable, as callRemote does.
+//
+// Remote's answers mean:
+//   - FAILED_PRECONDITION: the cancel landed. A replay of a cancel whose reply was lost gets the
+//     same answer back, because remote stores it on the job.
+//   - ErrJobNotReserved: something else already ended the reservation, for example a user. The
+//     release at the end of the call still decided the lock, so the cancel is done.
+//   - An error wrapping rst.ErrRequestNotDelivered: remote may not have seen the cancel. The
+//     reservation then keeps the lock, and it is not counted.
+//
+// The reservation leaves JobsReserved. A file that changed is counted in JobsChangedDuringBuild.
+// Any other reason means the builder could not lock or check the file, and is counted in Errors.
+func (w *worker) cancelBuilderReservation(ctx context.Context, mu *sync.Mutex, builder *flex.BuilderJob, request *pbr.JobRequest, reason error) error {
+	cancel := proto.Clone(request).(*pbr.JobRequest)
+	cancel.SetReservation(pbr.JobRequest_CLAIM)
+	cancel.SetGenerationStatus(&pbr.JobRequest_GenerationStatus{
+		State:   pbr.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+		Message: reason.Error(),
+	})
+	err := w.callRemote(ctx, request.GetPath(), "cancel the reservation", func(ctx context.Context) error {
+		_, submitErr := w.beeRemoteClient.SubmitJobRequest(ctx, cancel)
+		return submitErr
+	})
+	if errors.Is(err, rst.ErrRequestNotDelivered) {
+		return err
+	}
+	if errors.Is(err, rst.ErrJobFailedPrecondition) || errors.Is(err, rst.ErrJobNotReserved) {
+		err = nil
+	}
+
+	mu.Lock()
+	if builder.JobsReserved > 0 {
+		builder.JobsReserved--
+	}
+	if errors.Is(reason, rst.ErrFileChangedDuringBuild) {
+		builder.JobsChangedDuringBuild++
 	} else {
 		builder.Errors++
 	}
@@ -753,10 +811,11 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 	jobsAlreadyOffloaded := builder.GetJobsAlreadyOffloaded()
 	jobsAlreadyExist := builder.GetJobsAlreadyExist()
 	jobsReserved := builder.GetJobsReserved()
+	jobsChangedDuringBuild := builder.GetJobsChangedDuringBuild()
 	dirsConfigured := builder.GetDirsConfigured()
 
 	var parts []string
-	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsNotReserved + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist + jobsReserved
+	jobsProcessed := jobsSubmitted + jobsErrors + jobsNotAllowed + jobsNotReserved + jobsAlreadyComplete + jobsAlreadyOffloaded + jobsAlreadyExist + jobsReserved + jobsChangedDuringBuild
 	// A walk that only configured directories found matches. It did what --update or
 	// --remote-cooldown asked, even though it submitted no job request.
 	if jobsProcessed == 0 && dirsConfigured == 0 {
@@ -803,6 +862,11 @@ func getBuilderResults(builder *flex.BuilderJob) (message string, hasErrors bool
 	}
 	if jobsReserved > 0 {
 		parts = append(parts, fmt.Sprintf("%d reserved and not yet claimed", jobsReserved))
+		hasErrors = true
+	}
+	if jobsChangedDuringBuild > 0 {
+		// Nothing ran for these files, so the push or pull is incomplete until it is run again.
+		parts = append(parts, fmt.Sprintf("%d changed while the job was being built and were skipped", jobsChangedDuringBuild))
 		hasErrors = true
 	}
 

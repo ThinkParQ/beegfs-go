@@ -143,48 +143,43 @@ func classifyRPCError(err error) error {
 	return err
 }
 
-func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
+// submitJob sends jobRequest to remote. It returns the job remote answered with, and remote's
+// answer as the matching rst sentinel. A refusal can come back with a job, for example the job that
+// blocked the request, or the job a replayed reservation already reached.
+func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error) {
 	resp, err := c.client.SubmitJob(ctx, &beeremote.SubmitJobRequest{
 		Request:      jobRequest,
 		OriginNodeId: c.nodeId,
 	})
 	if err != nil {
-		return classifyRPCError(err)
+		return nil, classifyRPCError(err)
 	}
 
+	job := resp.GetResult().GetJob()
 	switch resp.GetStatus() {
 	case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
-		return rst.ErrJobAlreadyComplete
+		return job, rst.ErrJobAlreadyComplete
 	case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
-		return rst.ErrJobAlreadyOffloaded
+		return job, rst.ErrJobAlreadyOffloaded
 	case beeremote.SubmitJobResponse_EXISTING:
-		return rst.ErrJobAlreadyExists
+		return job, rst.ErrJobAlreadyExists
 	case beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
-		return rst.ErrJobBlockedByActiveJob
+		return job, rst.ErrJobBlockedByActiveJob
 	case beeremote.SubmitJobResponse_NOT_ALLOWED:
-		return rst.ErrJobNotAllowed
+		return job, rst.ErrJobNotAllowed
 	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
-		return rst.ErrJobFailedPrecondition
+		return job, rst.ErrJobFailedPrecondition
 	case beeremote.SubmitJobResponse_NOT_RESERVED:
-		return rst.ErrJobNotReserved
+		return job, rst.ErrJobNotReserved
 	case beeremote.SubmitJobResponse_RESERVATION_MISSING:
-		return rst.ErrReservationMissing
+		return job, rst.ErrReservationMissing
 	}
 
 	// A job request remote accepted always names the job that now owns it. Remote reporting no job
 	// means the request is neither refused nor running, so report it rather than letting the
 	// builder count it as submitted.
-	if resp.GetResult().GetJob() == nil {
-		return fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
+	if job == nil {
+		return nil, fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
 	}
-	return nil
-}
-
-// releaseUnusedFileLock asks remote to release the content lock on path if no job still needs it.
-func (c *grpcProvider) releaseUnusedFileLock(ctx context.Context, path string) error {
-	_, err := c.client.ReleaseUnusedFileLock(ctx, beeremote.ReleaseUnusedFileLockRequest_builder{Path: path}.Build())
-	if err != nil {
-		return classifyRPCError(err)
-	}
-	return nil
+	return job, nil
 }

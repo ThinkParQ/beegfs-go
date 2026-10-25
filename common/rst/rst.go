@@ -150,12 +150,13 @@ type Provider interface {
 	//
 	// log is used for per-path problems that must be reported without failing the builder job.
 	//
-	// A builder that takes a file's content lock must never clear it. If no request is submitted
-	// then remote.ReleaseUnusedFileLock should be called to release an acquired lock.
-	//
-	// All requests are submitted through remote.Submit. Remote releases the lock at the end of
-	// every submit unless a job on the path still needs it. So if the submission is refused, any
-	// file changes made for the request are undone after the lock may already be gone.
+	// A builder takes a file's content lock only after remote.Reserve recorded a job for the file.
+	// It clears a lock only when it just set it for a request that writes the file, and the file
+	// turned out to have changed, so the lock does not stay on a file no job owns. It ends every
+	// reservation through a claim with remote.Submit, or through remote.Cancel. A builder changes a
+	// file only for a claim. If remote refuses the claim, remote undoes those changes with
+	// CompleteWorkRequests and abort set, before it decides the lock.
+	// Remote releases the lock at the end of each call unless a job on the path still needs it.
 	ExecuteJobBuilderRequest(shutdownCtx context.Context, workCtx context.Context, log *zap.Logger, workRequest *flex.WorkRequest, remote RemoteJobCalls, workerSaturation []func() float64) *SchedulingResult
 	// CompleteJobBuilderRequest is the builder job counterpart to CompleteWorkRequests. It runs
 	// before a builder job moves to a terminal state and releases the bulk operations the builder
@@ -197,15 +198,6 @@ type Provider interface {
 	GetRemotePathInfo(ctx context.Context, cfg *flex.JobRequestCfg) (remoteSize int64, remoteMtime time.Time, isArchived bool, isArchiveRestoreAllowed bool, err error)
 	// GenerateExternalId can be used to generate an identifier for remote operations.
 	GenerateExternalId(ctx context.Context, cfg *flex.JobRequestCfg) (externalId string, err error)
-	// ReleaseExternalId discards an externalId returned by GenerateExternalId, freeing any remote
-	// resources it reserved (for example aborting a multipart upload). It must be called when the
-	// job request the id was generated for is abandoned before reaching remote, since no job is
-	// ever created for it and CompleteWorkRequests will therefore never run to abort it.
-	//
-	// Implementations must tolerate an empty externalId and must be safe to call more than once for
-	// the same id because it usually runs while the request context is being cancelled. Callers
-	// should pass a context detached from that cancellation.
-	ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error
 	// IsWorkRequestReady is used to indicate when the work request is ready and will be used to
 	// start work requests that have been placed into a wait queue. This is useful for providers
 	// that need the ability to wait for resources to be made available before continuing.
@@ -256,20 +248,38 @@ type Provider interface {
 // Implementations must be safe to call concurrently.
 type SubmitRequestFn func(ctx context.Context, request *beeremote.JobRequest) error
 
-// ReleaseUnusedFileLockFn asks remote to release the content lock on path if no job on the path
-// still needs it. An error wrapping ErrRequestNotDelivered means remote may not have received the
-// request. Implementations retry transient failures like SubmitRequestFn and must be safe to call
-// concurrently.
-type ReleaseUnusedFileLockFn func(ctx context.Context, path string) error
+// ReserveRequestFn sends request, which must carry the RESERVE action and a job_id, and returns
+// the job remote answers with. The error follows SubmitRequestFn. When remote already has a job
+// under the ID, because the request is a replay, the job comes back in the state it reached:
+//   - RESERVED with a nil error: the reservation is still waiting for its claim.
+//   - Claimed, so its request carries CLAIM: the error is the answer the claim got, nil when it
+//     was accepted.
+//   - Cancelled before a claim: an error wrapping ErrJobNotReserved.
+//
+// A refusal may come back with a nil job. Implementations retry like SubmitRequestFn and must be
+// safe to call concurrently.
+type ReserveRequestFn func(ctx context.Context, request *beeremote.JobRequest) (*beeremote.Job, error)
 
-// RemoteJobCalls are the calls a job builder makes to remote. Remote alone releases a file's content
-// lock, because the lock is one flag shared by every job on the path and only remote sees them all.
-// So a builder that took a lock never clears it. It submits the request, and remote decides the
-// lock at the end of the submit. When the builder submits nothing for a path, it asks remote to
-// release the lock instead.
+// CancelReservationFn ends the reservation request made, by claiming it with a FAILED_PRECONDITION
+// that carries reason. The builder calls it only before it changed the file, so remote records the
+// job as CANCELLED without the RST abort. Remote then releases the content lock unless another job
+// on the path needs it. reason wraps ErrFileChangedDuringBuild when the file changed
+// between the builder reading it and locking it, which callers count separately from errors. A nil
+// error means remote recorded the cancel. An error wrapping ErrRequestNotDelivered means remote may
+// not have received it, and the reservation then keeps the lock. Implementations retry like
+// SubmitRequestFn and must be safe to call concurrently.
+type CancelReservationFn func(ctx context.Context, request *beeremote.JobRequest, reason error) error
+
+// RemoteJobCalls are the calls a job builder makes to remote. Remote alone releases a file's
+// content lock, because the lock is one flag shared by every job on the path and only remote sees
+// them all. So the builder reserves a job before it takes a lock. It clears a lock only when it
+// just set it for a request that writes the file, and the file turned out to have changed. Every
+// other lock it takes ends in a claim through Submit or a Cancel, and remote decides the lock at
+// the end of either.
 type RemoteJobCalls struct {
-	Submit                SubmitRequestFn
-	ReleaseUnusedFileLock ReleaseUnusedFileLockFn
+	Submit  SubmitRequestFn
+	Reserve ReserveRequestFn
+	Cancel  CancelReservationFn
 }
 
 // CancelRequestFn cancels a reserved job and returns any errors.
@@ -606,13 +616,11 @@ func BuildJobRequestWithFailedPrecondition(client Provider, cfg *flex.JobRequest
 }
 
 // BuildJobRequest creates a provider-specific job request for cfg if the request is valid;
-// otherwise, the request will be returned with a failed precondition status for the issue.
+// otherwise, the request will be returned with a failed precondition status for the issue. The
+// builder calls it before it takes the content lock, because it only reserves and locks a file
+// once the request shows the file needs changing.
 func BuildJobRequest(ctx context.Context, client Provider, cfg *flex.JobRequestCfg) *beeremote.JobRequest {
 	lockedInfo := cfg.GetLockedInfo()
-	if !IsFileLocked(lockedInfo) && FileExists(lockedInfo) {
-		return BuildJobRequestWithFailedPrecondition(client, cfg, "path lock has not been acquired")
-	}
-
 	cfg.SetRemotePath(client.SanitizeRemotePath(cfg.RemotePath))
 	if IsFileOffloaded(lockedInfo) {
 		// Use rst url from the stub file when a remote-path wasn't provided.
@@ -796,6 +804,32 @@ func PlanFileStateForWorkRequests(mountPoint filesystem.Provider, cfg *flex.JobR
 	// Only an upload, or a download of a non-empty object, reaches this point.
 	workRequired = true
 	return
+}
+
+// planLeavesFileUnchanged runs after PlanFileStateForWorkRequests returned no failed precondition
+// and no work, and before the plan is applied. It reports whether applying the plan would change
+// nothing on the file. The builder takes the content lock, and reserves a job for it, only for a
+// plan that changes the file, so a plan this returns true for is submitted without a lock.
+//
+// It mirrors two branches of PlanFileStateForWorkRequests and must agree with them:
+//   - Already complete: prepareAlreadyComplete only reports the outcome.
+//   - Already offloaded with no restore policy: prepareAlreadyOffloaded only reports the outcome.
+//
+// Every other branch writes the file or its data state.
+//
+// Both branches are also followed by prepareUpdateFileRstPattern. With --update or a cooldown it
+// sets the file's RST pattern, which is configuration, not content. The content lock does not
+// protect it: meta checks the lock only when a file is opened, so a pattern write passes it either
+// way. Directories are configured the same way, without a lock or a job. So those flags do not
+// make the plan change the file here. The pattern is still written when the plan is applied.
+func planLeavesFileUnchanged(cfg *flex.JobRequestCfg) bool {
+	lockedInfo := cfg.GetLockedInfo()
+	alreadySynced := IsFileAlreadySynced(lockedInfo)
+	if !cfg.StubLocal {
+		return FileExists(lockedInfo) && alreadySynced
+	}
+	createsStub := (cfg.Download && (cfg.Overwrite || !FileExists(lockedInfo))) || alreadySynced
+	return !createsStub && IsFileOffloaded(lockedInfo) && !cfg.HasRestorePolicy()
 }
 
 // createWithParentDir runs create and, when it fails only because a parent directory is missing,
@@ -1243,6 +1277,11 @@ type PathState struct {
 	EntryInfo    *entry.GetEntryCombinedInfo
 	RstCfg       msg.RemoteStorageTarget
 	OwnerNode    beegfs.Node
+	// Ino is the inode number Lstat reported, or zero when the file does not exist or the
+	// filesystem reports none. The BeeGFS client derives it from the entry ID, so a path that names
+	// another file afterwards, through a rename or a replace, reports another number on the same
+	// client.
+	Ino uint64
 }
 
 func (p PathState) IsDir() bool {
@@ -1337,8 +1376,18 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 	result.LockedInfo.Size = stat.Size()
 	result.LockedInfo.Mtime = timestamppb.New(stat.ModTime())
 	result.LockedInfo.Mode = uint32(stat.Mode())
+	result.Ino = statIno(stat)
 
 	return result, nil
+}
+
+// statIno returns the inode number in stat, or zero when the filesystem provides none, such as an
+// in-memory filesystem in tests.
+func statIno(stat fs.FileInfo) uint64 {
+	if sys, ok := stat.Sys().(*syscall.Stat_t); ok {
+		return sys.Ino
+	}
+	return 0
 }
 
 // restorePolicyToDataState maps a RestorePolicy enum value to the corresponding beegfs.DataState.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"testing"
 	"time"
 
@@ -19,8 +18,7 @@ import (
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest/observer"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -42,8 +40,72 @@ func requireNoBulkRequest(t *testing.T) addToBulkRequestFn {
 	}
 }
 
+// withReserveFakes fills in the calls reserveAndLock makes, so a test that builds the builder by hand
+// only sets what it is about. Each fake is set only when the test left it nil:
+//   - reserveRequest accepts every reservation, as a first reservation with no job. A test about
+//     reservations routes them through its submit fake instead, with reserveVia.
+//   - cancelReservation goes through submitRequest as the claim carrying FAILED_PRECONDITION that
+//     sync sends, and treats remote's FAILED_PRECONDITION answer as success, as sync does.
+//   - setContentLock and clearContentLock always succeed.
+//   - mountPoint is an empty in-memory filesystem, so a path the test never created reads as not
+//     existing. That matches the empty locked info most of these tests use.
+func withReserveFakes(w *jobRequestBuilder) *jobRequestBuilder {
+	submit := w.submitRequest
+	if w.reserveRequest == nil {
+		w.reserveRequest = func(context.Context, *beeremote.JobRequest) (*beeremote.Job, error) { return nil, nil }
+	}
+	if w.cancelReservation == nil {
+		w.cancelReservation = func(ctx context.Context, request *beeremote.JobRequest, reason error) error {
+			cancel := proto.Clone(request).(*beeremote.JobRequest)
+			cancel.SetReservation(beeremote.JobRequest_CLAIM)
+			cancel.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: reason.Error(),
+			})
+			if err := submit(ctx, cancel); err != nil && !errors.Is(err, ErrJobFailedPrecondition) {
+				return err
+			}
+			return nil
+		}
+	}
+	if w.setContentLock == nil {
+		w.setContentLock = func(context.Context, string, PathState) error { return nil }
+	}
+	if w.clearContentLock == nil {
+		w.clearContentLock = func(context.Context, string, PathState) error { return nil }
+	}
+	if w.mountPoint == nil {
+		w.mountPoint = filesystem.NewMockFS()
+	}
+	return w
+}
+
+// reserveVia sends reservations through submit, so a test's submit fake answers the RESERVE like
+// any submission, and its recorded submissions show the reserve before any claim.
+func reserveVia(submit SubmitRequestFn) ReserveRequestFn {
+	return func(ctx context.Context, request *beeremote.JobRequest) (*beeremote.Job, error) {
+		return nil, submit(ctx, request)
+	}
+}
+
+// createTestFile creates an empty file at path in mountPoint and returns the locked info a read of
+// it reports, unlocked. A test whose path state says the file exists uses it, because the builder
+// checks the file again after locking it and would otherwise find it missing.
+func createTestFile(t *testing.T, mountPoint filesystem.Provider, path string) *flex.JobLockedInfo {
+	t.Helper()
+	require.NoError(t, mountPoint.CreateWriteClose(path, []byte{}, 0644, false))
+	stat, err := mountPoint.Lstat(path)
+	require.NoError(t, err)
+	return &flex.JobLockedInfo{
+		Exists: true,
+		Size:   stat.Size(),
+		Mtime:  timestamppb.New(stat.ModTime()),
+		Mode:   uint32(stat.Mode()),
+	}
+}
+
 func TestJobRequestBuilder_InitSetDirRstConfigNoopWhenDirsNotWalked(t *testing.T) {
-	w := &jobRequestBuilder{builderCfg: &flex.JobRequestCfg{}}
+	w := withReserveFakes(&jobRequestBuilder{builderCfg: &flex.JobRequestCfg{}})
 	w.initSetRstConfig()
 
 	// mountPoint is intentionally left nil; if the no-op short circuit didn't take effect this
@@ -138,13 +200,14 @@ func TestJobRequestBuilder_ResolvePathStateForRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := &jobRequestBuilder{
+			w := withReserveFakes(&jobRequestBuilder{
 				log:        zap.NewNop(),
 				builderCfg: tt.builderCfg,
 				getPathState: func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
+					assert.Equal(t, PathStateNoLock, mode, "the builder reads a path without the lock, and locks only after reserving")
 					return tt.pathState, tt.pathStateErr
 				},
-			}
+			})
 
 			pathState, skip, pathIssue, err := w.resolvePathStateForRequest(context.Background(), "/some/path")
 
@@ -168,7 +231,7 @@ func TestJobRequestBuilder_ResolvePathStateForRequest(t *testing.T) {
 }
 
 func TestJobRequestBuilder_BuildJobRequestCfgs(t *testing.T) {
-	w := &jobRequestBuilder{}
+	w := withReserveFakes(&jobRequestBuilder{})
 	cfg := &flex.JobRequestCfg{RemoteStorageTarget: 99, Path: "/original", Priority: new(int32(3))}
 	lockedInfo := &flex.JobLockedInfo{Size: 42}
 
@@ -191,7 +254,7 @@ func TestJobRequestBuilder_BuildJobRequestCfgs(t *testing.T) {
 
 func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 	t.Run("unknown rstId returns failed precondition without a client", func(t *testing.T) {
-		w := &jobRequestBuilder{RstMap: map[uint32]Provider{}}
+		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{}})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 7}
 
 		request := w.buildRequest(context.Background(), cfg, nil)
@@ -205,7 +268,7 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 
 	t.Run("failedPrecondition produces a failed precondition request", func(t *testing.T) {
 		client := &MockClient{}
-		w := &jobRequestBuilder{RstMap: map[uint32]Provider{1: client}}
+		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{1: client}})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1}
 
 		request := w.buildRequest(context.Background(), cfg, errors.New("precondition failed"))
@@ -217,7 +280,7 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 
 	t.Run("no failedPrecondition builds a normal request", func(t *testing.T) {
 		client := &MockClient{}
-		w := &jobRequestBuilder{RstMap: map[uint32]Provider{1: client}}
+		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{1: client}})
 		cfg := &flex.JobRequestCfg{
 			Path:                "/foo",
 			RemoteStorageTarget: 1,
@@ -234,11 +297,11 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	t.Run("request with generation status is submitted and answered", func(t *testing.T) {
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{},
 			submitRequest: submissions.submit,
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -250,20 +313,22 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		require.Len(t, submissions.all(), 1)
 	})
 
-	t.Run("a request its target does not include in a bulk operation is submitted normally", func(t *testing.T) {
+	t.Run("a request its target does not include in a bulk operation is reserved and claimed by the builder", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(false, "")
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		remote := &testRemoteCalls{}
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
+			reserveRequest:   remote.reserve,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -271,8 +336,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.True(t, submitted)
+		assert.Equal(t, []string{"reserve /foo"}, remote.all(), "a plan that changes the file is reserved before the builder locks it")
 		require.Len(t, submissions.all(), 1)
-		assert.Equal(t, beeremote.JobRequest_NO_RESERVATION, submissions.all()[0].GetReservation(), "a request no operation takes must not reserve a job")
+		assert.Equal(t, beeremote.JobRequest_CLAIM, submissions.all()[0].GetReservation(), "the builder claims the reservation it made")
 		assert.True(t, submissions.all()[0].HasJobId(), "every submission carries a job ID so remote can recognize a replay")
 	})
 
@@ -282,10 +348,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		var offered *beeremote.JobRequest
 		var offeredOperation string
-		w := &jobRequestBuilder{
-			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{1: client},
-			submitRequest: submissions.submit,
+		w := withReserveFakes(&jobRequestBuilder{
+			log:            zap.NewNop(),
+			RstMap:         map[uint32]Provider{1: client},
+			submitRequest:  submissions.submit,
+			reserveRequest: reserveVia(submissions.submit),
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
 				offered = request
 				offeredOperation = operation
@@ -294,7 +361,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -326,13 +393,13 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	})
 
 	// A plan that ends in a terminal sentinel moves no data, so a bulk operation has nothing to do
-	// for it. Offering it would reserve a job that the claim later resolves without leaving
-	// RESERVED. An in-sync file of an archived object is the common case.
+	// for it. An already complete file changes nothing either, so it is not even reserved or locked.
+	// An in-sync file of an archived object is the common case.
 	t.Run("a request that needs no work is not offered even when its target would include it", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
@@ -342,9 +409,16 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 					return true, nil, GetErrJobAlreadyCompleteWithMtime(time.Unix(0, 0))
 				}, false, nil
 			},
-		}
-		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
+		})
+		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{Exists: true}}
 		request := w.buildRequest(context.Background(), cfg, nil)
+		// The mock target reports a remote object with a zero size and mtime. A local file with the
+		// same size and mtime is already in sync with it.
+		cfg.GetLockedInfo().SetMtime(cfg.GetLockedInfo().GetRemoteMtime())
+		w.setContentLock = func(context.Context, string, PathState) error {
+			t.Fatal("a file the plan does not change must not be locked")
+			return nil
+		}
 
 		_, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
@@ -352,6 +426,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.True(t, submitted)
 		require.Len(t, submissions.all(), 1)
 		assert.Equal(t, beeremote.JobRequest_NO_RESERVATION, submissions.all()[0].GetReservation(), "a request that needs no work must not reserve a job")
+		assert.Equal(t, w.terminalJobIdFor(request), submissions.all()[0].GetJobId(), "a terminal request uses the terminal ID, so it never collides with a reservation for the path")
 		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, submissions.all()[0].GetGenerationStatus().GetState(), submissions.all()[0].GetGenerationStatus().GetMessage())
 	})
 
@@ -359,7 +434,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{1: client},
 			submitRequest: submissions.submit,
@@ -369,7 +444,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -401,7 +476,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		// reaches the bulk offer with one. This builds the request by hand to pin the invariant the
 		// offer relies on, since without it the missing client is a nil dereference.
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{},
 			submitRequest:    submissions.submit,
@@ -409,7 +484,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99, LockedInfo: &flex.JobLockedInfo{}}
 		request := &beeremote.JobRequest{}
 		request.SetPath("/foo")
@@ -427,11 +502,14 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
 		reserveErr := errors.New("remote is unreachable")
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:    zap.NewNop(),
 			RstMap: map[uint32]Provider{1: client},
 			submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
 				return reserveErr
+			},
+			reserveRequest: func(context.Context, *beeremote.JobRequest) (*beeremote.Job, error) {
+				return nil, reserveErr
 			},
 			// The request is only submitted once an operation has taken it, so the operation must
 			// accept it for the reservation to be attempted at all.
@@ -441,7 +519,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -472,10 +550,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				submissions := newTestSubmitter()
 				submissions.result = func(*beeremote.JobRequest) error { return conflictErr }
 				var reportedStates []BulkRequestState
-				w := &jobRequestBuilder{
-					log:           zap.NewNop(),
-					RstMap:        map[uint32]Provider{1: client},
-					submitRequest: submissions.submit,
+				w := withReserveFakes(&jobRequestBuilder{
+					log:            zap.NewNop(),
+					RstMap:         map[uint32]Provider{1: client},
+					submitRequest:  submissions.submit,
+					reserveRequest: reserveVia(submissions.submit),
 					addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
 						return nil
 					},
@@ -489,7 +568,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 							return false, nil, nil
 						}, true, nil
 					},
-				}
+				})
 				cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 				request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -520,10 +599,11 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		submissions.result = func(*beeremote.JobRequest) error { return ErrJobNotAllowed }
 		markErr := errors.New("status file is not writable")
-		w := &jobRequestBuilder{
-			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{1: client},
-			submitRequest: submissions.submit,
+		w := withReserveFakes(&jobRequestBuilder{
+			log:            zap.NewNop(),
+			RstMap:         map[uint32]Provider{1: client},
+			submitRequest:  submissions.submit,
+			reserveRequest: reserveVia(submissions.submit),
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
 				return nil
 			},
@@ -533,7 +613,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -550,7 +630,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
@@ -558,7 +638,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -592,46 +672,22 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		t.Cleanup(shutdown)
 		workCtx, cancel, checkpoint := WithCancellationDelay(parent, checkpointGrace)
 		t.Cleanup(cancel)
-		w := &jobRequestBuilder{
-			log:                   zap.NewNop(),
-			RstMap:                map[uint32]Provider{1: client},
-			submitRequest:         submitAlwaysFails,
-			releaseUnusedFileLock: remote.releaseUnusedFileLock,
-			addToBulkRequest:      requireNoBulkRequest(t),
+		w := withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{1: client},
+			submitRequest:     submitAlwaysFails,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			addToBulkRequest:  requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					shutdown()
 					return true, undo, nil
 				}, true, nil
 			},
-		}
+		})
 		return w, &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}, workCtx, checkpoint, remote
 	}
-
-	// The undo steps that restore BeeGFS state issue BeeMsg calls with the context they are handed,
-	// so rolling back with an already cancelled context would fail before touching anything. The
-	// rollback checkpoints its context first, which restarts the grace period and keeps it live
-	// past the shutdown that abandoned the request. The grace bounds it, so a wedged rollback still
-	// cannot stall shutdown forever; TestWithCancellationDelay covers that bound.
-	t.Run("rollback runs on a context that outlives the cancelled request", func(t *testing.T) {
-		// Sampled inside the rollback: the grace period is released as soon as processRequest
-		// returns, so inspecting the context afterwards would only ever show it cancelled.
-		var undoRan bool
-		var undoCtxErr error
-		w, cfg, ctx, checkpoint, remote := newUnsubmittableBuilder(t, func(ctx context.Context) error {
-			undoRan = true
-			undoCtxErr = ctx.Err()
-			return ctx.Err()
-		})
-		request := w.buildRequest(context.Background(), cfg, nil)
-		outcome, _, err := w.processRequest(ctx, checkpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
-
-		require.NoError(t, err)
-		require.True(t, undoRan)
-		assert.NoError(t, undoCtxErr, "rollback must not inherit the request context's cancellation")
-		assert.Equal(t, answered, outcome)
-		assert.Empty(t, remote.all(), "remote decided the lock at the end of the submit")
-	})
 
 	// Once a path has started being processed it is always seen through, even if the builder is
 	// already shutting down. Abandoning it here would strand it: the walk advances its resume token
@@ -641,7 +697,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
@@ -652,7 +708,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 					return true, nil, nil
 				}, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -669,7 +725,9 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.AssertCalled(t, "GenerateExternalId", mock.Anything, mock.Anything)
 	})
 
-	t.Run("a refused submission rolls back the applied plan", func(t *testing.T) {
+	// Remote undoes a refused claim's changes with the RST abort, under the lock, before it decides
+	// the lock. So the builder leaves the plan alone.
+	t.Run("a refused claim leaves its undo to remote", func(t *testing.T) {
 		undoCalls := 0
 		w, cfg, ctx, checkpoint, remote := newUnsubmittableBuilder(t, func(context.Context) error { undoCalls++; return nil })
 		request := w.buildRequest(context.Background(), cfg, nil)
@@ -677,33 +735,17 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.False(t, submitted)
-		assert.Equal(t, 1, undoCalls)
+		assert.Equal(t, beeremote.JobRequest_CLAIM, request.GetReservation())
+		assert.Zero(t, undoCalls)
 		assert.Equal(t, answered, outcome)
-		assert.Empty(t, remote.all(), "remote decided the lock at the end of the submit, so the builder makes no lock call")
-	})
-
-	t.Run("a failed rollback leaves the file modified and makes no lock call", func(t *testing.T) {
-		undoCalls := 0
-		w, cfg, ctx, checkpoint, remote := newUnsubmittableBuilder(t, func(context.Context) error { undoCalls++; return errors.New("rollback failed") })
-		request := w.buildRequest(context.Background(), cfg, nil)
-		outcome, submitted, err := w.processRequest(ctx, checkpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
-
-		// Being unable to revert is systemic enough to stop the builder job rather than carry on
-		// over a file nothing can put back.
-		require.ErrorContains(t, err, "rollback failed")
-		assert.False(t, submitted)
-		assert.Equal(t, 1, undoCalls)
-		// The file is still modified. Remote already decided the lock at the end of the submit, so
-		// the builder has nothing more to ask of it.
-		assert.Equal(t, answered, outcome)
-		assert.Empty(t, remote.all())
+		assert.Equal(t, []string{"reserve /foo"}, remote.all(), "the builder reserved before locking, and made no cancel: remote decided the lock at the end of the claim")
 	})
 
 	t.Run("a failed submission does not undo a plan that was already rolled back", func(t *testing.T) {
 		undoCalls := 0
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submitAlwaysFails,
@@ -713,7 +755,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 					return true, func(context.Context) error { undoCalls++; return nil }, nil
 				}, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		outcome, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
@@ -734,7 +776,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
@@ -745,7 +787,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 					return true, func(context.Context) error { undoCalls++; return nil }, nil
 				}, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		outcome, submitted, err := w.processRequest(ctx, noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
@@ -759,128 +801,71 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.Equal(t, answered, outcome)
 	})
 
-	t.Run("a failed submission retries a rollback that previously failed", func(t *testing.T) {
+	t.Run("a rollback that failed before the claim is reported as ERROR", func(t *testing.T) {
 		undoCalls := 0
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
 		remote := &testRemoteCalls{}
-		w := &jobRequestBuilder{
-			log:                   zap.NewNop(),
-			RstMap:                map[uint32]Provider{1: client},
-			submitRequest:         submitAlwaysFails,
-			releaseUnusedFileLock: remote.releaseUnusedFileLock,
-			addToBulkRequest:      requireNoBulkRequest(t),
+		w := withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{1: client},
+			submitRequest:     submitAlwaysFails,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			addToBulkRequest:  requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					return true, func(context.Context) error {
-						// Fail the rollback attempted by the externalId path, then succeed on the
-						// retry from the submission path.
 						undoCalls++
-						if undoCalls == 1 {
-							return errors.New("rollback failed")
-						}
-						return nil
+						return errors.New("rollback failed")
 					}, nil
 				}, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		outcome, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
 		assert.False(t, submitted)
-		// A failed rollback leaves the file possibly still mutated, so the submission path must try
-		// again rather than treat the plan as unapplied.
-		assert.Equal(t, 2, undoCalls)
-		// The retry restored the file. Remote already decided the lock at the end of the submit.
+		assert.Equal(t, 1, undoCalls, "the builder does not retry a rollback after the claim")
+		// The file may still be changed. ERROR tells remote to run the RST abort on the claim,
+		// where FAILED_PRECONDITION would tell it that nothing was changed.
+		assert.Equal(t, beeremote.JobRequest_GenerationStatus_ERROR, request.GetGenerationStatus().GetState())
 		assert.Equal(t, answered, outcome)
-		assert.Empty(t, remote.all())
+		assert.Equal(t, []string{"reserve /foo"}, remote.all(), "the builder reserved before locking, and made no cancel: remote decided the lock at the end of the claim")
 	})
 
-	// Nothing downstream ever aborts an externalId belonging to a request that never reached
-	// BeeRemote, so an abandoned request has to hand it back itself or the remote resource it
-	// reserved (for S3, a multipart upload) is orphaned.
-	t.Run("a failed submission releases a generated external id", func(t *testing.T) {
+	// Remote's abort of a refused claim releases the external ID the claim carries, so the builder
+	// does not release it.
+	t.Run("a refused claim leaves its external id to remote", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
-		var releaseCtxErr error
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").
-			Run(func(args mock.Arguments) {
-				releaseCtx := args.Get(0).(context.Context)
-				releaseCtxErr = releaseCtx.Err()
-			}).Return(nil)
-		// See newUnsubmittableBuilder: the parent is cancelled while the plan is applied so the
-		// release has to survive on the grace period the cleanup checkpoints for it.
-		parent, shutdown := context.WithCancel(context.Background())
-		t.Cleanup(shutdown)
-		ctx, cancel, checkpoint := WithCancellationDelay(parent, checkpointGrace)
-		t.Cleanup(cancel)
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submitAlwaysFails,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) {
-					shutdown()
-					return true, nil, nil
-				}, true, nil
+				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
-		_, submitted, err := w.processRequest(ctx, checkpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
+		_, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
 
 		require.NoError(t, err)
 		assert.False(t, submitted)
-		client.AssertCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, "upload-id")
-		// Like the rollback, the release has to outlive the cancelled request. The grace period it
-		// checkpoints keeps it bounded.
-		assert.NoError(t, releaseCtxErr, "release must not inherit the request context's cancellation")
-	})
-
-	t.Run("a failed external id release is logged rather than failing the builder job", func(t *testing.T) {
-		client := &MockClient{}
-		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "upload-id").Return(errors.New("abort failed"))
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		w := &jobRequestBuilder{
-			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
-			submitRequest:    submitAlwaysFails,
-			addToBulkRequest: requireNoBulkRequest(t),
-			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-				return func(context.Context, *PathState) (bool, undoFn, error) {
-					cancel()
-					return true, nil, nil
-				}, true, nil
-			},
-		}
-		core, logs := observer.New(zapcore.WarnLevel)
-		w.log = zap.New(core)
-		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
-		request := w.buildRequest(context.Background(), cfg, nil)
-		_, _, err := w.processRequest(ctx, noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
-
-		// One path leaking remote state must not fail the builder job, but nothing else surfaces an
-		// orphaned upload so it has to be logged.
-		require.NoError(t, err)
-		entries := logs.FilterMessage("unable to release external id").All()
-		require.Len(t, entries, 1)
-		fields := entries[0].ContextMap()
-		assert.Equal(t, "upload-id", fields["externalId"])
-		assert.Equal(t, "/foo", fields["path"])
-		assert.Contains(t, fmt.Sprint(fields["error"]), "abort failed")
+		// An S3 request shares cfg's locked info, so the claim carries the external ID remote's
+		// abort releases.
+		assert.Equal(t, "upload-id", cfg.GetLockedInfo().GetExternalId())
 	})
 
 	t.Run("a submitted request keeps its external id", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
 			RstMap:           map[uint32]Provider{1: client},
 			submitRequest:    submissions.submit,
@@ -888,7 +873,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
@@ -896,9 +881,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 
 		require.NoError(t, err)
 		require.True(t, submitted)
-		// The job will carry this id through to completion, so releasing it here would abort a live
-		// upload.
-		client.AssertNotCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything)
+		// The job carries this id through to completion.
 		assert.Equal(t, "upload-id", cfg.GetLockedInfo().GetExternalId())
 	})
 
@@ -918,7 +901,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	} {
 		t.Run("an already offloaded request is kept when "+tc.name, func(t *testing.T) {
 			undoCalls := 0
-			w := &jobRequestBuilder{
+			w := withReserveFakes(&jobRequestBuilder{
 				log:    zap.NewNop(),
 				RstMap: map[uint32]Provider{1: &MockClient{}},
 				submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
@@ -930,7 +913,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 						return true, func(context.Context) error { undoCalls++; return nil }, ErrJobAlreadyOffloaded
 					}, false, nil
 				},
-			}
+			})
 			cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 			request := w.buildRequest(context.Background(), cfg, nil)
 			outcome, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
@@ -951,7 +934,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	// there is no stub holding the lock, so the lock has nothing left to protect.
 	t.Run("an already complete request is kept when it cannot be submitted", func(t *testing.T) {
 		undoCalls := 0
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:    zap.NewNop(),
 			RstMap: map[uint32]Provider{1: &MockClient{}},
 			submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
@@ -964,7 +947,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 						GetErrJobAlreadyCompleteWithMtime(time.Unix(0, 0))
 				}, false, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 		request := w.buildRequest(context.Background(), cfg, nil)
 		outcome, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request)
@@ -982,7 +965,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	// it must not touch file state on the way.
 	t.Run("cancellation of a terminal request submits it without touching file state", func(t *testing.T) {
 		submissions := newTestSubmitter()
-		w := &jobRequestBuilder{
+		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{},
 			submitRequest: submissions.submit,
@@ -990,7 +973,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				t.Fatal("planFileState must not be called for a request that already has a GenerationStatus")
 				return nil, false, nil
 			},
-		}
+		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
 		request := w.buildRequest(context.Background(), cfg, nil)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1012,25 +995,26 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", nil)
 		remote := &testRemoteCalls{}
 		undoCalls := new(int)
-		w := &jobRequestBuilder{
-			log:                   zap.NewNop(),
-			RstMap:                map[uint32]Provider{1: client},
-			submitRequest:         submit,
-			releaseUnusedFileLock: remote.releaseUnusedFileLock,
-			addToBulkRequest:      requireNoBulkRequest(t),
+		w := withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{1: client},
+			submitRequest:     submit,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			addToBulkRequest:  requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				return func(context.Context, *PathState) (bool, undoFn, error) {
 					return true, func(context.Context) error { *undoCalls++; return nil }, nil
 				}, true, nil
 			},
-		}
+		})
 		return w, &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}, remote, undoCalls
 	}
 
-	// The undo is best-effort recovery. An error that hides remote's decision may mean remote
-	// accepted the request and lost the answer, but the builder does not ask again. It treats the
-	// error as a refusal and undoes.
-	t.Run("an error that hides remote's decision is undone as a refusal", func(t *testing.T) {
+	// An error that hides remote's decision may mean remote accepted the request and lost the
+	// answer. The builder leaves the plan either way: a job remote accepted owns it, and remote
+	// undid a claim it refused.
+	t.Run("an error that hides remote's decision leaves the plan", func(t *testing.T) {
 		submissions := newTestSubmitter()
 		submissions.result = func(*beeremote.JobRequest) error { return errors.New("unable to commit the outcome") }
 		w, cfg, remote, undoCalls := newUndoBuilder(t, submissions.submit)
@@ -1042,8 +1026,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.False(t, submitted)
 		assert.Equal(t, answered, outcome)
 		require.Len(t, submissions.all(), 1, "the builder does not ask remote again")
-		assert.Equal(t, 1, *undoCalls)
-		assert.Empty(t, remote.all(), "remote decided the lock at the end of the submit")
+		assert.Zero(t, *undoCalls)
+		assert.Equal(t, []string{"reserve /foo"}, remote.all(), "the builder reserved before locking, and made no cancel: remote decided the lock at the end of the claim")
 	})
 
 	t.Run("a submission remote never received leaves the plan, the lock and the external id", func(t *testing.T) {
@@ -1063,8 +1047,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		assert.False(t, submitted)
 		assert.Equal(t, notDelivered, outcome)
 		assert.Zero(t, *undoCalls, "a job may rely on the plan")
-		client.AssertNotCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything)
-		assert.Empty(t, remote.all())
+		assert.Equal(t, []string{"reserve /foo"}, remote.all(), "the builder reserved before locking, and made no cancel: remote decided the lock at the end of the claim")
 	})
 }
 
@@ -1074,13 +1057,14 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 	newBuilder := func() *jobRequestBuilder {
 		submissions = newTestSubmitter()
 		remote = &testRemoteCalls{}
-		return &jobRequestBuilder{
-			log:                   zap.NewNop(),
-			RstMap:                map[uint32]Provider{},
-			submitRequest:         submissions.submit,
-			releaseUnusedFileLock: remote.releaseUnusedFileLock,
-			builderCfg:            &flex.JobRequestCfg{},
-		}
+		return withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{},
+			submitRequest:     submissions.submit,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			builderCfg:        &flex.JobRequestCfg{},
+		})
 	}
 
 	// withDirPathState makes getPathState report a directory. GetPathState returns before it takes
@@ -1214,66 +1198,84 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		assert.Empty(t, remote.all(), "remote released the lock at the end of the submit")
 	})
 
-	// foreignLockPathState reports a file whose content access lock is already held by someone
-	// else. GetPathState reports that as a locked entry this builder did not acquire, because
-	// setting a flag that is already set returns entry.ErrAccessFlagsUnchanged rather than
-	// acquiring anything.
+	// withForeignLockPathState reports a file whose content access lock was already set when the
+	// builder read it, by another job or by a crash. The file exists in the builder's filesystem with
+	// the attributes the read reported, so the check after the reservation finds it unchanged. The
+	// builder sets the lock again after reserving, and finds it still set.
 	withForeignLockPathState := func(w *jobRequestBuilder) {
+		lockedInfo := createTestFile(t, w.mountPoint, "/some/path")
+		lockedInfo.SetReadWriteLocked(true)
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
-				LockedInfo: &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, Mtime: timestamppb.Now()},
+				LockedInfo: proto.Clone(lockedInfo).(*flex.JobLockedInfo),
 				EntryInfo:  &entry.GetEntryCombinedInfo{},
 				RstCfg:     msg.RemoteStorageTarget{RSTIDs: []uint32{1}},
 			}, nil
 		}
-		// This builder did not take the lock, so it never asks remote to release it.
-		w.releaseUnusedFileLock = func(ctx context.Context, path string) error {
-			t.Fatal("a lock this builder did not acquire must not be released by it")
-			return nil
+		w.setContentLock = func(context.Context, string, PathState) error {
+			return entry.ErrAccessFlagsUnchanged
 		}
 	}
 
-	t.Run("a lock held by another job fails a download", func(t *testing.T) {
-		client := &MockClient{}
-		w := newBuilder()
-		w.builderCfg = &flex.JobRequestCfg{Download: true}
-		w.RstMap = map[uint32]Provider{1: client}
-		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
-		withForeignLockPathState(w)
-
-		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
-
-		require.NoError(t, err)
-		require.Len(t, submissions.all(), 1)
-		request := submissions.all()[0]
-		require.NotNil(t, request.GetGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
-		// A download writes the file, so it cannot run beside whatever holds the lock. The message
-		// names the lock too, because remote only records it when no job owns the lock.
-		message := request.GetGenerationStatus().GetMessage()
-		assert.Contains(t, message, fs.ErrExist.Error())
-		assert.Contains(t, message, "access lock is already held")
-		assert.Zero(t, activeJobSubmissions)
-	})
-
-	t.Run("a lock held by another job fails an overwriting download with its own message", func(t *testing.T) {
+	// A download writes the file, so it can't run beside a job that holds the lock. Remote refuses
+	// its reservation, and answers with the job that blocked it. The builder must not decide this
+	// itself from the lock it read, because the lock may be its own reservation from a pass that
+	// crashed, or an orphan no job holds.
+	t.Run("a download over a lock another job holds is refused at the reservation", func(t *testing.T) {
 		client := &MockClient{}
 		w := newBuilder()
 		w.builderCfg = &flex.JobRequestCfg{Download: true, Overwrite: true}
 		w.RstMap = map[uint32]Provider{1: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
+		w.addToBulkRequest = requireNoBulkRequest(t)
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
+			return func(context.Context, *PathState) (bool, undoFn, error) {
+				t.Fatal("a refused reservation must not have its plan applied")
+				return false, nil, nil
+			}, true, nil
+		}
+		withForeignLockPathState(w)
+		remote.reserveResult = func(request *beeremote.JobRequest) (*beeremote.Job, error) {
+			return beeremote.Job_builder{
+				Id:      uuid.NewString(),
+				Request: beeremote.JobRequest_builder{Path: request.GetPath(), Reservation: beeremote.JobRequest_CLAIM}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_RUNNING}.Build(),
+			}.Build(), fmt.Errorf("%w: an upload is active", ErrJobNotAllowed)
+		}
+
+		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
+
+		require.NoError(t, err)
+		assert.Equal(t, []string{"reserve /some/path"}, remote.all())
+		assert.Empty(t, submissions.all())
+		assert.Zero(t, activeJobSubmissions)
+	})
+
+	// The lock was this builder job's own reservation, from a pass that crashed before its claim,
+	// or an orphan that no job holds. Remote accepts the reservation in both cases, so the download
+	// goes ahead instead of failing on a lock nothing else needs.
+	t.Run("a download over a lock remote accepts goes ahead", func(t *testing.T) {
+		client := &MockClient{}
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		w := newBuilder()
+		w.builderCfg = &flex.JobRequestCfg{Download: true, Overwrite: true}
+		w.RstMap = map[uint32]Provider{1: client}
+		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
+		w.addToBulkRequest = requireNoBulkRequest(t)
+		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
+			return func(context.Context, *PathState) (bool, undoFn, error) { return true, nil, nil }, true, nil
+		}
 		withForeignLockPathState(w)
 
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
+		assert.Equal(t, []string{"reserve /some/path"}, remote.all())
 		require.Len(t, submissions.all(), 1)
-		request := submissions.all()[0]
-		require.NotNil(t, request.GetGenerationStatus())
-		assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
-		// --overwrite does not override the lock, so say that rather than reporting the file exists.
-		assert.Contains(t, request.GetGenerationStatus().GetMessage(), "overwrite")
-		assert.Zero(t, activeJobSubmissions)
+		claim := submissions.all()[0]
+		assert.Equal(t, beeremote.JobRequest_CLAIM, claim.GetReservation())
+		assert.Nil(t, claim.GetGenerationStatus(), "the download must not fail on a lock remote accepted")
+		assert.EqualValues(t, 1, activeJobSubmissions)
 	})
 
 	t.Run("a lock held by another job does not stop an upload", func(t *testing.T) {
@@ -1290,15 +1292,17 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
 
-		// An upload only reads the file, so it may run beside the job holding the lock. The lock is
-		// still left alone: this builder did not acquire it and has no idea what it protects.
+		// An upload only reads the file, so it may run beside the job holding the lock. Remote's
+		// conflict check accepted the reservation alongside that job, and the claim shares the lock.
 		require.NoError(t, err)
+		assert.Equal(t, []string{"reserve /some/path"}, remote.all())
 		require.Len(t, submissions.all(), 1)
+		assert.Equal(t, beeremote.JobRequest_CLAIM, submissions.all()[0].GetReservation())
 		assert.Nil(t, submissions.all()[0].GetGenerationStatus())
 		assert.EqualValues(t, 1, activeJobSubmissions)
 	})
 
-	t.Run("a path with in-flight work releases nothing", func(t *testing.T) {
+	t.Run("a file with work is reserved and claimed once per RST", func(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
@@ -1319,18 +1323,25 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "/remote/path", nil)
 
 		require.NoError(t, err)
+		assert.Equal(t, []string{"reserve /some/path", "reserve /some/path"}, remote.all())
 		require.Len(t, submissions.all(), 2)
+		for _, claim := range submissions.all() {
+			assert.Equal(t, beeremote.JobRequest_CLAIM, claim.GetReservation())
+		}
 		assert.EqualValues(t, 2, activeJobSubmissions)
-		assert.Empty(t, remote.all())
 	})
 
-	// A path is skipped when it has no rstIds and none was given. GetPathState has already taken
-	// the lock by then, and no request will hold it, so the builder asks remote to release it.
-	t.Run("a skipped path that took the lock asks remote to release it", func(t *testing.T) {
+	// A path is skipped when it has no rstIds and none was given. The builder read it without the
+	// lock, so a skipped path costs no lock and no call to remote.
+	t.Run("a skipped path takes no lock and calls remote for nothing", func(t *testing.T) {
 		w := newBuilder()
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
+			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, EntryInfo: &entry.GetEntryCombinedInfo{}}, nil
+		}
+		w.setContentLock = func(context.Context, string, PathState) error {
+			t.Fatal("a skipped path must not be locked")
+			return nil
 		}
 
 		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "", nil)
@@ -1338,36 +1349,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		require.NoError(t, err)
 		assert.Zero(t, activeJobSubmissions)
 		assert.Empty(t, submissions.all())
-		assert.Equal(t, []string{"release /some/path"}, remote.all())
-	})
-
-	t.Run("a release error is joined into the returned error", func(t *testing.T) {
-		w := newBuilder()
-		wantErr := errors.New("release failed")
-		remote.releaseErr = wantErr
-		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
-		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
-		}
-
-		activeJobSubmissions, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "", nil)
-
-		require.ErrorIs(t, err, wantErr)
-		assert.Zero(t, activeJobSubmissions)
-	})
-
-	t.Run("a release remote never received keeps the lock without failing the path", func(t *testing.T) {
-		w := newBuilder()
-		remote.releaseErr = fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
-		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
-		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}, LockAcquired: true}, nil
-		}
-
-		_, err := w.ProcessPathFromOriginalWalk(context.Background(), "/some/path", "", nil)
-
-		require.NoError(t, err)
-		assert.Equal(t, []string{"release /some/path"}, remote.all())
+		assert.Empty(t, remote.all())
 	})
 }
 
@@ -1379,17 +1361,18 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		submissions = newTestSubmitter()
 		remote = &testRemoteCalls{}
 		reportedStates = nil
-		return &jobRequestBuilder{
-			log:                   zap.NewNop(),
-			RstMap:                map[uint32]Provider{},
-			submitRequest:         submissions.submit,
-			releaseUnusedFileLock: remote.releaseUnusedFileLock,
-			builderCfg:            &flex.JobRequestCfg{},
+		return withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{},
+			submitRequest:     submissions.submit,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			builderCfg:        &flex.JobRequestCfg{},
 			updateBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
 				reportedStates = append(reportedStates, state)
 				return nil
 			},
-		}
+		})
 	}
 	bulkInfo := &flex.BulkJobRequestInfo{Operation: "retrieve"}
 	// The operation hands back the job it reserved for the path when it took the request. Every
@@ -1458,13 +1441,12 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		assert.Equal(t, beeremote.JobRequest_CLAIM, request.GetReservation())
 	})
 
-	t.Run("a request remote refuses is rolled back and released from its bulk operation", func(t *testing.T) {
+	t.Run("a request remote refuses is released from its bulk operation", func(t *testing.T) {
 		// Regression test: a bulk request that never produces a job is only ever resolved here.
 		// Leaving it unresolved strands it in the bulk operation, whose batch then never completes,
 		// so the owning builder job reschedules forever waiting on a request that will never run.
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
 		w := newBuilder()
 		submissions.result = func(*beeremote.JobRequest) error { return ErrJobNotAllowed }
 		w.RstMap = map[uint32]Provider{1: client}
@@ -1487,8 +1469,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 
 		// A request remote refuses is an outcome for this one path, not a builder job failure.
 		require.NoError(t, err)
-		assert.Equal(t, 1, undoCalls, "the applied file state plan must be rolled back")
-		client.AssertCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, "external-id")
+		assert.Zero(t, undoCalls, "remote undoes a refused claim")
 		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
 		assert.Empty(t, remote.all(), "remote decided the lock at the end of the submit")
 	})
@@ -1499,7 +1480,6 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		// treat the claim like any other refusal.
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
 		w := newBuilder()
 		submissions.result = func(*beeremote.JobRequest) error { return ErrReservationMissing }
 		w.RstMap = map[uint32]Provider{1: client}
@@ -1523,7 +1503,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, submissions.all(), 1, "a missing reservation must not be reserved again")
 		assert.Equal(t, beeremote.JobRequest_CLAIM, submissions.all()[0].GetReservation(), "a missing reservation must be claimed, not reserved again")
-		assert.Equal(t, 1, undoCalls, "the applied file state plan must be rolled back")
+		assert.Zero(t, undoCalls, "remote undoes a refused claim from the claim's own request")
 		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
 		assert.Empty(t, remote.all())
 	})
@@ -1535,7 +1515,6 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		// delivered, not that it failed, so it keeps the request replayable.
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
 		w := newBuilder()
 		submissions.result = func(*beeremote.JobRequest) error {
 			return fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
@@ -1561,36 +1540,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Zero(t, undoCalls, "a job may rely on the plan, so it must not be rolled back")
 		assert.Equal(t, []BulkRequestState{BulkRequestNotDelivered}, reportedStates)
-		client.AssertNotCalled(t, "ReleaseExternalId", mock.Anything, mock.Anything, mock.Anything)
 		assert.Empty(t, remote.all(), "the lock is kept for the job remote may have")
-	})
-
-	t.Run("a refused request whose rollback fails makes no lock call", func(t *testing.T) {
-		client := &MockClient{}
-		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
-		client.On("ReleaseExternalId", mock.Anything, mock.Anything, "external-id").Return(nil)
-		w := newBuilder()
-		submissions.result = func(*beeremote.JobRequest) error { return ErrJobNotAllowed }
-		w.RstMap = map[uint32]Provider{1: client}
-		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
-			return PathState{
-				// A replay finds the lock the reservation pass took, so GetPathState reports it as
-				// already set rather than acquired.
-				LockedInfo: &flex.JobLockedInfo{Exists: true, ReadWriteLocked: true, Mtime: timestamppb.Now()},
-				EntryInfo:  &entry.GetEntryCombinedInfo{},
-			}, nil
-		}
-		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
-			return func(context.Context, *PathState) (bool, undoFn, error) {
-				return true, func(context.Context) error { return errors.New("rollback failed") }, nil
-			}, true, nil
-		}
-
-		// The bulk operation is still released even though the failed rollback stops the builder
-		// job, so the operation is not left waiting on a request that will never be resolved.
-		require.ErrorContains(t, w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil), "rollback failed")
-		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates)
-		assert.Empty(t, remote.all(), "remote decided the lock at the end of the submit, and the file stays modified")
 	})
 
 	t.Run("a claim with in-flight work releases nothing", func(t *testing.T) {
@@ -1615,13 +1565,11 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		assert.Empty(t, remote.all())
 	})
 
-	// The reservation guarantees the lock is the claim's own. A path that fails before its claim is
-	// sent leaves no job to hold the lock, so the builder asks remote to release it, and a release
-	// error is reported with the path's error.
-	t.Run("a claim that fails before it is sent asks remote to release the lock", func(t *testing.T) {
+	// The reservation keeps the lock while it is RESERVED. A claim that fails before it is sent
+	// leaves the reservation in place, and the bulk operation's teardown cancels it, so the builder
+	// makes no call of its own.
+	t.Run("a claim that fails before it is sent leaves the lock with its reservation", func(t *testing.T) {
 		w := newBuilder()
-		wantErr := errors.New("release failed")
-		remote.releaseErr = wantErr
 		fatalErr := fmt.Errorf("%w: %w", ErrGetPathStateFatal, errors.New("boom"))
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{LockedInfo: &flex.JobLockedInfo{Exists: true}}, fatalErr
@@ -1630,9 +1578,8 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		err := w.ProcessPathFromBulkOperation(context.Background(), &BulkStreamPathResult{InMountPath: "/some/path", RemotePath: "/remote/path", RstId: 1, ReservedJobId: reservedJobId, BulkInfo: bulkInfo}, nil)
 
 		require.ErrorIs(t, err, ErrGetPathStateFatal)
-		require.ErrorIs(t, err, wantErr)
 		assert.Empty(t, submissions.all())
-		assert.Equal(t, []string{"release /some/path"}, remote.all())
+		assert.Empty(t, remote.all())
 	})
 }
 
@@ -1651,7 +1598,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		reportedStates = nil
 		reportedRequests = nil
 		updateBulkErr = nil
-		return &jobRequestBuilder{
+		return withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
 			RstMap:        map[uint32]Provider{},
 			submitRequest: submissions.submit,
@@ -1661,7 +1608,6 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 				reportedRequests = append(reportedRequests, request)
 				return updateBulkErr
 			},
-			releaseUnusedFileLock: func(ctx context.Context, path string) error { return nil },
 			getPathState: func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 				return PathState{
 					LockedInfo:   &flex.JobLockedInfo{Exists: true},
@@ -1670,7 +1616,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 				}, nil
 			},
 			setDirRstConfig: func(ctx context.Context, inMountPath string) error { return nil },
-		}
+		})
 	}
 	bulkInfo := &flex.BulkJobRequestInfo{Operation: "retrieve", JobIndex: 7, StateMountPath: "/state/path"}
 	reservedJobId := uuid.NewString()
@@ -1746,7 +1692,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 // got a new ID on every attempt would create a second job when a response is lost.
 func TestJobRequestBuilder_JobIdFor(t *testing.T) {
 	builderJobId := uuid.New()
-	w := &jobRequestBuilder{builderJobId: builderJobId}
+	w := withReserveFakes(&jobRequestBuilder{builderJobId: builderJobId})
 	request := func(path string, rstId uint32) *beeremote.JobRequest {
 		return beeremote.JobRequest_builder{Path: path, RemoteStorageTarget: rstId}.Build()
 	}
@@ -1754,8 +1700,411 @@ func TestJobRequestBuilder_JobIdFor(t *testing.T) {
 	first := w.jobIdFor(request("/a/file", 1))
 	require.NoError(t, uuid.Validate(first))
 	assert.Equal(t, first, w.jobIdFor(request("/a/file", 1)), "the same path and RST must give the same ID")
-	assert.Equal(t, first, (&jobRequestBuilder{builderJobId: builderJobId}).jobIdFor(request("/a/file", 1)), "a rescheduled builder job must give the same ID")
+	assert.Equal(t, first, (withReserveFakes(&jobRequestBuilder{builderJobId: builderJobId})).jobIdFor(request("/a/file", 1)), "a rescheduled builder job must give the same ID")
 	assert.NotEqual(t, first, w.jobIdFor(request("/a/file", 2)), "each RST gets its own job")
 	assert.NotEqual(t, first, w.jobIdFor(request("/a/other", 1)), "each path gets its own job")
-	assert.NotEqual(t, first, (&jobRequestBuilder{builderJobId: uuid.New()}).jobIdFor(request("/a/file", 1)), "another builder job is a new request")
+	assert.NotEqual(t, first, (withReserveFakes(&jobRequestBuilder{builderJobId: uuid.New()})).jobIdFor(request("/a/file", 1)), "another builder job is a new request")
+
+	// A terminal request for the same path and RST gets its own ID, also deterministic. A rewalk
+	// after a crash can find a path already complete after an earlier pass reserved and claimed it,
+	// and remote would refuse the terminal request under the claimed job's ID as a collision.
+	terminal := w.terminalJobIdFor(request("/a/file", 1))
+	require.NoError(t, uuid.Validate(terminal))
+	assert.NotEqual(t, first, terminal, "a terminal request must not reuse the reservation's ID")
+	assert.Equal(t, terminal, w.terminalJobIdFor(request("/a/file", 1)), "a replayed terminal request must get the same ID")
+}
+
+// TestJobRequestBuilder_ReserveAndLock pins how the builder handles a file whose plan changes it.
+// The builder reads the file without the content lock, reserves a job, locks the file, and checks
+// the file is still the one it read. Only then does it apply the plan and claim the job. A file
+// that changed in between gets its reservation cancelled, so the lock is always held by a job and
+// released by remote.
+func TestJobRequestBuilder_ReserveAndLock(t *testing.T) {
+	type fixture struct {
+		w           *jobRequestBuilder
+		client      *MockClient
+		submissions *testSubmitter
+		remote      *testRemoteCalls
+		locks       *[]string
+		applied     *int
+		cfg         *flex.JobRequestCfg
+		pathState   PathState
+	}
+
+	// newFixture builds a builder for an upload of /foo, a file that exists and is not locked. The
+	// plan needs a transfer, and the target takes no request into a bulk operation.
+	newFixture := func(t *testing.T) fixture {
+		client := &MockClient{}
+		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(false, "")
+		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
+		submissions := newTestSubmitter()
+		remote := &testRemoteCalls{}
+		locks := []string{}
+		applied := 0
+		w := withReserveFakes(&jobRequestBuilder{
+			log:               zap.NewNop(),
+			RstMap:            map[uint32]Provider{1: client},
+			submitRequest:     submissions.submit,
+			reserveRequest:    remote.reserve,
+			cancelReservation: remote.cancel,
+			addToBulkRequest:  requireNoBulkRequest(t),
+			builderCfg:        &flex.JobRequestCfg{},
+			setContentLock: func(ctx context.Context, path string, pathState PathState) error {
+				locks = append(locks, path)
+				return nil
+			},
+			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
+				return func(context.Context, *PathState) (bool, undoFn, error) {
+					applied++
+					return true, nil, nil
+				}, true, nil
+			},
+		})
+		read := createTestFile(t, w.mountPoint, "/foo")
+		return fixture{
+			w:           w,
+			client:      client,
+			submissions: submissions,
+			remote:      remote,
+			locks:       &locks,
+			applied:     &applied,
+			cfg:         w.buildJobRequestCfg("/foo", "/foo", 1, read, w.builderCfg),
+			pathState:   PathState{LockedInfo: proto.Clone(read).(*flex.JobLockedInfo), EntryInfo: &entry.GetEntryCombinedInfo{}},
+		}
+	}
+
+	process := func(f fixture) (submitOutcome, bool, error) {
+		request := f.w.buildRequest(context.Background(), f.cfg, nil)
+		return f.w.processRequest(context.Background(), noopCheckpoint, f.cfg, f.pathState, request)
+	}
+
+	// changeFile writes new content to /foo after the builder read it, as a client would.
+	changeFile := func(t *testing.T, f fixture) {
+		require.NoError(t, f.w.mountPoint.CreateWriteClose("/foo", []byte("changed"), 0644, true))
+	}
+
+	// requireCancelled checks the path ended with its reservation cancelled before the plan ran.
+	requireCancelled := func(t *testing.T, f fixture, outcome submitOutcome, submitted bool, err error) {
+		t.Helper()
+		require.NoError(t, err, "a cancelled reservation is this path's outcome, not the builder job's")
+		assert.Equal(t, answered, outcome)
+		assert.False(t, submitted)
+		require.Equal(t, []string{"reserve /foo", "cancel /foo"}, f.remote.all())
+		require.Len(t, f.remote.reasons, 1)
+		assert.Zero(t, *f.applied, "the plan must not run on a file that changed")
+		assert.Empty(t, f.submissions.all(), "a cancelled reservation is never claimed")
+	}
+
+	t.Run("an unchanged file is reserved, locked, checked and then claimed", func(t *testing.T) {
+		f := newFixture(t)
+
+		outcome, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.Equal(t, answered, outcome)
+		assert.True(t, submitted)
+		assert.Equal(t, []string{"reserve /foo"}, f.remote.all())
+		assert.Equal(t, []string{"/foo"}, *f.locks, "the builder locks the file itself, after the reservation")
+		assert.Equal(t, 1, *f.applied)
+		require.Len(t, f.submissions.all(), 1)
+		claim := f.submissions.all()[0]
+		assert.Equal(t, beeremote.JobRequest_CLAIM, claim.GetReservation())
+		assert.Equal(t, f.w.jobIdFor(claim), claim.GetJobId(), "the claim names the job the reservation made")
+		assert.True(t, f.cfg.GetLockedInfo().GetReadWriteLocked(), "the claim must say the file is locked, so remote does not prepare it again")
+	})
+
+	t.Run("a file that changed after the read has its reservation cancelled", func(t *testing.T) {
+		f := newFixture(t)
+		changeFile(t, f)
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.ErrorIs(t, f.remote.reasons[0], ErrFileChangedDuringBuild)
+	})
+
+	t.Run("a lock set on a file that changed is cleared again", func(t *testing.T) {
+		// The file is not the one the reservation was made for. If the cancel were not delivered,
+		// a forced cancel's abort would otherwise find the lock and change the file.
+		f := newFixture(t)
+		f.cfg.SetDownload(true)
+		changeFile(t, f)
+		cleared := []string{}
+		f.w.clearContentLock = func(ctx context.Context, path string, pathState PathState) error {
+			cleared = append(cleared, path)
+			return nil
+		}
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.Equal(t, []string{"/foo"}, cleared)
+	})
+
+	t.Run("a lock set for a read-only request on a file that changed is kept", func(t *testing.T) {
+		// Remote lets uploads to other RSTs share the path, and one may rely on this lock.
+		f := newFixture(t)
+		changeFile(t, f)
+		cleared := []string{}
+		f.w.clearContentLock = func(ctx context.Context, path string, pathState PathState) error {
+			cleared = append(cleared, path)
+			return nil
+		}
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.Empty(t, cleared)
+	})
+
+	t.Run("a lock that was already set on a file that changed is kept", func(t *testing.T) {
+		// Another job on the path, such as an upload to another RST, may share the lock.
+		f := newFixture(t)
+		f.cfg.SetDownload(true)
+		changeFile(t, f)
+		f.w.setContentLock = func(context.Context, string, PathState) error { return entry.ErrAccessFlagsUnchanged }
+		cleared := []string{}
+		f.w.clearContentLock = func(ctx context.Context, path string, pathState PathState) error {
+			cleared = append(cleared, path)
+			return nil
+		}
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.Empty(t, cleared)
+	})
+
+	t.Run("a lock set on an unchanged file is kept", func(t *testing.T) {
+		f := newFixture(t)
+		cleared := []string{}
+		f.w.clearContentLock = func(ctx context.Context, path string, pathState PathState) error {
+			cleared = append(cleared, path)
+			return nil
+		}
+
+		_, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.True(t, submitted)
+		assert.Empty(t, cleared)
+	})
+
+	t.Run("a file removed after the read has its reservation cancelled", func(t *testing.T) {
+		f := newFixture(t)
+		require.NoError(t, f.w.mountPoint.(filesystem.MockFS).Fs.Remove("/foo"))
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.ErrorIs(t, f.remote.reasons[0], ErrFileChangedDuringBuild)
+	})
+
+	t.Run("a file a client has open counts as changed", func(t *testing.T) {
+		// Meta refuses the lock while a client has the file open for writing, so its content may
+		// still be changing.
+		f := newFixture(t)
+		f.w.setContentLock = func(context.Context, string, PathState) error {
+			return fmt.Errorf("server returned an error setting file access flags: %w", beegfs.OpsErr_INUSE)
+		}
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.ErrorIs(t, f.remote.reasons[0], ErrFileChangedDuringBuild)
+	})
+
+	t.Run("a lock that fails for another reason is cancelled as an error", func(t *testing.T) {
+		f := newFixture(t)
+		lockErr := errors.New("metadata server unreachable")
+		f.w.setContentLock = func(context.Context, string, PathState) error { return lockErr }
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.ErrorIs(t, f.remote.reasons[0], lockErr)
+		assert.NotErrorIs(t, f.remote.reasons[0], ErrFileChangedDuringBuild, "sync counts only a changed file as changed, and anything else as an error")
+	})
+
+	t.Run("a lock that was already set is not an error", func(t *testing.T) {
+		// The lock was set between the read and the lock, by a job remote's conflict check allowed
+		// alongside this one, such as an upload to another RST.
+		f := newFixture(t)
+		f.w.setContentLock = func(context.Context, string, PathState) error { return entry.ErrAccessFlagsUnchanged }
+
+		_, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.True(t, submitted)
+		assert.Equal(t, []string{"reserve /foo"}, f.remote.all())
+	})
+
+	// The read came before the reservation. The job that held the lock then may have finished
+	// since, and its release cleared the lock while this builder had no job on the path yet. So the
+	// builder sets the lock again for every file that existed, and an upload never runs unlocked.
+	t.Run("a file read with its lock set is locked again after the reserve", func(t *testing.T) {
+		f := newFixture(t)
+		f.pathState.LockedInfo.SetReadWriteLocked(true)
+		f.cfg.GetLockedInfo().SetReadWriteLocked(true)
+
+		_, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.True(t, submitted)
+		assert.Equal(t, []string{"/foo"}, *f.locks, "a lock read before the reservation may be gone by now")
+	})
+
+	t.Run("a file the plan creates is not locked by the builder", func(t *testing.T) {
+		// A download to a new path creates the file and locks it inside the plan, after the
+		// reservation. The check only confirms the path still does not exist.
+		f := newFixture(t)
+		require.NoError(t, f.w.mountPoint.(filesystem.MockFS).Fs.Remove("/foo"))
+		f.cfg = f.w.buildJobRequestCfg("/foo", "/foo", 1, &flex.JobLockedInfo{}, f.w.builderCfg)
+		f.pathState = PathState{LockedInfo: &flex.JobLockedInfo{}, EntryInfo: &entry.GetEntryCombinedInfo{}}
+
+		_, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.True(t, submitted)
+		assert.Empty(t, *f.locks)
+		assert.Equal(t, 1, *f.applied)
+	})
+
+	t.Run("a replay of a reservation still waiting is checked against what it was made for", func(t *testing.T) {
+		// A rescheduled builder job walks the path again under the same ID. Its fresh read matches
+		// the file, but the reservation was made for an earlier version of it.
+		f := newFixture(t)
+		stored := proto.Clone(f.cfg.GetLockedInfo()).(*flex.JobLockedInfo)
+		stored.SetSize(stored.GetSize() + 1)
+		f.remote.reserveResult = func(request *beeremote.JobRequest) (*beeremote.Job, error) {
+			return beeremote.Job_builder{
+				Request: beeremote.JobRequest_builder{
+					Path:        request.GetPath(),
+					Reservation: beeremote.JobRequest_RESERVE,
+					Mock:        flex.MockJob_builder{LockedInfo: stored}.Build(),
+				}.Build(),
+				Status: beeremote.Job_Status_builder{State: beeremote.Job_RESERVED}.Build(),
+			}.Build(), nil
+		}
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.ErrorIs(t, f.remote.reasons[0], ErrFileChangedDuringBuild)
+	})
+
+	t.Run("a replay of a reservation already claimed ends the path without touching the file", func(t *testing.T) {
+		// The claim's job owns the file, and its own plan already changed it. Checking the file
+		// would find it changed and cancel a job that is running.
+		f := newFixture(t)
+		f.remote.reserveResult = func(request *beeremote.JobRequest) (*beeremote.Job, error) {
+			return beeremote.Job_builder{
+				Id:      request.GetJobId(),
+				Request: beeremote.JobRequest_builder{Path: request.GetPath(), Reservation: beeremote.JobRequest_CLAIM}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_RUNNING}.Build(),
+			}.Build(), nil
+		}
+
+		outcome, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.Equal(t, answered, outcome)
+		assert.False(t, submitted)
+		assert.Equal(t, []string{"reserve /foo"}, f.remote.all(), "a claimed job is never cancelled")
+		assert.Empty(t, *f.locks)
+		assert.Zero(t, *f.applied)
+		assert.Empty(t, f.submissions.all())
+	})
+
+	// Remote answers a refused reserve with the job that blocked it. Every builder job is claimed,
+	// so that job's request carries CLAIM too, typically an earlier run's job still running on the
+	// path. Only its ID says it is not this request's reservation, and the refusal must be handled
+	// as one: counted by sync, and failed in a bulk operation.
+	t.Run("a reserve refused by another builder's claimed job is a refusal, not a replay", func(t *testing.T) {
+		f := newFixture(t)
+		f.client.ExpectedCalls = nil
+		f.client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
+		f.w.addToBulkRequest = func(context.Context, *beeremote.JobRequest, string) error { return nil }
+		var reportedStates []BulkRequestState
+		f.w.updateBulkRequest = func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+			reportedStates = append(reportedStates, state)
+			return nil
+		}
+		f.remote.reserveResult = func(request *beeremote.JobRequest) (*beeremote.Job, error) {
+			return beeremote.Job_builder{
+				Id:      uuid.NewString(),
+				Request: beeremote.JobRequest_builder{Path: request.GetPath(), Reservation: beeremote.JobRequest_CLAIM}.Build(),
+				Status:  beeremote.Job_Status_builder{State: beeremote.Job_RUNNING}.Build(),
+			}.Build(), fmt.Errorf("%w: an earlier run's job is active", ErrJobNotAllowed)
+		}
+
+		outcome, submitted, err := process(f)
+
+		require.NoError(t, err, "a conflict is this path's outcome, not the builder job's")
+		assert.Equal(t, answered, outcome)
+		assert.False(t, submitted)
+		assert.Empty(t, *f.locks)
+		assert.Zero(t, *f.applied)
+		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates, "a refused reservation must release its bulk request")
+	})
+
+	t.Run("a replay of a reservation cancelled before its claim ends the path", func(t *testing.T) {
+		f := newFixture(t)
+		f.remote.reserveResult = func(*beeremote.JobRequest) (*beeremote.Job, error) {
+			return nil, fmt.Errorf("%w: job was cancelled", ErrJobNotReserved)
+		}
+
+		outcome, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.Equal(t, answered, outcome)
+		assert.False(t, submitted)
+		assert.Empty(t, *f.locks)
+		assert.Zero(t, *f.applied)
+	})
+
+	t.Run("a reservation remote never received takes no lock", func(t *testing.T) {
+		f := newFixture(t)
+		f.remote.reserveResult = func(*beeremote.JobRequest) (*beeremote.Job, error) {
+			return nil, fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
+		}
+
+		outcome, _, err := process(f)
+
+		require.NoError(t, err)
+		assert.Equal(t, notDelivered, outcome)
+		assert.Empty(t, *f.locks)
+		assert.Zero(t, *f.applied)
+	})
+
+	t.Run("a cancel remote never received leaves the reservation holding the lock", func(t *testing.T) {
+		f := newFixture(t)
+		changeFile(t, f)
+		f.remote.cancelErr = fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
+
+		outcome, submitted, err := process(f)
+
+		require.NoError(t, err)
+		assert.Equal(t, notDelivered, outcome)
+		assert.False(t, submitted)
+		assert.Zero(t, *f.applied)
+	})
+
+	t.Run("a bulk request whose file changed is cancelled and failed in its operation", func(t *testing.T) {
+		f := newFixture(t)
+		f.client.ExpectedCalls = nil
+		f.client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
+		f.w.addToBulkRequest = func(context.Context, *beeremote.JobRequest, string) error { return nil }
+		var reportedStates []BulkRequestState
+		f.w.updateBulkRequest = func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
+			reportedStates = append(reportedStates, state)
+			return nil
+		}
+		changeFile(t, f)
+
+		outcome, submitted, err := process(f)
+
+		requireCancelled(t, f, outcome, submitted, err)
+		assert.Equal(t, []BulkRequestState{BulkRequestFailed}, reportedStates, "the operation must stop waiting on a path that gets no job")
+	})
 }

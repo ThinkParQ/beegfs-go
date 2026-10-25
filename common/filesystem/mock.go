@@ -34,9 +34,10 @@ func (fs MockFS) Stat(path string) (os.FileInfo, error) {
 	return fs.Fs.Stat(path)
 }
 
+// Lstat answers like Stat. afero has no lstat for its in-memory filesystem, and that filesystem has
+// no symlinks, so the two never differ here.
 func (fs MockFS) Lstat(path string) (os.FileInfo, error) {
-	// afereo does not have an equivalent for lstat.
-	return nil, fmt.Errorf("not implemented")
+	return fs.Fs.Stat(path)
 }
 
 func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {

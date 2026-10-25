@@ -358,11 +358,6 @@ func (c *JobBuilderClient) GenerateExternalId(ctx context.Context, cfg *flex.Job
 	return "", ErrUnsupportedOpForRST
 }
 
-// ReleaseExternalId is a no-op because GenerateExternalId never hands out an id to release.
-func (c *JobBuilderClient) ReleaseExternalId(ctx context.Context, cfg *flex.JobRequestCfg, externalId string) error {
-	return nil
-}
-
 func (c *JobBuilderClient) IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, workRequest *flex.WorkRequest) (ready bool, delay time.Duration, err error) {
 	return true, 0, nil
 }
@@ -443,17 +438,20 @@ func (c *JobBuilderClient) newJobRequestBuilder(
 	updateBulkRequest updateBulkRequestFn,
 ) *jobRequestBuilder {
 	requestBuilder := &jobRequestBuilder{
-		log:                   log,
-		mountPoint:            c.mountPoint,
-		RstMap:                c.rstMap,
-		submitRequest:         remote.Submit,
-		releaseUnusedFileLock: remote.ReleaseUnusedFileLock,
-		builderJobId:          builderJobId,
-		builderCfg:            builderCfg,
-		getPathState:          GetPathState,
-		planFileState:         PlanFileStateForWorkRequests,
-		addToBulkRequest:      addToBulkRequest,
-		updateBulkRequest:     updateBulkRequest,
+		log:               log,
+		mountPoint:        c.mountPoint,
+		RstMap:            c.rstMap,
+		submitRequest:     remote.Submit,
+		reserveRequest:    remote.Reserve,
+		cancelReservation: remote.Cancel,
+		setContentLock:    setContentLock,
+		clearContentLock:  clearContentLock,
+		builderJobId:      builderJobId,
+		builderCfg:        builderCfg,
+		getPathState:      GetPathState,
+		planFileState:     PlanFileStateForWorkRequests,
+		addToBulkRequest:  addToBulkRequest,
+		updateBulkRequest: updateBulkRequest,
 	}
 	requestBuilder.init()
 

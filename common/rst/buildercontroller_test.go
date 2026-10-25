@@ -762,19 +762,39 @@ func (s *testSubmitter) submit(ctx context.Context, request *beeremote.JobReques
 	return nil
 }
 
-// testRemoteCalls records the builder's release calls to remote, in the order made. Each entry is
-// the call's name and its arguments. releaseErr is the error the call returns.
+// testRemoteCalls records the builder's reserve and cancel calls to remote, in the order made.
+// Each entry is the call's name and the request's path, for example "reserve /a" or "cancel /a".
+// Submissions go to a testSubmitter instead, so the tests that count submissions keep counting
+// claims and terminal requests only.
+//
+// reserveResult, when set, decides what a reserve answers. By default every reserve is accepted with
+// no job, which the builder treats as a first reservation. cancelErr is what a cancel returns.
+// reasons records the reason of every cancel, in order.
 type testRemoteCalls struct {
-	mu         sync.Mutex
-	calls      []string
-	releaseErr error
+	mu            sync.Mutex
+	calls         []string
+	reasons       []error
+	reserveResult func(request *beeremote.JobRequest) (*beeremote.Job, error)
+	cancelErr     error
 }
 
-func (r *testRemoteCalls) releaseUnusedFileLock(ctx context.Context, path string) error {
+func (r *testRemoteCalls) reserve(ctx context.Context, request *beeremote.JobRequest) (*beeremote.Job, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, "reserve "+request.GetPath())
+	result := r.reserveResult
+	r.mu.Unlock()
+	if result != nil {
+		return result(request)
+	}
+	return nil, nil
+}
+
+func (r *testRemoteCalls) cancel(ctx context.Context, request *beeremote.JobRequest, reason error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, "release "+path)
-	return r.releaseErr
+	r.calls = append(r.calls, "cancel "+request.GetPath())
+	r.reasons = append(r.reasons, reason)
+	return r.cancelErr
 }
 
 // all returns every call made so far.
@@ -785,9 +805,9 @@ func (r *testRemoteCalls) all() []string {
 }
 
 // remoteCalls returns the calls a builder makes to remote, with submissions going to s and
-// releases recorded in r.
+// reserves and cancels recorded in r.
 func remoteCalls(s *testSubmitter, r *testRemoteCalls) RemoteJobCalls {
-	return RemoteJobCalls{Submit: s.submit, ReleaseUnusedFileLock: r.releaseUnusedFileLock}
+	return RemoteJobCalls{Submit: s.submit, Reserve: r.reserve, Cancel: r.cancel}
 }
 
 // all returns every request submitted so far. Unlike draining a channel it may be called more than

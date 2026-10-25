@@ -35,7 +35,7 @@ const remoteCheckTimeout = 10 * time.Second
 // requiredRemoteFeatures are the remote features this node can't run without. UpdateConfig refuses
 // a remote that lacks any of them. Remote checks this node's features the same way when it
 // connects, so a mismatch is refused from both sides.
-var requiredRemoteFeatures = []string{registry.FeatureRemoteLockRelease}
+var requiredRemoteFeatures = []string{registry.FeatureRemoteLockRelease, registry.FeatureReserveBeforeLock}
 
 var (
 	attrState    = attribute.Key("state")

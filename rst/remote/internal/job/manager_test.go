@@ -3100,6 +3100,104 @@ func TestSubmitJobRequestReservations(t *testing.T) {
 	}
 }
 
+// TestSubmitJobRequestReserveReplays pins what a RESERVE answers when its job_id already names a
+// job on the path. A builder job reschedules after a crash and walks its paths again under the same
+// IDs, so a replayed reserve must hand back the job in whatever state it reached:
+//   - still RESERVED: nil, so the builder takes the lock and verifies the file again;
+//   - claimed: the answer the claim got, so an accepted claim is not reserved a second time;
+//   - cancelled before a claim: ErrJobNotReserved, so the builder moves on.
+//
+// A reserve under a different ID is another builder's, and must be refused by the reservation that
+// already holds the path rather than replace or cancel it.
+func TestSubmitJobRequestReserveReplays(t *testing.T) {
+	reserve := func(t *testing.T, m *Manager, jobId string) {
+		t.Helper()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+	}
+
+	t.Run("a replay of a job still reserved answers with the reservation", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_RESERVED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a job already claimed answers with the claim's answer", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		_, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+		require.NoError(t, err)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.NoError(t, err, "an accepted claim answers nil, as the claim itself did")
+		assert.Equal(t, beeremote.JobRequest_CLAIM, result.GetJob().GetRequest().GetReservation(), "the caller tells a claimed job from a reservation by its request")
+		assert.NotEqual(t, beeremote.Job_RESERVED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a reservation its builder cancelled answers with that cancel", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		cancel := newReservationRequest(false, jobId)
+		cancel.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "file changed",
+		})
+		_, err := m.SubmitJobRequest(cancel, "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		require.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, beeremote.Job_CANCELLED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a reservation cancelled before any claim answers not reserved", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		require.NoError(t, m.cancelReservedRequest(newReservationRequest(true, jobId).GetPath(), jobId))
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+		assert.Equal(t, beeremote.Job_CANCELLED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay for another RST is refused as a collision", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		replay := newReservationRequest(true, jobId)
+		replay.SetRemoteStorageTarget(2)
+
+		_, err := m.SubmitJobRequest(replay, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, jobId).GetStatus().GetState(), "a collision must leave the reservation alone")
+	})
+
+	t.Run("a reserve under another ID is refused by the reservation holding the path", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, uuid.NewString()), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.Equal(t, jobId, result.GetJob().GetId(), "remote answers with the reservation that blocked the request")
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+	})
+}
+
 // getReservationTestJob reads one job back from m by path and ID.
 func getReservationTestJob(t *testing.T, m *Manager, jobId string) *beeremote.Job {
 	t.Helper()
@@ -3630,73 +3728,6 @@ func TestSubmitJobRequestReleasesAtEndOfCall(t *testing.T) {
 
 		require.ErrorIs(t, err, rst.ErrJobNotReserved)
 		assert.Equal(t, []bool{false}, decisions(), "no job needs the lock, so the claimer undoes unlocked")
-	})
-}
-
-// TestReleaseUnusedFileLock checks the release a client asks for when no job of its own was
-// recorded to hold the lock.
-func TestReleaseUnusedFileLock(t *testing.T) {
-	path := newReservationRequest(false, "").GetPath()
-
-	t.Run("a path with no entry is released and leaves no entry behind", func(t *testing.T) {
-		m := newReservationManager(t)
-		decisions := recordLockReleases(m)
-
-		released, err := m.ReleaseUnusedFileLock(path)
-
-		require.NoError(t, err)
-		assert.True(t, released)
-		assert.Equal(t, []bool{false}, decisions())
-		_, err = m.pathStore.GetEntry(path)
-		assert.ErrorIs(t, err, kvstore.ErrEntryNotInDB, "the entry created for the check must be removed")
-	})
-
-	t.Run("an unfinished job keeps the lock", func(t *testing.T) {
-		m := newReservationManager(t)
-		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
-		require.NoError(t, err)
-		recordLockReleases(m)
-
-		released, err := m.ReleaseUnusedFileLock(path)
-
-		require.NoError(t, err)
-		assert.False(t, released)
-	})
-
-	t.Run("another spelling of a path with an unfinished job keeps the lock", func(t *testing.T) {
-		m := newReservationManager(t)
-		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
-		require.NoError(t, err)
-		decisions := recordLockReleases(m)
-
-		for _, alias := range []string{"/test/./bulkfile", "/test/x/../bulkfile", "//test//bulkfile", "test/bulkfile"} {
-			released, err := m.ReleaseUnusedFileLock(alias)
-
-			require.NoError(t, err)
-			assert.False(t, released, "%s names the file the job holds the lock for", alias)
-		}
-		assert.Equal(t, []bool{true, true, true, true}, decisions())
-	})
-
-	t.Run("an existing entry with only finished jobs is kept", func(t *testing.T) {
-		m := newReservationManager(t)
-		m.config.MaxJobEntriesPerRST = 10
-		request := newReservationRequest(false, "")
-		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
-			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
-			Message: "the file changed",
-		})
-		_, err := m.SubmitJobRequest(request, "")
-		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
-		recordLockReleases(m)
-
-		released, err := m.ReleaseUnusedFileLock(path)
-
-		require.NoError(t, err)
-		assert.True(t, released)
-		entry, err := m.pathStore.GetEntry(path)
-		require.NoError(t, err)
-		assert.Len(t, entry.Value, 1, "an entry the call found must not be deleted")
 	})
 }
 

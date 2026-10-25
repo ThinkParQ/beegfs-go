@@ -41,8 +41,7 @@ type Provider interface {
 	init(config Config) error
 	disconnect() error
 	updateWork(ctx context.Context, workResult *flex.Work) error
-	submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error
-	releaseUnusedFileLock(ctx context.Context, path string) error
+	submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error)
 }
 
 // New returns an initialized BeeRemote client. The dynamic portion of the initialCfg can be set to
@@ -203,27 +202,16 @@ func (c *Client) UpdateWorkRequest(ctx context.Context, workResult *flex.Work) (
 	return false, nil
 }
 
-// SubmitJobRequest will forward the provided job request to BeeRemote.
-func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.JobRequest) error {
+// SubmitJobRequest will forward the provided job request to BeeRemote. It returns the job remote
+// answered with, which may be nil for a refusal, together with remote's answer as an error.
+func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error) {
 	c.readyMu.RLock()
 	defer c.readyMu.RUnlock()
 	if c.Provider == nil {
-		return fmt.Errorf("BeeRemote client is not ready")
+		return nil, fmt.Errorf("BeeRemote client is not ready")
 	}
 
 	return c.submitJob(ctx, jobRequest)
-}
-
-// ReleaseUnusedFileLock asks BeeRemote to release the content lock on path if no job still needs
-// it.
-func (c *Client) ReleaseUnusedFileLock(ctx context.Context, path string) error {
-	c.readyMu.RLock()
-	defer c.readyMu.RUnlock()
-	if c.Provider == nil {
-		return fmt.Errorf("BeeRemote client is not ready")
-	}
-
-	return c.releaseUnusedFileLock(ctx, path)
 }
 
 func (c *Client) Disconnect() error {

@@ -43,15 +43,17 @@ func (c *MockProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 	return nil
 }
 
-func (c *MockProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
+// submitJob returns the error set as the first return argument. A test that needs the job remote
+// answers with sets it as an optional second argument.
+func (c *MockProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error) {
 	args := c.Called(jobRequest)
 	err, ok := args.Get(0).(error)
-	if err != nil && !ok {
+	if args.Get(0) != nil && !ok {
 		panic("error type used for test is invalid")
 	}
-	return err
-}
-
-func (c *MockProvider) releaseUnusedFileLock(ctx context.Context, path string) error {
-	return c.Called(path).Error(0)
+	var job *beeremote.Job
+	if len(args) > 1 {
+		job, _ = args.Get(1).(*beeremote.Job)
+	}
+	return job, err
 }

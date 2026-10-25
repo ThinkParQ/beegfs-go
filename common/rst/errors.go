@@ -36,6 +36,9 @@ var (
 	ErrRSTUnavailable               = errors.New("remote target is unavailable")
 	ErrGetPathStateFatal            = errors.New("fatal error collecting state path info")
 	ErrBulkOperationCancelRequest   = errors.New("bulk operation cancel request")
+	// ErrFileChangedDuringBuild means the file changed between the builder reading it without the
+	// content lock and locking it, so the builder cancelled the job it reserved for the file.
+	ErrFileChangedDuringBuild = errors.New("file changed while the job was being built")
 )
 
 // blockedByActiveJobError reports that a job cannot start because another active job holds the same
