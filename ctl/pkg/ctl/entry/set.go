@@ -146,6 +146,35 @@ func setEntry(ctx context.Context, mappings *util.Mappings, cfg SetEntryCfg, pat
 	}
 	return handleFile(ctx, store, entry, cfg, path)
 }
+
+func newMultiRangePrototypeLayout(storagePoolID uint16) *msg.FileLayout {
+	return &msg.FileLayout{
+		DataOnMetadataEndOffset: 0,
+		LayoutRanges: []msg.LayoutRange{
+			{
+				EndOffset: 128 * 1024 * 1024,
+				Pattern: msg.StripePattern{
+					Type:              beegfs.StripePatternRaid0,
+					HasPoolID:         true,
+					Chunksize:         512 * 1024,
+					StoragePoolID:     storagePoolID,
+					DefaultNumTargets: 2,
+				},
+			},
+			{
+				EndOffset: math.MaxUint64,
+				Pattern: msg.StripePattern{
+					Type:              beegfs.StripePatternRaid0,
+					HasPoolID:         true,
+					Chunksize:         1024 * 1024,
+					StoragePoolID:     storagePoolID,
+					DefaultNumTargets: 4,
+				},
+			},
+		},
+	}
+}
+
 func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg.NodeStore, entry *GetEntryCombinedInfo, cfg SetEntryCfg, path string) (SetEntryResult, error) {
 	if entry.Entry.Details == nil {
 		return SetEntryResult{}, fmt.Errorf("full entry details unavailable for %s: %s", path, entry.Entry.EntryInfoPopulated)
@@ -195,7 +224,8 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 			if pool, err := mappings.StoragePoolToConfig.Get(poolID); err == nil {
 				if *cfg.StripePattern == beegfs.StripePatternBuddyMirror && len(pool.BuddyGroups) == 0 {
 					return SetEntryResult{}, fmt.Errorf("refusing to set stripe pattern %s on path %s because its assigned storage pool %s does not contain any buddy groups (use force to override)", cfg.StripePattern, path, pool.Pool.String())
-				} else if *cfg.StripePattern == beegfs.StripePatternRaid0 && len(pool.Targets) == 0 {
+				} else if (*cfg.StripePattern == beegfs.StripePatternRaid0 ||
+					*cfg.StripePattern == beegfs.StripePatternMultiRange) && len(pool.Targets) == 0 {
 					return SetEntryResult{}, fmt.Errorf("refusing to set stripe pattern %s on path %s because its assigned storage pool %s does not contain any targets (use force to override)", cfg.StripePattern, path, pool.Pool.String())
 				}
 				// Otherwise allow the pattern to be updated.
@@ -203,7 +233,14 @@ func handleDirectory(ctx context.Context, mappings *util.Mappings, store *beemsg
 				return SetEntryResult{}, fmt.Errorf("looking up pool with ID %s for path %s: %w", poolID, path, err)
 			}
 		}
-		request.Pattern.Type = *cfg.StripePattern
+		if *cfg.StripePattern == beegfs.StripePatternMultiRange {
+			if cfg.Chunksize != nil || cfg.DefaultNumTargets != nil {
+				return SetEntryResult{}, fmt.Errorf("multi-range uses a fixed prototype layout; --chunk-size and --num-targets are not supported")
+			}
+			request.FileLayout = newMultiRangePrototypeLayout(request.Pattern.StoragePoolID)
+		} else {
+			request.Pattern.Type = *cfg.StripePattern
+		}
 	}
 	if cfg.RemoteTargets != nil {
 		request.RST.RSTIDs = cfg.RemoteTargets

@@ -99,7 +99,7 @@ This enables normal users to change the default number of targets and chunksize 
 	cmd.Flags().Var(newPoolFlag(&backendCfg.Pool), "pool", `Use the specified storage pool for all new files in this directory.
 	Can be specified as the alias, numerical ID, or unique ID of the pool.
 	This is an enterprise feature. See end-user license agreement for definition and usage.`)
-	cmd.Flags().Var(newStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
+	cmd.Flags().Var(newSetStripePatternFlag(&backendCfg.StripePattern), "pattern", fmt.Sprintf(`Set the stripe pattern type to use. Valid patterns: %s.
 	When the pattern is set to "%s", each target will be mirrored on a corresponding mirror target.
 	Buddy mirroring is an enterprise feature. See end-user license agreement for definition and usage.`, strings.Join(validStripePatternKeys(), ", "), beegfs.StripePatternBuddyMirror))
 	cmd.Flags().Var(newNumTargetsFlag(&backendCfg.DefaultNumTargets), "num-targets", fmt.Sprintf(`Number of targets to stripe each file across.

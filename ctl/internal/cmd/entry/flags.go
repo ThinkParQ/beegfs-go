@@ -85,7 +85,8 @@ func (f *poolFlag) Set(value string) error {
 }
 
 type stripePatternFlag struct {
-	p **beegfs.StripePatternType
+	p               **beegfs.StripePatternType
+	allowMultiRange bool
 }
 
 // validStripePatterns lists the patterns a user can set, in the order they are advertised in help.
@@ -103,6 +104,10 @@ var validStripePatterns = []struct {
 
 func newStripePatternFlag(p **beegfs.StripePatternType) *stripePatternFlag {
 	return &stripePatternFlag{p: p}
+}
+
+func newSetStripePatternFlag(p **beegfs.StripePatternType) *stripePatternFlag {
+	return &stripePatternFlag{p: p, allowMultiRange: true}
 }
 
 // validStripePatternKeys returns the patterns to advertise in help, as their display names so what
@@ -127,6 +132,12 @@ func (f *stripePatternFlag) Type() string {
 }
 
 func (f *stripePatternFlag) Set(value string) error {
+	if f.allowMultiRange && beegfs.EnumInputMatches(value, beegfs.StripePatternMultiRange) {
+		pattern := beegfs.StripePatternMultiRange
+		*f.p = &pattern
+		return nil
+	}
+
 	for _, p := range validStripePatterns {
 		if beegfs.EnumInputMatches(value, p.pattern, p.legacyAliases...) {
 			// Copy the value so the caller can do whatever they want with it.
@@ -135,7 +146,11 @@ func (f *stripePatternFlag) Set(value string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("unsupported stripe pattern (supported patterns: %s)", strings.Join(validStripePatternKeys(), ", "))
+	keys := validStripePatternKeys()
+	if f.allowMultiRange {
+		keys = append(keys, beegfs.StripePatternMultiRange.String())
+	}
+	return fmt.Errorf("unsupported stripe pattern (supported patterns: %s)", strings.Join(keys, ", "))
 }
 
 type numTargetsFlag struct {
