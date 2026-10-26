@@ -17,7 +17,7 @@ func newRescanCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *co
 
 	cmd := &cobra.Command{
 		Use:   "rescan <directory-path> [<directory-path>...]",
-		Short: "Rebuilds the index for one or more directories.",
+		Short: "Rebuild the index for one or more directories",
 		Long: `Rebuild the index for one or more directories.
 
 All paths must lie within the single indexed BeeGFS mount. The index has one

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -180,7 +179,7 @@ func PingNode(mountpoint string, nodeID beegfs.LegacyId, count uint32, interval 
 			OutPingType: [pingMaxCount][pingSockTypeBufLen]byte{},
 		},
 	}
-	copy(arg.Params.NodeType[:], strings.ToLower(nodeID.NodeType.String())+"\x00")
+	copy(arg.Params.NodeType[:], nodeID.NodeType.String()+"\x00")
 
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,

@@ -24,6 +24,14 @@ func newDeletePoolCmd() *cobra.Command {
 		Long: `Delete a storage pool.
 
 WARNING: If this pool ID is still referenced in existing directory stripe patterns, creating files in that directory will fail until either the directory is updated or a new pool with the same ID is created. Note if you reuse the same pool ID in the future, it will automatically be used by any existing directories with that pool ID, which might be undesirable.
+
+Example: Preview deleting storage pool 2 (dry-run, the default)
+
+  beegfs pool delete 2
+
+Example: Delete storage pool 2
+
+  beegfs pool delete 2 --yes
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,14 +63,14 @@ func runDeletePoolCmd(cmd *cobra.Command, cfg deletePool_Config) error {
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if cfg.execute {
 		if err != nil {
-			cmdfmt.Printf("Pool deleted, but received no id info from the server. Please verify the deletion using the `pool list` command.\n")
+			cmdfmt.Printf("Pool deleted, but received no id info from the management node. Please verify the deletion using the `pool list` command.\n")
 		} else {
 			cmdfmt.Printf("Pool deleted: %s\n", res)
 		}
 	} else {
 		if err != nil {
 			// Since it was a dry run, we report this error
-			return fmt.Errorf("received no id info from the server")
+			return fmt.Errorf("received no id info from the management node")
 		} else {
 			cmdfmt.Printf("Pool can be deleted: %s\nIf you really want to delete it, please add the --yes flag to the command.\n", res)
 		}

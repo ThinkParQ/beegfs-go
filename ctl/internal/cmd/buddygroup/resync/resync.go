@@ -7,8 +7,8 @@ import (
 func NewResyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resync",
-		Short: "Manage and query resyncing buddy mirrors",
-		Long:  "Manage and query resyncing buddy mirrors",
+		Short: "Manage and query resyncing buddy groups",
+		Long:  "Manage and query resyncing buddy groups",
 	}
 
 	cmd.AddCommand(newResyncStatsCmd())

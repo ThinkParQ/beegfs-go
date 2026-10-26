@@ -25,7 +25,7 @@ func newSetStateCmd() *cobra.Command {
 
 WARNING: This command is very dangerous and can cause serious data loss. It should not be used under normal circumstances. It is absolutely recommended to contact support before proceeding.
 
-This is useful to manually set a target or node to the state "bad", or to resolve a situation in which both buddies in a buddy mirror group are in the state "needs-resync".
+This is useful to manually set a target or node to the state "bad", or to resolve a situation in which both buddies in a buddy mirror group are in the state "needs-resync". State names are matched case insensitively and ignore separators.
 `,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

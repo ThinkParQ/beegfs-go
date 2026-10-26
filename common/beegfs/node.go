@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -55,9 +56,17 @@ func (n NicType) String() string {
 		return "rdma"
 	case Sdp:
 		return "sdp"
+	case InvalidNicType:
+		return "invalid"
 	default:
-		return "<invalid>"
+		return fmt.Sprintf("unknown(%d)", int(n))
 	}
+}
+
+// MarshalJSON encodes the nic type as its human-readable string so structured output matches the
+// table output instead of exposing the underlying integer.
+func (n NicType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
 }
 
 // Holds BeeGFS node nic information

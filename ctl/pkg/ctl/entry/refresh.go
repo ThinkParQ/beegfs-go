@@ -23,7 +23,7 @@ func RefreshEntriesInfo(ctx context.Context, paths util.PathInputMethod) (<-chan
 	log, _ := config.GetLogger()
 	store, err := config.NodeStore(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error accessing the node store: %w", err)
+		return nil, nil, fmt.Errorf("accessing the node store: %w", err)
 	}
 
 	mappings, err := util.GetMappings(ctx)
@@ -53,7 +53,7 @@ func refreshEntryInfo(ctx context.Context, mappings *util.Mappings, store *beems
 	}
 	err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
 	if err != nil {
-		return &RefreshEntryResult{}, fmt.Errorf("error refreshing entry information from node: %w", err)
+		return &RefreshEntryResult{}, fmt.Errorf("refreshing entry information from node: %w", err)
 	}
 	if resp.Result != beegfs.OpsErr_SUCCESS {
 		return &RefreshEntryResult{Path: path, EntryID: string(entryInfo.EntryID), Status: resp.Result}, resp.Result

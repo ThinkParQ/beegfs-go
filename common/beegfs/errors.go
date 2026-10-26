@@ -1,6 +1,7 @@
 package beegfs
 
 import (
+	"encoding/json"
 	"fmt"
 	"syscall"
 )
@@ -56,7 +57,9 @@ func (e OpsErr) Error() string {
 	return e.String()
 }
 
-// String method returns a string representation of the error codes.
+// String returns a string representation of the error codes. These are deliberately error messages
+// rather than kebab-case variant names like the other domain enums, because OpsErr also implements
+// error and its String() is what users see behind the CLI's "Error: " prefix.
 func (e OpsErr) String() string {
 	switch e {
 	case OpsErr_DUMMY_DONTUSEME:
@@ -132,6 +135,11 @@ func (e OpsErr) String() string {
 	default:
 		return fmt.Sprintf("Unknown error (%d)", int(e))
 	}
+}
+
+// MarshalJSON encodes the operation result as its human-readable string.
+func (e OpsErr) MarshalJSON() ([]byte, error) {
+	return json.Marshal(e.String())
 }
 
 // Unwrap exposes the corresponding syscall.Errno (when available), enabling errors.Is(err,

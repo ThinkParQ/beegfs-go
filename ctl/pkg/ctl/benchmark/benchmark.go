@@ -45,21 +45,21 @@ type StorageBenchConfig struct {
 // StorageBenchResponseInfo in the C++ codebase except TargetResults is a slice instead of a map so
 // it can be sorted elsewhere if needed.
 type StorageBenchResult struct {
-	Node          beegfs.EntityIdSet
-	ErrorCode     beegfs.StorageBenchError
-	Status        beegfs.StorageBenchStatus
-	Action        beegfs.StorageBenchAction
-	Type          beegfs.StorageBenchType
-	TargetResults []TargetResult
+	Node          beegfs.EntityIdSet        `json:"node"`
+	ErrorCode     beegfs.StorageBenchError  `json:"errorCode"`
+	Status        beegfs.StorageBenchStatus `json:"status"`
+	Action        beegfs.StorageBenchAction `json:"action"`
+	Type          beegfs.StorageBenchType   `json:"type"`
+	TargetResults []TargetResult            `json:"targetResults"`
 }
 
 // TargetResult contains the benchmark results for a single target. It duplicates the node and type
 // fields from StorageBenchResult so results can be flattened, sorted, and printed independently.
 type TargetResult struct {
-	ID         beegfs.EntityIdSet
-	Node       beegfs.EntityIdSet
-	Throughput int64
-	Type       beegfs.StorageBenchType
+	ID         beegfs.EntityIdSet      `json:"id"`
+	Node       beegfs.EntityIdSet      `json:"node"`
+	Throughput int64                   `json:"throughput"`
+	Type       beegfs.StorageBenchType `json:"type"`
 }
 
 // ExecuteStorageBenchAction is used to interact with the storage bench functionality of storage
@@ -84,7 +84,7 @@ func ExecuteStorageBenchAction(ctx context.Context, benchConfig *StorageBenchCon
 
 	filteredTargetsByNode, err := filterTargetsByNode(ctx, mappings, benchConfig)
 	if err != nil {
-		return nil, fmt.Errorf("error filtering target list: %w", err)
+		return nil, fmt.Errorf("filtering target list: %w", err)
 	}
 	log.Debug("initialized storage bench mode", zap.String("filteredTargetsByNode", fmt.Sprintf("%+v", filteredTargetsByNode)))
 

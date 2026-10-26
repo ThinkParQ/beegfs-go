@@ -164,7 +164,7 @@ run:
 			totalEntries, rst.Synchronized, syncedFiles, rst.Offloaded, offloadedFiles, rst.Unsynchronized, unsyncedFiles, rst.NotAttempted, notAttemptedFiles, rst.NoTargets, noTargetFiles, rst.NotSupported, notSupportedFiles, rst.Directory, directories)
 	}
 	if noTargetFiles != 0 {
-		cmdfmt.Printf("INFO: not all files have remote targets configured\n")
+		cmdfmt.Printf("Note: not all files have remote targets configured.\n")
 	}
 
 	if totalEntries != (syncedFiles + offloadedFiles + unsyncedFiles + notAttemptedFiles + noTargetFiles + notSupportedFiles + directories) {

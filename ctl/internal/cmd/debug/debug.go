@@ -14,8 +14,8 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "debug <node> <command>",
 		Hidden: true,
-		Short:  "Send various debug commands to meta or storage nodes",
-		Long: `Send various debug commands to meta or storage nodes.
+		Short:  "Send various debug commands to metadata or storage nodes",
+		Long: `Send various debug commands to metadata or storage nodes.
 
 THIS MODE IS MEANT FOR DEBUGGING PURPOSES ONLY! IMPROPER USE CAN HAVE UNINTENDED EFFECTS AND EVEN CAUSE DAMAGE TO THE FILE SYSTEM. USE AT YOUR OWN RISK!
 

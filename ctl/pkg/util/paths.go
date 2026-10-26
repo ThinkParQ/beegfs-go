@@ -31,8 +31,10 @@ func (t PathInputType) String() string {
 		return "recursion"
 	case PathInputList:
 		return "list"
+	case PathInputInvalid:
+		return "invalid"
 	default:
-		return "unknown"
+		return fmt.Sprintf("unknown(%d)", int(t))
 	}
 }
 

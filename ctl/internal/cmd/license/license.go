@@ -31,20 +31,20 @@ type license_Config struct {
 }
 
 var out_tpl = `%s
-                  ##########                                  
-                 #############                                
-                 ###########################                  
+                  ##########
+                 #############
+                 ###########################
                   #########      ######                  #####
-                  #########      ######     #####      ###    
-              #### ## #####      ######     ###### ## ##      
-         ######### ## #####      ######     ###### ########   
-      ############# # #####      ######     ###### ########## 
+                  #########      ######     #####      ###
+              #### ## #####      ######     ###### ## ##
+         ######### ## #####      ######     ###### ########
+      ############# # #####      ######     ###### ##########
     ############### # #####      ######     ###### ###########
       ############# # #####      ######     ###### ###########
-         ###########  #####      ######     ###### ########## 
-              ######  #####      ######     ###### ######     
-                      #####      ######     ######            
-                       ####      ######     #####             
+         ###########  #####      ######     ###### ##########
+              ######  #####      ######     ###### ######
+                      #####      ######     ######
+                       ####      ######     #####
 %s
 %s
 %s
@@ -80,9 +80,9 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&cfg.Reload, "reload", false,
-		"Reload and re-verify license certificate on the server.")
+		"Reload and re-verify license certificate on the management node.")
 	cmd.Flags().BoolVar(&cfg.Get, "get", false,
-		"Get and install a new license for this file system.")
+		"Get and install a new license for this filesystem.")
 
 	return cmd
 }
@@ -136,13 +136,21 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		return errors.Join(ret, errors.New(license.Message))
 	}
 
-	if viper.GetString(config.OutputKey) == config.OutputJSONPretty.String() {
-		pretty, _ := json.MarshalIndent(license, "", "  ")
-		fmt.Printf("%s\n", pretty)
-	} else if viper.GetString(config.OutputKey) == config.OutputJSON.String() {
-		json, _ := json.Marshal(license)
-		fmt.Printf("%s\n", json)
-	} else {
+	switch config.OutputType(viper.GetString(config.OutputKey)) {
+	case config.OutputJSONPretty:
+		data, err := json.MarshalIndent(license, "", "  ")
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	case config.OutputJSON, config.OutputNDJSON:
+		// A license is a single object, so NDJSON is the same single compact line as JSON.
+		data, err := json.Marshal(license)
+		if err != nil {
+			return errors.Join(ret, fmt.Errorf("marshaling license: %w", err))
+		}
+		fmt.Printf("%s\n", data)
+	default:
 		var features []string
 		var scopes []string
 		var numservers string
@@ -168,22 +176,22 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 			}
 		}
 
+		var product = "BeeGFS"
 		var header string
-		// A license can have multiple scopes, so we order them by "importance" here. Scopes will
-		// be listed below again.
+		if slices.Contains(scopes, "beeond") {
+			product = "BeeOND"
+		}
 		if slices.Contains(scopes, "nfr") {
-			header = fmt.Sprintf("NOT FOR RESALE License Certificate %s", license.Data.CommonName)
-		} else if slices.Contains(scopes, "beeond") {
-			header = fmt.Sprintf("BeeOND License Certificate %s", license.Data.CommonName)
+			header = fmt.Sprintf("%s NOT FOR RESALE License Certificate %s", product, license.Data.CommonName)
 		} else if license.Data.Type == pl.CertType_CERT_TYPE_ENTERPRISE {
-			header = fmt.Sprintf("BeeGFS Enterprise License Certificate %s", license.Data.CommonName)
+			header = fmt.Sprintf("%s Enterprise License Certificate %s", product, license.Data.CommonName)
 		} else if license.Data.Type == pl.CertType_CERT_TYPE_TRIAL {
-			header = fmt.Sprintf("BeeGFS Trial License Certificate %s", license.Data.CommonName)
+			header = fmt.Sprintf("%s Trial License Certificate %s", product, license.Data.CommonName)
 			defer genLicHelpFunc(cmd.Context(), "\nWARNING: This system has a trial license installed.")
 		} else if license.Data.Type == pl.CertType_CERT_TYPE_COMMUNITY {
-			header = fmt.Sprintf("BeeGFS Community License Certificate %s", license.Data.CommonName)
+			header = fmt.Sprintf("%s Community License Certificate %s", product, license.Data.CommonName)
 		} else {
-			header = fmt.Sprintf("Unknown BeeGFS License Certificate %s", license.Data.CommonName)
+			header = fmt.Sprintf("Unknown %s License Certificate %s", product, license.Data.CommonName)
 		}
 
 		var color string
@@ -239,13 +247,14 @@ func runLicenseCmd(cmd *cobra.Command, cfg license_Config) error {
 		if len(features) == 0 {
 			fmt.Println("  - None")
 		}
-		if len(scopes) > 0 {
+		scopesnobeeond := slices.Clone(scopes)
+		if n := slices.Index(scopes, "beeond"); n != -1 {
+			scopesnobeeond = slices.Delete(scopesnobeeond, n, n+1)
+		}
+		if len(scopesnobeeond) > 0 {
 			fmt.Printf("\nLicense scopes and limitations:\n")
-			if slices.Contains(scopes, "nfr") {
+			if slices.Contains(scopesnobeeond, "nfr") {
 				fmt.Println("  - This license is NOT FOR RESALE and may be used for testing purposes only")
-			}
-			if slices.Contains(scopes, "beeond") {
-				fmt.Println("  - This is a license for BeeOND (BeeGFS On Demand) file systems")
 			}
 		}
 	}
@@ -269,9 +278,13 @@ If you need a license:
 * Enterprise licenses are available by contacting %s.
 * Community licenses are available free of charge, however we require you to share some information to help us improve BeeGFS.
 
-A community license for this file system can be generated by pasting the following URL into your web browser:
+When using BeeGFS, use this link to generate a BeeGFS community license specific to this system:
 
-%s
+  %s
+
+When using BeeOND, use this link to generate a BeeOND community license that is independent of this specific system:
+
+  https://beegfs.io/license?beeond⏎
 
 If you have any questions please reach out to %s.
 
@@ -296,7 +309,7 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return "", fmt.Errorf("unable to connect to management: %w", err)
+		return "", err
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)
@@ -319,6 +332,8 @@ func assembleGetArgs(ctx context.Context) (string, error) {
 
 	var numMeta int
 	var numStorage int
+	// These are lowercase wire values for the license server's net_proto query parameter, not
+	// display output, so they are not NicType.String().
 	var netProto = "tcp"
 	for _, node := range allNodes {
 		switch node.Node.Id.NodeType {

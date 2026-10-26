@@ -18,7 +18,7 @@ func newStatCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobr
 
 	cmd := &cobra.Command{
 		Use:         "stat <path>...",
-		Short:       "Displays file or directory metadata information.",
+		Short:       "Display file or directory metadata information",
 		Annotations: map[string]string{"authorization.AllowAllUsers": ""},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {

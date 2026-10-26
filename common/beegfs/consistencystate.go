@@ -1,7 +1,8 @@
 package beegfs
 
 import (
-	"strings"
+	"encoding/json"
+	"fmt"
 
 	pb "github.com/thinkparq/protobuf/go/beegfs"
 )
@@ -16,22 +17,14 @@ const (
 	Bad
 )
 
-// Create a Consistency state for a target from a string.
+// Create a Consistency state for a target from a string. Accepts the kebab-case form printed by
+// String() ("needs-resync") as well as its snake_case and no-separator spellings, the first of
+// which keeps the historically documented "needs_resync" working. Returns
+// ConsistencyStateUnspecified if the input names no state.
 func ConsistencyStateFromString(input string) ConsistencyState {
-	input = strings.ToLower(strings.TrimSpace(input))
-
-	if len(input) == 0 {
-		return ConsistencyStateUnspecified
+	if state, ok := MatchEnumInput(input, Good, NeedsResync, Bad); ok {
+		return state
 	}
-
-	if strings.EqualFold("good", input) {
-		return Good
-	} else if strings.EqualFold("needs_resync", input) {
-		return NeedsResync
-	} else if strings.EqualFold("bad", input) {
-		return Bad
-	}
-
 	return ConsistencyStateUnspecified
 }
 
@@ -69,10 +62,20 @@ func (n ConsistencyState) String() string {
 	case Good:
 		return "good"
 	case NeedsResync:
-		return "needs_resync"
+		return "needs-resync"
 	case Bad:
 		return "bad"
+	case ConsistencyStateUnspecified:
+		return "unspecified"
 	default:
-		return "<unspecified>"
+		// The state comes from mgmtd, so a state a newer management service adds is reported as
+		// itself rather than as the unspecified sentinel.
+		return fmt.Sprintf("unknown(%d)", int(n))
 	}
+}
+
+// MarshalJSON encodes the consistency state as its human-readable string so structured output
+// matches the table output instead of exposing the underlying integer.
+func (n ConsistencyState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
 }

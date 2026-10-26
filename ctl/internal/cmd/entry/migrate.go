@@ -56,7 +56,7 @@ This mode is generally more efficient, especially when data only needs to be mig
 targets assigned to a file. This mode also supports migrating hard links as it does not require the
 inode be recreated, as is the case when migrating using a temporary file.
 
-Note: When the number of targets/buddy groups in the destination pool are greater than the number of
+When the number of targets/buddy groups in the destination pool are greater than the number of
 targets/buddy groups a particular entry is migrated away from, the destination targets/buddy groups
 will be randomly picked for each entry to more evenly redistribute file data.
 
@@ -87,7 +87,15 @@ Symlinks are supported but the migrated links will look slightly different than 
   the link will always inherit its storage pool assignment from its parent directory (which may differ).
   
 These differences should never be problematic as typically the link itself is not important and most commands will
-actually redirect and return information from the linked file (i.e., stat, open, etc).`, msg.StartChunkBalanceMsgVersions),
+actually redirect and return information from the linked file (i.e., stat, open, etc).
+
+Example: Migrate files off storage target 3 into pool 2
+
+  beegfs entry migrate --from-targets 3 --pool 2 /mnt/beegfs/data
+
+Example: Recursively migrate a directory to buddy groups 10 and 11 using background rebalancing
+
+  beegfs entry migrate --from-pools 1 --groups 10,11 --rebalance --recurse /mnt/beegfs/project`, msg.StartChunkBalanceMsgVersions),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing <path> argument. Usage: %s", cmd.Use)

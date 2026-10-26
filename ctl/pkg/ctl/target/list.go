@@ -27,17 +27,17 @@ type GetTargets_Result struct {
 
 // Defined as constants for reuse elsewhere, notably the health checks.
 const (
-	ReachabilityOnline          = "Online"
-	ReachabilityProbablyOffline = "Probably-offline"
-	ReachabilityOffline         = "Offline"
+	ReachabilityOnline          = "online"
+	ReachabilityProbablyOffline = "probably-offline"
+	ReachabilityOffline         = "offline"
 
-	ConsistencyGood        = "Good"
-	ConsistencyNeedsResync = "Needs-resync"
-	ConsistencyBad         = "Bad"
+	ConsistencyGood        = "good"
+	ConsistencyNeedsResync = "needs-resync"
+	ConsistencyBad         = "bad"
 
-	CapacityNormal    = "Normal"
-	CapacityLow       = "Low"
-	CapacityEmergency = "Emergency"
+	CapacityNormal    = "normal"
+	CapacityLow       = "low"
+	CapacityEmergency = "emergency"
 )
 
 // Get the complete list of targets from the management. This accepts optional grpc.CallOptions so

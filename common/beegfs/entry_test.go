@@ -28,3 +28,22 @@ func TestFeatureFlags(t *testing.T) {
 	assert.Equal(t, int32(1), flag.IsBuddyMirroredI32())
 	assert.True(t, flag.IsInlined())
 }
+
+func TestAccessState(t *testing.T) {
+	var flag FileState
+
+	flag = flag.WithAccessState(AccessFlagWriteLock)
+	assert.Equal(t, FileState(0b10), flag)
+
+	flag = flag.WithAccessState(AccessFlagReadLock | AccessFlagWriteLock)
+	assert.Equal(t, FileState(0b11), flag)
+
+	flag = flag.WithoutAccessState(AccessFlagReadLock)
+	assert.Equal(t, FileState(0b10), flag)
+
+	flag = flag.WithAccessState(AccessFlagReadLock | AccessFlagWriteLock)
+	assert.Equal(t, FileState(0b11), flag)
+
+	flag = flag.WithoutAccessState(AccessFlagReadLock | AccessFlagWriteLock)
+	assert.Equal(t, FileState(0b00), flag)
+}

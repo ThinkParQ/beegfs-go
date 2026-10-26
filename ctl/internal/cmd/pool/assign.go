@@ -55,8 +55,8 @@ func newAssignPoolCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the pool")
-	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the pool")
+	cmd.Flags().StringSliceVarP(&targets, "targets", "t", nil, "Comma separated list of target(s) to move to the pool.")
+	cmd.Flags().StringSliceVarP(&groups, "groups", "g", nil, "Comma separated list of buddy group(s) to move to the pool.")
 	cmd.MarkFlagsOneRequired("targets", "groups")
 
 	return cmd
@@ -84,7 +84,7 @@ func runAssignPoolCmd(cmd *cobra.Command, cfg assignPool_Config) error {
 
 	res, err := beegfs.EntityIdSetFromProto(resp.Pool)
 	if err != nil {
-		cmdfmt.Printf("Pool assigned, but received no id info from the server. Please verify the assignment using the `pool list` command.\n")
+		cmdfmt.Printf("Pool assigned, but received no id info from the management node. Please verify the assignment using the `pool list` command.\n")
 	} else {
 		cmdfmt.Printf("Pool assigned: %s\n", res)
 	}

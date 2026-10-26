@@ -17,7 +17,16 @@ type GetBuddyGroups_Result struct {
 	SecondaryTarget           beegfs.EntityIdSet
 	PrimaryConsistencyState   string
 	SecondaryConsistencyState string
+	// Empty for buddy groups that don't have a quota accounting mode (e.g. meta groups).
+	QuotaAccounting string
 }
+
+// Defined as constants for reuse elsewhere, notably the --quota-accounting flag which accepts the
+// same values that are printed here.
+const (
+	QuotaAccountingPrimary = "primary"
+	QuotaAccountingBoth    = "both"
+)
 
 // Get the complete list of buddy groups from the mananagement
 func GetBuddyGroups(ctx context.Context) ([]GetBuddyGroups_Result, error) {
@@ -68,6 +77,14 @@ func GetBuddyGroups(ctx context.Context) ([]GetBuddyGroups_Result, error) {
 			secondary_cs = target.ConsistencyBad
 		}
 
+		quota_accounting := ""
+		switch t.GetOptions().GetQuotaAccounting() {
+		case pm.BuddyGroupOptions_BUDDY_GROUP_QUOTA_ACCOUNTING_PRIMARY:
+			quota_accounting = QuotaAccountingPrimary
+		case pm.BuddyGroupOptions_BUDDY_GROUP_QUOTA_ACCOUNTING_BOTH:
+			quota_accounting = QuotaAccountingBoth
+		}
+
 		res = append(res, GetBuddyGroups_Result{
 			BuddyGroup:                bg,
 			NodeType:                  bg.LegacyId.NodeType,
@@ -75,6 +92,7 @@ func GetBuddyGroups(ctx context.Context) ([]GetBuddyGroups_Result, error) {
 			SecondaryTarget:           secondary,
 			PrimaryConsistencyState:   primary_cs,
 			SecondaryConsistencyState: secondary_cs,
+			QuotaAccounting:           quota_accounting,
 		})
 	}
 

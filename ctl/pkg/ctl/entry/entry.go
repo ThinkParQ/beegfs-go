@@ -306,7 +306,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	if resp == nil {
 		store, err := config.NodeStore(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("error accessing the node store: %w", err)
+			return nil, fmt.Errorf("accessing the node store: %w", err)
 		}
 
 		request := &msg.GetEntryInfoRequest{
@@ -316,7 +316,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 
 		err = store.RequestTCP(ctx, ownerNode.Uid, request, resp)
 		if err != nil {
-			return nil, fmt.Errorf("error getting entry info from node: %w", err)
+			return nil, fmt.Errorf("getting entry info from node: %w", err)
 		}
 	}
 

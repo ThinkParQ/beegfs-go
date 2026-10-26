@@ -1,6 +1,9 @@
 package msg
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/thinkparq/beegfs-go/common/beemsg/beeserde"
 )
 
@@ -136,19 +139,26 @@ const (
 func (n BuddyResyncJobState) String() string {
 	switch n {
 	case NotStarted:
-		return "Not-started"
+		return "not-started"
 	case Running:
-		return "Running"
+		return "running"
 	case Success:
-		return "Success"
+		return "success"
 	case Interrupted:
-		return "Interrupted"
+		return "interrupted"
 	case Failure:
-		return "Failure"
+		return "failure"
 	case Errors:
-		return "Errors"
+		return "errors"
 	default:
-		return "<unspecified>"
+		// This enum has no sentinel variant - 0-5 are all named and mirror the C++
+		// BuddyResyncJobState - so an unmatched value read off the wire keeps its number rather
+		// than being reported as a state that does not exist.
+		return fmt.Sprintf("unknown(%d)", int32(n))
 	}
+}
 
+// MarshalJSON encodes the resync job state as its human-readable string.
+func (n BuddyResyncJobState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(n.String())
 }

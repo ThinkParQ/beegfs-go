@@ -1,6 +1,7 @@
 package msg
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs"
@@ -44,9 +45,18 @@ func (t RebalanceIDType) String() string {
 		return "group"
 	case RebalanceIDTypePool:
 		return "pool"
+	case RebalanceIDTypeInvalid:
+		return "invalid"
 	default:
-		return fmt.Sprintf("unknown (%d)", t)
+		// Only a value that matches no variant carries its number, so an impossible ID type is
+		// still diagnosable.
+		return fmt.Sprintf("unknown(%d)", t)
 	}
+}
+
+// MarshalJSON encodes the rebalance ID type as its human-readable string.
+func (t RebalanceIDType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
 }
 
 // Serialization of StartChunkBalanceMsg
@@ -124,24 +134,31 @@ const (
 func (s ChunkBalancerJobState) String() string {
 	switch s {
 	case ChunkBalancerJobStateNotStarted:
-		return "NotStarted"
+		return "not-started"
 	case ChunkBalancerJobStateStarting:
-		return "Starting"
+		return "starting"
 	case ChunkBalancerJobStateRunning:
-		return "Running"
+		return "running"
 	case ChunkBalancerJobStateSuccess:
-		return "Success"
+		return "success"
 	case ChunkBalancerJobStateInterrupted:
-		return "Interrupted"
+		return "interrupted"
 	case ChunkBalancerJobStateFailure:
-		return "Failure"
+		return "failure"
 	case ChunkBalancerJobStateErrors:
-		return "Errors"
+		return "errors"
 	case ChunkBalancerJobStateIdle:
-		return "Idle"
+		return "idle"
 	default:
-		return "Invalid"
+		// No sentinel variant is declared, so an unmatched value keeps its number instead of
+		// borrowing a name no constant uses.
+		return fmt.Sprintf("unknown(%d)", int32(s))
 	}
+}
+
+// MarshalJSON encodes the chunk balancer job state as its human-readable string.
+func (s ChunkBalancerJobState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 type GetChunkBalanceJobStatsRespMsg struct {
