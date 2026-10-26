@@ -87,6 +87,8 @@ type Config struct {
 
 // New creates a new Metadata manager that handles reading events from the
 // specified EventLogTarget and publishing them to an EventBuffer.
+// If the socket's directory is missing, New creates it with mode 0700 and
+// creates any missing parents with mode 0755.
 // It is the callers responsibility to call the returned cleanup function to
 // avoid leaking resources (typically using a defer statement).
 // This allows us to initialize the metadata socket and buffer which are then
@@ -129,6 +131,11 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 
 	socketDir := filepath.Dir(config.EventLogTarget)
 	if _, err := os.Stat(socketDir); os.IsNotExist(err) {
+		// Parents such as /run/beegfs may be missing too, because /run is tmpfs.
+		parentDir := filepath.Dir(socketDir)
+		if err := os.MkdirAll(parentDir, 0755); err != nil {
+			return nil, nil, fmt.Errorf("unable to create parent directories of socket directory at %s: %w", parentDir, err)
+		}
 		if err := os.Mkdir(socketDir, 0700); err != nil {
 			return nil, nil, fmt.Errorf("unable to create socket directory at %s", socketDir)
 		}
