@@ -21,39 +21,19 @@ func deserializeEvent(buf []byte, expectedSize uint32) (*pb.Event, error) {
 	// Checking the length of the buffer is pointless since we should be working with a reusable
 	// fixed sized buffer that should always be larger than the expected size.
 
-	// Deserialize the header to determine the event version. This is necessary because while the
-	// event protocol is determined by the initial handshake, the metadata persistent message queue
-	// might contain events with different versions, for example if the meta service was upgraded.
+	// The first two bytes are the event format version. Watch decodes v2 events only.
 	version := binary.LittleEndian.Uint16(buf[0:2])
-	if version == 1 {
-		// There was only one v1 packet format that had uint16 major and uint16 minor versions but
-		// the only version to ever exist was 1.0. To reduce packet sizes the v2 packets switched to
-		// using a single uint16 version. If this is a v1 packet we need to check the minor version.
-		minor := binary.LittleEndian.Uint16(buf[2:4])
-		if minor != 0 {
-			return &event, fmt.Errorf("received unsupported event version (major version: %d, minor version: %d)", version, minor)
-		}
-		// v1 packets included the size of the event data immediately after the version and
-		// expectedSize simply indicates how many bytes were read from the Unix socket.
-		size := binary.LittleEndian.Uint32(buf[4:8])
-		if expectedSize < size {
-			// If the size parsed from the packet is smaller than the expected size we should bail,
-			// otherwise stale data in the buffer may be interpreted as fields for this event.
-			return &event, fmt.Errorf("only the event header could be deserialized because the provided buffer was smaller than the indicated event size (expected size: %d, actual size: %d)", size, expectedSize)
-		}
-		event.EventData = parseV1Event(buf)
-	} else if version == 2 {
-		var bytesParsed uint32
-		event.EventFlags = binary.LittleEndian.Uint32(buf[2:6])
-		event.EventData, bytesParsed = parseV2Event(buf)
-		// The v2 protocol no longer includes the size as part of the event data since this is
-		// stored separately in the PMQ for each event. The size is now provided as expectedSize and
-		// we simply verify the number of bytes parsed matches expectedSize.
-		if bytesParsed != expectedSize {
-			return &event, fmt.Errorf("expected packet size was %d but only parsed %d bytes", expectedSize, bytesParsed)
-		}
-	} else {
+	if version != 2 {
 		return &event, fmt.Errorf("received unsupported event version %d", version)
+	}
+	var bytesParsed uint32
+	event.EventFlags = binary.LittleEndian.Uint32(buf[2:6])
+	event.EventData, bytesParsed = parseV2Event(buf)
+	// The v2 protocol no longer includes the size as part of the event data since this is
+	// stored separately in the PMQ for each event. The size is now provided as expectedSize and
+	// we simply verify the number of bytes parsed matches expectedSize.
+	if bytesParsed != expectedSize {
+		return &event, fmt.Errorf("expected packet size was %d but only parsed %d bytes", expectedSize, bytesParsed)
 	}
 	return &event, nil
 }
@@ -80,33 +60,15 @@ func parseV2Event(buf []byte) (*pb.Event_V2, uint32) {
 	return eventData, nextOffset + 12
 }
 
-func parseV1Event(buf []byte) *pb.Event_V1 {
-	entryID, ParentEntryID, path, targetPath, targetParentID, _ := parseCStrings(buf, 28)
-	eventData := &pb.Event_V1{
-		V1: &pb.V1Event{
-			DroppedSeq:     binary.LittleEndian.Uint64(buf[8:16]),
-			MissedSeq:      binary.LittleEndian.Uint64(buf[16:24]),
-			Type:           pb.V1Event_Type(binary.LittleEndian.Uint32(buf[24:28])),
-			EntryId:        entryID,
-			ParentEntryId:  ParentEntryID,
-			Path:           path,
-			TargetPath:     targetPath,
-			TargetParentId: targetParentID,
-		},
-	}
-	return eventData
-}
-
 const (
 	uint32Size = 4
 )
 
-// parseCStrings is used to parse several strings encoded as c-strings from both V1 and V2 event
-// buffers. Each string starts with a uint32 value indicating the length of the string to follow.
-// Each string is terminated by a NULL character (\x00). The starting offset of these strings inside
-// the buffer is different in v1 versus v2 and is set by eventPacketHeaderSize. Additionally V2 also
-// needs to known the offset of the next byte to continue parsing the remaining fields which is
-// returned as nextOffset.
+// parseCStrings is used to parse the strings of a v2 event, which are encoded as c-strings. Each
+// string starts with a uint32 value indicating the length of the string to follow. Each string is
+// terminated by a NULL character (\x00). The strings start at eventPacketHeaderSize. It also returns
+// nextOffset, the offset of the first byte after the strings, so the caller can parse the remaining
+// fields.
 func parseCStrings(buf []byte, eventPacketHeaderSize int) (entryID, parentEntryID, path, targetPath, targetParentID string, nextOffset uint32) {
 	// defer func() {
 	// 	if r := recover(); r != nil {

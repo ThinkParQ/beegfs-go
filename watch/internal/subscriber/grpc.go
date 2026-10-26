@@ -74,8 +74,8 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 		beegrpc.WithProxy(s.UseProxy),
 		beegrpc.WithNode(&beegfs.LegacyId{
 			NodeType: beegfs.Meta,
-			// This will be zero if node ID detection is skipped. That is an invalid NumId which
-			// will cause the caller to be unable to parse an entity ID from the legacy ID.
+			// The handler connects only after the meta's handshake named it, so this is never
+			// zero. Zero is an invalid NumId that a subscriber cannot parse.
 			NumId: forMetaID,
 		}),
 		// ForceCodecV2 is experimental but has no wire-compatible alternative: rawBytesCodec.Name()
@@ -96,6 +96,10 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 	s.stream, err = s.client.ReceiveEvents(context.TODO())
 
 	if err != nil {
+		// The handler calls Connect again after a failure, and that call replaces s.conn. So close
+		// the connection now, or nothing would ever close it.
+		s.conn.Close()
+		s.conn = nil
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
 			// Note this is just a hint to the user, other error conditions may have the same
