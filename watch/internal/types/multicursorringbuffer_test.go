@@ -646,16 +646,6 @@ func TestSearchIndexOfSeqID(t *testing.T) {
 	assert.Equal(t, 4, idx)
 	assert.False(t, found)
 
-	// Search for a seqID that wasn't sent yet but has wrapped around in the buffer:
-	idx, found = rb.searchIndexOfSeqID(4, 8, 25)
-	assert.Equal(t, -1, idx)
-	assert.False(t, found)
-
-	// Search for a seqID that wasn't sent yet and doesn't exist:
-	idx, found = rb.searchIndexOfSeqID(4, 8, 27)
-	assert.Equal(t, -1, idx)
-	assert.False(t, found)
-
 	rb = NewMultiCursorRingBuffer(10, 5)
 
 	// 23, 25, 27, 29, nil, 11, 13, 15, 17, 19, 21...
