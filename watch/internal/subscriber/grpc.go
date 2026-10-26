@@ -74,8 +74,8 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 		beegrpc.WithProxy(s.UseProxy),
 		beegrpc.WithNode(&beegfs.LegacyId{
 			NodeType: beegfs.Meta,
-			// This will be zero if node ID detection is skipped. That is an invalid NumId which
-			// will cause the caller to be unable to parse an entity ID from the legacy ID.
+			// The handler connects only after the meta's handshake named it, so this is never
+			// zero. Zero is an invalid NumId that a subscriber cannot parse.
 			NumId: forMetaID,
 		}),
 		// ForceCodecV2 is experimental but has no wire-compatible alternative: rawBytesCodec.Name()
