@@ -1149,8 +1149,12 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 			return nil
 		}
 
+		// A locked path with no file means a bulk claim found the empty placeholder its reservation
+		// created (see BulkStreamPathResult.Placeholder). The placeholder is empty, so growing it
+		// to the object's size prepares it the same way as creating a new file.
+		overwrite := cfg.Overwrite || IsFileLocked(lockedInfo)
 		err := createWithParentDir(mountPoint, cfg.Path, func() error {
-			return mountPoint.CreatePreallocatedFile(cfg.Path, lockedInfo.RemoteSize, cfg.Overwrite)
+			return mountPoint.CreateOrResizeFile(cfg.Path, lockedInfo.RemoteSize, overwrite)
 		})
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
@@ -1164,8 +1168,8 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 		}
 		info := pathState.LockedInfo
 		lockedInfo.SetReadWriteLocked(info.ReadWriteLocked)
-		// Leave Exists false. An abort reads it through FileCreatedByJob to learn that this job
-		// created the file and must remove it.
+		// Leave Exists false. The path had no file when the job was planned, and an abort removes
+		// a file there that holds the content lock.
 		lockedInfo.SetSize(info.Size)
 		lockedInfo.SetMtime(info.Mtime)
 		lockedInfo.SetMode(info.Mode)

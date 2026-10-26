@@ -1088,7 +1088,7 @@ func (r *S3Client) abortDownload(ctx context.Context, job *beeremote.Job, workRe
 	}
 
 	// Mark the abort as finished for the check above. A job recorded before its file existed has
-	// no mtime, so this leaves its stop mtime unset.
+	// no mtime, so this leaves its stop mtime unset. The placeholder check below covers that case.
 	defer func() {
 		if err == nil {
 			job.SetStopMtime(lockedInfo.Mtime)
@@ -1138,6 +1138,23 @@ func (r *S3Client) abortDownload(ctx context.Context, job *beeremote.Job, workRe
 	}
 
 	if !FileExists(lockedInfo) {
+		if lockedInfo.Mtime == nil {
+			// The job was recorded before any file existed, so it never gets a stop mtime and a
+			// later abort can't tell it already ran. Its file is the placeholder a bulk reservation
+			// created, which is empty, or the file a plan created before a crash left the job
+			// reserved, which is preallocated to the object's size. A file of any other size isn't
+			// the job's, and is left alone.
+			stat, statErr := r.mountPoint.Lstat(request.Path)
+			if statErr != nil {
+				if !errors.Is(statErr, fs.ErrNotExist) {
+					err = fmt.Errorf("unable to check whether %s is the placeholder created for this job: %w", request.Path, statErr)
+				}
+				return
+			}
+			if !stat.Mode().IsRegular() || (stat.Size() != 0 && stat.Size() != lockedInfo.RemoteSize) {
+				return
+			}
+		}
 		if removeErr := r.mountPoint.Remove(request.Path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
 			err = fmt.Errorf("failed to remove the file created for this job: %w", removeErr)
 		}

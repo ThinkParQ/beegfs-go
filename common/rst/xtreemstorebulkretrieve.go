@@ -263,6 +263,9 @@ func (m *xtreemstoreS3BulkRetrieveManager) AddRequest(ctx context.Context, reque
 	binary.BigEndian.PutUint64(record[xtreemstoreS3BulkPathsOffsetOffset:], uint64(pathOffset))
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkInMountPathLenOffset:], uint16(len(inMountPath)))
 	binary.BigEndian.PutUint16(record[xtreemstoreS3BulkRemotePathLenOffset:], uint16(len(remotePath)))
+	if !FileExists(request.GetSync().GetLockedInfo()) {
+		record[xtreemstoreS3BulkFlagsOffset] |= xtreemstoreS3BulkFlagPlaceholder
+	}
 	if _, err = m.statusAppendHandle.Write(record[:]); err != nil {
 		// A failed append may still have written part of the record. Cut it now, before the next
 		// append lands after it and shifts every later record off its index. openState does the same
@@ -348,6 +351,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) Cancel(ctx context.Context, reason er
 				InMountPath:   span.inMountPath(info),
 				RemotePath:    span.remotePath(info),
 				ReservedJobId: info.jobId,
+				Placeholder:   info.placeholder,
 				Err:           &RequestCancelError{Reason: reason},
 			}:
 			}
@@ -881,6 +885,7 @@ func (m *xtreemstoreS3BulkRetrieveManager) processSessionBatchKey(
 	result := &BulkStreamPathResult{
 		RstId:         m.rstId,
 		ReservedJobId: entry.info.jobId,
+		Placeholder:   entry.info.placeholder,
 		InMountPath:   entry.inMountPath,
 		RemotePath:    entry.remotePath,
 		BulkInfo: &flex.BulkJobRequestInfo{

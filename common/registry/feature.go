@@ -15,8 +15,12 @@ const (
 	FeatureRemoteLockRelease = "remote-lock-release"
 	// FeatureReserveBeforeLock covers a sync node's job builder reserving a job before it takes a
 	// file's content lock. Remote answers a replayed reservation with the job in whatever state it
-	// reached, and the builder resumes from it after a reschedule. Remote and sync each refuse a peer
-	// without it, because an older remote refuses a replayed reservation that was already claimed,
-	// and the builder would count a path it submitted as refused.
+	// reached, and the builder resumes from it after a reschedule. Remote undoes a refused claim's
+	// changes to the file with the RST abort, and the builder never undoes them itself. A bulk
+	// request whose path has no file is held with a locked, empty placeholder until its claim.
+	// Remote and sync each refuse a peer without the feature:
+	//   - An older remote refuses a replayed reservation that was already claimed, and the builder
+	//     would count a path it submitted as refused.
+	//   - An older remote does not undo a refused claim, so the claim's changes would stay.
 	FeatureReserveBeforeLock = "reserve-before-lock"
 )

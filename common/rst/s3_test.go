@@ -443,6 +443,7 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 
 	t.Run("a reservation removes its locked placeholder", func(t *testing.T) {
 		fs := newAbortFS()
+		fs.sizes[path] = 0
 		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
 		// A RESERVED job's request was built before the placeholder existed, so it records no
 		// attributes for the file. A RESERVED job has no work results.
@@ -451,6 +452,32 @@ func TestCompleteSyncWorkRequestsDownloadAbort(t *testing.T) {
 		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, nil, true))
 
 		assert.Equal(t, []string{path}, fs.removed)
+	})
+
+	t.Run("a reservation removes the file its plan created before a crash", func(t *testing.T) {
+		fs := newAbortFS()
+		// The plan preallocated the file to the object's size, then the builder crashed before
+		// it claimed the job.
+		fs.sizes[path] = 500
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, RemoteSize: 500})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, nil, true))
+
+		assert.Equal(t, []string{path}, fs.removed)
+	})
+
+	t.Run("a reservation leaves a locked file of another size alone", func(t *testing.T) {
+		fs := newAbortFS()
+		// Neither an empty placeholder nor a file preallocated to the object's size, so another
+		// job's file holds the lock.
+		fs.sizes[path] = 700
+		r := newTestS3Client(t, fs, withContentLockCheck(locked.check))
+		job := newDownloadAbortJob(&flex.JobLockedInfo{Exists: false, RemoteSize: 500})
+
+		require.NoError(t, r.completeSyncWorkRequests_Download(context.Background(), job, nil, true))
+
+		assert.Empty(t, fs.removed)
 	})
 
 	t.Run("an unlocked file at a path that had no file is left alone", func(t *testing.T) {

@@ -21,8 +21,9 @@ const (
 	// known about one job index: the request's status, the ID of the job reserved for it, and where
 	// that request's in-mount and remote paths live in the record file. Keeping them in one record
 	// means one durable append per request rather than one per field. It also makes it impossible
-	// for a request to have a status without a job, or a job without its paths.
-	xtreemstoreS3BulkRecordLen = 1 + JobIdLen + 8 + 2 + 2
+	// for a request to have a status without a job, or a job without its paths. The last byte holds
+	// the request's flags, such as xtreemstoreS3BulkFlagPlaceholder.
+	xtreemstoreS3BulkRecordLen = 1 + JobIdLen + 8 + 2 + 2 + 1
 	// xtreemstoreS3BulkJobIdOffset is where the job ID starts within a record.
 	xtreemstoreS3BulkJobIdOffset = 1
 	// xtreemstoreS3BulkPathsOffsetOffset is where the byte offset of the request's paths in the
@@ -35,6 +36,12 @@ const (
 	// xtreemstoreS3BulkRemotePathLenOffset is where the remote path's length in bytes starts, as a
 	// big endian uint16.
 	xtreemstoreS3BulkRemotePathLenOffset = xtreemstoreS3BulkInMountPathLenOffset + 2
+	// xtreemstoreS3BulkFlagsOffset is where the request's flags byte sits within a record.
+	xtreemstoreS3BulkFlagsOffset = xtreemstoreS3BulkRemotePathLenOffset + 2
+	// xtreemstoreS3BulkFlagPlaceholder is set when the request's in-mount path had no file when the
+	// request was added. The builder then holds the path with an empty, locked placeholder file
+	// until the request is claimed. See BulkStreamPathResult.Placeholder.
+	xtreemstoreS3BulkFlagPlaceholder byte = 1 << 0
 	// xtreemstoreS3BulkMaxPathLen is the longest in-mount or remote path a record can describe, set
 	// by the width of the length fields. It is far above both PATH_MAX and the 1024 byte S3 key
 	// limit, so a path that exceeds it is rejected rather than silently truncated.
@@ -357,6 +364,8 @@ type xtreemstoreS3BulkInfo struct {
 	pathsOffset    int64
 	inMountPathLen int
 	remotePathLen  int
+	// placeholder reports xtreemstoreS3BulkFlagPlaceholder.
+	placeholder bool
 }
 
 // remotePathOffset is where the remote path starts in the record file. It directly follows the
@@ -411,6 +420,7 @@ func (s *xtreemstoreS3BulkInfos) Get(jobIndex int64) (info xtreemstoreS3BulkInfo
 	info.pathsOffset = int64(binary.BigEndian.Uint64(record[xtreemstoreS3BulkPathsOffsetOffset:]))
 	info.inMountPathLen = int(binary.BigEndian.Uint16(record[xtreemstoreS3BulkInMountPathLenOffset:]))
 	info.remotePathLen = int(binary.BigEndian.Uint16(record[xtreemstoreS3BulkRemotePathLenOffset:]))
+	info.placeholder = record[xtreemstoreS3BulkFlagsOffset]&xtreemstoreS3BulkFlagPlaceholder != 0
 	return
 }
 

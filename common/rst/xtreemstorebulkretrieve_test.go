@@ -635,6 +635,50 @@ func TestBulkRetrieveStatusRecordHoldsReservedJobPerIndex(t *testing.T) {
 	require.NoError(t, m.closeState())
 }
 
+// TestBulkRetrieveRecordKeepsPlaceholderFlag checks that a request whose path had no file is
+// recorded with the placeholder flag, and that a status update leaves the flag alone. The builder
+// relies on the flag at claim time to recognize its placeholder.
+func TestBulkRetrieveRecordKeepsPlaceholderFlag(t *testing.T) {
+	bulkInfo := &flex.BulkJobRequestInfo{StateMountPath: testStateMountPath, Operation: flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE.String()}
+	m := &xtreemstoreS3BulkRetrieveManager{
+		s3ApiClient:    &fakeS3ApiClient{},
+		rstId:          1,
+		mountPath:      t.TempDir(),
+		stateRoot:      DefaultStateRoot,
+		stateMountPath: bulkInfo.StateMountPath,
+		operation:      bulkInfo.Operation,
+		state:          &xtreemstoreS3BulkRetrieveManagerState{},
+	}
+	require.NoError(t, m.openState())
+	t.Cleanup(func() { _ = m.closeState() })
+
+	for _, exists := range []bool{true, false} {
+		jobId := uuid.NewString()
+		require.NoError(t, m.AddRequest(context.Background(), beeremote.JobRequest_builder{
+			Path:                fmt.Sprintf("/objects/%t", exists),
+			RemoteStorageTarget: 1,
+			Sync: flex.SyncJob_builder{
+				Operation:  flex.SyncJob_DOWNLOAD,
+				RemotePath: "key",
+				LockedInfo: &flex.JobLockedInfo{Exists: exists},
+			}.Build(),
+			BulkInfo: &flex.BulkJobRequestInfo{StateMountPath: bulkInfo.StateMountPath, Operation: bulkInfo.Operation},
+			JobId:    &jobId,
+		}.Build()))
+	}
+	require.NoError(t, m.MarkAccepted(1))
+
+	infos, err := m.getBulkInfos(0, 2)
+	require.NoError(t, err)
+	existing, err := infos.Get(0)
+	require.NoError(t, err)
+	assert.False(t, existing.placeholder, "a path with a file is held by its own lock")
+	absent, err := infos.Get(1)
+	require.NoError(t, err)
+	assert.True(t, absent.placeholder, "a path without a file is held by a placeholder")
+	assert.Equal(t, xtreemstoreS3BulkRequestAccepted, absent.status, "the status update must not disturb the flag")
+}
+
 // The builder, sync and remote all write a request's status byte, and nothing orders their writes.
 // Remote can finish a job and mark its request complete before the builder hears back from the
 // submission that created that job. The builder's late accepted must not undo the completion, or

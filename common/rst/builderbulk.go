@@ -25,7 +25,12 @@ type BulkStreamPathResult struct {
 	// job instead of creating a new one. It is set on every result, including the ones carrying
 	// an Err, because the reserved job is where that failure has to be recorded.
 	ReservedJobId string
-	Err           error
+	// Placeholder is set when the request's path had no file when the request joined the
+	// operation. The builder then created an empty file at the path and locked it, right after
+	// remote reserved the job, so the path stays held until the claim. The claim treats that file
+	// as absent. See jobRequestBuilder.createPlaceholder.
+	Placeholder bool
+	Err         error
 }
 
 // bulkOperationEntry is the saved state of one bulk operation stored as json. It has no version

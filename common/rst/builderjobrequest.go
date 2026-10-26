@@ -159,7 +159,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		checkpoint(checkpointGrace)
 		cfg := w.buildJobRequestCfg(inMountPath, remotePath, 0, pathState.LockedInfo, w.builderCfg)
 		request := BuildJobRequestWithFailedPrecondition(nil, cfg, failedPrecondition.Error())
-		_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
+		_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request, false)
 		return
 	}
 
@@ -167,7 +167,7 @@ func (w *jobRequestBuilder) ProcessPathFromOriginalWalk(
 		// Each rstId is an independent round of remote work, so it earns its own grace.
 		checkpoint(checkpointGrace)
 		request := w.buildRequest(workCtx, cfg, failedPrecondition)
-		_, submitted, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request)
+		_, submitted, processErr := w.processRequest(workCtx, checkpoint, cfg, pathState, request, false)
 		if processErr != nil {
 			err = processErr
 			return
@@ -191,24 +191,38 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	defer cancel()
 
 	// The reservation pass locked the file after remote recorded the reservation and checked the
-	// file had not changed. The RESERVED job has kept the lock since, so no client could open the
-	// file to change it, and the claim needs no second check. Two cases find no lock:
-	//   - A file that did not exist when it was reserved, such as the target of a download. The
-	//     plan creates it and locks it.
+	// file had not changed. A path that had no file got a locked placeholder instead, and
+	// result.Placeholder says so. The RESERVED job has kept the lock since, so no client could open
+	// the file to change it, and the claim needs no second check. The cases that differ:
+	//   - The placeholder is found. The claim treats the path as having no file, with the lock
+	//     held, so the plan downloads into it without --overwrite. If the claim fails its
+	//     precondition, processRequest removes the placeholder before it submits the claim.
+	//   - A placeholder was expected but another file is at the path. Someone replaced it, so the
+	//     request fails its precondition. A path with no file at all is planned as usual.
 	//   - An existing file found unlocked. The reservation is gone or the lock was cleared by hand.
 	//     The lock is taken again and logged, and the claim is most likely refused. Remote's release
 	//     at the end of that claim clears the lock again, so this pass never has to release it.
 	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, result.InMountPath, PathStateWithLock)
-	if pathState.LockAcquired {
-		w.log.Warn("content lock was not held when claiming a reserved request, so it was taken again", zap.String("path", result.InMountPath), zap.String("jobId", result.ReservedJobId))
-	}
-
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		err = pathStateErr
 		return
 	}
 	if pathStateErr != nil {
 		failedPrecondition = appendErrors(failedPrecondition, pathStateErr)
+	}
+
+	// ownsPlaceholder is true only when this read found the placeholder. A failed read proves
+	// nothing about the file at the path, so processRequest must not remove it.
+	ownsPlaceholder := false
+	switch {
+	case pathStateErr != nil:
+	case result.Placeholder && isPlaceholder(pathState):
+		ownsPlaceholder = true
+		pathState.LockedInfo = &flex.JobLockedInfo{ReadWriteLocked: true}
+	case result.Placeholder && FileExists(pathState.LockedInfo):
+		failedPrecondition = appendErrors(failedPrecondition, fmt.Errorf("%w: the placeholder held for this download was replaced", ErrFileChangedDuringBuild))
+	case pathState.LockAcquired:
+		w.log.Warn("content lock was not held when claiming a reserved request, so it was taken again", zap.String("path", result.InMountPath), zap.String("jobId", result.ReservedJobId))
 	}
 
 	checkpoint(checkpointGrace)
@@ -219,7 +233,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	request.SetJobId(result.ReservedJobId)
 	request.SetReservation(beeremote.JobRequest_CLAIM)
 
-	_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request)
+	_, _, err = w.processRequest(workCtx, checkpoint, cfg, pathState, request, ownsPlaceholder)
 	return
 }
 
@@ -359,12 +373,18 @@ const (
 // If remote refuses a claim, remote undoes whatever the plan changed in the file before it decides
 // the content lock at the end of the submit. The builder never undoes a submitted plan, and never
 // clears the lock itself.
+//
+// ownsPlaceholder is true when the caller's read confirmed the path holds this reservation's
+// placeholder. If the request then fails its precondition, the placeholder is removed under the
+// reservation's lock before the submit, because remote does not abort that status. Remote's abort
+// removes it for ERROR.
 func (w *jobRequestBuilder) processRequest(
 	ctx context.Context,
 	checkpoint CancellationCheckpoint,
 	cfg *flex.JobRequestCfg,
 	pathState PathState,
 	request *beeremote.JobRequest,
+	ownsPlaceholder bool,
 ) (outcome submitOutcome, submitted bool, err error) {
 	if !request.HasJobId() {
 		// A request that reserves takes the reservation's ID in reserveAndLock instead.
@@ -393,6 +413,13 @@ func (w *jobRequestBuilder) processRequest(
 
 	if !request.HasGenerationStatus() {
 		w.prepareJobRequest(ctx, checkpoint, cfg, pathState, request, applyPlan)
+	}
+
+	if ownsPlaceholder && request.GetGenerationStatus().GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
+		checkpoint(checkpointGrace)
+		if removeErr := w.mountPoint.Remove(cfg.GetPath()); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			w.log.Warn("unable to remove the placeholder of a request that failed its precondition", zap.String("path", cfg.GetPath()), zap.String("jobId", request.GetJobId()), zap.Error(removeErr))
+		}
 	}
 
 	checkpoint(checkpointGrace)
@@ -530,6 +557,15 @@ func (w *jobRequestBuilder) reserveAndLock(
 
 	checkpoint(checkpointGrace)
 	job, reserveErr := w.reserveRequest(ctx, request)
+
+	// A replay checks the file against the request remote stored, because the file must still
+	// match what the reservation was made for. A first reservation stored this request, and remote
+	// may answer without echoing it, so the request's own locked info stands in.
+	reserved := requestLockedInfo(job.GetRequest())
+	if reserved == nil {
+		reserved = cfg.GetLockedInfo()
+	}
+
 	outcome = answered
 	switch {
 	case errors.Is(reserveErr, ErrRequestNotDelivered):
@@ -552,17 +588,23 @@ func (w *jobRequestBuilder) reserveAndLock(
 		}
 		err = fmt.Errorf("failed to reserve job for %s: %w", request.GetPath(), reserveErr)
 		return
+	case job.GetId() == request.GetJobId() && operation != "" && !FileExists(reserved) && isPlaceholder(pathState):
+		// A replay of a bulk reservation that is still unclaimed. The placeholder already holds the
+		// locked file, so the file is unchanged, and creating it again would fail. The bulk
+		// operation claims the job later, as it does for a fresh bulk reservation.
+		return
 	}
 
-	// A replay checks the file against the request remote stored, because the file must still
-	// match what the reservation was made for. A first reservation stored this request, and remote
-	// may answer without echoing it, so the request's own locked info stands in.
-	reserved := requestLockedInfo(job.GetRequest())
-	if reserved == nil {
-		reserved = cfg.GetLockedInfo()
-	}
 	checkpoint(checkpointGrace)
-	if reason := w.lockAndCheckUnchanged(ctx, cfg, pathState, reserved); reason != nil {
+	reason := w.lockAndCheckUnchanged(ctx, cfg, pathState, reserved)
+	if reason == nil && operation != "" && !FileExists(reserved) {
+		// A bulk request can wait a long time for its claim. A path with no file has nothing to
+		// lock, so the builder holds it with a placeholder. The bulk operation recorded the flag
+		// that tells the claim about it when the request joined.
+		checkpoint(checkpointGrace)
+		reason = w.createPlaceholder(ctx, cfg.GetPath())
+	}
+	if reason != nil {
 		checkpoint(checkpointGrace)
 		cancelErr := w.cancelReservation(ctx, request, reason)
 		if errors.Is(cancelErr, ErrRequestNotDelivered) {
@@ -678,6 +720,61 @@ func (w *jobRequestBuilder) lockAndCheckUnchanged(ctx context.Context, cfg *flex
 		return fmt.Errorf("%w: the path now names another file", ErrFileChangedDuringBuild)
 	}
 	return nil
+}
+
+// createPlaceholder creates an empty file at path and locks it. reserveAndLock calls it after
+// remote reserved a bulk request whose path had no file, so the reservation holds a locked file
+// until its claim. The claim's plan downloads into the placeholder, and an abort removes it,
+// because the path had no file when the job was reserved and the placeholder holds the lock.
+//
+// A file that appeared at path since the builder read it is reported as ErrFileChangedDuringBuild,
+// and the caller cancels the reservation. A placeholder that could not be locked is removed again
+// before the error is returned, because the reservation is cancelled and nothing else would remove
+// it.
+func (w *jobRequestBuilder) createPlaceholder(ctx context.Context, path string) error {
+	err := createWithParentDir(w.mountPoint, path, func() error {
+		return w.mountPoint.CreatePreallocatedFile(path, 0, false)
+	})
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("%w: it was created", ErrFileChangedDuringBuild)
+	}
+	if err != nil {
+		return fmt.Errorf("unable to create a placeholder for %s: %w", path, err)
+	}
+
+	pathState, lockErr := w.getPathState(ctx, w.mountPoint, path, PathStateWithLock)
+	if lockErr == nil && !pathState.LockAcquired {
+		// A file the builder just created can't already hold the lock, so another process
+		// replaced it.
+		lockErr = fmt.Errorf("%w: it was replaced", ErrFileChangedDuringBuild)
+	}
+	if lockErr != nil {
+		if removeErr := w.mountPoint.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			w.log.Warn("unable to remove a placeholder that could not be locked", zap.String("path", path), zap.Error(removeErr))
+		}
+		return fmt.Errorf("unable to lock the placeholder for %s: %w", path, lockErr)
+	}
+	return nil
+}
+
+// isPlaceholder reports whether pathState, read with PathStateWithLock at a bulk claim, shows the
+// placeholder createPlaceholder left: an empty regular file that already held the content lock
+// before the read. Only the reservation can have locked a file at the path, because it refuses
+// every other job there. A file that is not the placeholder was put there by someone else.
+func isPlaceholder(pathState PathState) bool {
+	return isOwnPlaceholder(pathState) && !pathState.LockAcquired
+}
+
+// isOwnPlaceholder reports whether pathState, read with PathStateNoLock by a rewalk, shows the
+// placeholder an earlier pass created for the reservation being replayed: an empty regular file
+// that already holds the content lock. The read takes no lock, so ReadWriteLocked says the lock was
+// set before this pass. Only the reservation can have locked a file at the path, because remote
+// refuses every other job there while it holds the reservation. The caller must therefore know
+// that remote answered with this request's own reservation, and that the reservation recorded no
+// file at the path.
+func isOwnPlaceholder(pathState PathState) bool {
+	return FileExists(pathState.LockedInfo) && pathState.IsRegular() &&
+		IsFileLocked(pathState.LockedInfo) && pathState.LockedInfo.GetSize() == 0
 }
 
 // requestLockedInfo returns the locked info a job request carries, or nil for a request type that
