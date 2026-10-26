@@ -14,6 +14,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// minReconnectDelay is the wait before the first connection attempt to a subscriber, and the least
+// wait between two attempts.
+const minReconnectDelay = time.Second
+
 // A Handler manages a the lifecycle of a connection to a single subscriber.
 // It defines general connection handling semantics applicable across all subscriber types.
 // Connections are attempted with an exponential backoff.
@@ -27,11 +31,13 @@ type Handler struct {
 	metaEventBuffer *types.MultiCursorRingBuffer
 	config          HandlerConfig
 	*subscriber.Subscriber
-	// The mutex serves two purposes: (1) guarantee only one handler runs at a
-	// time. (2) guarantee when dynamic configuration updates happen the old
-	// version has finished shutting down before we swap out the handler or
-	// delete it.
+	// The mutex guarantees only one Handle runs at a time.
 	mu sync.Mutex
+	// done is closed when Handle returns. The manager waits on it after Stop, so the old handler
+	// no longer uses the buffer cursor when a restarted handler takes it over or the cursor is
+	// removed. A channel works whether or not Handle has started yet, because Handle returns at
+	// once on a stopped handler.
+	done chan struct{}
 	// lastSeqID is the last sequence ID acknowledged by the subscriber. It is used to avoid
 	// sending duplicate events to subscribers after a restart. This is necessary because
 	// subscribers may acknowledge the last event they received before that event exists in the
@@ -79,6 +85,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 		metaEventBuffer: metaEventBuffer,
 		config:          config,
 		Subscriber:      subscriber,
+		done:            make(chan struct{}),
 	}
 	// types.NoSeqId means "no subscriber ack received yet." Zero is not usable as a sentinel
 	// because SeqId=0 is a valid first event from the metadata PMQ, and lastSeqID=0 would be
@@ -93,6 +100,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 func (h *Handler) Handle(wg *sync.WaitGroup) {
 	wg.Add(1)
 	defer wg.Done()
+	defer close(h.done)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -173,7 +181,7 @@ func (h *Handler) doDisconnect() bool {
 // If it returns false there was an unrecoverable error and the caller should first call doDisconnect() before reconnecting.
 func (h *Handler) connectLoop() bool {
 	h.log.Info("connecting to subscriber")
-	var reconnectBackOff float64 = 1
+	reconnectDelay := minReconnectDelay
 
 	var metaID beegfs.NumId
 	if !h.Subscriber.Config.SkipNodeIDDetection {
@@ -210,7 +218,7 @@ func (h *Handler) connectLoop() bool {
 		case <-h.ctx.Done():
 			h.log.Info("not attempting to connect to subscriber because the handler is shutting down")
 			return false
-		case <-time.After(time.Second * time.Duration(reconnectBackOff)): // We use this instead of time.Ticker so we can change the duration.
+		case <-time.After(reconnectDelay): // We use this instead of time.Ticker so we can change the duration.
 			retry, err := h.Connect(metaID)
 			if err != nil {
 				if !retry {
@@ -218,13 +226,8 @@ func (h *Handler) connectLoop() bool {
 					return false
 				}
 
-				// We'll retry to connect with an exponential back off. We'll add some jitter to avoid load spikes.
-				reconnectBackOff *= 2 + rand.Float64()
-				if reconnectBackOff > float64(h.config.MaxReconnectBackOff) {
-					reconnectBackOff = float64(h.config.MaxReconnectBackOff) - rand.Float64()
-				}
-
-				h.log.Warn("unable to connect to subscriber (retrying)", zap.Error(err), zap.Any("retry_in_seconds", reconnectBackOff))
+				reconnectDelay = nextReconnectDelay(reconnectDelay, h.config.MaxReconnectBackOff)
+				h.log.Warn("unable to connect to subscriber (retrying)", zap.Error(err), zap.Any("retry_in_seconds", reconnectDelay.Seconds()))
 				continue
 			}
 
@@ -232,6 +235,23 @@ func (h *Handler) connectLoop() bool {
 			return true
 		}
 	}
+}
+
+// nextReconnectDelay runs after a failed connection attempt and returns the wait before the next
+// one. previous is the wait before the attempt that failed. maxSeconds is the max-reconnect-backoff
+// setting. The rules are:
+//   - The wait grows by a random factor between 2 and 3. The jitter spreads out the attempts of
+//     handlers that lost their subscriber at the same time.
+//   - Once the wait passes maxSeconds, it is set to maxSeconds less up to one second of jitter.
+//   - The wait is never less than minReconnectDelay. Without this floor, a maxSeconds of 1 allows a
+//     wait close to zero. A maxSeconds of 0 or less gives a negative wait, which time.After treats
+//     as no wait. Either way the handler would retry almost without pause.
+func nextReconnectDelay(previous time.Duration, maxSeconds int) time.Duration {
+	next := time.Duration(float64(previous) * (2 + rand.Float64()))
+	if limit := time.Duration(maxSeconds) * time.Second; next > limit {
+		next = limit - time.Duration(rand.Float64()*float64(time.Second))
+	}
+	return max(next, minReconnectDelay)
 }
 
 // seekToEndOfBuffer handles a subscriber request (CompletedSeq == types.SeekToEndSeqID) to skip all
