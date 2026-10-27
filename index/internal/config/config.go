@@ -52,8 +52,8 @@ func (c *AppConfig) UpdateAllowed(configmgr.Configurable) error {
 // starts and then quietly does nothing:
 //   - collector.ack-frequency must be above 0. With 0 the subscriber SDK never answers Watch's
 //     connect, and Watch, by default, waits for that answer forever before it sends any event.
-//   - markwalk.work is required. Empty, batches would land in the working directory, and the
-//     updater, which lists the work directory, would never find them.
+//   - markwalk.work is required. Empty, suspect files would land in the working directory, and
+//     the updater, which lists the work directory, would never find them.
 func (c *AppConfig) ValidateConfig() error {
 	var errs []error
 	if co := c.Collector; co.Listen == "" || co.Checkpoint == "" {
@@ -65,8 +65,8 @@ func (c *AppConfig) ValidateConfig() error {
 	if m := c.Markwalk; m.Work == "" || m.Index == "" || m.Query == "" || m.Sqlite == "" {
 		errs = append(errs, errors.New("markwalk.work, markwalk.index, markwalk.query and markwalk.sqlite are required"))
 	}
-	if m := c.Markwalk; m.QueryTimeout <= 0 || m.LinkQueryTimeout <= 0 || m.MaxWorkSize < 1 || m.MaxWorkSize > markwalk.MaxWorkSizeLimit {
-		errs = append(errs, fmt.Errorf("markwalk.query-timeout and markwalk.link-query-timeout must be above 0, markwalk.max-work-size between 1 and %d", markwalk.MaxWorkSizeLimit))
+	if m := c.Markwalk; m.MaxWorkSize < 1 || m.MaxWorkSize > markwalk.MaxWorkSizeLimit {
+		errs = append(errs, fmt.Errorf("markwalk.max-work-size must be between 1 and %d", markwalk.MaxWorkSizeLimit))
 	}
 	if c.Management.Address == "" {
 		errs = append(errs, errors.New("management.address is required"))

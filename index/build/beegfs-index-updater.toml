@@ -31,6 +31,7 @@ ack-frequency = "1s"
 batch-every = "30s"
 batch-events = 50000
 batch-queue = 2
+high-water-mark = 2097152
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-key-file = "/etc/beegfs/key.pem"
 tls-disable = false
@@ -40,8 +41,6 @@ work = "/var/lib/beegfs/index-updater/markwalk"
 index = "/mnt/index/beegfs"
 query = "/opt/beegfs/bin/index/gufi_query"
 sqlite = "/opt/beegfs/bin/index/gufi_sqlite3"
-query-timeout = "30s"
-link-query-timeout = "30s"
 track-opens = false
 max-work-size = 1024
 
@@ -55,7 +54,6 @@ compress = false
 max-subtrees = 0
 keep-artifacts = ""
 every = "0s"
-pending-dirs = 0
 state = "/var/lib/beegfs/index-updater/update.json"
 
 
@@ -75,10 +73,10 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # BeeGFS Index Updater keeps a GUFI index in step with a BeeGFS file system. The collector is a
 # BeeGFS Watch subscriber: it receives file system events over gRPC and gathers them into batches
-# in memory. Markwalk writes, per batch, the list of directories whose index databases must be
-# rebuilt, with their inodes read from the index itself; it never reads the file system. Only then
-# are the batch's events acknowledged to Watch, which keeps everything not yet acknowledged. The
-# updater applies the completed batches to the index with gufi_incremental_update, on the
+# in memory. Markwalk looks up each batch's directories in the index itself, never in the file
+# system, and keeps their inodes in memory. When an update starts, markwalk writes them to one
+# suspect file, and only then are the events acknowledged to Watch, which keeps everything not yet
+# acknowledged. The updater applies the file to the index with gufi_incremental_update, on the
 # schedule below or when `beegfs index update` asks, and repairs a gap in the event stream with a
 # full rebuild of the index. The configuration is read once at start.
 
@@ -144,14 +142,19 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
 
 # batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
-# system. Together with batch-events this bounds how long Watch waits for an acknowledgement.
+# system before the next update starts.
 
 # batch-events: Close the open batch once it holds this many events.
 
 # batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
-# the collector stops reading from Watch, which then keeps the events in its own buffer. At most
-# batch-queue + 3 batches of batch-events events are held in memory unacknowledged: the one in
-# markwalk, the waiting ones, the open one and the receive buffer.
+# the collector stops reading from Watch, which then keeps the events in its own buffer.
+
+# high-water-mark: Ask for an update once one metadata server has this many unacknowledged events.
+# Events are acknowledged only when an update starts, so Watch's buffer holds every event since the
+# last one. Watch drops the oldest events once its event-buffer-size is reached, which schedules a
+# full repair. Keep the mark well below that size: the default is half of Watch's default of
+# 4194304. A running update is not interrupted, so Watch must also hold the events of one whole
+# update. 0 disables the mark.
 
 # tls-cert-file, tls-key-file: The certificate and key that identify this server to Watch and
 # the beegfs CLI, the same files the other BeeGFS services use. Each Watch subscriber entry for
@@ -159,7 +162,7 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # tls-disable: Disable TLS for the gRPC server Watch and the CLI connect to.
 
-# A failing batch is retried with a growing delay and never skipped; the service does not stop,
+# A failing batch is retried with a growing delay and never skipped. The service does not stop,
 # so it resumes by itself once the cause is gone. `beegfs index update --status` shows a batch
 # that keeps failing and why.
 
@@ -170,8 +173,8 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # Markwalk configuration must be specified under [markwalk].
 
-# work: The directory each batch's suspect file is written to, as batch-<N>/suspects. Numbering
-# continues from the highest batch present after a restart.
+# work: The directory each update's suspect file is written to, as suspects-<N>. A file stays until
+# an update applies it, so a failed update leaves it for the next one.
 
 # index: The GUFI index root: the index directory that corresponds to the BeeGFS mount, that is
 # <index root>/<mount name> as `beegfs index create` lays it out. Its name must match the name of
@@ -186,23 +189,12 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # sqlite: The gufi_sqlite3 binary. It writes the inodes of a batch's hard-linked files to a small
 # database that the hard-link lookup attaches, so one walk of the index serves any number of them.
 
-# query-timeout: The most time one gufi_query or gufi_sqlite3 run may take, except the hard-link
-# lookup. A directory lookup that times out fails the batch, which is retried.
-
-# link-query-timeout: The most time the hard-link lookup may take. The lookup walks the whole
-# index, so it takes longer than the directory lookups as the index grows. One that times out is
-# logged as "hard-link lookup failed" and skipped: the other names keep a stale row until the next
-# change in their directory. Raise it on a large index when that message appears. The batch waits
-# for the lookup, and the collector reads no events from Watch meanwhile, so a long timeout can
-# make Watch drop events under heavy load.
-
 # track-opens: Include open events so atime changes are indexed.
 
 # max-work-size: The most disk space, in MiB, the work directory may hold, counted in disk
-# blocks. Once it holds that much, no further suspect file is written: the batch waits, the
-# collector stops reading from Watch, and Watch keeps the events in its own buffer until an update
-# deletes the batches it has applied. The space is measured before each batch, so the files of one
-# batch may take it past the limit.
+# blocks. Once it holds that much, no further batch is processed: the batch waits, the collector
+# stops reading from Watch, and Watch keeps the events in its own buffer until an update deletes
+# the suspect files it has applied. The space is measured before each batch.
 
 
 #
@@ -244,13 +236,11 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # every: Run an update at least this often. 0 disables the timer. Otherwise it must be at least 1m.
 
-# pending-dirs: Run an update once this many directories wait to be rebuilt. 0 disables the
-# threshold. `beegfs index update --every/--pending-dirs` changes every and pending-dirs until the
-# service restarts. After a restart the values here apply again.
+# `beegfs index update --every` changes every until the service restarts. After a restart the
+# value here applies again.
 
-# With every and pending-dirs both 0, updates run only when `beegfs index update` asks. Batches then
-# collect in the markwalk work directory until max-work-size stops the collector, and Watch drops
-# the events it can no longer hold, which schedules a full repair.
+# With every 0, updates run when `beegfs index update` asks or when collector.high-water-mark is
+# reached.
 
 # A full repair is scheduled when Watch lost events. It rebuilds every directory of the index,
 # because nothing says which directories the lost events changed. A failed repair stays pending and

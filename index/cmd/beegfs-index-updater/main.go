@@ -62,15 +62,14 @@ func main() {
 	pflag.Duration("collector.batch-every", 30*time.Second, "Close the open batch at least this often.")
 	pflag.Int("collector.batch-events", 50_000, "Close the open batch once it holds this many events.")
 	pflag.Int("collector.batch-queue", 2, "The number of closed batches that may wait for markwalk before receiving blocks.")
+	pflag.Uint64("collector.high-water-mark", 2_097_152, "Ask for an update once one metadata server has this many unacknowledged events, because only an update acknowledges them. Keep it well below Watch's event-buffer-size; the default is half of Watch's default. 0 disables it.")
 	pflag.String("collector.tls-cert-file", "/etc/beegfs/cert.pem", "The certificate that identifies this server to Watch and the CLI.")
 	pflag.String("collector.tls-key-file", "/etc/beegfs/key.pem", "The key belonging to collector.tls-cert-file.")
 	pflag.Bool("collector.tls-disable", false, "Disable TLS for the gRPC server Watch and the CLI connect to.")
-	pflag.String("markwalk.work", "/var/lib/beegfs/index-updater/markwalk", "The directory each batch's suspect file is written to, as batch-<N>/suspects.")
+	pflag.String("markwalk.work", "/var/lib/beegfs/index-updater/markwalk", "The directory each update's suspect file is written to, as suspects-<N>.")
 	pflag.String("markwalk.index", "/mnt/index/beegfs", "The GUFI index root: the index directory that corresponds to the BeeGFS mount, <index root>/<mount name> as 'beegfs index create' lays it out. Its name must match update.mount.")
 	pflag.String("markwalk.query", "/opt/beegfs/bin/index/gufi_query", "The gufi_query binary, which reads directory inodes from the index and finds the other names of a hard-linked file.")
 	pflag.String("markwalk.sqlite", "/opt/beegfs/bin/index/gufi_sqlite3", "The gufi_sqlite3 binary, which writes a batch's hard-linked inodes to a database the hard-link lookup attaches.")
-	pflag.Duration("markwalk.query-timeout", 30*time.Second, "The most time one gufi_query or gufi_sqlite3 run may take, except the hard-link lookup.")
-	pflag.Duration("markwalk.link-query-timeout", 30*time.Second, "The most time the hard-link lookup may take. It walks the whole index, and the batch waits for it. Raise it on a large index if the log shows 'hard-link lookup failed'.")
 	pflag.Bool("markwalk.track-opens", false, "Include open events so atime changes are indexed.")
 	pflag.Int64("markwalk.max-work-size", 1024, "The most disk space, in MiB, the work directory may hold. Once it does, batches wait and Watch keeps the events.")
 	pflag.String("update.mount", "/mnt/beegfs", "The BeeGFS mount point the index describes. No update runs while it is not a mounted BeeGFS.")
@@ -83,7 +82,6 @@ func main() {
 	pflag.Int("update.max-subtrees", 0, "Pass --max-subtrees to gufi_incremental_update: subtrees processed in parallel, which bounds open file descriptors. 0 leaves the tool's default.")
 	pflag.String("update.keep-artifacts", "", "Pass --keep-artifacts to gufi_incremental_update: an existing directory to keep the run's artifacts in instead of deleting them.")
 	pflag.Duration("update.every", 0, "Run an update at least this often: 0 disables the timer, otherwise at least 1m. 'beegfs index update --every' changes it until the service restarts.")
-	pflag.Uint64("update.pending-dirs", 0, "Run an update once this many directories wait to be rebuilt. 0 disables the threshold. 'beegfs index update --pending-dirs' changes it until the service restarts.")
 	pflag.String("update.state", "/var/lib/beegfs/index-updater/update.json", "The file that keeps the pending repair and the highest processed sequence ID per metadata node.")
 	pflag.CommandLine.SortFlags = false
 	pflag.Usage = func() {
@@ -187,7 +185,7 @@ Using environment variables:
 		}
 		return nil
 	}
-	up, err := updater.New(cfg.Update, index, cfg.Markwalk.Work, mounted, logger.Logger)
+	up, err := updater.New(cfg.Update, index, cfg.Markwalk.Work, mounted, marker, logger.Logger)
 	if err != nil {
 		logger.Fatal("unable to load updater state", zap.Error(err))
 	}

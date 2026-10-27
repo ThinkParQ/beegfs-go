@@ -1,6 +1,14 @@
-// Package markwalk turns a batch of BeeGFS Watch events into a GUFI suspect file: one
-// "<inode> d" line per directory whose own index database must be rebuilt, written to
-// <work>/batch-<N>/suspects.
+// Package markwalk turns BeeGFS Watch events into a GUFI suspect file: one "<inode> d" line per
+// directory whose own index database must be rebuilt.
+//
+// It works in two steps, at two paces:
+//   - Process looks up one batch in the index as the batch arrives, and adds the inodes to the run
+//     set: every inode found since the last Dump, each held once, in memory only.
+//   - Dump writes the run set to the file the updater names when a run starts, and starts an empty
+//     one. It reads no index and processes no batch.
+//
+// The run set is not on disk until Dump, so the events behind it stay unacknowledged until then.
+// After a crash Watch resends them, and Process looks them up again.
 //
 // gufi_incremental_update finds new, moved and deleted directories by itself, so a line is
 // needed only for a directory that is in the index at its current path and whose own rows
@@ -53,21 +61,17 @@ const MaxWorkSizeLimit = math.MaxInt64 >> 20
 const ownInode = "inode FROM summary WHERE isroot = 1"
 
 type Config struct {
-	Work         string        `mapstructure:"work"`
-	Index        string        `mapstructure:"index"`
-	Query        string        `mapstructure:"query"`
-	Sqlite       string        `mapstructure:"sqlite"`
-	QueryTimeout time.Duration `mapstructure:"query-timeout"`
-	// LinkQueryTimeout bounds the hard-link lookup, which walks the whole index, not a few
-	// directories. The batch waits for it, so a long timeout holds back Watch too.
-	LinkQueryTimeout time.Duration `mapstructure:"link-query-timeout"`
-	TrackOpens       bool          `mapstructure:"track-opens"`
+	Work       string `mapstructure:"work"`
+	Index      string `mapstructure:"index"`
+	Query      string `mapstructure:"query"`
+	Sqlite     string `mapstructure:"sqlite"`
+	TrackOpens bool   `mapstructure:"track-opens"`
 	// MaxWorkSize is in MiB of allocated blocks, not bytes written, because it protects the disk.
 	MaxWorkSize int64 `mapstructure:"max-work-size"`
 }
 
-// ErrWorkFull holds a batch back until the updater deletes applied batches. The batch is neither
-// written nor acknowledged.
+// ErrWorkFull holds a batch back until the updater deletes applied suspect files. The batch is
+// neither added to the run set nor acknowledged.
 var ErrWorkFull = errors.New("work directory full")
 
 // errIndex marks a failure to read the index tree itself, as opposed to a query over it.
@@ -76,10 +80,28 @@ var errIndex = errors.New("index not readable")
 // errQuery marks a failed gufi_query run.
 var errQuery = errors.New("index query failed")
 
-// Batch is what Process left on disk for one batch.
+// Batch is what the collector keeps of a batch's events: the directories they changed, the names
+// that may have other names elsewhere, and the sequence IDs delivered per metadata server. Add
+// fills it, so the collector never holds whole events.
 type Batch struct {
-	OnDisk   bool // a batch directory exists, which the updater deletes once applied
-	Suspects int
+	N         uint64 // for the log only
+	Events    int
+	Dirs      map[string]struct{}
+	Links     map[string]struct{}
+	Delivered map[uint32][]SeqRange
+}
+
+// SeqRange is a run of consecutive sequence IDs delivered by one metadata server, First and Last
+// included. The subscriber SDK reports progress to Watch only once every delivered event is
+// acknowledged on its own, so the collector must acknowledge each sequence ID, not just the
+// highest. Watch numbers each server's events one by one, so a run set usually holds one range
+// per server. A new range starts after a gap, where Watch lost events, and where Watch
+// redelivers events after a reconnect.
+type SeqRange struct{ First, Last uint64 }
+
+// NewBatch returns an empty batch numbered n.
+func NewBatch(n uint64) *Batch {
+	return &Batch{N: n, Dirs: map[string]struct{}{}, Links: map[string]struct{}{}, Delivered: map[uint32][]SeqRange{}}
 }
 
 type Marker struct {
@@ -87,8 +109,13 @@ type Marker struct {
 	threads int
 	log     *zap.Logger
 
+	mu sync.Mutex
+	// The run set and the sequence IDs of the batches in it, in delivery order per metadata
+	// server. Process adds to them, Dump takes them.
+	set       map[uint64]struct{}
+	delivered map[uint32][]SeqRange
+	batches   int
 	// What Process is doing, for Status. Process writes these fields, Status reads them.
-	mu      sync.Mutex
 	state   beeindex.MarkwalkStatus_State
 	batch   uint64 // the batch in markwalk, while processing or failing
 	events  int
@@ -104,7 +131,7 @@ type Marker struct {
 
 // New returns a Marker whose gufi_query runs use threads threads. GUFI's own default is one.
 func New(cfg Config, threads int, log *zap.Logger) *Marker {
-	return &Marker{cfg: cfg, threads: threads, log: log}
+	return &Marker{cfg: cfg, threads: threads, log: log, set: map[uint64]struct{}{}, delivered: map[uint32][]SeqRange{}}
 }
 
 // Check refuses a wrong setting at startup instead of failing every batch.
@@ -117,7 +144,7 @@ func (m *Marker) Check(ctx context.Context) error {
 	if err := os.MkdirAll(m.cfg.Work, 0o755); err != nil {
 		return err
 	}
-	out, err := m.query(ctx, m.cfg.QueryTimeout, "--max-level", "0", "-S", "SELECT "+ownInode)
+	out, err := m.query(ctx, "--max-level", "0", "-S", "SELECT "+ownInode)
 	if err != nil {
 		return err
 	}
@@ -131,76 +158,146 @@ func (m *Marker) Check(ctx context.Context) error {
 	return nil
 }
 
-// Process writes batch n's suspect file and returns once it is on disk, because the caller
-// acknowledges the events then and Watch never resends them. The space limit is checked before
-// the batch, so one batch may take the work directory past it. Status reports each step.
-func (m *Marker) Process(ctx context.Context, n uint64, events []*bw.Event) (b Batch, err error) {
-	m.begin(n, len(events))
-	defer func() { m.end(b, err) }()
+// Add records what ev changed in b: the directories, and the name when the entry may have
+// another name elsewhere. It records ev's sequence ID too, because Dump's caller acknowledges
+// every delivered event.
+func (m *Marker) Add(b *Batch, ev *bw.Event) {
+	paths, link := pathsFor(ev.GetV2(), m.cfg.TrackOpens)
+	for _, p := range paths {
+		b.Dirs[p] = struct{}{}
+	}
+	if link != "" {
+		b.Links[link] = struct{}{}
+	}
+	b.Delivered[ev.GetMetaId()] = extend(b.Delivered[ev.GetMetaId()], SeqRange{ev.GetSeqId(), ev.GetSeqId()})
+	b.Events++
+}
+
+// Process looks up batch b in the index and adds the inodes to the run set, together with the
+// batch's sequence IDs. A batch that fails adds nothing, so its events stay unacknowledged until
+// the caller's retry succeeds. The space limit is checked before the batch, because the updater
+// deletes suspect files only after a successful run. Status reports each step.
+func (m *Marker) Process(ctx context.Context, b *Batch) (err error) {
+	m.begin(b.N, b.Events)
+	marks := 0
+	defer func() { m.end(marks, err) }()
 	m.setStep("checking the work directory's size")
 	used, err := allocated(m.cfg.Work)
 	if err != nil {
-		return Batch{}, err
+		return err
 	}
 	if limit := m.cfg.MaxWorkSize << 20; used >= limit {
-		return Batch{}, fmt.Errorf("%w: %s holds %d of %d bytes", ErrWorkFull, m.cfg.Work, used, limit)
-	}
-	dirs := map[string]struct{}{}
-	links := map[string]struct{}{}
-	for _, ev := range events {
-		paths, link := pathsFor(ev.GetV2(), m.cfg.TrackOpens)
-		for _, p := range paths {
-			dirs[p] = struct{}{}
-		}
-		if link != "" {
-			links[link] = struct{}{}
-		}
+		return fmt.Errorf("%w: %s holds %d of %d bytes", ErrWorkFull, m.cfg.Work, used, limit)
 	}
 	m.setStep("finding the batch's directories in the index")
-	listed, dropped, err := m.indexDirs(dirs)
+	listed, dropped, err := m.indexDirs(b.Dirs)
 	if err != nil {
-		return Batch{}, err
+		return err
 	}
-	m.log.Debug("directories of the batch", zap.Uint64("batch", n), zap.Strings("in_index", listed), zap.Int("not_in_index", dropped))
-	batchDir := BatchDir(m.cfg.Work, n)
-	fields := []zap.Field{zap.Uint64("batch", n), zap.Int("events", len(events)),
+	m.log.Debug("directories of the batch", zap.Uint64("batch", b.N), zap.Strings("in_index", listed), zap.Int("not_in_index", dropped))
+	fields := []zap.Field{zap.Uint64("batch", b.N), zap.Int("events", b.Events),
 		zap.Int("directories", len(listed)), zap.Int("not_index_directories", dropped)}
 	if len(listed) == 0 {
-		// An earlier try of this batch may have created the directory before it failed.
-		if err := os.RemoveAll(batchDir); err != nil {
-			return Batch{}, err
-		}
+		m.add(nil, b.Delivered)
 		m.log.Info("batch done: no directory of the index changed", fields...)
-		return Batch{}, nil
+		return nil
 	}
-	linked := linkedDirs(listed, links)
-	if err := makeDir(batchDir); err != nil {
-		return Batch{}, err
+	// The path lists and the hard-link database go to a scratch directory. One batch is processed
+	// at a time, so one directory serves them all.
+	scratch := filepath.Join(m.cfg.Work, "lookup")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		return err
 	}
+	defer os.RemoveAll(scratch)
 	m.setStep("looking up inodes in the index")
-	marks, files, err := m.indexInodes(ctx, batchDir, listed, linked)
+	found, files, err := m.indexInodes(ctx, scratch, listed, linkedDirs(listed, b.Links))
 	if err != nil {
-		return Batch{}, err
+		return err
 	}
 	m.setStep("looking up the other names of hard links")
-	others, err := m.otherNames(ctx, batchDir, files)
+	others, err := m.otherNames(ctx, scratch, files)
 	if err != nil {
-		return Batch{}, err
+		return err
 	}
-	suspects := map[uint64]struct{}{}
-	for _, ino := range slices.Concat(marks, others) {
-		suspects[ino] = struct{}{}
+	inos := slices.Concat(found, others)
+	marks = len(inos)
+	held := m.add(inos, b.Delivered)
+	m.log.Info("batch done", append(fields, zap.Int("marks", marks), zap.Int("multi_name_files", len(files)),
+		zap.Int("other_name_dirs", len(others)), zap.Int("run_set", held))...)
+	return nil
+}
+
+// add puts one batch's inodes and sequence IDs into the run set and returns its size. Batches
+// arrive in delivery order, so the ranges keep that order.
+func (m *Marker) add(inodes []uint64, delivered map[uint32][]SeqRange) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.batches++
+	for _, ino := range inodes {
+		m.set[ino] = struct{}{}
 	}
-	m.setStep("writing the suspect file")
-	out := filepath.Join(batchDir, "suspects")
-	if len(suspects) == 0 {
-		out = "none: nothing to mark"
-	} else if err := writeSuspects(suspects, out); err != nil {
-		return Batch{}, fmt.Errorf("write %s: %w", out, err)
+	for meta, ranges := range delivered {
+		for _, r := range ranges {
+			m.delivered[meta] = extend(m.delivered[meta], r)
+		}
 	}
-	m.log.Info("batch done", append(fields, zap.Int("marks", len(suspects)), zap.Int("multi_name_files", len(files)),
-		zap.Int("other_name_dirs", len(others)), zap.String("suspects", out))...)
-	return Batch{OnDisk: true, Suspects: len(suspects)}, nil
+	return len(m.set)
+}
+
+// extend appends r to ranges, merging it into the last range when it follows on directly.
+func extend(ranges []SeqRange, r SeqRange) []SeqRange {
+	if n := len(ranges); n > 0 && ranges[n-1].Last+1 == r.First {
+		ranges[n-1].Last = r.Last
+		return ranges
+	}
+	return append(ranges, r)
+}
+
+// Dumped is what one Dump took from the run set.
+type Dumped struct {
+	// Delivered is every sequence ID per metadata server the file covers, in delivery order.
+	Delivered map[uint32][]SeqRange
+	// Seqs is the highest of them per metadata server.
+	Seqs    map[uint32]uint64
+	Inodes  int // lines written; zero means no file
+	Batches int
+}
+
+// Dump runs when the updater starts a run. It writes the run set to file and starts an empty one.
+// The rules:
+//   - It takes the run set as it is. A batch still in Process goes into the new run set, and so
+//     does every batch after it.
+//   - The file is synced before Dump returns, so the caller may then acknowledge every
+//     delivered sequence ID it returns.
+//   - An empty run set writes no file. Its sequence IDs are still returned, because those
+//     events changed nothing in the index.
+//   - A failed write puts the taken run set back, so the next Dump writes it.
+func (m *Marker) Dump(file string) (Dumped, error) {
+	m.mu.Lock()
+	d := Dumped{Delivered: m.delivered, Seqs: map[uint32]uint64{}, Inodes: len(m.set), Batches: m.batches}
+	set := m.set
+	m.set, m.delivered, m.batches = map[uint64]struct{}{}, map[uint32][]SeqRange{}, 0
+	m.mu.Unlock()
+	for meta, ranges := range d.Delivered {
+		for _, r := range ranges {
+			d.Seqs[meta] = max(d.Seqs[meta], r.Last)
+		}
+	}
+	if len(set) == 0 {
+		return d, nil
+	}
+	if err := writeSuspects(set, file); err != nil {
+		// The taken ranges are older than any added since, so they go in front.
+		m.mu.Lock()
+		maps.Copy(m.set, set)
+		for meta, ranges := range d.Delivered {
+			m.delivered[meta] = append(ranges, m.delivered[meta]...)
+		}
+		m.batches += d.Batches
+		m.mu.Unlock()
+		return Dumped{}, fmt.Errorf("write %s: %w", file, err)
+	}
+	return d, nil
 }
 
 // begin records that batch n entered markwalk.
@@ -219,7 +316,7 @@ func (m *Marker) setStep(step string) {
 
 // end records how Process ended. A failed batch stays in markwalk, because the caller retries it
 // until it succeeds, and the status keeps the time of its first failure across the retries.
-func (m *Marker) end(b Batch, err error) {
+func (m *Marker) end(marks int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err != nil {
@@ -232,7 +329,7 @@ func (m *Marker) end(b Batch, err error) {
 	m.state, m.batch, m.events, m.since = beeindex.MarkwalkStatus_WAITING, 0, 0, time.Time{}
 	m.step, m.failure, m.failingSince = "", "", time.Time{}
 	m.batchesDone++
-	m.suspectDirs += uint64(b.Suspects)
+	m.suspectDirs += uint64(marks)
 }
 
 // Status reports what Process is doing, for the IndexUpdater API.
@@ -250,24 +347,21 @@ func (m *Marker) Status() *beeindex.MarkwalkStatus {
 // reason is what Status reports for a failed batch, in fixed words. The full error goes to the
 // log only, because it can quote file names and tool output, and any client with the secret may
 // ask. The first rule that matches wins:
-//   - the work directory holds its limit, so an update must apply and delete batches first;
+//   - the work directory holds its limit, so an update must apply and delete suspect files first;
 //   - the work directory's file system is out of space;
 //   - the index tree cannot be read, reported with the system error;
-//   - an index query timed out;
 //   - an index query failed.
 func reason(err error) string {
 	var errno syscall.Errno
 	switch {
 	case errors.Is(err, ErrWorkFull):
-		return "the work directory is full until an update applies and deletes batches"
+		return "the work directory is full until an update applies and deletes suspect files"
 	case errors.Is(err, syscall.ENOSPC):
 		return "no space is left on the work directory's file system"
 	case errors.Is(err, errIndex) && errors.As(err, &errno):
 		return "the index cannot be read: " + errno.Error()
 	case errors.Is(err, errIndex):
 		return "the index cannot be read; the service log has the error"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "an index query timed out"
 	case errors.Is(err, errQuery):
 		return "an index query failed; the service log has its output"
 	}
@@ -275,7 +369,7 @@ func reason(err error) string {
 }
 
 // allocated skips a path that vanishes during the walk, because the updater deletes applied
-// batches concurrently.
+// suspect files concurrently.
 func allocated(dir string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
@@ -292,11 +386,6 @@ func allocated(dir string) (int64, error) {
 		return err
 	})
 	return total, err
-}
-
-// BatchDir zero-pads n so that batch directories list in number order.
-func BatchDir(work string, n uint64) string {
-	return filepath.Join(work, fmt.Sprintf("batch-%010d", n))
 }
 
 // pathsFor returns the index-relative directories ev dirties and, when the entry may have another
@@ -419,12 +508,12 @@ func (m *Marker) indexDirs(dirs map[string]struct{}) (listed []string, dropped i
 // indexInodes returns the own inode of every listed directory, and the inode of every
 // multi-name file in the linked directories. A file the event did not name is matched too when
 // it shares a linked directory, which costs extra rebuilds but keeps file names out of the SQL.
-func (m *Marker) indexInodes(ctx context.Context, batchDir string, listed, linked []string) (dirInodes, fileInodes []uint64, err error) {
-	dirInodes, err = m.queryList(ctx, filepath.Join(batchDir, "dirs"), listed, "-S", "SELECT "+ownInode)
+func (m *Marker) indexInodes(ctx context.Context, scratch string, listed, linked []string) (dirInodes, fileInodes []uint64, err error) {
+	dirInodes, err = m.queryList(ctx, filepath.Join(scratch, "dirs"), listed, "-S", "SELECT "+ownInode)
 	if err != nil || len(linked) == 0 {
 		return dirInodes, nil, err
 	}
-	fileInodes, err = m.queryList(ctx, filepath.Join(batchDir, "linkdirs"), linked, "-E", "SELECT inode FROM entries WHERE nlink > 1")
+	fileInodes, err = m.queryList(ctx, filepath.Join(scratch, "linkdirs"), linked, "-E", "SELECT inode FROM entries WHERE nlink > 1")
 	return dirInodes, fileInodes, err
 }
 
@@ -434,7 +523,7 @@ func (m *Marker) queryList(ctx context.Context, list string, dirs []string, sql 
 	if err := os.WriteFile(list, []byte(strings.Join(dirs, "\n")+"\n"), 0o644); err != nil {
 		return nil, err
 	}
-	out, err := m.query(ctx, m.cfg.QueryTimeout, slices.Concat([]string{"--min-level", "1", "--max-level", "1", "--path-list", list}, sql)...)
+	out, err := m.query(ctx, slices.Concat([]string{"--min-level", "1", "--max-level", "1", "--path-list", list}, sql)...)
 	if err != nil {
 		return nil, fmt.Errorf("index lookup: %w", err)
 	}
@@ -442,24 +531,23 @@ func (m *Marker) queryList(ctx context.Context, list string, dirs []string, sql 
 }
 
 // otherNames returns the own inode of every directory in the index that lists one of
-// fileInodes, in one walk of the whole index. The inodes go into <batchDir>/links.db, which every
+// fileInodes, in one walk of the whole index. The inodes go into <scratch>/links.db, which every
 // gufi_query thread attaches through -I. In the SQL text they would cost one walk per few
-// thousand inodes, because Linux caps one argument at 128 KiB. The walk gets its own timeout,
-// Config.LinkQueryTimeout, because it covers the whole index. A failed lookup, a timed-out one
-// included, loses only the batch's hard-link marks: the other names keep a stale row until their
-// directory changes again.
-func (m *Marker) otherNames(ctx context.Context, batchDir string, fileInodes []uint64) ([]uint64, error) {
+// thousand inodes, because Linux caps one argument at 128 KiB. The walk has no time limit, so a
+// large index makes the batch wait for it. A failed lookup loses only the batch's hard-link marks:
+// the other names keep a stale row until their directory changes again.
+func (m *Marker) otherNames(ctx context.Context, scratch string, fileInodes []uint64) ([]uint64, error) {
 	if len(fileInodes) == 0 {
 		return nil, nil
 	}
 	slices.Sort(fileInodes)
 	fileInodes = slices.Compact(fileInodes)
-	db := filepath.Join(batchDir, "links.db")
+	db := filepath.Join(scratch, "links.db")
 	defer os.Remove(db)
 	err := m.writeLinks(ctx, db, fileInodes)
 	var out []byte
 	if err == nil {
-		out, err = m.query(ctx, m.cfg.LinkQueryTimeout, "-I", "ATTACH "+sqlString(db)+" AS links",
+		out, err = m.query(ctx, "-I", "ATTACH "+sqlString(db)+" AS links",
 			"-E", "SELECT (SELECT "+ownInode+") FROM entries WHERE nlink > 1 AND inode IN (SELECT inode FROM links.inodes)")
 	}
 	if err != nil {
@@ -485,9 +573,7 @@ func (m *Marker) writeLinks(ctx context.Context, db string, inos []uint64) error
 		fmt.Fprintf(&sql, "INSERT INTO inodes VALUES ('%d');\n", ino)
 	}
 	sql.WriteString("COMMIT;\n")
-	qctx, cancel := context.WithTimeout(ctx, m.cfg.QueryTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(qctx, m.cfg.Sqlite, db)
+	cmd := exec.CommandContext(ctx, m.cfg.Sqlite, db)
 	cmd.Stdin = strings.NewReader(sql.String())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gufi_sqlite3: %w: %s", err, bytes.TrimSpace(out))
@@ -499,24 +585,19 @@ func sqlString(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// query runs gufi_query over the index and kills it after timeout. gufi_query exits zero after
-// most failures and reports them on stderr only:
+// query runs gufi_query over the index. gufi_query exits zero after most failures and reports
+// them on stderr only:
 //   - "Error:" means rows are missing, so the query fails.
 //   - "Cannot attach database" means one directory's database is unreadable, for example
 //     corrupt. A retry would fail the same way and hold the batch forever, so the line is logged
 //     and that directory's rows are left out.
-func (m *Marker) query(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
-	qctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+func (m *Marker) query(ctx context.Context, args ...string) ([]byte, error) {
 	args = append(append([]string{"-n", strconv.Itoa(m.threads), "-d", " "}, args...), m.cfg.Index)
-	cmd := exec.CommandContext(qctx, m.cfg.Query, args...)
+	cmd := exec.CommandContext(ctx, m.cfg.Query, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		if errors.Is(qctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%w: gufi_query took longer than %s", context.DeadlineExceeded, timeout)
-		}
 		return nil, fmt.Errorf("%w: gufi_query: %w: %s", errQuery, err, bytes.TrimSpace(stderr.Bytes()))
 	}
 	for line := range strings.Lines(stderr.String()) {
@@ -544,18 +625,9 @@ func inodes(out []byte) ([]uint64, error) {
 	return inos, nil
 }
 
-// makeDir also syncs the work directory: after a power loss the synced suspect file inside is
-// only there if the batch directory's own entry is too.
-func makeDir(batchDir string) error {
-	if err := os.MkdirAll(batchDir, 0o755); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(batchDir))
-}
-
 // writeSuspects writes the file gufi_incremental_update reads with --suspect-method 1. It renames
-// the file into place and syncs the directory, because the batch is acknowledged once this
-// returns.
+// the file into place and syncs the directory, because the events behind it are acknowledged
+// once Dump returns.
 func writeSuspects(dirs map[uint64]struct{}, out string) error {
 	var b bytes.Buffer
 	for _, ino := range slices.Sorted(maps.Keys(dirs)) {

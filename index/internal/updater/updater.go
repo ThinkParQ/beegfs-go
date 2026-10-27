@@ -3,13 +3,18 @@
 // queues the next run, so a slow run never overlaps the next, and a request made during a run is
 // served by the run that follows it.
 //
-// A normal run applies the suspect files of every batch completed so far and deletes those
-// batches on success. A repair run passes the tool a time instead of a file: the tool stats every
-// entry and rebuilds each directory with anything changed at or after that time. A repair limited
-// by time touches no batch, so it fits between two normal runs. The repair that follows a gap
-// passes time 0, so every directory is rebuilt. That covers every batch completed before it
-// started, so a full repair replaces the normal run queued before it and deletes those batches
-// when it succeeds. A normal run requested while it runs waits and runs after it.
+// A normal run starts with the hand-over: markwalk writes its run set to a new suspect file, and
+// the collector acknowledges the events the file covers. The run applies that file and any a
+// failed run left, and deletes them on success. A repair run passes the tool a time instead of a
+// file: the tool stats every entry and rebuilds each directory with anything changed at or after
+// that time. A repair limited by time takes no hand-over and touches no suspect file, so it fits
+// between two normal runs. The repair that follows a gap passes time 0, so every directory is
+// rebuilt. It takes a hand-over too, because the rebuild covers every change made before it
+// started. So a full repair replaces the normal run queued before it and deletes the suspect
+// files when it succeeds. A normal run requested while it runs waits and runs after it.
+//
+// Runs start on the interval, on request, or when the collector reports that Watch holds many
+// unacknowledged events, see Due.
 //
 // The tool walks the whole mount and diffs it against the whole index by inode. It deletes every
 // index directory whose inode it does not find in the tree, so it runs only over a mounted BeeGFS,
@@ -66,10 +71,9 @@ type Config struct {
 	Compress      bool   `mapstructure:"compress"`
 	MaxSubtrees   int    `mapstructure:"max-subtrees"`
 	KeepArtifacts string `mapstructure:"keep-artifacts"`
-	// Every and PendingDirs are the schedule at startup. SetSchedule changes it until a restart.
-	Every       time.Duration `mapstructure:"every"`
-	PendingDirs uint64        `mapstructure:"pending-dirs"`
-	State       string        `mapstructure:"state"`
+	// Every is the interval at startup. SetSchedule changes it until a restart.
+	Every time.Duration `mapstructure:"every"`
+	State string        `mapstructure:"state"`
 }
 
 // ValidEvery accepts 0, which disables the timer, or at least MinEvery.
@@ -83,16 +87,16 @@ func ValidEvery(d time.Duration) error {
 // state is what survives a restart.
 type state struct {
 	RepairPending bool `json:"repair_pending"`
-	// LastSeq is the highest sequence ID per metadata node whose batch is on disk. The collector
-	// starts from it after a restart, so events processed before a crash, but acknowledged
-	// after the last checkpoint, are not counted as lost.
+	// LastSeq is the highest sequence ID per metadata node in a suspect file on disk. It is saved
+	// before the collector acknowledges those events. The collector starts from it after a
+	// restart, so events acknowledged after the last checkpoint are not counted as lost.
 	LastSeq map[uint32]uint64 `json:"last_seq"`
 }
 
 // totals counts the runs since the service started, for Status.
 type totals struct {
 	runs, repairs, failed uint64
-	batches, suspectDirs  uint64 // consumed, and named by their suspect files, by the runs that succeeded
+	batches, suspectDirs  uint64 // covered by the hand-overs, and named in the suspect files, of the runs that succeeded
 	time                  time.Duration
 }
 
@@ -115,46 +119,45 @@ type Updater struct {
 	work    string
 	parking string
 	mounted func() error // reports why cfg.Mount is not a mounted BeeGFS, or nil
-	log     *zap.Logger
+	marker  *markwalk.Marker
+	// acknowledge is the collector's, set before Run. See handover.
+	acknowledge func(markwalk.Dumped)
+	log         *zap.Logger
 
-	mu             sync.Mutex
-	st             state
-	every          time.Duration
-	threshold      uint64 // pending directories that queue a normal run
-	completed      uint64 // highest batch whose suspect file is on disk
-	pendingBatches uint64 // see recount
-	pendingDirs    uint64
-	running        *Run
-	nextNormal     *Run
-	nextRepair     *Run
-	repairGap      bool // Watch lost events while the running full repair walked the tree
-	last           *beeindex.RunSummary
-	lastNormal     time.Time // start of the last normal run, for the interval
-	totals         totals
-	normalHold     hold
-	repairHold     hold
-	wake           chan struct{}
+	mu         sync.Mutex
+	st         state
+	every      time.Duration
+	lastFile   uint64 // number of the newest suspect file on disk
+	running    *Run
+	nextNormal *Run
+	nextRepair *Run
+	repairGap  bool // Watch lost events while the running full repair walked the tree
+	last       *beeindex.RunSummary
+	lastNormal time.Time // start of the last normal run, for the interval
+	totals     totals
+	normalHold hold
+	repairHold hold
+	wake       chan struct{}
 }
 
-// New loads the state, cleans the parking lot and counts the batches already in the work
-// directory. Every batch on disk at startup is complete: the processor acknowledges a batch only
-// after writing it, and Watch resends a batch that a crash left without its suspect file, under a
-// new number. mounted is called before every run of the tool, see tool.
+// New loads the state, cleans the parking lot and finds the suspect files already in the work
+// directory, which failed or killed runs left. Each is complete, because markwalk renames it into
+// place. mounted is called before every run of the tool, see tool. marker gives up its run set at
+// each hand-over.
 //
 // A parking lot that is not empty means a run was killed while it had index directories parked.
 // Cleaning the lot deletes them from the index. New then queues a full repair, which finds them
 // in the tree again. It does so after a killed normal run too, because the lot does not say which
 // kind of run left it, and a full repair covers both.
-func New(cfg Config, index, work string, mounted func() error, log *zap.Logger) (*Updater, error) {
+func New(cfg Config, index, work string, mounted func() error, marker *markwalk.Marker, log *zap.Logger) (*Updater, error) {
 	cfg.Mount = filepath.Clean(cfg.Mount)
 	index = filepath.Clean(index)
 	if err := checkConfig(cfg, index); err != nil {
 		return nil, err
 	}
 	u := &Updater{
-		cfg: cfg, index: index, work: work, mounted: mounted, log: log,
-		every: cfg.Every, threshold: cfg.PendingDirs,
-		normalHold: newHold(), repairHold: newHold(),
+		cfg: cfg, index: index, work: work, mounted: mounted, marker: marker, log: log,
+		every: cfg.Every, normalHold: newHold(), repairHold: newHold(),
 		wake: make(chan struct{}, 1),
 	}
 	if err := u.load(); err != nil {
@@ -171,15 +174,12 @@ func New(cfg Config, index, work string, mounted func() error, log *zap.Logger) 
 			return nil, fmt.Errorf("state file %s: %w", cfg.State, err)
 		}
 	}
-	nums, err := u.batches(math.MaxUint64)
+	nums, err := u.files(math.MaxUint64)
 	if err != nil {
 		return nil, err
 	}
 	if len(nums) > 0 {
-		u.completed = nums[len(nums)-1]
-	}
-	if err := u.recount(); err != nil {
-		return nil, err
+		u.lastFile = nums[len(nums)-1]
 	}
 	return u, nil
 }
@@ -281,64 +281,26 @@ func sameFileSystem(a, b string) (bool, error) {
 	return ia.Sys().(*syscall.Stat_t).Dev == ib.Sys().(*syscall.Stat_t).Dev, nil
 }
 
-// recount sets the pending counts from the batch directories on disk, at startup and after every
-// normal run. Counting from disk, not by deltas, keeps the counts true when a delete fails half way
-// or an operator deletes batches by hand. Only batches up to u.completed count: the processor
-// writes a batch before it calls Completed, which counts it then. The caller holds the lock, so
-// no batch completes during the count.
-func (u *Updater) recount() error {
-	nums, err := u.batches(u.completed)
-	if err != nil {
-		return err
-	}
-	var dirs uint64
-	for _, n := range nums {
-		lines, err := suspectLines(markwalk.BatchDir(u.work, n))
-		if err != nil {
-			return err
-		}
-		dirs += lines
-	}
-	u.pendingBatches, u.pendingDirs = uint64(len(nums)), dirs
-	return nil
-}
-
-// suspectLines returns 0 for a batch with nothing to mark, which has no suspect file.
-func suspectLines(batch string) (uint64, error) {
-	data, err := os.ReadFile(filepath.Join(batch, "suspects"))
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	return uint64(strings.Count(string(data), "\n")), nil
-}
-
-// LastBatch is the newest batch on disk at startup, so the collector numbers on from it.
-func (u *Updater) LastBatch() uint64 {
-	return u.completed
-}
-
 func (u *Updater) LastSeq() map[uint32]uint64 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return maps.Clone(u.st.LastSeq)
 }
 
-// Completed records that batch n is on disk, and the highest sequence ID per metadata node in it.
-func (u *Updater) Completed(n uint64, b markwalk.Batch, seqs map[uint32]uint64) {
+// SetAcknowledge sets the collector's acknowledgement for the hand-over. Call it before Run.
+func (u *Updater) SetAcknowledge(ack func(markwalk.Dumped)) {
+	u.acknowledge = ack
+}
+
+// Due queues a normal run, because Watch holds many unacknowledged events for one metadata
+// server and only a hand-over acknowledges them. A run in progress made its hand-over when it
+// started, so the queued run starts when that run ends. A failure backoff still holds it back.
+func (u *Updater) Due() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.completed = n
-	if b.OnDisk {
-		u.pendingBatches++
-		u.pendingDirs += uint64(b.Suspects)
+	if u.nextNormal == nil {
+		u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
 	}
-	for meta, seq := range seqs {
-		u.st.LastSeq[meta] = max(u.st.LastSeq[meta], seq)
-	}
-	u.save()
 	u.signal()
 }
 
@@ -402,21 +364,17 @@ func (u *Updater) SetSchedule(req *beeindex.SetScheduleRequest) (*beeindex.Sched
 	if req.Every != nil {
 		u.every = req.GetEvery().AsDuration()
 	}
-	if req.PendingDirs != nil {
-		u.threshold = req.GetPendingDirs()
-	}
 	u.signal()
 	return u.schedule(), nil
 }
 
-// Status reports the backlog, the schedule, the run in progress or the next one due, the last
-// run and the totals, for the IndexUpdater API.
+// Status reports the schedule, the run in progress or the next one due, the last run and the
+// totals, for the IndexUpdater API.
 func (u *Updater) Status() *beeindex.UpdateStatus {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	s := &beeindex.UpdateStatus{
-		PendingBatches: u.pendingBatches, PendingDirs: u.pendingDirs, Schedule: u.schedule(),
-		LastRun: u.last, RepairPending: u.st.RepairPending,
+		Schedule: u.schedule(), LastRun: u.last, RepairPending: u.st.RepairPending,
 		Runs: u.totals.runs, Repairs: u.totals.repairs, FailedRuns: u.totals.failed,
 		BatchesApplied: u.totals.batches, SuspectDirsApplied: u.totals.suspectDirs,
 		RunTime: durationpb.New(u.totals.time),
@@ -449,7 +407,7 @@ func (u *Updater) count(s *beeindex.RunSummary) {
 
 // The caller holds the lock.
 func (u *Updater) schedule() *beeindex.Schedule {
-	return &beeindex.Schedule{Every: durationpb.New(u.every), PendingDirs: u.threshold}
+	return &beeindex.Schedule{Every: durationpb.New(u.every)}
 }
 
 // save logs a failed write and keeps the state in memory, so the next change tries again. The
@@ -535,17 +493,12 @@ func (u *Updater) next(now time.Time) *Run {
 // holds the lock. The rules:
 //   - A full repair is queued while one is pending.
 //   - A normal run is queued when the interval since the last one started has passed.
-//   - A normal run is queued when the pending directories reach the threshold.
 func (u *Updater) queue(now time.Time) {
 	if u.st.RepairPending && u.nextRepair == nil {
 		u.nextRepair = newRun(beeindex.RunUpdateRequest_REPAIR, time.Time{}, false)
 	}
-	if u.nextNormal == nil {
-		interval := u.every > 0 && !now.Before(u.lastNormal.Add(u.every))
-		threshold := u.threshold > 0 && u.pendingDirs >= u.threshold
-		if interval || threshold {
-			u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
-		}
+	if u.nextNormal == nil && u.every > 0 && !now.Before(u.lastNormal.Add(u.every)) {
+		u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
 	}
 }
 
@@ -652,19 +605,23 @@ func (u *Updater) execute(ctx context.Context, r *Run) {
 		u.log.Info("update stopped: "+summary.Error, fields...)
 	case summary.Error != "":
 		u.log.Error("update failed: "+summary.Error, append(fields, zap.Time("automatic_retry_after", retryAt))...)
-	case r.Mode == beeindex.RunUpdateRequest_NORMAL && summary.Batches == 0:
+	case r.Mode == beeindex.RunUpdateRequest_NORMAL && summary.SuspectDirs == 0:
 		u.log.Debug("update done: nothing to apply", fields...) // an interval run on a quiet system
 	default:
 		u.log.Info("update done", fields...)
 	}
 }
 
-// normal applies the suspect files of every batch completed when the run started, then deletes
-// those batches. A run with no directory to rebuild skips the tool: its full walk would find
-// nothing a later run does not find too.
+// normal makes the hand-over, applies every suspect file up to the one it wrote, then deletes
+// them. A run with no directory to rebuild skips the tool: its full walk would find nothing a
+// later run does not find too.
 func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
-	defer u.recountLogged()
-	nums, merged, err := u.pending(summary)
+	upTo, err := u.handover(summary)
+	if err != nil {
+		summary.Error = err.Error()
+		return
+	}
+	nums, merged, err := u.pending(upTo, summary)
 	if err != nil {
 		summary.Error = err.Error()
 		return
@@ -672,38 +629,37 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 	if len(nums) == 0 {
 		return
 	}
-	if summary.SuspectDirs > 0 {
-		file := filepath.Join(u.work, "update-suspects")
-		if err := os.WriteFile(file, merged, 0o644); err != nil {
-			summary.Error = err.Error()
-			return
-		}
-		defer os.Remove(file)
-		if !u.tool(ctx, r, summary, "--suspect-method", "1", "--suspect-file", file) {
-			return
-		}
+	file := filepath.Join(u.work, "update-suspects")
+	if err := os.WriteFile(file, merged, 0o644); err != nil {
+		summary.Error = err.Error()
+		return
+	}
+	defer os.Remove(file)
+	if !u.tool(ctx, r, summary, "--suspect-method", "1", "--suspect-file", file) {
+		return
 	}
 	if err := u.consume(nums); err != nil {
 		summary.Error = err.Error()
 		return
 	}
-	if summary.SuspectDirs > 0 {
-		u.treesummary(ctx, summary)
-	}
+	u.treesummary(ctx, summary)
 }
 
 // repair rebuilds directories judged from file times: every directory when r.Since is zero,
-// otherwise those with an entry changed at or after r.Since. A full rebuild that succeeds clears
-// the pending repair, unless Watch lost events again while it ran, and deletes the batches
-// completed before it started: their changes were on the file system when the tool walked it.
-// A batch completed while it ran stays for the next normal run.
+// otherwise those with an entry changed at or after r.Since. A full rebuild makes the hand-over
+// first. When it succeeds it clears the pending repair, unless Watch lost events again while it
+// ran, and deletes the suspect files up to its hand-over: their changes were on the file system
+// when the tool walked it. A file written by a later hand-over stays for the next normal run.
 func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
 	var since int64
 	var nums []uint64
 	if r.Since.IsZero() {
-		defer u.recountLogged()
-		var err error
-		if nums, _, err = u.pending(summary); err != nil {
+		upTo, err := u.handover(summary)
+		if err != nil {
+			summary.Error = err.Error()
+			return
+		}
+		if nums, _, err = u.pending(upTo, summary); err != nil {
 			summary.Error = err.Error()
 			return
 		}
@@ -729,48 +685,73 @@ func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSumma
 	u.treesummary(ctx, summary)
 }
 
-// pending lists the batches completed when the run started and merges their suspect files, and
-// fills the summary's batch and directory counts from them.
-func (u *Updater) pending(summary *beeindex.RunSummary) (nums []uint64, merged []byte, err error) {
+// handover runs at the start of a normal run and of a full repair. It returns the number of the
+// newest suspect file the run applies. The steps:
+//   - markwalk writes its run set to the next suspect file and syncs it, see markwalk.Dump;
+//   - the state saves the highest sequence IDs the file covers;
+//   - the collector acknowledges those events to Watch.
+//
+// The state is saved before the acknowledgement. After a crash Watch may resume above the SDK's
+// checkpoint, but never above LastSeq, so the collector does not count the events in between as
+// lost. A failed write acknowledges nothing, and the run set waits for the next hand-over.
+func (u *Updater) handover(summary *beeindex.RunSummary) (uint64, error) {
 	u.mu.Lock()
-	upTo := u.completed
+	n := u.lastFile + 1
 	u.mu.Unlock()
-	if nums, err = u.batches(upTo); err != nil {
+	d, err := u.marker.Dump(suspectFile(u.work, n))
+	if err != nil {
+		return 0, err
+	}
+	u.mu.Lock()
+	if d.Inodes > 0 {
+		u.lastFile = n
+	}
+	for meta, seq := range d.Seqs {
+		u.st.LastSeq[meta] = max(u.st.LastSeq[meta], seq)
+	}
+	if len(d.Seqs) > 0 {
+		u.save()
+	}
+	upTo := u.lastFile
+	u.mu.Unlock()
+	if u.acknowledge != nil && len(d.Seqs) > 0 {
+		u.acknowledge(d)
+	}
+	summary.Batches = uint64(d.Batches)
+	u.log.Info("hand-over done", zap.Int("batches", d.Batches), zap.Int("inodes", d.Inodes), zap.Uint64("suspect_file", n))
+	return upTo, nil
+}
+
+// pending merges the suspect files up to upTo and counts their lines into the summary.
+func (u *Updater) pending(upTo uint64, summary *beeindex.RunSummary) (nums []uint64, merged []byte, err error) {
+	if nums, err = u.files(upTo); err != nil {
 		return nil, nil, err
 	}
 	for _, n := range nums {
-		data, err := os.ReadFile(filepath.Join(markwalk.BatchDir(u.work, n), "suspects"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		data, err := os.ReadFile(suspectFile(u.work, n))
 		if err != nil {
 			return nil, nil, err
 		}
 		merged = append(merged, data...)
 	}
-	summary.Batches = uint64(len(nums))
 	summary.SuspectDirs = uint64(strings.Count(string(merged), "\n"))
 	return nums, merged, nil
 }
 
-// consume deletes batches whose changes the index now holds. One that cannot be deleted is
+// consume deletes suspect files whose changes the index now holds. One that cannot be deleted is
 // applied again by the next normal run, which costs a walk and nothing else.
 func (u *Updater) consume(nums []uint64) error {
 	for _, n := range nums {
-		if err := os.RemoveAll(markwalk.BatchDir(u.work, n)); err != nil {
-			return fmt.Errorf("remove applied batch: %w", err)
+		if err := os.Remove(suspectFile(u.work, n)); err != nil {
+			return fmt.Errorf("remove applied suspect file: %w", err)
 		}
 	}
 	return nil
 }
 
-// recountLogged sets the pending counts from the disk after a run, see recount.
-func (u *Updater) recountLogged() {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if err := u.recount(); err != nil {
-		u.log.Error("unable to count the pending batches", zap.Error(err))
-	}
+// suspectFile zero-pads n so that suspect files list in number order.
+func suspectFile(work string, n uint64) string {
+	return filepath.Join(work, fmt.Sprintf("suspects-%010d", n))
 }
 
 // tool runs gufi_incremental_update and reports whether it exited zero. It first checks the
@@ -815,8 +796,8 @@ func (u *Updater) treesummary(ctx context.Context, summary *beeindex.RunSummary)
 	}
 }
 
-// batches lists the batch directories numbered upTo or below, in order.
-func (u *Updater) batches(upTo uint64) ([]uint64, error) {
+// files lists the suspect files numbered upTo or below, in order.
+func (u *Updater) files(upTo uint64) ([]uint64, error) {
 	entries, err := os.ReadDir(u.work)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -826,13 +807,13 @@ func (u *Updater) batches(upTo uint64) ([]uint64, error) {
 	}
 	var nums []uint64
 	for _, e := range entries {
-		digits, ok := strings.CutPrefix(e.Name(), "batch-")
+		digits, ok := strings.CutPrefix(e.Name(), "suspects-")
 		if !ok {
 			continue
 		}
 		n, err := strconv.ParseUint(digits, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("%s: not a batch directory", filepath.Join(u.work, e.Name()))
+			return nil, fmt.Errorf("%s: not a suspect file", filepath.Join(u.work, e.Name()))
 		}
 		if n <= upTo {
 			nums = append(nums, n)

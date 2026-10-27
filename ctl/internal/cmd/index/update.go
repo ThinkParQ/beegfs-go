@@ -18,21 +18,21 @@ import (
 
 func newUpdateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *cobra.Command {
 	var (
-		every       time.Duration
-		pendingDirs uint64
-		showStatus  bool
-		repair      bool
-		since       time.Duration
-		noMetadata  bool
+		every      time.Duration
+		showStatus bool
+		repair     bool
+		since      time.Duration
+		noMetadata bool
 	)
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Apply the changes beegfs-index-updater collected to the index",
 		Long: `Apply the changes beegfs-index-updater collected to the index.
 
-beegfs-index-updater receives file system events from BeeGFS Watch and keeps,
-per batch, the list of directories whose index entries changed. An update
-applies every completed batch to the index with gufi_incremental_update. This
+beegfs-index-updater receives file system events from BeeGFS Watch and keeps
+the list of directories whose index entries changed. An update writes that
+list to a suspect file and applies it to the index with
+gufi_incremental_update. Only then are the events acknowledged to Watch. This
 command talks to the service at --updater-addr, or the "updater" entry of
 .beegfs.index.
 
@@ -42,22 +42,23 @@ status is non-zero when the run failed.
 
 A repair rebuilds directories judged from file times rather than events. When
 Watch lost events, the service schedules a full repair on its own, which
-rebuilds every directory. A full repair covers every batch completed before it
-started: it consumes those batches and serves an update queued before it.
+rebuilds every directory. A full repair covers every change made before it
+started: it consumes the list and serves an update queued before it.
 --repair runs a full repair now. --since rebuilds only the directories with an
 entry changed since the given time ago, unless a full repair is pending: then
 the run is a full repair.
 
-The schedule set with --every and --pending-dirs lasts until the service
-restarts. The service's configuration file sets the schedule it starts with.
+The interval set with --every lasts until the service restarts. The service's
+configuration file sets the interval it starts with. The service also starts
+an update on its own when Watch holds many unacknowledged events.
 
 Example: run an update now
 
   beegfs index update
 
-Example: run an update every ten minutes, or once 5000 directories wait
+Example: run an update every ten minutes
 
-  beegfs index update --every 10m --pending-dirs 5000
+  beegfs index update --every 10m
 
 Example: repair everything changed in the last two hours
 
@@ -78,14 +79,8 @@ Example: show what each stage is doing, the backlog, the schedule and the last r
 			switch {
 			case showStatus:
 				return printStatus(ctx, client)
-			case cmd.Flags().Changed("every") || cmd.Flags().Changed("pending-dirs"):
-				req := &beeindex.SetScheduleRequest{}
-				if cmd.Flags().Changed("every") {
-					req.Every = durationpb.New(every)
-				}
-				if cmd.Flags().Changed("pending-dirs") {
-					req.PendingDirs = &pendingDirs
-				}
+			case cmd.Flags().Changed("every"):
+				req := &beeindex.SetScheduleRequest{Every: durationpb.New(every)}
 				resp, err := client.SetSchedule(ctx, req)
 				if err != nil {
 					return err
@@ -111,13 +106,12 @@ Example: show what each stage is doing, the backlog, the schedule and the last r
 
 	cmd.Flags().AddFlagSet(parentFlags)
 	cmd.Flags().DurationVar(&every, "every", 0, "Run an update at least this often, until the service restarts. 0 disables the timer, otherwise at least 1m.")
-	cmd.Flags().Uint64Var(&pendingDirs, "pending-dirs", 0, "Run an update once this many directories wait to be rebuilt, until the service restarts. 0 disables the threshold.")
 	cmd.Flags().BoolVar(&showStatus, "status", false, "Show the service status instead of running an update.")
 	cmd.Flags().BoolVar(&repair, "repair", false, "Run a full repair now: rebuild every directory.")
 	cmd.Flags().DurationVar(&since, "since", 0, "Run a repair of the directories with an entry changed this long ago or later. A pending full repair makes it full.")
 	cmd.Flags().BoolVarP(&noMetadata, "no-beegfs-metadata", "B", false, "Skip the BeeGFS plugin for this run (rebuilt directories get no BeeGFS metadata).")
 	// One invocation shows the status, sets the schedule or runs an update, never two of these.
-	schedule, run := []string{"every", "pending-dirs"}, []string{"repair", "since", "no-beegfs-metadata"}
+	schedule, run := []string{"every"}, []string{"repair", "since", "no-beegfs-metadata"}
 	for _, f := range slices.Concat(schedule, run) {
 		cmd.MarkFlagsMutuallyExclusive("status", f)
 	}
@@ -161,7 +155,6 @@ func printSummary(s *beeindex.RunSummary, prefix string) {
 
 func printSchedule(s *beeindex.Schedule, prefix string) {
 	fmt.Printf("%srun every: %s\n", prefix, s.GetEvery().AsDuration())
-	fmt.Printf("%srun when pending directories reach: %d\n", prefix, s.GetPendingDirs())
 }
 
 func local(t *timestamppb.Timestamp) string {
@@ -193,7 +186,8 @@ func printCollector(c *beeindex.CollectorStatus) {
 	fmt.Printf("  since start: events %d, batches closed %d, acknowledged %d\n",
 		c.GetEventsReceived(), c.GetBatchesClosed(), c.GetBatchesAcknowledged())
 	for _, m := range c.GetMetas() {
-		fmt.Printf("  metadata node %d: received %d, acknowledged %d", m.GetMeta(), m.GetReceivedSeq(), m.GetAcknowledgedSeq())
+		fmt.Printf("  metadata node %d: received %d, acknowledged %d, waiting for an update %d", m.GetMeta(),
+			m.GetReceivedSeq(), m.GetAcknowledgedSeq(), m.GetReceivedSeq()-m.GetAcknowledgedSeq())
 		if m.GetMissingEvents() > 0 {
 			fmt.Printf(", lost %d events", m.GetMissingEvents())
 		}
@@ -231,8 +225,6 @@ func printUpdate(u *beeindex.UpdateStatus) {
 	} else {
 		fmt.Println("update: idle")
 	}
-	fmt.Printf("  pending batches: %d\n", u.GetPendingBatches())
-	fmt.Printf("  pending directories: %d\n", u.GetPendingDirs())
 	printSchedule(u.GetSchedule(), "  ")
 	if u.GetNextRun() != nil {
 		fmt.Printf("  next run: %s\n", local(u.GetNextRun()))

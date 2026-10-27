@@ -160,10 +160,12 @@ A Watch subscriber that applies file system changes to an index built by `beegfs
 It shells out to the GUFI binaries (`gufi_query`, `gufi_sqlite3`, `gufi_incremental_update`,
 `gufi_treesummary`).
 - `internal/collector/` — gRPC server: the Watch subscriber endpoint and the `IndexUpdater`
-  service, batching, acknowledgements, and gap detection in sequence IDs.
-- `internal/markwalk/` — turns one batch of events into a GUFI suspect file, using only the index.
-- `internal/updater/` — runs `gufi_incremental_update` on a schedule or on request, and full
-  repairs after Watch lost events.
+  service, batching, gap detection in sequence IDs, and the high-water mark. It acknowledges
+  events only when an update starts, one ack per metadata server.
+- `internal/markwalk/` — looks up each batch's directories in the index, never the mount, and
+  keeps their inodes in memory until an update starts. Then it writes them to one suspect file.
+- `internal/updater/` — runs `gufi_incremental_update` on a schedule, on request or at the
+  high-water mark, and full repairs after Watch lost events.
 - The CLI side is `beegfs index update` (`ctl/internal/cmd/index/update.go`). The service
   definition is `protobuf/proto/beeindex.proto`.
 

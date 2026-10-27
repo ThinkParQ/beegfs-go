@@ -1,10 +1,13 @@
 // Package collector receives events from BeeGFS Watch, batches them in memory and hands each
-// batch to markwalk. An event is acknowledged to Watch only once the suspect file of its batch
-// is on disk. Watch keeps every unacknowledged event and resends it after a reconnect, so a
-// crash costs a replay and nothing else.
+// batch to markwalk, which adds it to its run set. Nothing is acknowledged then. When the updater
+// starts a run, markwalk writes the run set to the run's suspect file, and only then does the
+// collector acknowledge every event the file covers. Watch keeps every unacknowledged event and
+// resends it after a reconnect, so a crash costs a replay and nothing else.
 //
-// Watch never waits for a subscriber: when the collector falls behind, Watch's own buffer fills
-// and drops the oldest events. The queues here are small on purpose. When markwalk is slower
+// Watch never waits for a subscriber: once its buffer is full, it drops the oldest events. So
+// Watch's buffer holds every event since the last run started. When one metadata server's
+// unacknowledged events reach Config.HighWaterMark, the collector asks the updater for a run,
+// whose start acknowledges them. The queues here are small on purpose. When markwalk is slower
 // than events arrive or its work directory is full, the batcher blocks, the event queue fills,
 // the streams stop reading and Watch holds the rest.
 //
@@ -43,9 +46,12 @@ type Config struct {
 	BatchEvery   time.Duration `mapstructure:"batch-every"`
 	BatchEvents  int           `mapstructure:"batch-events"`
 	BatchQueue   int           `mapstructure:"batch-queue"`
-	TLSCertFile  string        `mapstructure:"tls-cert-file"`
-	TLSKeyFile   string        `mapstructure:"tls-key-file"`
-	TLSDisable   bool          `mapstructure:"tls-disable"`
+	// HighWaterMark is in unacknowledged events per metadata server. Watch's event-buffer-size is
+	// also per metadata server, so the mark should stay well below it.
+	HighWaterMark uint64 `mapstructure:"high-water-mark"`
+	TLSCertFile   string `mapstructure:"tls-cert-file"`
+	TLSKeyFile    string `mapstructure:"tls-key-file"`
+	TLSDisable    bool   `mapstructure:"tls-disable"`
 }
 
 type Collector struct {
@@ -57,13 +63,17 @@ type Collector struct {
 	server  *grpc.Server
 	svc     *subscriber.Service
 
-	events  chan *bw.Event      // from the SDK's stream handlers to the batcher
-	batches chan *batch         // from the batcher to the processor; the batcher closes it
-	acks    chan subscriber.Ack // from the processor to the SDK; Run closes it last
+	events  chan *bw.Event       // from the SDK's stream handlers to the batcher
+	batches chan *markwalk.Batch // from the batcher to the processor; the batcher closes it
+	acks    chan subscriber.Ack  // from Acknowledge to the SDK; Run closes it last
+
+	// ackMu orders Acknowledge, which the updater calls, against Run closing acks.
+	ackMu      sync.Mutex
+	acksClosed bool
 
 	// Owned by the batcher.
-	cur  *batch
-	last uint64 // number of the newest batch
+	cur  *markwalk.Batch
+	last uint64 // number of the newest batch, for the log only
 	seqs *seqTracker
 
 	// What the loops are doing, for GetStatus. The batcher writes all but acked.
@@ -71,7 +81,7 @@ type Collector struct {
 	open     atomic.Uint64 // events in the open batch
 	received atomic.Uint64 // events received since the service started
 	closed   atomic.Uint64 // batches closed since the service started
-	acked    atomic.Uint64 // batches acknowledged since the service started
+	acked    atomic.Uint64 // batches whose events were acknowledged since the service started
 }
 
 // New opens the checkpoint and builds the gRPC server with the subscriber and IndexUpdater
@@ -86,12 +96,13 @@ func New(cfg Config, marker *markwalk.Marker, up *updater.Updater, log *zap.Logg
 		return nil, fmt.Errorf("unable to read checkpoint: %w", err)
 	}
 	c := &Collector{
-		log: log, cfg: cfg, marker: marker, updater: up, last: up.LastBatch(),
+		log: log, cfg: cfg, marker: marker, updater: up,
 		seqs:    newSeqTracker(stored, up.LastSeq()),
 		events:  make(chan *bw.Event, cfg.BatchEvents),
-		batches: make(chan *batch, cfg.BatchQueue),
+		batches: make(chan *markwalk.Batch, cfg.BatchQueue),
 		acks:    make(chan subscriber.Ack, 1<<16),
 	}
+	up.SetAcknowledge(c.Acknowledge)
 	// WaitForHandlers makes Stop return only once every stream handler has, so no handler
 	// outlives the loops it sends to.
 	opts := []grpc.ServerOption{grpc.WaitForHandlers(true)}
@@ -140,22 +151,19 @@ func (c *Collector) Run(ctx context.Context) error {
 	c.server.Stop()
 	cancel()
 	loops.Wait()
+	c.ackMu.Lock()
 	close(c.acks)
+	c.acksClosed = true
+	c.ackMu.Unlock()
 	c.svc.WaitFlushed()
 	c.log.Info("collector stopped")
 	return serveErr
 }
 
-// batch is a closed group of events waiting for, or in, markwalk. Its number names the suspect
-// file's directory.
-type batch struct {
-	n      uint64
-	events []*bw.Event
-}
-
-// batcher is the only goroutine that touches cur, last and seqs. The hand-off to the processor
-// blocks while BatchQueue batches wait, which is what slows the streams, and so Watch, down. On
-// ctx done the open batch is dropped: it is unacknowledged, so Watch resends it.
+// batcher is the only goroutine that touches cur and last. Acknowledge updates seqs too, under
+// the tracker's own lock. The hand-off to the processor blocks while BatchQueue batches wait,
+// which is what slows the streams, and so Watch, down. On ctx done the open batch is dropped: it
+// is unacknowledged, so Watch resends it.
 func (c *Collector) batcher(ctx context.Context) {
 	defer close(c.batches)
 	tick := time.NewTicker(c.cfg.BatchEvery)
@@ -165,7 +173,7 @@ func (c *Collector) batcher(ctx context.Context) {
 		select {
 		case ev := <-c.events:
 			c.add(ev)
-			if len(c.cur.events) < c.cfg.BatchEvents {
+			if c.cur.Events < c.cfg.BatchEvents {
 				continue
 			}
 			closedBy = "size"
@@ -177,7 +185,7 @@ func (c *Collector) batcher(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
-		c.log.Info("batch closed", zap.Uint64("batch", c.cur.n), zap.Int("events", len(c.cur.events)), zap.String("closed_by", closedBy))
+		c.log.Info("batch closed", zap.Uint64("batch", c.cur.N), zap.Int("events", c.cur.Events), zap.String("closed_by", closedBy))
 		c.closed.Add(1)
 		select {
 		case c.batches <- c.cur:
@@ -196,9 +204,13 @@ func (c *Collector) batcher(ctx context.Context) {
 	}
 }
 
-// add appends ev to the open batch, opening one when needed. A hole in the meta's sequence IDs
-// means Watch no longer had those events: they are counted, and a full repair is requested,
-// because nothing else says which directories the lost events changed.
+// add records ev in the open batch, opening one when needed. The batch keeps what markwalk needs,
+// not the event. The checks per event:
+//   - A hole in the meta's sequence IDs means Watch no longer had those events. They are
+//     counted, and a full repair is requested, because nothing else says which directories the
+//     lost events changed.
+//   - When the meta's unacknowledged events reach the high-water mark, the updater is asked for
+//     a run, once per crossing.
 func (c *Collector) add(ev *bw.Event) {
 	meta, seq := ev.GetMetaId(), ev.GetSeqId()
 	// Check first: building the fields for every event is wasted work at the default level.
@@ -212,29 +224,32 @@ func (c *Collector) add(ev *bw.Event) {
 		c.log.Warn("missing events: Watch no longer had them; a full repair is due", zap.Uint32("meta", meta),
 			zap.Uint64("from", seq-n), zap.Uint64("to", seq-1))
 	}
+	if c.seqs.reached(meta, c.cfg.HighWaterMark) {
+		c.updater.Due()
+		c.log.Warn("high-water mark reached: an update is due to acknowledge the events Watch holds",
+			zap.Uint32("meta", meta), zap.Uint64("seq", seq), zap.Uint64("high_water_mark", c.cfg.HighWaterMark))
+	}
 	if c.cur == nil {
 		c.last++
-		c.cur = &batch{n: c.last, events: make([]*bw.Event, 0, c.cfg.BatchEvents)}
+		c.cur = markwalk.NewBatch(c.last)
 		c.state.Store(int32(beeindex.CollectorStatus_GATHERING))
 	}
-	c.cur.events = append(c.cur.events, ev)
-	c.open.Store(uint64(len(c.cur.events)))
+	c.marker.Add(c.cur, ev)
+	c.open.Store(uint64(c.cur.Events))
 	c.received.Add(1)
 }
 
-// processor hands each batch to markwalk and acknowledges its events once the suspect file is
-// on disk. A failed batch, including one held back by a full work directory, is retried with a
-// growing delay and never acknowledged, so nothing is skipped. On ctx done it returns at once,
-// even mid-batch: Watch resends what is unacknowledged.
+// processor hands each batch to markwalk, which adds it to the run set. A failed batch,
+// including one held back by a full work directory, is retried with a growing delay and never
+// added, so nothing is skipped. On ctx done it returns at once, even mid-batch: Watch resends
+// what is unacknowledged.
 func (c *Collector) processor(ctx context.Context) {
 	retry := backoff.NewExponentialBackOff()
 	for b := range c.batches {
 		var failing time.Time
-		var done markwalk.Batch
 		for {
-			res, err := c.marker.Process(ctx, b.n, b.events)
+			err := c.marker.Process(ctx, b)
 			if err == nil {
-				done = res
 				break
 			}
 			if ctx.Err() != nil {
@@ -244,7 +259,7 @@ func (c *Collector) processor(ctx context.Context) {
 				failing = time.Now()
 			}
 			d := retry.NextBackOff()
-			c.log.Error("batch failed, retrying", zap.Uint64("batch", b.n), zap.Error(err),
+			c.log.Error("batch failed, retrying", zap.Uint64("batch", b.N), zap.Error(err),
 				zap.Duration("failing_for", time.Since(failing)), zap.Duration("after", d))
 			select {
 			case <-time.After(d):
@@ -253,28 +268,39 @@ func (c *Collector) processor(ctx context.Context) {
 			}
 		}
 		if !failing.IsZero() {
-			c.log.Info("batch recovered", zap.Uint64("batch", b.n), zap.Duration("after", time.Since(failing)))
+			c.log.Info("batch recovered", zap.Uint64("batch", b.N), zap.Duration("after", time.Since(failing)))
 		}
 		retry.Reset()
-		seqs := highest(b.events)
-		c.updater.Completed(b.n, done, seqs)
-		// The SDK tracks deliveries one by one, so each event is acknowledged on its own. It
-		// reads acks until Run closes the channel, so the send only waits for it to catch up.
-		for _, ev := range b.events {
-			c.acks <- subscriber.Ack{MetaId: ev.GetMetaId(), SeqId: ev.GetSeqId()}
-		}
-		c.seqs.acknowledged(seqs)
-		c.acked.Add(1)
-		c.log.Info("batch acknowledged", zap.Uint64("batch", b.n), zap.Int("events", len(b.events)), zap.Any("highest_seq", seqs))
 	}
 }
 
-func highest(events []*bw.Event) map[uint32]uint64 {
-	m := map[uint32]uint64{}
-	for _, ev := range events {
-		m[ev.GetMetaId()] = max(m[ev.GetMetaId()], ev.GetSeqId())
+// Acknowledge runs when the updater has a run's suspect file on disk. It acknowledges every
+// event the file covers, one ack per event, because the subscriber SDK advances what it reports
+// to Watch only past events acknowledged one by one. Each meta's acks go in delivery order, so
+// the SDK finds each at the front of its list. After Run has closed the acks channel the acks
+// are dropped, and Watch resends those events after the restart.
+func (c *Collector) Acknowledge(d markwalk.Dumped) {
+	c.ackMu.Lock()
+	defer c.ackMu.Unlock()
+	if c.acksClosed {
+		c.log.Info("not acknowledging: the collector stopped; Watch resends these events", zap.Any("highest_seq", d.Seqs))
+		return
 	}
-	return m
+	// The SDK reads acks until Run closes the channel, so the send only waits for it to catch up.
+	for meta, ranges := range d.Delivered {
+		for _, r := range ranges {
+			// Stop at Last, not past it, so a range ending at the largest ID cannot wrap around.
+			for seq := r.First; ; seq++ {
+				c.acks <- subscriber.Ack{MetaId: meta, SeqId: seq}
+				if seq == r.Last {
+					break
+				}
+			}
+		}
+	}
+	c.seqs.acknowledged(d.Seqs)
+	c.acked.Add(uint64(d.Batches))
+	c.log.Info("events acknowledged", zap.Int("batches", d.Batches), zap.Any("highest_seq", d.Seqs))
 }
 
 func (c *Collector) RunUpdate(ctx context.Context, req *beeindex.RunUpdateRequest) (*beeindex.RunUpdateResponse, error) {
@@ -325,28 +351,31 @@ func queue(size, capacity int) *beeindex.Queue {
 	return &beeindex.Queue{Size: uint64(size), Capacity: uint64(capacity)}
 }
 
-// seqTracker finds holes in each meta's sequence IDs. The batcher writes it; GetStatus reads the
+// seqTracker finds holes in each meta's sequence IDs and tells when a meta's unacknowledged
+// events reach the high-water mark. The batcher and Acknowledge write it; GetStatus reads the
 // counts.
 type seqTracker struct {
 	mu      sync.Mutex
 	last    map[uint32]uint64 // highest sequence ID seen, per meta
-	acked   map[uint32]uint64 // highest sequence ID acknowledged, per meta
+	acked   map[uint32]uint64 // highest sequence ID acknowledged, per meta; MaxUint64 stands for -1
 	skipped map[uint32]uint64 // events skipped so far, per meta
+	due     map[uint32]bool   // the mark was reached and nothing was acknowledged since, per meta
 }
 
 // newSeqTracker starts each meta from the higher of two values, so a hole that opened while the
 // collector was down is found on the first event after it:
 //   - checkpoint is what the subscriber SDK last flushed, where Watch resumes. The SDK flushes
 //     on a timer, so after a crash it can lag behind what Watch has already seen acknowledged.
-//   - processed is the highest sequence ID whose batch is on disk, saved with every batch. Watch
-//     never resumes above it, because events are acknowledged only after their batch is written.
+//   - processed is the highest sequence ID in a suspect file on disk, saved before each
+//     acknowledgement. Watch never resumes above it, because events are acknowledged only after
+//     the file that covers them is written.
 //
 // Without processed, a crash would make Watch resume above the checkpoint, and the events in
 // between would look lost. A meta in neither, or in the checkpoint only as the SDK's "seek to
 // end" placeholder (MaxUint64), starts at its first event. The acknowledged sequence IDs start
 // at the same values: everything up to them is on disk.
 func newSeqTracker(checkpoint, processed map[uint32]uint64) *seqTracker {
-	t := &seqTracker{last: maps.Clone(processed), skipped: map[uint32]uint64{}}
+	t := &seqTracker{last: maps.Clone(processed), skipped: map[uint32]uint64{}, due: map[uint32]bool{}}
 	if t.last == nil {
 		t.last = map[uint32]uint64{}
 	}
@@ -369,6 +398,12 @@ func (t *seqTracker) see(meta uint32, seq uint64) (skipped uint64) {
 	if !ok || seq > prev {
 		t.last[meta] = seq
 	}
+	if !ok {
+		// Nothing before the first event is ours to acknowledge, so the mark counts from here.
+		// A new file system numbers its events from 0, so this can wrap to MaxUint64, which
+		// stands for -1. The unsigned subtraction in reached still counts right.
+		t.acked[meta] = seq - 1
+	}
 	if !ok || seq <= prev+1 {
 		return 0
 	}
@@ -377,12 +412,30 @@ func (t *seqTracker) see(meta uint32, seq uint64) (skipped uint64) {
 	return n
 }
 
-// acknowledged records the highest sequence ID per meta of a batch whose events were acknowledged.
+// reached reports whether meta's unacknowledged events, the gap between the highest sequence ID
+// seen and the highest acknowledged, have reached mark. It returns true once per crossing: an
+// acknowledgement of meta re-arms it. A mark of zero never fires.
+func (t *seqTracker) reached(meta uint32, mark uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if mark == 0 || t.due[meta] || t.last[meta]-t.acked[meta] < mark {
+		return false
+	}
+	t.due[meta] = true
+	return true
+}
+
+// acknowledged records the highest sequence ID per meta whose events were acknowledged. The
+// comparison adds one to both sides: it compares the next sequence ID to acknowledge, so a
+// start of MaxUint64, which stands for -1, counts as 0 and any acknowledgement moves it.
 func (t *seqTracker) acknowledged(seqs map[uint32]uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for meta, seq := range seqs {
-		t.acked[meta] = max(t.acked[meta], seq)
+		if seq+1 > t.acked[meta]+1 {
+			t.acked[meta] = seq
+		}
+		delete(t.due, meta)
 	}
 }
 
