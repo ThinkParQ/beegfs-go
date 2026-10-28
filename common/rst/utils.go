@@ -2,12 +2,307 @@ package rst
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"math"
+	"os"
+	"path"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// appendErrors joins each nextErr onto accumulatedErr in order, keeping them all wrapped so
+// errors.Is and errors.As still match any one of them. Any argument may be nil, which is what makes
+// it convenient for accumulating the failures of steps that all have to run before returning.
+func appendErrors(accumulatedErr error, nextErrs ...error) error {
+	for _, nextErr := range nextErrs {
+		if nextErr == nil {
+			continue
+		} else if accumulatedErr == nil {
+			accumulatedErr = nextErr
+		} else {
+			accumulatedErr = fmt.Errorf("%w; %w", accumulatedErr, nextErr)
+		}
+	}
+	return accumulatedErr
+}
+
+// persistentFile is a state file handle whose every write is on stable storage before the write
+// returns. It wraps the *os.File rather than embedding it, so a caller cannot reach a write method
+// that skips the sync.
+//
+// The handle is opened with O_DSYNC, and each write is also followed by an fsync. Neither one alone
+// is enough on every backend these files live on:
+//   - A local file system honors O_DSYNC, so each write's data is on disk before the fsync. The
+//     fsync still flushes metadata such as mtime, which costs a second commit.
+//   - A BeeGFS client using the default buffered cache type ignores O_DSYNC on its write path. A
+//     small write can sit in the client's write buffer until a background flush, which runs about
+//     every five seconds. Whether a write is buffered depends on how sequential recent writes
+//     were. A crash of the client node loses a buffered write. The fsync sends the buffer to the
+//     storage server before it returns.
+//   - The BeeGFS client still passes O_DSYNC on to the storage server, which then opens the chunk
+//     file with O_SYNC. Every write that reaches the server, including the flush the fsync sends,
+//     is on disk before the server acks it.
+//   - The fsync alone is not enough on BeeGFS. It asks the storage server to fsync the chunk, but
+//     only through the server's session for the open file. A storage node that crashed after it
+//     acked the write, and before its page cache reached disk, comes back with no session. Its
+//     fsync finds nothing to sync and reports success, so the write is lost without an error. A
+//     clean server restart keeps its sessions and loses nothing. O_DSYNC closes the crash gap,
+//     because the write was on disk before the ack.
+//
+// A write that fails part way, or whose sync fails, can leave bytes on disk that were never
+// confirmed. Callers must treat those bytes as unreliable, which is why records are fixed size or
+// self delimiting.
+type persistentFile struct {
+	f *os.File
+}
+
+// Write writes b at the end of an O_APPEND handle, or at the current offset otherwise, then syncs.
+func (p *persistentFile) Write(b []byte) (int, error) {
+	n, err := p.f.Write(b)
+	if err != nil {
+		return n, err
+	}
+	return n, p.sync()
+}
+
+// WriteString is Write for a string.
+func (p *persistentFile) WriteString(s string) (int, error) {
+	n, err := p.f.WriteString(s)
+	if err != nil {
+		return n, err
+	}
+	return n, p.sync()
+}
+
+// WriteAt writes b at off, then syncs. It fails on an O_APPEND handle, as os.File.WriteAt does.
+func (p *persistentFile) WriteAt(b []byte, off int64) (int, error) {
+	n, err := p.f.WriteAt(b, off)
+	if err != nil {
+		return n, err
+	}
+	return n, p.sync()
+}
+
+// ReadAt reads into b from off.
+func (p *persistentFile) ReadAt(b []byte, off int64) (int, error) {
+	return p.f.ReadAt(b, off)
+}
+
+// Close closes the handle. Every write was synced when it returned, so Close has nothing to flush.
+func (p *persistentFile) Close() error {
+	return p.f.Close()
+}
+
+func (p *persistentFile) sync() error {
+	if err := p.f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync %s: %w", p.f.Name(), err)
+	}
+	return nil
+}
+
+// openFileForAppend returns a handle that durably appends to name within dir, creating it if needed
+// and never truncating what is already there. Each Write is on stable storage before it returns,
+// so an appended record survives a crash without an explicit Sync. persistentFile explains how,
+// and what each backend does. A crash part way through a Write can still leave a partial record
+// behind, so records must be fixed size or self delimiting.
+func openFileForAppend(dir *os.Root, name string) (*persistentFile, error) {
+	return createPersistentFile(dir, name, unix.O_WRONLY|unix.O_APPEND, stateFilePerm)
+}
+
+// openFileForUpdate returns a handle that reads and durably rewrites bytes of an existing file in
+// place, such as the fixed size records ReadAt and WriteAt address by offset. The handle is opened
+// for reading as well as writing so a caller can check a record before replacing it. Nothing is
+// created or truncated, so os.ErrNotExist means the file was never created or has since been
+// deleted, which is state a caller can act on instead of silently recreating.
+func openFileForUpdate(dir *os.Root, name string) (*persistentFile, error) {
+	return updatePersistentFile(dir, name, unix.O_RDWR)
+}
+
+// touchFile durably creates name within dir and leaves an existing file's contents untouched, so it
+// is safe to call every time state is opened. Creating state files up front is what makes their
+// later absence unambiguous: it means the state was deleted, not that nothing has been written to
+// it yet. How durable the creation is depends on the backend, as syncDir explains.
+func touchFile(dir *os.Root, name string) error {
+	f, err := createPersistentFile(dir, name, 0, stateFilePerm)
+	if err != nil {
+		return err
+	}
+
+	return f.Close()
+}
+
+// createPersistentFile opens name within dir for durable writes with the given unix.O_* mode flags,
+// creating it if needed but never truncating a file that already exists. perm applies only to a
+// file this call creates, and the parent directory has to exist already. Newly created files have
+// their parent directory synced by syncDir so the directory entry is persisted. Each write through
+// the returned handle is on stable storage before it returns, because the handle uses O_DSYNC and
+// persistentFile follows each write with an fsync. persistentFile explains why it needs both.
+func createPersistentFile(dir *os.Root, name string, mode int, perm os.FileMode) (*persistentFile, error) {
+	mode |= unix.O_DSYNC
+
+	f, err := dir.OpenFile(name, mode|os.O_CREATE|os.O_EXCL, perm)
+	created := err == nil
+	if errors.Is(err, fs.ErrExist) {
+		f, err = dir.OpenFile(name, mode, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if created {
+		if err := syncDir(dir, path.Dir(name)); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
+
+	return &persistentFile{f: f}, nil
+}
+
+// updatePersistentFile opens an existing name within dir for durable in-place writes with the given
+// unix.O_* mode flags. Nothing is created or truncated, so opening a name that doesn't exist fails.
+// Each write through the returned handle is on stable storage before it returns, because the handle
+// uses O_DSYNC and persistentFile follows each write with an fsync. persistentFile explains why it
+// needs both.
+func updatePersistentFile(dir *os.Root, name string, mode int) (*persistentFile, error) {
+	f, err := dir.OpenFile(name, mode|unix.O_DSYNC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &persistentFile{f: f}, nil
+}
+
+// writePersistentFile atomically replaces name within dir with data, which is how a whole file's
+// worth of state should be rewritten. Content is staged in a temporary file that is fsynced before
+// being renamed over name, then the parent directory is fsynced so the rename is persisted. A crash
+// therefore leaves name either fully replaced or untouched, never truncated part way through a
+// rewrite the way an O_TRUNC write would. The parent directory has to exist already.
+func writePersistentFile(dir *os.Root, name string, data []byte) (err error) {
+	tmpName := persistentTmpPath(name)
+
+	f, err := dir.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, stateFilePerm)
+	if err != nil {
+		return err
+	}
+
+	closed := false
+	defer func() {
+		if err != nil {
+			if !closed {
+				_ = f.Close()
+			}
+			_ = removeIfExists(dir, tmpName)
+		}
+	}()
+
+	if _, err = f.Write(data); err != nil {
+		return fmt.Errorf("failed to write %s: %w", tmpName, err)
+	}
+
+	if err = f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync %s: %w", tmpName, err)
+	}
+
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("failed to close %s: %w", tmpName, err)
+	}
+	closed = true
+
+	if err = dir.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("failed to rename %s to %s: %w", tmpName, name, err)
+	}
+
+	return syncDir(dir, path.Dir(name))
+}
+
+// persistentTmpSuffix distinguishes the staging file writePersistentFile renames from. Listing code
+// needs it to tell a leftover apart from the file it was staging for.
+const persistentTmpSuffix = ".tmp"
+
+// persistentTmpPath is where writePersistentFile stages content before renaming it over path. A
+// crash can leave one behind, so anything that lists a directory of persisted files must skip
+// these, and anything deleting state should delete them alongside the file itself.
+func persistentTmpPath(path string) string {
+	return path + persistentTmpSuffix
+}
+
+// syncDir fsyncs the directory name within dir so entries created, renamed or removed within it are
+// persisted. Only the directory's own entries are covered: file contents need their own sync.
+//
+// What the fsync achieves depends on the backend:
+//   - On a local file system it persists the directory's entries.
+//   - On BeeGFS it does nothing, because the client's fsync returns at once for anything that is
+//     not a regular file. A create, rename or unlink there is a single request to the metadata
+//     server, so the client has nothing left to send. When the change reaches disk is decided by
+//     the metadata server's own file system, not by this call.
+func syncDir(dir *os.Root, name string) error {
+	f, err := dir.Open(name)
+	if err != nil {
+		return fmt.Errorf("failed to open %s for sync: %w", name, err)
+	}
+
+	syncErr := f.Sync()
+	closeErr := f.Close()
+
+	if syncErr != nil {
+		return fmt.Errorf("failed to sync %s: %w", name, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to close %s: %w", name, closeErr)
+	}
+
+	return nil
+}
+
+// removeEmptyDirs removes dir within root and then each of its parents in turn, stopping at the
+// first one that is not empty or at root itself, whichever comes first. root is never removed.
+//
+// A directory that still holds another operation's state ends the walk rather than failing, which is
+// what lets every teardown call this without knowing whether it is the last one to finish. Without
+// it the per-job and per-operation directories accumulate on the mount forever, since the files
+// inside them are removed but nothing ever removes the directories themselves.
+func removeEmptyDirs(root *os.Root, dir string) error {
+	for dir = path.Clean(dir); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if err := root.Remove(dir); err != nil {
+			if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+				// Still in use by another operation, so this is as far up as the walk can go.
+				return nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("failed to remove empty state directory %s: %w", dir, err)
+			}
+		}
+	}
+	return nil
+}
+
+// truncateStateFile cuts the existing file name within dir to size. It goes through an open handle
+// because os.Root has no Truncate, and a path based truncate would follow whatever the name
+// resolves to at the time.
+func truncateStateFile(dir *os.Root, name string, size int64) error {
+	f, err := dir.OpenFile(name, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+
+	truncErr := f.Truncate(size)
+	return appendErrors(truncErr, f.Close())
+}
+
+// removeIfExists removes name within dir and reports success when it is already gone, for teardown
+// paths that cannot assume every state file was created.
+func removeIfExists(dir *os.Root, name string) error {
+	if err := dir.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
 
 // CancellationCheckpoint reports that one unit of work finished and that the next should be given
 // delay to complete. It may be called from any goroutine and a delay <= 0 is ignored.

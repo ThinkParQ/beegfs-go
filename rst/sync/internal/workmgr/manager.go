@@ -16,6 +16,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/scheduler"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
@@ -27,6 +28,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
+
+// remoteCheckTimeout bounds the capability check UpdateConfig makes against the remote it is given.
+const remoteCheckTimeout = 10 * time.Second
+
+// requiredRemoteFeatures are the remote features this node can't run without. UpdateConfig refuses
+// a remote that lacks any of them. Remote checks this node's features the same way when it
+// connects, so a mismatch is refused from both sides.
+var requiredRemoteFeatures = []string{registry.FeatureRemoteLockRelease, registry.FeatureReserveBeforeLock}
 
 var (
 	attrState    = attribute.Key("state")
@@ -97,6 +106,9 @@ type Manager struct {
 	config               Config
 	remoteStorageTargets *rst.ClientStore
 	beeRemoteClient      *beeremote.Client
+	// warnDefaultStateRoot logs once that Remote sent no state root. UpdateConfig runs on every
+	// reconnect, so warning each time would repeat for as long as that Remote stays in service.
+	warnDefaultStateRoot sync.Once
 	// The workJournal has a work entry for each work request and its result. It uses an
 	// automatically incremented submission ID as the key for each entry, allowing it to be used as
 	// a journal to recreate the work queue(s) after a restart. This ensures requests are always
@@ -272,13 +284,37 @@ func (m *Manager) IsReady() bool {
 // an error if the configuration update is invalid/not allowed.
 //
 // IMPORTANT: Currently once the initial RST config is set, it cannot be dynamically updated without
-// first restarting BeeSync.
+// first restarting BeeSync. The same is true of stateRoot, which is where bulk operations persist
+// the state a builder job needs to resume.
+//
+// Before it changes anything, it checks that the remote beeRemoteConfig names supports every feature
+// in requiredRemoteFeatures. A remote that lacks one is refused, the previous configuration is
+// kept, and the node stays not ready. An error wrapping beeremote.ErrUnavailable means the remote
+// could not be reached to check, which is expected while remote starts.
 //
 // TODO: https://github.com/ThinkParQ/bee-remote/issues/29
 // Allow RST configuration to be updated dynamically.
-func (m *Manager) UpdateConfig(rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string) error {
+func (m *Manager) UpdateConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, remoteCheckTimeout)
+	defer cancel()
+	if err := m.beeRemoteClient.RequireFeatures(checkCtx, beeRemoteConfig, requiredRemoteFeatures...); err != nil {
+		return err
+	}
 
-	err := m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs)
+	// A Remote predating the setting sends nothing, so fall back to the same default it would have
+	// used. Revalidating what Remote already validated costs nothing and keeps a malformed value
+	// from reaching the paths built from it.
+	if stateRoot == "" {
+		m.warnDefaultStateRoot.Do(func() {
+			m.log.Warn("remote did not provide a state root for bulk operations, assuming the default", zap.String("stateRoot", rst.DefaultStateRoot))
+		})
+	}
+	stateRoot, err := rst.ValidateStateRoot(stateRoot)
+	if err != nil {
+		return fmt.Errorf("remote provided an invalid state root: %w", err)
+	}
+
+	err = m.remoteStorageTargets.UpdateConfig(m.mgrCtx, rstConfigs, stateRoot)
 	if err != nil {
 		return err
 	}

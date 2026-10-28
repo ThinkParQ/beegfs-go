@@ -2,12 +2,14 @@ package filesystem
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 )
@@ -32,9 +34,10 @@ func (fs MockFS) Stat(path string) (os.FileInfo, error) {
 	return fs.Fs.Stat(path)
 }
 
+// Lstat answers like Stat. afero has no lstat for its in-memory filesystem, and that filesystem has
+// no symlinks, so the two never differ here.
 func (fs MockFS) Lstat(path string) (os.FileInfo, error) {
-	// afereo does not have an equivalent for lstat.
-	return nil, fmt.Errorf("not implemented")
+	return fs.Fs.Stat(path)
 }
 
 func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool) error {
@@ -52,6 +55,21 @@ func (fs MockFS) CreatePreallocatedFile(path string, size int64, overwrite bool)
 	defer file.Close()
 
 	return file.Truncate(size)
+}
+
+func (fs MockFS) CreateOrResizeFile(path string, size int64, overwrite bool) error {
+	flags := os.O_RDWR | os.O_CREATE
+	if !overwrite {
+		flags |= os.O_EXCL
+	}
+
+	file, err := fs.Fs.OpenFile(path, flags, 0666)
+	if err != nil {
+		return err
+	}
+
+	truncErr := file.Truncate(size)
+	return errors.Join(truncErr, file.Close())
 }
 
 func (fs MockFS) CreateWriteClose(path string, buf []byte, mode uint32, overwrite bool) error {
@@ -126,6 +144,10 @@ func (fs MockFS) CopyOwnerAndMode(fromStat fs.FileInfo, dstPath string) error {
 
 func (fs MockFS) CopyTimestamps(fromStat fs.FileInfo, dstPath string) error {
 	return fmt.Errorf("not implemented")
+}
+
+func (fs MockFS) Chtimes(path string, atime time.Time, mtime time.Time) error {
+	return fs.Fs.Chtimes(path, atime, mtime)
 }
 
 func (fs MockFS) OverwriteFile(srcPath, dstPath string) error {

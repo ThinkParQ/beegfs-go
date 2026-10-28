@@ -31,13 +31,16 @@ const (
 	syncAuthFile         = "/etc/beegfs/.beegfs-sync-auth-file"
 )
 
-func (c *grpcProvider) init(cfg Config) error {
+// newClientConn opens a connection to the remote cfg names, with cfg's TLS and proxy settings. It
+// has no other side effects, so it can also open a short-lived connection to check a remote before
+// the node switches to it.
+func newClientConn(cfg Config) (*grpc.ClientConn, error) {
 	var cert []byte
 	var err error
 	if !cfg.TlsDisable && cfg.TlsCertFile != "" {
 		cert, err = os.ReadFile(cfg.TlsCertFile)
 		if err != nil {
-			return fmt.Errorf("reading certificate file failed: %w", err)
+			return nil, fmt.Errorf("reading certificate file failed: %w", err)
 		}
 	}
 	conn, err := beegrpc.NewClientConn(
@@ -48,7 +51,15 @@ func (c *grpcProvider) init(cfg Config) error {
 		beegrpc.WithProxy(cfg.UseProxy),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrUnableToConnect, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnableToConnect, err)
+	}
+	return conn, nil
+}
+
+func (c *grpcProvider) init(cfg Config) error {
+	conn, err := newClientConn(cfg)
+	if err != nil {
+		return err
 	}
 
 	c.conn = conn
@@ -108,46 +119,67 @@ func (c *grpcProvider) updateWork(ctx context.Context, workResult *flex.Work) er
 	return nil
 }
 
-func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error {
-	resp, err := c.client.SubmitJob(ctx, beeremote.SubmitJobRequest_builder{
+// classifyRPCError turns a failed call to remote into the error its callers act on. Unavailable and
+// DeadlineExceeded wrap ErrUnavailable, so callers retry them. Canceled wraps context.Canceled, so
+// the caller can check its own ctx to tell its cancellation from a connection a failed config
+// update closed. Any other error is returned as is: remote decided the call, and asking again gets
+// the same answer.
+func classifyRPCError(err error) error {
+	st, ok := status.FromError(err)
+	if ok {
+		// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
+		// Note this is just a hint to the user, other error conditions may have the same
+		// message so we don't adjust behavior (i.e., treat it as fatal).
+		if strings.Contains(st.Message(), "error reading server preface: EOF") {
+			err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+		}
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded:
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	case codes.Canceled:
+		return fmt.Errorf("%w: %w", context.Canceled, err)
+	}
+	return err
+}
+
+// submitJob sends jobRequest to remote. It returns the job remote answered with, and remote's
+// answer as the matching rst sentinel. A refusal can come back with a job, for example the job that
+// blocked the request, or the job a replayed reservation already reached.
+func (c *grpcProvider) submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error) {
+	resp, err := c.client.SubmitJob(ctx, &beeremote.SubmitJobRequest{
 		Request:      jobRequest,
 		OriginNodeId: c.nodeId,
-	}.Build())
+	})
 	if err != nil {
-		st, ok := status.FromError(err)
-		if ok {
-			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
-			// Note this is just a hint to the user, other error conditions may have the same
-			// message so we don't adjust behavior (i.e., treat it as fatal).
-			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				err = fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
-			}
-		}
-
-		// Unavailable and DeadlineExceeded are retried. Canceled is returned as context.Canceled so
-		// the caller can check its own ctx to tell its cancellation from a connection a failed
-		// config update closed.
-		switch st.Code() {
-		case codes.Unavailable, codes.DeadlineExceeded:
-			return fmt.Errorf("%w: %w", ErrUnavailable, err)
-		case codes.Canceled:
-			return fmt.Errorf("%w: %w", context.Canceled, err)
-		}
-		return err
+		return nil, classifyRPCError(err)
 	}
 
+	job := resp.GetResult().GetJob()
 	switch resp.GetStatus() {
 	case beeremote.SubmitJobResponse_ALREADY_COMPLETE:
-		return rst.ErrJobAlreadyComplete
+		return job, rst.ErrJobAlreadyComplete
 	case beeremote.SubmitJobResponse_ALREADY_OFFLOADED:
-		return rst.ErrJobAlreadyOffloaded
+		return job, rst.ErrJobAlreadyOffloaded
 	case beeremote.SubmitJobResponse_EXISTING:
-		return rst.ErrJobAlreadyExists
+		return job, rst.ErrJobAlreadyExists
+	case beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB:
+		return job, rst.ErrJobBlockedByActiveJob
 	case beeremote.SubmitJobResponse_NOT_ALLOWED:
-		return rst.ErrJobNotAllowed
+		return job, rst.ErrJobNotAllowed
 	case beeremote.SubmitJobResponse_FAILED_PRECONDITION:
-		return rst.ErrJobFailedPrecondition
+		return job, rst.ErrJobFailedPrecondition
+	case beeremote.SubmitJobResponse_NOT_RESERVED:
+		return job, rst.ErrJobNotReserved
+	case beeremote.SubmitJobResponse_RESERVATION_MISSING:
+		return job, rst.ErrReservationMissing
 	}
 
-	return nil
+	// A job request remote accepted always names the job that now owns it. Remote reporting no job
+	// means the request is neither refused nor running, so report it rather than letting the
+	// builder count it as submitted.
+	if job == nil {
+		return nil, fmt.Errorf("request was accepted for %s but did not return a job (this is probably a bug)", jobRequest.GetPath())
+	}
+	return job, nil
 }

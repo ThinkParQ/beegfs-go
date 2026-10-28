@@ -50,6 +50,7 @@ tls-disable = false
 
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
+state-root = ".beegfs-rst"
 
 #
 # --- Section 1.2: [Worker Settings] ---
@@ -281,6 +282,12 @@ rate-limit-event-types = ["*"]
 # stored internally by Remote.
 
 # path-db: Path where the database tracking jobs for each path will be created/maintained.
+
+# state-root: Directory where persistent state information may be stored and is available to and
+# shared among all sync workers. The directory's path must be relative inside the BeeGFS mount. It
+# is currently used to maintain bulk operation state information but may have other uses in the
+# future. WARNING, only change if there are not job requests that are inflight or have been
+# rescheduled; otherwise, bulk operations may be orphaned.
 
 # request-queue-depth: Deprecated and no longer used. It is still accepted so existing configuration
 # files continue to work, but the value is ignored. It will be removed in a future release.

@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -115,7 +117,7 @@ func TestManage(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -123,15 +125,19 @@ func TestManage(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be scheduled:
+	//
+	// The cfg declares an upload that does not stub the local file. That makes the job read-only
+	// with respect to /test/myfile, which is what lets the RST 2 job below run alongside it. A mock
+	// job with no cfg is treated as a write and would conflict across RSTs.
 	testJobRequest := beeremote.JobRequest_builder{
 		Path:                "/test/myfile",
 		Name:                "test job 1",
 		Priority:            3,
-		Mock:                flex.MockJob_builder{NumTestSegments: 4}.Build(),
+		Mock:                flex.MockJob_builder{NumTestSegments: 4, Cfg: &flex.JobRequestCfg{}}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
 
@@ -173,12 +179,12 @@ func TestManage(t *testing.T) {
 	assert.Len(t, getJobsResponse.GetResults(), 1)
 	assert.Equal(t, beeremote.Job_SCHEDULED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
-	// If we schedule a job for a different RST it should be scheduled:
+	// If we schedule a read-only job for a different RST it should be scheduled:
 	testJobRequest2 := beeremote.JobRequest_builder{
 		Path:                "/test/myfile",
 		Name:                "test job 1",
 		Priority:            3,
-		Mock:                flex.MockJob_builder{NumTestSegments: 4}.Build(),
+		Mock:                flex.MockJob_builder{NumTestSegments: 4, Cfg: &flex.JobRequestCfg{}}.Build(),
 		RemoteStorageTarget: 2,
 	}.Build()
 	jr, err = jobManager.SubmitJobRequest(testJobRequest2, "")
@@ -277,7 +283,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -285,7 +291,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// Submit two jobs for testing:
@@ -581,7 +587,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -589,7 +595,7 @@ func TestManageErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	// When we initially submit a job the state should be cancelled if any work
@@ -731,7 +737,7 @@ func TestUpdateJobResults(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -739,7 +745,7 @@ func TestUpdateJobResults(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -922,7 +928,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -930,7 +936,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	testJobRequest := beeremote.JobRequest_builder{
@@ -1010,6 +1016,151 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	}
 }
 
+func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
+	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err, "error setting up for test")
+	defer cleanupPathDBPath(t)
+
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
+	require.NoError(t, err)
+	workerMgrConfig := workermgr.Config{}
+	workerConfigs := []worker.Config{
+		{
+			ID:                  "0",
+			Name:                "test-node-0",
+			Type:                worker.Mock,
+			MaxReconnectBackOff: 5,
+			MockConfig: worker.MockConfig{
+				Expectations: []worker.MockExpectation{
+					{
+						MethodName: "connect",
+						ReturnArgs: []any{false, nil},
+					},
+					{
+						MethodName: "SubmitWork",
+						Args:       []any{mock.Anything},
+						ReturnArgs: []any{
+							flex.Work_Status_builder{
+								State:   flex.Work_SCHEDULED,
+								Message: "test expects a scheduled request",
+							}.Build(),
+							nil,
+						},
+					},
+					{
+						MethodName: "disconnect",
+						ReturnArgs: []any{nil},
+					},
+				},
+			},
+		},
+	}
+
+	mountPoint := filesystem.NewMockFS()
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	mockRST, ok := workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	require.True(t, ok)
+
+	jobMgrConfig := Config{
+		PathDBPath: tmpPathDBPath,
+	}
+
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
+	require.NoError(t, jobManager.Start())
+
+	builderRequest := beeremote.JobRequest_builder{
+		Path:                "/test/builder",
+		Name:                "builder job",
+		Priority:            3,
+		RemoteStorageTarget: 1,
+		Builder: flex.BuilderJob_builder{
+			Cfg: flex.JobRequestCfg_builder{
+				Path:                "/test/builder",
+				RemoteStorageTarget: 1,
+				Download:            true,
+				RemotePath:          "remote/test/builder",
+			}.Build(),
+		}.Build(),
+	}.Build()
+
+	mockRST.On("GenerateWorkRequests", mock.MatchedBy(func(job *beeremote.Job) bool {
+		return job.GetRequest().HasBuilder() &&
+			job.GetRequest().GetPath() == builderRequest.GetPath() &&
+			job.GetRequest().GetRemoteStorageTarget() == builderRequest.GetRemoteStorageTarget()
+	}), 0).Return([]*flex.WorkRequest{
+		flex.WorkRequest_builder{
+			JobId:               "ignored-by-worker-manager",
+			RequestId:           "0",
+			Path:                builderRequest.GetPath(),
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{}.Build(),
+		}.Build(),
+	}, nil, nil).Once()
+
+	jobResponse, err := jobManager.SubmitJobRequest(builderRequest, "")
+	require.NoError(t, err)
+	require.NotNil(t, jobResponse)
+
+	jobID := jobResponse.GetJob().GetId()
+	const failedMessage = "job builder failed to complete bulk operation(s): bulk restore session failed"
+	// A builder job is completed through CompleteJobBuilderRequest, not CompleteWorkRequests, so
+	// the provider also gets the callback that releases the jobs its bulk operations reserved.
+	mockRST.On("CompleteJobBuilderRequest", mock.MatchedBy(func(job *beeremote.Job) bool {
+		return job.GetId() == jobID && job.GetRequest().HasBuilder()
+	}), mock.MatchedBy(func(workResults []*flex.Work) bool {
+		return len(workResults) == 1 &&
+			workResults[0].GetRequestId() == "0" &&
+			workResults[0].GetStatus().GetState() == flex.Work_FAILED
+	}), true).Return(nil).Once()
+
+	workResult := flex.Work_builder{
+		Path:      builderRequest.GetPath(),
+		JobId:     jobID,
+		RequestId: "0",
+		Status: flex.Work_Status_builder{
+			State:   flex.Work_FAILED,
+			Message: failedMessage,
+		}.Build(),
+		Parts: []*flex.Work_Part{},
+	}.Build()
+
+	err = jobManager.UpdateWork(workResult)
+	require.NoError(t, err)
+
+	getJobsRequest := beeremote.GetJobsRequest_builder{
+		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+			JobId: jobID,
+			Path:  builderRequest.GetPath(),
+		}.Build(),
+		IncludeWorkRequests: false,
+		IncludeWorkResults:  true,
+	}.Build()
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobsRequest, responses)
+	require.NoError(t, err)
+	getJobsResponse := <-responses
+	require.Equal(t, beeremote.Job_FAILED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
+	storedWork := getJobsResponse.GetResults()[0].GetWorkResults()[0].GetWork()
+	require.Equal(t, flex.Work_FAILED, storedWork.GetStatus().GetState())
+	require.Equal(t, failedMessage, storedWork.GetStatus().GetMessage())
+
+	updateJobRequest := beeremote.UpdateJobsRequest_builder{
+		JobId:    new(jobID),
+		Path:     builderRequest.GetPath(),
+		NewState: beeremote.UpdateJobsRequest_CANCELLED,
+	}.Build()
+	updateJobResponse, err := jobManager.UpdateJobs(updateJobRequest)
+	require.NoError(t, err)
+	require.True(t, updateJobResponse.GetOk())
+	require.Equal(t, beeremote.Job_CANCELLED, updateJobResponse.GetResults()[0].GetJob().GetStatus().GetState())
+
+	mockRST.AssertExpectations(t)
+}
+
 func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
 	require.NoError(t, err, "error setting up for test")
@@ -1052,7 +1203,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1060,7 +1211,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		PathDBPath: tmpPathDBPath,
 	}
 
-	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFunc())
+	jobManager := NewManager(log, jobMgrConfig, workerManager, withIgnoreReleaseUnusedFileLockFn())
 	require.NoError(t, jobManager.Start())
 
 	baseTestJobRequest := &beeremote.JobRequest{
@@ -1105,6 +1256,14 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.ErrorIs(t, err, rst.ErrJobAlreadyExists)
 	require.NotNil(t, result)
 
+	// Test an active job for the same RST but a different remote path. The jobs do not move the same
+	// object, so the caller must not be told the job already exists. The block clears when the
+	// active job finishes, so the error must be the retryable one.
+	testOtherRemotePathJobRequest := proto.Clone(testAlreadyExistJobRequest).(*beeremote.JobRequest)
+	testOtherRemotePathJobRequest.GetMock().SetCfg(flex.JobRequestCfg_builder{RemotePath: "other-key"}.Build())
+	result, err = jobManager.SubmitJobRequest(testOtherRemotePathJobRequest, "")
+	require.ErrorIs(t, err, rst.ErrJobBlockedByActiveJob)
+	require.NotErrorIs(t, err, rst.ErrJobAlreadyExists)
 	require.NotNil(t, result)
 
 	// Test job request with failed-precondition. This should be distinguished from job request
@@ -1118,6 +1277,18 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	require.Equal(t, result.Job.Status.State, beeremote.Job_CANCELLED)
 	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
 	require.NotNil(t, result)
+
+	// A builder that has no provider for a path, because the file has no rstIds or names one that
+	// does not exist, builds the request without a client. Remote must record it as a job carrying
+	// the error rather than reject it, so the user can see why the path was not synced.
+	noClientCfg := flex.JobRequestCfg_builder{Path: "/test/no-rst", RemotePath: "key"}.Build()
+	testNoClientJobRequest := rst.BuildJobRequestWithFailedPrecondition(nil, noClientCfg, "stub file is not readable")
+	result, err = jobManager.SubmitJobRequest(testNoClientJobRequest, "")
+	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+	require.NotNil(t, result)
+	require.Equal(t, beeremote.Job_CANCELLED, result.Job.Status.State)
+	require.Contains(t, result.Job.Status.GetMessage(), "stub file is not readable")
+	require.Zero(t, result.Job.Request.GetRemoteStorageTarget())
 
 	// Test an error is creating job request that is not a failed-precondition.
 	testFailedJobRequest := proto.Clone(baseTestJobRequest).(*beeremote.JobRequest)
@@ -1217,7 +1388,7 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 			}
 			// COMPLETED/OFFLOADED require forceUpdate to bypass the early "already done" return.
 			forceUpdate := startState == beeremote.Job_COMPLETED || startState == beeremote.Job_OFFLOADED
-			success, safeToDelete, msg := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, forceUpdate)
+			success, safeToDelete, msg := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, forceUpdate, false)
 			assert.True(t, success)
 			assert.True(t, safeToDelete)
 			// Empty message confirms the DELETED code path was taken, not an early-
@@ -1236,7 +1407,7 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
 				}.Build(),
 			}
-			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, forceUpdate)
+			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, forceUpdate, false)
 			counts := jobActiveValues(t, reader)
 			for k, v := range counts {
 				assert.Equal(t, int64(0), v, "terminal → terminal must not increment jobActive; unexpected increment for key %v", k)
@@ -1255,7 +1426,7 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
 				}.Build(),
 			}
-			success, safeToDelete, _ := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, false)
+			success, safeToDelete, _ := m.updateJobState(testJob, beeremote.UpdateJobsRequest_DELETED, false, false)
 			assert.False(t, success)
 			assert.False(t, safeToDelete)
 			assert.Equal(t, startState, testJob.GetStatus().GetState())
@@ -1270,7 +1441,7 @@ func TestNoDoubleRecordOnAlreadyTerminal(t *testing.T) {
 					Status:  beeremote.Job_Status_builder{State: startState}.Build(),
 				}.Build(),
 			}
-			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, false)
+			mc.updateJobState(testJob2, beeremote.UpdateJobsRequest_DELETED, false, false)
 			counts := jobActiveValues(t, reader)
 			for k, v := range counts {
 				assert.Equal(t, int64(0), v, "rejected delete must not increment jobActive; unexpected increment for key %v", k)
@@ -1406,7 +1577,7 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 			jobDuration: jobDuration,
 			jobActive:   jobActive,
 		},
-		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
+		releaseUnusedFileLockFn: func(string, map[string]*Job) (bool, error) { return false, nil },
 	}
 
 	cleanup := func() {
@@ -1865,7 +2036,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
 	require.NoError(t, err)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{})
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1913,7 +2084,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 			jobDuration: jobDuration,
 			jobActive:   jobActive,
 		},
-		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
+		releaseUnusedFileLockFn: func(string, map[string]*Job) (bool, error) { return false, nil },
 	}
 
 	cleanup := func() {
@@ -2731,4 +2902,1192 @@ func TestWorkCounterBalance(t *testing.T) {
 	assert.Equal(t, int64(2), workActive[counterKey{"scheduled", 1}], "D2: WorkActive{scheduled} == 2 (one entry per WR, no decrements)")
 	workTerm := workTerminalValues(t, reader)
 	assert.Equal(t, int64(2), workTerm[counterKey{"completed", 1}], "D2: 2 WRs must be counted in WorkTerminal{completed}")
+}
+
+// newReservationManager builds a job manager with one mock RST and one mock worker that accepts
+// whatever it is given. The reservation tests only care about which job a submission lands on, not
+// about how its work requests fare, so the worker always reports the work as scheduled.
+func newReservationManager(t *testing.T) *Manager {
+	t.Helper()
+	tmpPathDBPath, cleanupPathDBPath, err := tempPathForTesting(testDBBasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() { cleanupPathDBPath(t) })
+
+	log, err := logger.New(logger.Config{Type: "stdout", Level: 3}, nil)
+	require.NoError(t, err)
+
+	mountPoint := filesystem.NewMockFS()
+	mountPoint.CreateWriteClose("/test/bulkfile", make([]byte, 30), 0644, false)
+
+	scheduled := flex.Work_Status_builder{State: flex.Work_SCHEDULED, Message: "scheduled"}.Build()
+	workerConfigs := []worker.Config{{
+		ID:                  "0",
+		Name:                "test-node-0",
+		Type:                worker.Mock,
+		MaxReconnectBackOff: 5,
+		MockConfig: worker.MockConfig{Expectations: []worker.MockExpectation{
+			{MethodName: "connect", ReturnArgs: []any{false, nil}},
+			{MethodName: "SubmitWork", Args: []any{mock.Anything}, ReturnArgs: []any{scheduled, nil}},
+			{MethodName: "UpdateWork", Args: []any{mock.Anything}, ReturnArgs: []any{scheduled, nil}},
+			{MethodName: "disconnect", ReturnArgs: []any{nil}},
+		}},
+	}}
+
+	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	require.NoError(t, err)
+	require.NoError(t, workerManager.Start())
+
+	jobManager := NewManager(log, Config{PathDBPath: tmpPathDBPath}, workerManager, withIgnoreReleaseUnusedFileLockFn())
+	require.NoError(t, jobManager.Start())
+	return jobManager
+}
+
+// newReservationRequest builds the request the builder sends for a path a bulk operation handles.
+// reserve true asks remote to create the reservation, false with a jobId claims one that already
+// exists. Both name the job with jobId, which the builder mints rather than learning from remote.
+// reserve false with no jobId builds an ordinary request.
+func newReservationRequest(reserve bool, jobId string) *beeremote.JobRequest {
+	request := beeremote.JobRequest_builder{
+		Path:                "/test/bulkfile",
+		Name:                "bulk job",
+		RemoteStorageTarget: 1,
+		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+	}.Build()
+	if reserve {
+		request.SetReservation(beeremote.JobRequest_RESERVE)
+	} else if jobId != "" {
+		request.SetReservation(beeremote.JobRequest_CLAIM)
+	}
+	if jobId != "" {
+		request.SetJobId(jobId)
+	}
+	return request
+}
+
+// TestSubmitJobRequestReservations pins how SubmitJobRequest reads the reservation action and
+// job_id:
+//
+//   - RESERVE with a job_id creates the reservation under that ID.
+//   - RESERVE with no job_id is refused, because remote does not mint reservation IDs.
+//   - CLAIM with a job_id claims the job that ID names.
+//   - NO_RESERVATION is an ordinary request, with or without a job_id, and is covered elsewhere.
+func TestSubmitJobRequestReservations(t *testing.T) {
+	t.Run("a request that reserves creates the job under the ID it supplied", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, reservedJobId, result.GetJob().GetId(), "the reserved job must take the ID the builder minted")
+		assert.Equal(t, beeremote.Job_RESERVED, result.GetJob().GetStatus().GetState())
+		assert.Empty(t, result.GetWorkRequests(), "a reserved job has no work yet")
+	})
+
+	t.Run("a request that reserves without an ID is refused", func(t *testing.T) {
+		m := newReservationManager(t)
+
+		_, err := m.SubmitJobRequest(newReservationRequest(true, ""), "")
+
+		require.ErrorContains(t, err, "must name the reserved job with job_id")
+	})
+
+	t.Run("a request that claims takes over the reserved job rather than making a new one", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		claimed, err := m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, reservedJobId, claimed.GetJob().GetId(), "the claim must run as the job that was reserved")
+		assert.NotEqual(t, beeremote.Job_RESERVED, claimed.GetJob().GetStatus().GetState(), "claiming must take the job out of RESERVED")
+	})
+
+	t.Run("a claim of an ID remote never saw reports the reservation as missing", func(t *testing.T) {
+		m := newReservationManager(t)
+
+		_, err := m.SubmitJobRequest(newReservationRequest(false, uuid.NewString()), "")
+
+		// Distinct from a job that exists but has moved on, so the message can say remote has no
+		// record of it.
+		require.ErrorIs(t, err, rst.ErrReservationMissing)
+		// It still satisfies the broad error, so callers that only care that the claim failed, and
+		// the gRPC status mapping, keep working.
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+	})
+
+	t.Run("a claim of a job that is no longer reserved is not reported as missing", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+		require.NoError(t, err)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+
+		// The job still exists, so the error must not say there is no record of it.
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, rst.ErrReservationMissing, "a job that exists must never look like one that was never recorded")
+	})
+
+	// A claim that resolves without work must record the outcome on the reserved job, even when an
+	// earlier job already records the same outcome. Returning the earlier job instead would leave
+	// the reserved job RESERVED, and a RESERVED job blocks every later job for its path and RST.
+	t.Run("a claim that is already complete moves the reserved job out of RESERVED", func(t *testing.T) {
+		m := newReservationManager(t)
+		// Keep finished jobs so the earlier job is still the claim's last job. The default of zero
+		// would delete it when the reservation is submitted.
+		m.config.MaxJobEntriesPerRST = 10
+		mtime := "2026-10-01T12:00:00Z"
+		alreadyComplete := &beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+			Message: mtime,
+		}
+		earlier := newReservationRequest(false, "")
+		earlier.SetGenerationStatus(alreadyComplete)
+		earlierResult, err := m.SubmitJobRequest(earlier, "")
+		require.ErrorIs(t, err, rst.ErrJobAlreadyComplete)
+
+		reservedJobId := uuid.NewString()
+		_, err = m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+
+		claim := newReservationRequest(false, reservedJobId)
+		claim.SetGenerationStatus(alreadyComplete)
+		claimed, err := m.SubmitJobRequest(claim, "")
+
+		require.ErrorIs(t, err, rst.ErrJobAlreadyComplete)
+		assert.Equal(t, reservedJobId, claimed.GetJob().GetId(), "the claim must report its own job, not the earlier one")
+		assert.NotEqual(t, earlierResult.GetJob().GetId(), claimed.GetJob().GetId())
+		assert.Equal(t, beeremote.Job_COMPLETED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+	})
+
+	// The RST can be removed from remote's configuration between the reservation and the claim. The
+	// claim is refused either way. A claim that may have changed the file can't be undone without
+	// the RST, so its job is FAILED and keeps the lock. A claim whose request reports that nothing
+	// was changed is CANCELLED.
+	for _, tc := range []struct {
+		name             string
+		generationStatus *beeremote.JobRequest_GenerationStatus
+		want             beeremote.Job_State
+	}{
+		{"a direct claim", nil, beeremote.Job_FAILED},
+		{"a builder claim", &beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
+			Message: "2026-10-01T12:00:00Z",
+		}, beeremote.Job_CANCELLED},
+	} {
+		t.Run(tc.name+" for an RST that no longer exists ends the reserved job", func(t *testing.T) {
+			m := newReservationManager(t)
+			reservedJobId := uuid.NewString()
+			_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+			require.NoError(t, err)
+			delete(m.workerManager.RemoteStorageTargets, 1)
+
+			claim := newReservationRequest(false, reservedJobId)
+			if tc.generationStatus != nil {
+				claim.SetGenerationStatus(tc.generationStatus)
+			}
+			_, err = m.SubmitJobRequest(claim, "")
+
+			require.ErrorContains(t, err, "requested RST does not exist")
+			assert.Equal(t, tc.want, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+		})
+	}
+}
+
+// TestSubmitJobRequestReserveReplays pins what a RESERVE answers when its job_id already names a
+// job on the path. A builder job reschedules after a crash and walks its paths again under the same
+// IDs, so a replayed reserve must hand back the job in whatever state it reached:
+//   - still RESERVED: nil, so the builder takes the lock and verifies the file again;
+//   - claimed: the answer the claim got, so an accepted claim is not reserved a second time;
+//   - cancelled before a claim: ErrJobNotReserved, so the builder moves on.
+//
+// A reserve under a different ID is another builder's, and must be refused by the reservation that
+// already holds the path rather than replace or cancel it.
+func TestSubmitJobRequestReserveReplays(t *testing.T) {
+	reserve := func(t *testing.T, m *Manager, jobId string) {
+		t.Helper()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+	}
+
+	t.Run("a replay of a job still reserved answers with the reservation", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_RESERVED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a job already claimed answers with the claim's answer", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		_, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+		require.NoError(t, err)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.NoError(t, err, "an accepted claim answers nil, as the claim itself did")
+		assert.Equal(t, beeremote.JobRequest_CLAIM, result.GetJob().GetRequest().GetReservation(), "the caller tells a claimed job from a reservation by its request")
+		assert.NotEqual(t, beeremote.Job_RESERVED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a reservation its builder cancelled answers with that cancel", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		cancel := newReservationRequest(false, jobId)
+		cancel.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "file changed",
+		})
+		_, err := m.SubmitJobRequest(cancel, "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		require.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, beeremote.Job_CANCELLED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay of a reservation cancelled before any claim answers not reserved", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		require.NoError(t, m.cancelReservedRequest(newReservationRequest(true, jobId).GetPath(), jobId))
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+		assert.Equal(t, beeremote.Job_CANCELLED, result.GetJob().GetStatus().GetState())
+	})
+
+	t.Run("a replay for another RST is refused as a collision", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+		replay := newReservationRequest(true, jobId)
+		replay.SetRemoteStorageTarget(2)
+
+		_, err := m.SubmitJobRequest(replay, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, jobId).GetStatus().GetState(), "a collision must leave the reservation alone")
+	})
+
+	t.Run("a reserve under another ID is refused by the reservation holding the path", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		reserve(t, m, jobId)
+
+		result, err := m.SubmitJobRequest(newReservationRequest(true, uuid.NewString()), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.Equal(t, jobId, result.GetJob().GetId(), "remote answers with the reservation that blocked the request")
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+	})
+}
+
+// getReservationTestJob reads one job back from m by path and ID.
+func getReservationTestJob(t *testing.T, m *Manager, jobId string) *beeremote.Job {
+	t.Helper()
+	request := beeremote.GetJobsRequest_builder{
+		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
+			JobId: jobId,
+			Path:  newReservationRequest(false, "").GetPath(),
+		}.Build(),
+	}.Build()
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	require.NoError(t, m.GetJobs(context.Background(), request, responses))
+	response := <-responses
+	require.Len(t, response.GetResults(), 1)
+	return response.GetResults()[0].GetJob()
+}
+
+// TestCancelReservedJob pins how a job still in RESERVED is cancelled. A reserved job has no work
+// requests, but its claimer may already have changed the file. So the cancel runs the RST abort,
+// which undoes the plan from the reservation's request. Who may cancel differs:
+//
+//   - Bulk teardown always may, through cancelReservedRequest.
+//   - A user needs the force flag.
+func TestCancelReservedJob(t *testing.T) {
+	t.Run("bulk teardown aborts a reservation and releases its lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		// Count only the releases the teardown makes. Submitting the reservation also attempts one,
+		// which the rule refuses because the reservation needs the lock.
+		var lockReleases int
+		m.releaseUnusedFileLockFn = func(string, map[string]*Job) (bool, error) {
+			lockReleases++
+			return true, nil
+		}
+		recorder := recordAborts(m)
+
+		err = m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), reservedJobId)
+
+		require.NoError(t, err)
+		job := getReservationTestJob(t, m, reservedJobId)
+		assert.Equal(t, beeremote.Job_CANCELLED, job.GetStatus().GetState(), "teardown must not leave the reservation blocking the path")
+		assert.Equal(t, 1, recorder.aborts, "the claimer may already have changed the file")
+		assert.Equal(t, 1, lockReleases, "the lock must be released together with the reservation")
+	})
+
+	t.Run("bulk teardown keeps a reservation whose abort failed", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		decisions := recordLockReleases(m)
+		recorder := recordAborts(m)
+		recorder.err = errors.New("unable to remove the placeholder")
+
+		err = m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), reservedJobId)
+
+		require.Error(t, err)
+		job := getReservationTestJob(t, m, reservedJobId)
+		assert.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+		assert.Contains(t, job.GetStatus().GetMessage(), "unable to remove the placeholder")
+		assert.Empty(t, decisions(), "a FAILED reservation keeps the lock so a cancel can retry the abort")
+	})
+
+	t.Run("a user cancel without force leaves a reservation in place", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		recorder := recordAborts(m)
+
+		response, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:     newReservationRequest(false, "").GetPath(),
+			JobId:    new(reservedJobId),
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build())
+
+		require.NoError(t, err)
+		assert.Contains(t, response.GetMessage(), "rejecting cancel for reserved job")
+		assert.Equal(t, beeremote.Job_RESERVED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+		assert.Equal(t, 0, recorder.aborts)
+	})
+
+	t.Run("a forced user cancel aborts a reservation", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		recorder := recordAborts(m)
+
+		_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:        newReservationRequest(false, "").GetPath(),
+			JobId:       new(reservedJobId),
+			NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+			ForceUpdate: true,
+		}.Build())
+
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+		assert.Equal(t, 1, recorder.aborts)
+	})
+
+	t.Run("a claim of a cancelled reservation aborts it again", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		require.NoError(t, m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), reservedJobId))
+		// The claimer applied its plan after the cancel's abort ran, then claimed.
+		recorder := recordAborts(m)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+		assert.Equal(t, 1, recorder.aborts, "the claim's changes must be undone")
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+	})
+}
+
+// TestSubmitJobRequestRejectsStateRoot checks that Remote refuses any job for a path inside the
+// configured state root. The CLI sends a single file straight to Remote without a builder walk, so
+// this check is the only one between such a request and the bulk operation state files.
+func TestSubmitJobRequestRejectsStateRoot(t *testing.T) {
+	newRequest := func(path string) *beeremote.JobRequest {
+		return beeremote.JobRequest_builder{
+			Path:                path,
+			Name:                "state root job",
+			RemoteStorageTarget: 1,
+			Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
+		}.Build()
+	}
+
+	tests := []struct {
+		name      string
+		stateRoot string
+		path      string
+		rejected  bool
+	}{
+		{name: "the default state root itself", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst", rejected: true},
+		{name: "a file below the default state root", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst/job/1/state.bin", rejected: true},
+		{name: "an unset state root means the default", stateRoot: "", path: "/.beegfs-rst/job/1/state.bin", rejected: true},
+		{name: "a path that escapes back into the state root", stateRoot: rst.DefaultStateRoot, path: "/test/../.beegfs-rst/x", rejected: true},
+		{name: "a file below a custom state root", stateRoot: "custom/state", path: "/custom/state/job/1/state.bin", rejected: true},
+		{name: "the default state root when a custom one is set", stateRoot: "custom/state", path: "/.beegfs-rst/job/1/state.bin"},
+		{name: "a sibling that only shares a name prefix", stateRoot: rst.DefaultStateRoot, path: "/.beegfs-rst2/file"},
+		{name: "an ordinary file", stateRoot: rst.DefaultStateRoot, path: "/test/bulkfile"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := newReservationManager(t)
+			m.config.StateRoot = test.stateRoot
+
+			_, err := m.SubmitJobRequest(newRequest(test.path), "")
+			if test.rejected {
+				require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+				assert.ErrorContains(t, err, "state root")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestAnyJobNeedsFileLock lists every job state so that a new state fails the test until someone
+// decides whether a job in that state still relies on the content lock.
+func TestAnyJobNeedsFileLock(t *testing.T) {
+	type want struct {
+		job     bool // a sync job in this state keeps the lock
+		builder bool // a builder job in this state keeps the lock
+	}
+	needsLock := map[beeremote.Job_State]want{
+		beeremote.Job_UNSPECIFIED: {job: true, builder: false},
+		beeremote.Job_UNKNOWN:     {job: true, builder: false},
+		beeremote.Job_UNASSIGNED:  {job: true, builder: false},
+		beeremote.Job_RESERVED:    {job: true, builder: false},
+		beeremote.Job_SCHEDULED:   {job: true, builder: true},
+		beeremote.Job_RUNNING:     {job: true, builder: true},
+		beeremote.Job_ERROR:       {job: true, builder: false},
+		beeremote.Job_FAILED:      {job: true, builder: false},
+		beeremote.Job_CANCELLED:   {job: false, builder: false},
+		beeremote.Job_COMPLETED:   {job: false, builder: false},
+		beeremote.Job_OFFLOADED:   {job: false, builder: false},
+	}
+
+	newJob := func(state beeremote.Job_State) *Job {
+		return &Job{Job: beeremote.Job_builder{
+			Request: beeremote.JobRequest_builder{Sync: &flex.SyncJob{}}.Build(),
+			Status:  beeremote.Job_Status_builder{State: state}.Build(),
+		}.Build()}
+	}
+	newBuilderJob := func(state beeremote.Job_State) *Job {
+		return &Job{Job: beeremote.Job_builder{
+			Request: beeremote.JobRequest_builder{Builder: &flex.BuilderJob{}}.Build(),
+			Status:  beeremote.Job_Status_builder{State: state}.Build(),
+		}.Build()}
+	}
+
+	for name, value := range beeremote.Job_State_value {
+		state := beeremote.Job_State(value)
+		t.Run(name, func(t *testing.T) {
+			want, ok := needsLock[state]
+			require.True(t, ok, "add job state %s to this test", name)
+
+			// The state decides alone, and a job that needs the lock is found among jobs that do not.
+			assert.Equal(t, want.job, anyJobNeedsFileLock(map[string]*Job{"1": newJob(state)}), "sync job")
+			assert.Equal(t, want.job, anyJobNeedsFileLock(map[string]*Job{
+				"1": newJob(beeremote.Job_COMPLETED),
+				"2": newJob(state),
+				"3": newJob(beeremote.Job_CANCELLED),
+			}), "sync job among finished jobs")
+			assert.Equal(t, want.builder, anyJobNeedsFileLock(map[string]*Job{"1": newBuilderJob(state)}), "builder job")
+		})
+	}
+
+	assert.False(t, anyJobNeedsFileLock(nil), "a path with no jobs does not need the lock")
+}
+
+// TestUpdateJobsReleasesLockBeforeCommit checks that UpdateJobs decides the lock release while it
+// still holds the path entry. The stub reads the committed entry during the release. If the release
+// ran after the commit, as it once did from a defer, the committed job would already be CANCELLED.
+func TestUpdateJobsReleasesLockBeforeCommit(t *testing.T) {
+	m := newReservationManager(t)
+	path := newReservationRequest(false, "").GetPath()
+	reservedJobId := uuid.NewString()
+	_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+	require.NoError(t, err)
+
+	var lockReleases int
+	m.releaseUnusedFileLockFn = func(releasePath string, jobs map[string]*Job) (bool, error) {
+		lockReleases++
+		assert.Equal(t, beeremote.Job_CANCELLED, jobs[reservedJobId].GetStatus().GetState(), "the release must see the update it follows")
+
+		committed, err := m.pathStore.GetEntry(releasePath)
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_RESERVED, committed.Value[reservedJobId].GetStatus().GetState(), "the release must run before the entry is committed")
+		return true, nil
+	}
+
+	_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+		Path:        path,
+		JobId:       new(reservedJobId),
+		NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+		ForceUpdate: true,
+	}.Build())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, lockReleases)
+	assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, reservedJobId).GetStatus().GetState())
+}
+
+// TestSubmitJobRequestReplays checks that a request sent again under the same job_id, after its
+// submitter lost the response, gets back the job and the answer the first request got. Remote
+// commits the path entry before it replies, so a lost reply does not mean nothing was recorded.
+func TestSubmitJobRequestReplays(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	plainWithId := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		return request
+	}
+	jobsOnPath := func(t *testing.T, m *Manager) int {
+		t.Helper()
+		entry, err := m.pathStore.GetEntry(path)
+		require.NoError(t, err)
+		return len(entry.Value)
+	}
+
+	t.Run("a replayed request gets its job back instead of a second job", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		first, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		require.Equal(t, jobId, first.GetJob().GetId(), "the job must be created under the caller's ID")
+
+		replay, err := m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+		assert.Equal(t, 1, jobsOnPath(t, m))
+		assert.Equal(t, beeremote.SubmitJobResponse_CREATED, getReservationTestJob(t, m, jobId).GetSubmitStatus())
+	})
+
+	t.Run("a replayed refusal gets the same refusal back", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		refused := func() *beeremote.JobRequest {
+			request := plainWithId(jobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: "the file changed",
+			})
+			return request
+		}
+		_, err := m.SubmitJobRequest(refused(), "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+
+		replay, err := m.SubmitJobRequest(refused(), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+		assert.Equal(t, 1, jobsOnPath(t, m))
+	})
+
+	t.Run("a job ID that names a different request is refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+
+		other := plainWithId(jobId)
+		other.SetRemoteStorageTarget(2)
+		_, err = m.SubmitJobRequest(other, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.ErrorContains(t, err, "already names a job for a different request")
+		assert.Equal(t, 1, jobsOnPath(t, m))
+	})
+
+	t.Run("a claim without a job ID is refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		claim := newReservationRequest(false, "")
+		claim.SetReservation(beeremote.JobRequest_CLAIM)
+
+		_, err := m.SubmitJobRequest(claim, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		assert.ErrorContains(t, err, "must name the reserved job with job_id")
+	})
+
+	t.Run("a replayed claim that was accepted answers already exists", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+		require.NoError(t, err)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, reservedJobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobAlreadyExists, "the sync node treats this answer to a claim as success")
+	})
+
+	t.Run("a replayed claim that was refused gets its refusal back", func(t *testing.T) {
+		m := newReservationManager(t)
+		reservedJobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
+		require.NoError(t, err)
+		claim := func() *beeremote.JobRequest {
+			request := newReservationRequest(false, reservedJobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+				State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+				Message: "object no longer exists",
+			})
+			return request
+		}
+		_, err = m.SubmitJobRequest(claim(), "")
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+
+		_, err = m.SubmitJobRequest(claim(), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.NotErrorIs(t, err, rst.ErrJobAlreadyExists, "a refused claim must not be reported as claimed")
+	})
+}
+
+// TestSubmitJobRequestReplaysWithoutStoredAnswer checks replays of jobs that have no stored submit
+// answer. Remote records INVALID when a request fails with an error that has no status of its own.
+// Such a job answers from its state, so a job that was not refused never replays as a refusal.
+func TestSubmitJobRequestReplaysWithoutStoredAnswer(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	// withoutStoredAnswer rewrites a stored job to have no submit answer and the given state.
+	withoutStoredAnswer := func(t *testing.T, m *Manager, jobId string, state beeremote.Job_State) {
+		t.Helper()
+		entry, commit, err := m.pathStore.GetAndLockEntry(path)
+		require.NoError(t, err)
+		job := entry.Value[jobId]
+		job.SetSubmitStatus(beeremote.SubmitJobResponse_INVALID)
+		job.GetStatus().SetState(state)
+		require.NoError(t, commit())
+	}
+	plainWithId := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		return request
+	}
+
+	t.Run("a job that was not refused replays as accepted", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		withoutStoredAnswer(t, m, jobId, beeremote.Job_SCHEDULED)
+
+		replay, err := m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.NoError(t, err, "a job with no stored answer must not be read as refused, or the builder would undo under it")
+		assert.Equal(t, jobId, replay.GetJob().GetId())
+	})
+
+	t.Run("a job that failed replays as refused", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(plainWithId(jobId), "")
+		require.NoError(t, err)
+		withoutStoredAnswer(t, m, jobId, beeremote.Job_FAILED)
+
+		_, err = m.SubmitJobRequest(plainWithId(jobId), "")
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "was not accepted")
+	})
+}
+
+// TestSubmitStatus checks the mapping between submit errors and wire statuses, and that a stored
+// status rebuilds an error that maps back to the same status.
+func TestSubmitStatus(t *testing.T) {
+	tests := []struct {
+		err  error
+		want beeremote.SubmitJobResponse_ResponseStatus
+	}{
+		{nil, beeremote.SubmitJobResponse_CREATED},
+		{rst.ErrJobAlreadyComplete, beeremote.SubmitJobResponse_ALREADY_COMPLETE},
+		{rst.ErrJobAlreadyOffloaded, beeremote.SubmitJobResponse_ALREADY_OFFLOADED},
+		{rst.ErrJobAlreadyExists, beeremote.SubmitJobResponse_EXISTING},
+		{rst.ErrJobFailedPrecondition, beeremote.SubmitJobResponse_FAILED_PRECONDITION},
+		// ErrJobBlockedByActiveJob unwraps to ErrJobNotAllowed and must keep its own status.
+		{rst.ErrJobBlockedByActiveJob, beeremote.SubmitJobResponse_BLOCKED_BY_ACTIVE_JOB},
+		{rst.ErrJobNotAllowed, beeremote.SubmitJobResponse_NOT_ALLOWED},
+		// ErrReservationMissing unwraps to ErrJobNotReserved and must keep its own status.
+		{rst.ErrReservationMissing, beeremote.SubmitJobResponse_RESERVATION_MISSING},
+		{rst.ErrJobNotReserved, beeremote.SubmitJobResponse_NOT_RESERVED},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want.String(), func(t *testing.T) {
+			got, ok := SubmitResponseStatus(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+
+			job := &Job{Job: beeremote.Job_builder{
+				Id:           "job",
+				Status:       beeremote.Job_Status_builder{Message: "detail"}.Build(),
+				SubmitStatus: got,
+			}.Build()}
+			roundTrip, ok := SubmitResponseStatus(storedSubmitError(job))
+			require.True(t, ok)
+			assert.Equal(t, tt.want, roundTrip, "a replay must get the same status as the first request")
+		})
+	}
+
+	status, ok := SubmitResponseStatus(errors.New("an unexpected failure"))
+	assert.False(t, ok, "other errors are returned to the caller as gRPC errors")
+	assert.Equal(t, beeremote.SubmitJobResponse_INVALID, status)
+}
+
+// TestSubmitJobRequestRejectsAlreadyExistsFromGeneration checks that generating work requests can't
+// produce an EXISTING answer. Only the conflict check may answer EXISTING, because only it can name
+// the active job the answer refers to, and a sync node counts EXISTING as success for a claim.
+func TestSubmitJobRequestRejectsAlreadyExistsFromGeneration(t *testing.T) {
+	m := newReservationManager(t)
+	mockRST, ok := m.workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	require.True(t, ok)
+	mockRST.On("GenerateWorkRequests", mock.Anything, mock.Anything).Return(nil, nil, rst.ErrJobAlreadyExists)
+
+	request := beeremote.JobRequest_builder{
+		Path:                "/test/bulkfile",
+		RemoteStorageTarget: 1,
+		Sync:                flex.SyncJob_builder{Operation: flex.SyncJob_UPLOAD}.Build(),
+	}.Build()
+	result, err := m.SubmitJobRequest(request, "")
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, rst.ErrJobAlreadyExists, "the answer must not reach the caller as EXISTING")
+	assert.ErrorContains(t, err, "this is a bug")
+	assert.Equal(t, beeremote.Job_FAILED, result.GetJob().GetStatus().GetState(), "the request is recorded so the failure is visible")
+}
+
+// recordLockReleases replaces the release function with one that applies the real rule but never
+// touches a file. Each call appends whether the rule kept the lock. The returned function reads
+// the decisions so far.
+func recordLockReleases(m *Manager) func() []bool {
+	var kept []bool
+	m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+		needed := anyJobNeedsFileLock(jobs)
+		kept = append(kept, needed)
+		return !needed, nil
+	}
+	return func() []bool { return kept }
+}
+
+// TestSubmitJobRequestReleasesAtEndOfCall checks that every submit ends with a release attempt
+// decided by the rule, so a refused or terminal request never leaves a lock no job needs.
+func TestSubmitJobRequestReleasesAtEndOfCall(t *testing.T) {
+	t.Run("a scheduled job keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		decisions := recordLockReleases(m)
+
+		_, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true}, decisions())
+	})
+
+	t.Run("a refused request releases the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		decisions := recordLockReleases(m)
+		request := newReservationRequest(false, "")
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "the file changed",
+		})
+
+		_, err := m.SubmitJobRequest(request, "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
+		assert.Equal(t, []bool{false}, decisions(), "the CANCELLED job needs no lock")
+	})
+
+	t.Run("a refused claim releases the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		require.NoError(t, m.cancelReservedRequest(newReservationRequest(false, "").GetPath(), jobId))
+		decisions := recordLockReleases(m)
+
+		_, err = m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotReserved)
+		assert.Equal(t, []bool{false}, decisions(), "no job needs the lock, so the claimer undoes unlocked")
+	})
+}
+
+// TestSubmitJobRequestRecordsFailedRelease checks that a release that fails at the end of a request
+// is recorded on a FAILED job of that request. The job shows the stuck lock, and cancelling it
+// retries the release.
+func TestSubmitJobRequestRecordsFailedRelease(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	// failReleases makes every release the rule allows fail, as an unreachable metadata server
+	// would.
+	failReleases := func(m *Manager) {
+		m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			if anyJobNeedsFileLock(jobs) {
+				return false, nil
+			}
+			return false, errors.New("metadata server unreachable")
+		}
+	}
+	requireFailedRelease := func(t *testing.T, m *Manager, result *beeremote.JobResult) {
+		t.Helper()
+		job := getReservationTestJob(t, m, result.GetJob().GetId())
+		assert.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+		assert.Contains(t, job.GetStatus().GetMessage(), "unable to release the content lock, cancel this job to try again")
+	}
+	refused := func(jobId string) *beeremote.JobRequest {
+		request := newReservationRequest(false, "")
+		request.SetJobId(jobId)
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: "the file changed",
+		})
+		return request
+	}
+
+	t.Run("the job the request recorded is turned FAILED", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+
+		result, err := m.SubmitJobRequest(refused(jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrJobFailedPrecondition, "the answer is not changed")
+		require.Equal(t, jobId, result.GetJob().GetId())
+		requireFailedRelease(t, m, result)
+	})
+
+	t.Run("a request that recorded nothing gets a FAILED job under its ID", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+
+		result, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+
+		require.ErrorIs(t, err, rst.ErrReservationMissing)
+		require.Equal(t, jobId, result.GetJob().GetId())
+		requireFailedRelease(t, m, result)
+	})
+
+	t.Run("another request's job is left alone", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(refused(jobId), "")
+		require.Error(t, err)
+		failReleases(m)
+		other := refused(jobId)
+		other.SetRemoteStorageTarget(2)
+
+		result, err := m.SubmitJobRequest(other, "")
+
+		require.ErrorIs(t, err, rst.ErrJobNotAllowed)
+		require.NotEqual(t, jobId, result.GetJob().GetId(), "the failure must be recorded on a job of its own")
+		requireFailedRelease(t, m, result)
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+	})
+
+	t.Run("cancelling the FAILED job retries the release", func(t *testing.T) {
+		m := newReservationManager(t)
+		failReleases(m)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(refused(jobId), "")
+		require.Error(t, err)
+		decisions := recordLockReleases(m)
+
+		_, err = m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:     path,
+			JobId:    new(jobId),
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build())
+
+		require.NoError(t, err)
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+	})
+}
+
+// abortRecorder wraps an RST and counts the aborts remote asks it for. A test reads aborts to
+// prove a cancel did or did not reach the RST abort.
+type abortRecorder struct {
+	rst.Provider
+	aborts int
+	// err, when set, is what every abort returns.
+	err error
+	// events, when set, gets "abort" appended for every abort, so a test can order it against
+	// other calls.
+	events *[]string
+}
+
+func (r *abortRecorder) CompleteWorkRequests(ctx context.Context, job *beeremote.Job, workResults []*flex.Work, abort bool) error {
+	if abort {
+		r.aborts++
+		if r.events != nil {
+			*r.events = append(*r.events, "abort")
+		}
+		if r.err != nil {
+			return r.err
+		}
+	}
+	return r.Provider.CompleteWorkRequests(ctx, job, workResults, abort)
+}
+
+// recordAborts replaces RST 1 of m with an abortRecorder and returns it.
+func recordAborts(m *Manager) *abortRecorder {
+	recorder := &abortRecorder{Provider: m.workerManager.RemoteStorageTargets[1]}
+	m.workerManager.RemoteStorageTargets[1] = recorder
+	return recorder
+}
+
+// TestCancelJobAbort checks when a cancel runs the RST abort. The abort decides from the job's own
+// request and work results what to undo, and it is safe to repeat. So a cancel runs it for every
+// job, except one whose request reports that nothing was changed. The RST's own abort tests cover
+// what it undoes for each kind of job.
+func TestCancelJobAbort(t *testing.T) {
+	path := newReservationRequest(false, "").GetPath()
+	failReleases := func(m *Manager) {
+		m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			if anyJobNeedsFileLock(jobs) {
+				return false, nil
+			}
+			return false, errors.New("metadata server unreachable")
+		}
+	}
+	cancel := func(t *testing.T, m *Manager, jobId string, force bool) {
+		t.Helper()
+		response, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:        path,
+			JobId:       new(jobId),
+			NewState:    beeremote.UpdateJobsRequest_CANCELLED,
+			ForceUpdate: force,
+		}.Build())
+		require.NoError(t, err)
+		require.True(t, response.GetOk(), response.GetMessage())
+	}
+
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a refused claim whose release failed (force=%t)", force), func(t *testing.T) {
+			m := newReservationManager(t)
+			failReleases(m)
+			jobId := uuid.NewString()
+			// A claim of a job that does not exist is refused before any job is recorded. Its own
+			// job undoes its changes, and the failed release records it.
+			recorder := recordAborts(m)
+			_, err := m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+			require.ErrorIs(t, err, rst.ErrReservationMissing)
+			require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			require.Equal(t, 1, recorder.aborts, "remote undoes a refused claim's changes")
+			decisions := recordLockReleases(m)
+
+			cancel(t, m, jobId, force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, 2, recorder.aborts, "the cancel repeats the abort, which is safe")
+			assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+		})
+
+		t.Run(fmt.Sprintf("a finished job whose release failed (force=%t)", force), func(t *testing.T) {
+			m := newReservationManager(t)
+			result, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+			require.NoError(t, err)
+			jobId := result.GetJob().GetId()
+			failReleases(m)
+			for _, work := range result.GetWorkResults() {
+				require.NoError(t, m.UpdateWork(flex.Work_builder{
+					Path:      path,
+					JobId:     jobId,
+					RequestId: work.GetWork().GetRequestId(),
+					Status:    flex.Work_Status_builder{State: flex.Work_COMPLETED}.Build(),
+					Parts:     []*flex.Work_Part{},
+				}.Build()))
+			}
+			job := getReservationTestJob(t, m, jobId)
+			require.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+			require.Contains(t, job.GetStatus().GetMessage(), "unable to clear lock")
+			decisions := recordLockReleases(m)
+			recorder := recordAborts(m)
+
+			cancel(t, m, jobId, force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, 1, recorder.aborts, "the abort finds the finished work and leaves it")
+			assert.Equal(t, []bool{false}, decisions(), "the cancel must retry the release")
+		})
+	}
+
+	t.Run("a refused claim is aborted before the lock release", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		var events []string
+		recorder := recordAborts(m)
+		recorder.events = &events
+		m.releaseUnusedFileLockFn = func(path string, jobs map[string]*Job) (bool, error) {
+			events = append(events, "release")
+			return !anyJobNeedsFileLock(jobs), nil
+		}
+		claim := newReservationRequest(false, jobId)
+		claim.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ERROR,
+			Message: "rollback also failed",
+		})
+
+		_, err = m.SubmitJobRequest(claim, "")
+
+		require.Error(t, err)
+		assert.Equal(t, []string{"abort", "release"}, events, "the undo must run while the lock still holds")
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+	})
+
+	t.Run("a refused claim whose abort failed keeps the lock", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		recorder := recordAborts(m)
+		recorder.err = errors.New("unable to restore the stub")
+		decisions := recordLockReleases(m)
+		claim := newReservationRequest(false, jobId)
+		claim.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_ERROR,
+			Message: "rollback also failed",
+		})
+
+		_, err = m.SubmitJobRequest(claim, "")
+
+		require.Error(t, err)
+		job := getReservationTestJob(t, m, jobId)
+		assert.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+		assert.Contains(t, job.GetStatus().GetMessage(), "unable to restore the stub")
+		assert.Equal(t, []bool{true}, decisions())
+	})
+
+	t.Run("a refused claim for a removed RST is aborted once the RST is back", func(t *testing.T) {
+		m := newReservationManager(t)
+		jobId := uuid.NewString()
+		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
+		require.NoError(t, err)
+		// Remote refuses the claim because RST 1 is gone, then the RST is configured again.
+		provider := m.workerManager.RemoteStorageTargets[1]
+		delete(m.workerManager.RemoteStorageTargets, 1)
+		_, err = m.SubmitJobRequest(newReservationRequest(false, jobId), "")
+		require.Error(t, err)
+		m.workerManager.RemoteStorageTargets[1] = provider
+		require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		recorder := recordAborts(m)
+
+		cancel(t, m, jobId, false)
+
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		assert.Equal(t, 1, recorder.aborts)
+	})
+
+	// A request that carries a generation status is never scheduled. Its status decides whether a
+	// cancel may run the RST abort. ERROR is defined as needing CompleteWorkRequests to clean up,
+	// so it keeps the abort. The release at the end of these submits succeeds, so only the
+	// generation status can mark the job.
+	for _, tc := range []struct {
+		state      beeremote.JobRequest_GenerationStatus_State
+		message    string
+		recorded   beeremote.Job_State
+		force      bool
+		wantAborts int
+	}{
+		{beeremote.JobRequest_GenerationStatus_ERROR, "rollback also failed", beeremote.Job_FAILED, false, 1},
+		{beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, "the file changed", beeremote.Job_CANCELLED, true, 0},
+		{beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE, "", beeremote.Job_COMPLETED, true, 0},
+		{beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED, "", beeremote.Job_OFFLOADED, true, 0},
+	} {
+		t.Run(fmt.Sprintf("a request with generation status %s", tc.state), func(t *testing.T) {
+			m := newReservationManager(t)
+			recordLockReleases(m)
+			jobId := uuid.NewString()
+			request := newReservationRequest(false, "")
+			request.SetJobId(jobId)
+			request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{State: tc.state, Message: tc.message})
+			_, err := m.SubmitJobRequest(request, "")
+			require.Error(t, err)
+			require.Equal(t, tc.recorded, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			recorder := recordAborts(m)
+
+			cancel(t, m, jobId, tc.force)
+
+			assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+			assert.Equal(t, tc.wantAborts, recorder.aborts)
+		})
+	}
+
+	t.Run("a job that failed after its work ran is aborted", func(t *testing.T) {
+		m := newReservationManager(t)
+		result, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		jobId := result.GetJob().GetId()
+		for _, work := range result.GetWorkResults() {
+			require.NoError(t, m.UpdateWork(flex.Work_builder{
+				Path:      path,
+				JobId:     jobId,
+				RequestId: work.GetWork().GetRequestId(),
+				Status:    flex.Work_Status_builder{State: flex.Work_FAILED}.Build(),
+				Parts:     []*flex.Work_Part{},
+			}.Build()))
+		}
+		require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
+		recorder := recordAborts(m)
+
+		cancel(t, m, jobId, true)
+
+		assert.Equal(t, 1, recorder.aborts, "work ran and failed, so the RST may hold partial results")
+	})
+
+	t.Run("a forced cancel whose abort failed leaves the job cancelled", func(t *testing.T) {
+		m := newReservationManager(t)
+		result, err := m.SubmitJobRequest(newReservationRequest(false, ""), "")
+		require.NoError(t, err)
+		jobId := result.GetJob().GetId()
+		// A FAILED job skips stopping its work on a cancel that is not forced, so the abort decides
+		// the outcome.
+		for _, work := range result.GetWorkResults() {
+			require.NoError(t, m.UpdateWork(flex.Work_builder{
+				Path:      path,
+				JobId:     jobId,
+				RequestId: work.GetWork().GetRequestId(),
+				Status:    flex.Work_Status_builder{State: flex.Work_FAILED}.Build(),
+				Parts:     []*flex.Work_Part{},
+			}.Build()))
+		}
+		recorder := recordAborts(m)
+		recorder.err = errors.New("failed to replace incomplete download with stub file")
+
+		response, err := m.UpdateJobs(beeremote.UpdateJobsRequest_builder{
+			Path:     path,
+			JobId:    new(jobId),
+			NewState: beeremote.UpdateJobsRequest_CANCELLED,
+		}.Build())
+		require.NoError(t, err)
+		require.False(t, response.GetOk())
+		job := getReservationTestJob(t, m, jobId)
+		require.Equal(t, beeremote.Job_FAILED, job.GetStatus().GetState())
+		require.Contains(t, job.GetStatus().GetMessage(), "failed to replace incomplete download with stub file")
+
+		cancel(t, m, jobId, true)
+
+		assert.Equal(t, beeremote.Job_CANCELLED, getReservationTestJob(t, m, jobId).GetStatus().GetState(), "force leaves the file as it is")
+	})
 }
