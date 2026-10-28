@@ -93,6 +93,45 @@ func DeterminePathInputMethod(paths []string, recurse bool, stdinDelimiter strin
 	return pm, nil
 }
 
+// ResolveMountFromFirstPath runs before a command first contacts the management node. It resolves
+// the BeeGFS mount of the first input path with config.BeeGFSClient(). ManagementClient() then
+// takes the filesystem from that mount, so --mgmtd-addr auto works when several filesystems are
+// mounted. Without it, the walk resolves the mount only after the management node was chosen.
+//
+// The first path depends on the input method:
+//   - list: the first path in the list.
+//   - recursion: the directory to walk.
+//   - stdin: none. Backends return their result channels before any path arrives, and the walk
+//     reads stdin on its own goroutine. Reading the first path here would block the backend
+//     instead. The CLI turns Ctrl+C into a context cancel, and a blocked stdin read does not watch
+//     the context. So with several filesystems mounted, paths from stdin need --mount.
+//
+// It does nothing when --mount is set. --mount already selects the filesystem, and BeeGFSClient()
+// ignores the path then. Resolving --mount none early would also change what the walk sees: only
+// the first BeeGFSClient() call returns filesystem.ErrUnmounted.
+//
+// It returns any error from resolving the mount. The walk would fail on the same path otherwise.
+func (m PathInputMethod) ResolveMountFromFirstPath() error {
+	if viper.IsSet(config.BeeGFSMountPointKey) {
+		return nil
+	}
+
+	var firstPath string
+	switch m.inputType {
+	case PathInputList:
+		firstPath = m.pathsViaList[0]
+	case PathInputRecursion:
+		firstPath = m.pathsViaRecursion
+	case PathInputStdin:
+		return nil
+	default:
+		return fmt.Errorf("unable to resolve the mount of the first path (path input method is %s)", m.inputType)
+	}
+
+	_, err := config.BeeGFSClient(firstPath)
+	return err
+}
+
 // The PathInputMethod is usually determined by the frontend then the backend calls ProcessPaths.
 // ProcessPathOpts contains any settings that should always be determined by the backend.
 type ProcessPathOpts struct {

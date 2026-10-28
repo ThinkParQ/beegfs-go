@@ -32,6 +32,8 @@ func TestReportJSONSchema(t *testing.T) {
 					Status:  Critical,
 					Summary: "over threshold",
 					Detail: BusyDetail{
+						DegradedThreshold: 16,
+						CriticalThreshold: 512,
 						Nodes: []BusyNode{{
 							Alias:          "storage_1",
 							NumID:          1,
@@ -86,10 +88,28 @@ func TestReportJSONSchema(t *testing.T) {
 	assert.Contains(t, s, `"status":"degraded"`)
 	assert.Contains(t, s, `"fallbackStatus":"degraded"`)
 
-	// Busy detail is always present; thresholds are reported in the summary, not per node.
-	assert.Contains(t, s, `"queuedRequests":812`)
-	assert.NotContains(t, s, "degradedThreshold")
-	assert.NotContains(t, s, "criticalThreshold")
+	// Busy detail is always present. The thresholds are reported once per check, on the busy detail,
+	// and not on each node. They are configurable, so consumers cannot infer them from the queued
+	// request counts.
+	var decoded struct {
+		Sections []struct {
+			Checks []struct {
+				Detail map[string]json.RawMessage `json:"detail"`
+			} `json:"checks"`
+		} `json:"sections"`
+	}
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	busyDetail := decoded.Sections[0].Checks[0].Detail
+	assert.JSONEq(t, `16`, string(busyDetail["degradedThreshold"]))
+	assert.JSONEq(t, `512`, string(busyDetail["criticalThreshold"]))
+	var busyNodes []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(busyDetail["nodes"], &busyNodes))
+	require.Len(t, busyNodes, 1)
+	assert.JSONEq(t, `812`, string(busyNodes[0]["queuedRequests"]))
+	assert.NotContains(t, busyNodes[0], "degradedThreshold")
+	assert.NotContains(t, busyNodes[0], "criticalThreshold")
+	// A node whose stats were read has no error key.
+	assert.NotContains(t, busyNodes[0], "error")
 
 	// Targets detail is serialized.
 	assert.Contains(t, s, `"targets":`)

@@ -20,16 +20,16 @@ import (
 	"google.golang.org/grpc/peer"
 )
 
-// QueuedReqsDegradedThreshold and QueuedReqsCriticalThreshold are the queued-request counts at which
-// a node is considered degraded or critical. They are exported so the frontend and the structured
-// output can reference them; they may become configurable later.
+// DefaultQueuedReqsDegradedThreshold and DefaultQueuedReqsCriticalThreshold are the default
+// queued-request counts at which a node is considered degraded or critical. They are exported so
+// the frontend can use them as flag defaults.
 const (
-	QueuedReqsDegradedThreshold = 16
-	QueuedReqsCriticalThreshold = 512
+	DefaultQueuedReqsDegradedThreshold uint32 = 16
+	DefaultQueuedReqsCriticalThreshold uint32 = 512
 )
 
-// CollectConfig controls how the connection checks are performed. It only carries options that
-// affect collection; how much detail is displayed is a rendering concern owned by the frontend.
+// CollectConfig controls how the checks are performed. It only carries options that affect
+// collection; how much detail is displayed is a rendering concern owned by the frontend.
 type CollectConfig struct {
 	// ConnectionTimeout bounds establishing new client/server connections for the connection check.
 	ConnectionTimeout time.Duration
@@ -39,6 +39,26 @@ type CollectConfig struct {
 	// FilterByMounts limits the connection check to specific client mount paths (empty means all
 	// mounts of the managed file system).
 	FilterByMounts []string
+	// QueuedReqsDegradedThreshold and QueuedReqsCriticalThreshold are the queued-request counts a
+	// server node must exceed to be considered degraded or critical by the busy nodes check.
+	// Callers that don't have a reason to use different values should set them from
+	// DefaultQueuedReqsDegradedThreshold and DefaultQueuedReqsCriticalThreshold. The degraded
+	// threshold must be less than the critical one (see Validate). The zero value of CollectConfig
+	// does not meet this rule, so Collect rejects it.
+	QueuedReqsDegradedThreshold uint32
+	QueuedReqsCriticalThreshold uint32
+}
+
+// Validate returns an error if cfg breaks a rule Collect relies on. Collect calls it before it
+// contacts any service. The rules:
+//   - The degraded threshold must be less than the critical threshold. The busy nodes check tests
+//     the critical threshold first. With equal or inverted thresholds, every node past the degraded
+//     threshold is also past the critical one, so the check could never report degraded.
+func (cfg CollectConfig) Validate() error {
+	if cfg.QueuedReqsDegradedThreshold >= cfg.QueuedReqsCriticalThreshold {
+		return fmt.Errorf("queued requests degraded threshold (%d) must be less than the critical threshold (%d)", cfg.QueuedReqsDegradedThreshold, cfg.QueuedReqsCriticalThreshold)
+	}
+	return nil
 }
 
 // Collect runs all health checks and returns the results as a Report. It performs no output; the
@@ -46,27 +66,23 @@ type CollectConfig struct {
 //
 // When updating this function consider if QuickChecks (in the frontend) needs to be updated as well.
 func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	log, _ := config.GetLogger()
 
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
-		return nil, err
+		// ManagementClient() contacts the management node when it checks an auto-configured
+		// address, so it can fail with the same TLS errors as GetFsUUID() below.
+		return nil, withTLSHint(err)
 	}
 
 	fsUUID, err := mgmtd.GetFsUUID(ctx)
 	// If the mgmtd is not available other checks cannot proceed and fail in confusing ways.
 	if err != nil {
-		// TLS errors are vague, offer some hints for common misconfigurations:
-		if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
-		}
-		if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
-		}
-		if strings.Contains(err.Error(), "failed to verify certificate") {
-			return nil, fmt.Errorf("unable to proceed without a working management node: %w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
-		}
-		return nil, fmt.Errorf("unable to proceed without a working management node: %w", err)
+		return nil, withTLSHint(fmt.Errorf("unable to proceed without a working management node: %w", err))
 	}
 
 	report := &Report{
@@ -98,19 +114,20 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 		return nil, err
 	}
 	busy := Section{Title: SectionBusyNodes}
-	metaBusy := checkForBusyNodes(metaNodes)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: busySummary(metaBusy), Detail: newBusyDetail(metaNodes)})
-	storageBusy := checkForBusyNodes(storageNodes)
-	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: busySummary(storageBusy), Detail: newBusyDetail(storageNodes)})
+	degraded, critical := cfg.QueuedReqsDegradedThreshold, cfg.QueuedReqsCriticalThreshold
+	metaBusy, metaSummary := checkForBusyNodes(metaNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Metadata Nodes", Status: metaBusy, Summary: metaSummary, Detail: newBusyDetail(metaNodes, degraded, critical)})
+	storageBusy, storageSummary := checkForBusyNodes(storageNodes, degraded, critical)
+	busy.Checks = append(busy.Checks, Check{Name: "Busy Storage Nodes", Status: storageBusy, Summary: storageSummary, Detail: newBusyDetail(storageNodes, degraded, critical)})
 	report.Sections = append(report.Sections, busy)
 
 	// Targets.
 	reachability, consistency, capacity, mapping := CheckTargets(targets)
 	targetsSection := Section{Title: SectionTargets, Detail: newTargetsDetail(targets)}
 	targetsSection.Checks = append(targetsSection.Checks,
-		Check{Name: "Reachability", Status: reachability, Summary: healthyOr(reachability, "All targets are responding.", "Not all targets are responding.")},
-		Check{Name: "Consistency", Status: consistency, Summary: healthyOr(consistency, "All mirrors are synchronized.", "Not all mirrors are synchronized.")},
-		Check{Name: "Available Capacity", Status: capacity, Summary: healthyOr(capacity, "All targets have sufficient free space based on the thresholds defined by the management service's configuration.", "Not all targets have sufficient free space based on the thresholds defined by the management service's configuration.")},
+		Check{Name: "Reachability", Status: reachability, Summary: healthyOr(reachability, "All targets are responding.", "Not all targets are responding, or the state of some targets is unknown.")},
+		Check{Name: "Consistency", Status: consistency, Summary: healthyOr(consistency, "All mirrors are synchronized.", "Not all mirrors are synchronized, or the state of some targets is unknown.")},
+		Check{Name: "Available Capacity", Status: capacity, Summary: healthyOr(capacity, "All targets have sufficient free space based on the thresholds defined by the management service's configuration.", "Not all targets have sufficient free space based on the thresholds defined by the management service's configuration, or some targets have not reported their free space yet.")},
 		Check{Name: "Mapping Status", Status: mapping, Summary: healthyOr(mapping, "All targets are mapped to a storage node.", "Not all targets are mapped to a storage node.")},
 	)
 	report.Sections = append(report.Sections, targetsSection)
@@ -162,6 +179,22 @@ func Collect(ctx context.Context, cfg CollectConfig) (*Report, error) {
 	return report, nil
 }
 
+// withTLSHint adds a hint to an error from contacting the management node when the error matches
+// a common TLS misconfiguration. The gRPC errors for these are vague. Other errors are returned
+// unchanged.
+func withTLSHint(err error) error {
+	if strings.Contains(err.Error(), "tls: first record does not look like a TLS handshake") {
+		return fmt.Errorf("%w\n(hint: TLS does not appear to be enabled on the management, try setting %s)", err, config.TlsDisableKey)
+	}
+	if strings.Contains(err.Error(), "error reading server preface: unexpected EOF") {
+		return fmt.Errorf("%w\n(hint: TLS appears to be enabled on the management but disabled in CTL, try unsetting %s and configure %s if needed)", err, config.TlsDisableKey, config.TlsCertFile)
+	}
+	if strings.Contains(err.Error(), "failed to verify certificate") {
+		return fmt.Errorf("%w\n(hint: TLS appears to be enabled on the management, verify CTL has the correct certificates installed at the path specified by %s or added to the system certificate chain)", err, config.TlsCertFile)
+	}
+	return err
+}
+
 // healthyOr returns healthyMsg when s is Healthy and unhealthyMsg otherwise.
 func healthyOr(s Status, healthyMsg, unhealthyMsg string) string {
 	if s == Healthy {
@@ -170,11 +203,18 @@ func healthyOr(s Status, healthyMsg, unhealthyMsg string) string {
 	return unhealthyMsg
 }
 
-func busySummary(s Status) string {
-	if s == Healthy {
-		return fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", QueuedReqsDegradedThreshold, QueuedReqsCriticalThreshold)
+// busySummary describes the outcome of the busy nodes check. queueStatus is the status from the
+// queued request counts alone. unreadable is the number of nodes, out of total, whose stats could not
+// be read.
+func busySummary(queueStatus Status, unreadable, total int, degradedThreshold, criticalThreshold uint32) string {
+	summary := fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
+	if queueStatus == Healthy {
+		summary = fmt.Sprintf("Number of queued requests does not exceed the degraded (%d) or critical (%d) thresholds.", degradedThreshold, criticalThreshold)
 	}
-	return fmt.Sprintf("Number of queued requests exceeds the degraded (%d) or critical (%d) thresholds.", QueuedReqsDegradedThreshold, QueuedReqsCriticalThreshold)
+	if unreadable > 0 {
+		summary = fmt.Sprintf("Unable to read stats from %d of %d nodes. ", unreadable, total) + summary
+	}
+	return summary
 }
 
 // checkLicense maps a license check result to a status and human-readable summary.
@@ -218,7 +258,10 @@ func checkForFallbacks(client procfs.Client) Status {
 }
 
 // CheckTargets returns the reachability, consistency, capacity, and mapping status across all
-// targets, each reflecting the target in the worst condition.
+// targets, each reflecting the target in the worst condition. A state that is empty or not known to
+// this function counts as degraded, because the check cannot tell whether the target is healthy.
+// The management service leaves the capacity pool empty for a target that has not reported its free
+// space and inodes yet.
 func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consistency, capacity, mapping Status) {
 	reachability, consistency, capacity, mapping = Healthy, Healthy, Healthy, Healthy
 	for _, t := range targets {
@@ -229,6 +272,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			reachability.updateStatusIfWorse(Degraded)
 		case tgtBackend.ReachabilityOffline:
 			reachability.updateStatusIfWorse(Critical)
+		default:
+			reachability.updateStatusIfWorse(Degraded)
 		}
 
 		switch t.ConsistencyState {
@@ -238,6 +283,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			consistency.updateStatusIfWorse(Degraded)
 		case tgtBackend.ConsistencyBad:
 			consistency.updateStatusIfWorse(Critical)
+		default:
+			consistency.updateStatusIfWorse(Degraded)
 		}
 
 		switch t.CapacityPool {
@@ -247,6 +294,8 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 			capacity.updateStatusIfWorse(Degraded)
 		case tgtBackend.CapacityEmergency:
 			capacity.updateStatusIfWorse(Critical)
+		default:
+			capacity.updateStatusIfWorse(Degraded)
 		}
 
 		if t.Node == nil {
@@ -257,17 +306,26 @@ func CheckTargets(targets []tgtBackend.GetTargets_Result) (reachability, consist
 }
 
 // checkForBusyNodes returns the overall busy status across nodes, reflecting the node in the worst
-// condition.
-func checkForBusyNodes(nodes []stats.NodeStats) Status {
-	busy := Healthy
+// condition, and a summary of the result. A node whose stats could not be read is critical. A node
+// that does not answer is likely not serving requests at all, which is worse than being busy.
+func checkForBusyNodes(nodes []stats.NodeStats, degradedThreshold, criticalThreshold uint32) (Status, string) {
+	queueStatus := Healthy
+	unreadable := 0
 	for _, node := range nodes {
-		if node.Stats.QueuedRequests > QueuedReqsCriticalThreshold {
-			busy.updateStatusIfWorse(Critical)
-		} else if node.Stats.QueuedRequests > QueuedReqsDegradedThreshold {
-			busy.updateStatusIfWorse(Degraded)
+		switch {
+		case node.Err != nil:
+			unreadable++
+		case node.Stats.QueuedRequests > criticalThreshold:
+			queueStatus.updateStatusIfWorse(Critical)
+		case node.Stats.QueuedRequests > degradedThreshold:
+			queueStatus.updateStatusIfWorse(Degraded)
 		}
 	}
-	return busy
+	busy := queueStatus
+	if unreadable > 0 {
+		busy.updateStatusIfWorse(Critical)
+	}
+	return busy, busySummary(queueStatus, unreadable, len(nodes), degradedThreshold, criticalThreshold)
 }
 
 // CheckTLSCertificates checks the TLS certificates presented by a peer service and returns a health
