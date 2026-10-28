@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/stretchr/testify/mock"
@@ -36,7 +37,7 @@ func (n *MockNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatRes
 	//  args := n.Called()
 	// return args.Get(0).(*flex.HeartbeatResponse), args.Error(1)
 	return flex.HeartbeatResponse_builder{
-		IsReady: true,
+		State: flex.HeartbeatResponse_READY,
 	}.Build(), nil
 }
 
@@ -48,10 +49,19 @@ func (n *MockNode) disconnect() error {
 func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
+	// Matches BeeSyncNode: a draining node may still be offered work as a last resort, so only an
+	// unreachable node is refused outright here.
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
 	args := n.Called(request)
+
+	// A mock node simulates declining while draining by returning ErrNodeDraining, which is handled
+	// the same way BeeSyncNode handles a node that answers with SubmitWorkResponse_DRAINING.
+	if errors.Is(args.Error(1), ErrNodeDraining) {
+		n.setState(DRAINING)
+		return nil, ErrNodeDraining
+	}
 
 	if args.Error(1) != nil {
 		select {
@@ -82,8 +92,9 @@ func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 func (n *MockNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
-		return nil, fmt.Errorf("unable to submit work request to an offline node")
+	// Matches BeeSyncNode: work already assigned to a draining node can still be updated.
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
+		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
 	args := n.Called(request)
 

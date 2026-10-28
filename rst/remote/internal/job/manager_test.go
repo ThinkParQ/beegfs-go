@@ -135,7 +135,7 @@ func TestManage(t *testing.T) {
 		RemoteStorageTarget: 1,
 	}.Build()
 
-	_, err = jobManager.SubmitJobRequest(testJobRequest)
+	_, err = jobManager.SubmitJobRequest(testJobRequest, "")
 	require.NoError(t, err)
 
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
@@ -158,7 +158,7 @@ func TestManage(t *testing.T) {
 	scheduledJobID := getJobsResponse.GetResults()[0].GetJob().GetId()
 
 	// If we try to submit another job for the same path with the same RST an error should be returned:
-	jr, err := jobManager.SubmitJobRequest(testJobRequest)
+	jr, err := jobManager.SubmitJobRequest(testJobRequest, "")
 	assert.NotNil(t, jr) // Should get back the original job request.
 	assert.Error(t, err)
 
@@ -181,7 +181,7 @@ func TestManage(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 4}.Build(),
 		RemoteStorageTarget: 2,
 	}.Build()
-	jr, err = jobManager.SubmitJobRequest(testJobRequest2)
+	jr, err = jobManager.SubmitJobRequest(testJobRequest2, "")
 	assert.NoError(t, err)
 	assert.Equal(t, beeremote.Job_SCHEDULED, jr.GetJob().GetStatus().GetState())
 
@@ -190,7 +190,8 @@ func TestManage(t *testing.T) {
 		Path:     "/test/myfile",
 		NewState: beeremote.UpdateJobsRequest_CANCELLED,
 	}.Build()
-	jobManager.JobUpdates <- updateJobRequest
+	_, err = jobManager.UpdateJobs(updateJobRequest)
+	require.NoError(t, err)
 
 	getJobRequestsByID := beeremote.GetJobsRequest_builder{
 		ByJobIdAndPath: beeremote.GetJobsRequest_QueryIdAndPath_builder{
@@ -201,16 +202,11 @@ func TestManage(t *testing.T) {
 		IncludeWorkResults:  true,
 	}.Build()
 
-	require.Eventually(t, func() bool {
-		responses = make(chan *beeremote.GetJobsResponse, 1)
-		if err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses); err != nil {
-			return false
-		}
-		getJobsResponse = <-responses
-		return len(getJobsResponse.GetResults()) > 0 &&
-			getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
-	}, 10*time.Second, 100*time.Millisecond, "job did not reach CANCELLED state")
+	responses = make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobRequestsByID, responses)
 	require.NoError(t, err)
+	getJobsResponse = <-responses
+	require.Len(t, getJobsResponse.GetResults(), 1)
 	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
 	for _, wr := range getJobsResponse.GetResults()[0].GetWorkResults() {
@@ -308,11 +304,11 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 		RemoteStorageTarget: 2,
 	}.Build()
 
-	_, err = jobManager.SubmitJobRequest(testJobRequest1)
+	_, err = jobManager.SubmitJobRequest(testJobRequest1, "")
 	require.NoError(t, err)
 
 	// We only interact with the second job request by its job ID:
-	submitJobResponse2, err := jobManager.SubmitJobRequest(testJobRequest2)
+	submitJobResponse2, err := jobManager.SubmitJobRequest(testJobRequest2, "")
 	require.NoError(t, err)
 
 	////////////////////////////////////
@@ -451,7 +447,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	// Test deleting completed jobs:
 	////////////////////////////////
 
-	response, err := jobManager.SubmitJobRequest(testJobRequest1)
+	response, err := jobManager.SubmitJobRequest(testJobRequest1, "")
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	// Complete the job by simulating a worker node updating the results.
@@ -605,29 +601,22 @@ func TestManageErrorHandling(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 4}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	jobManager.JobRequests <- testJobRequest
+	// An error is expected: the mock worker refuses to schedule the work requests, so JobMgr
+	// cancels whatever it did schedule and the overall job ends up cancelled.
+	_, err = jobManager.SubmitJobRequest(testJobRequest, "")
+	assert.Error(t, err)
 
 	getJobRequestsByPrefix := beeremote.GetJobsRequest_builder{
 		ByPathPrefix:        new("/"),
 		IncludeWorkRequests: false,
 		IncludeWorkResults:  true,
 	}.Build()
-	// Poll until the async job is stored and reaches CANCELLED state. A fixed
-	// sleep is too tight because the mock worker connection takes ~1 second,
-	// and SubmitJobRequest blocks until it is established.
-	var getJobsResponse *beeremote.GetJobsResponse
-	require.Eventually(t, func() bool {
-		responses := make(chan *beeremote.GetJobsResponse, 1)
-		if err := jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses); err != nil {
-			return false
-		}
-		resp := <-responses
-		if len(resp.GetResults()) == 0 {
-			return false
-		}
-		getJobsResponse = resp
-		return resp.GetResults()[0].GetJob().GetStatus().GetState() == beeremote.Job_CANCELLED
-	}, 10*time.Second, 100*time.Millisecond)
+	responses := make(chan *beeremote.GetJobsResponse, 1)
+	err = jobManager.GetJobs(context.Background(), getJobRequestsByPrefix, responses)
+	require.NoError(t, err)
+	getJobsResponse := <-responses
+	require.Len(t, getJobsResponse.GetResults(), 1)
+	assert.Equal(t, beeremote.Job_CANCELLED, getJobsResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
 	// JobMgr should have cancelled all outstanding requests:
 	assert.Len(t, getJobsResponse.GetResults()[0].GetWorkResults(), 4)
@@ -640,7 +629,7 @@ func TestManageErrorHandling(t *testing.T) {
 	expectedStatus.SetState(flex.Work_FAILED)
 	expectedStatus.SetMessage("test expects a failed request")
 
-	jobResponse, err := jobManager.SubmitJobRequest(testJobRequest)
+	jobResponse, err := jobManager.SubmitJobRequest(testJobRequest, "")
 	assert.Error(t, err)
 	assert.Equal(t, beeremote.Job_UNKNOWN, jobResponse.GetJob().GetStatus().GetState())
 	jobID := jobResponse.GetJob().GetId()
@@ -656,7 +645,7 @@ func TestManageErrorHandling(t *testing.T) {
 	assert.Equal(t, beeremote.Job_UNKNOWN, updateJobResponse.GetResults()[0].GetJob().GetStatus().GetState())
 
 	// We should reject new jobs while there is a job in an unknown state:
-	jobResponse, err = jobManager.SubmitJobRequest(testJobRequest)
+	jobResponse, err = jobManager.SubmitJobRequest(testJobRequest, "")
 	require.Error(t, err)
 	assert.NotNil(t, jobResponse) // Should get back the job in an unknown state.
 
@@ -678,7 +667,7 @@ func TestManageErrorHandling(t *testing.T) {
 	expectedStatus.SetState(flex.Work_UNKNOWN)
 	expectedStatus.SetMessage("test expects the work request status is unknown")
 
-	jobResponse, err = jobManager.SubmitJobRequest(testJobRequest)
+	jobResponse, err = jobManager.SubmitJobRequest(testJobRequest, "")
 	assert.Error(t, err)
 	assert.Equal(t, beeremote.Job_UNKNOWN, jobResponse.GetJob().GetStatus().GetState())
 	jobID = jobResponse.GetJob().GetId()
@@ -765,7 +754,7 @@ func TestUpdateJobResults(t *testing.T) {
 	// transitions correctly:
 	for _, expectedStatus := range []flex.Work_State{flex.Work_COMPLETED, flex.Work_CANCELLED} {
 
-		js, err := jobManager.SubmitJobRequest(testJobRequest)
+		js, err := jobManager.SubmitJobRequest(testJobRequest, "")
 		require.NoError(t, err)
 
 		// The first response should not finish the job:
@@ -839,7 +828,7 @@ func TestUpdateJobResults(t *testing.T) {
 
 	// Test if all WRs are in a terminal state but there is a mismatch the job
 	// state is unknown:
-	js, err := jobManager.SubmitJobRequest(testJobRequest)
+	js, err := jobManager.SubmitJobRequest(testJobRequest, "")
 	require.NoError(t, err)
 
 	workResult1 := flex.Work_builder{
@@ -952,7 +941,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 		RemoteStorageTarget: 1,
 	}.Build()
 
-	js, err := jobManager.SubmitJobRequest(testJobRequest)
+	js, err := jobManager.SubmitJobRequest(testJobRequest, "")
 	require.NoError(t, err)
 
 	jobID := js.GetJob().GetId()
@@ -1090,7 +1079,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 		State:   beeremote.JobRequest_GenerationStatus_ALREADY_COMPLETE,
 		Message: time.Now().String(),
 	})
-	result, err := jobManager.SubmitJobRequest(testAlreadyCompleteJobRequest)
+	result, err := jobManager.SubmitJobRequest(testAlreadyCompleteJobRequest, "")
 	require.ErrorIs(t, err, rst.ErrJobAlreadyComplete)
 	assert.NotEmpty(t, result.Job.Status.GetMessage()) // verifies database update
 	require.NotNil(t, result)
@@ -1100,7 +1089,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	testAlreadyOffloadedJobRequest.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 		State: beeremote.JobRequest_GenerationStatus_ALREADY_OFFLOADED,
 	})
-	result, err = jobManager.SubmitJobRequest(testAlreadyOffloadedJobRequest)
+	result, err = jobManager.SubmitJobRequest(testAlreadyOffloadedJobRequest, "")
 	assert.NotEmpty(t, result.Job.Status.GetMessage()) // verifies database update
 	require.ErrorIs(t, err, rst.ErrJobAlreadyOffloaded)
 	require.NotNil(t, result)
@@ -1109,11 +1098,13 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	// Repeat same job request twice without updating any of the work requests and verify job already exists
 	testAlreadyExistJobRequest := proto.Clone(baseTestJobRequest).(*beeremote.JobRequest)
 	testAlreadyExistJobRequest.SetPath("/test/myfile2")
-	result, err = jobManager.SubmitJobRequest(testAlreadyExistJobRequest)
+	result, err = jobManager.SubmitJobRequest(testAlreadyExistJobRequest, "")
 	require.Nil(t, err)
 	require.NotNil(t, result)
-	result, err = jobManager.SubmitJobRequest(testAlreadyExistJobRequest)
+	result, err = jobManager.SubmitJobRequest(testAlreadyExistJobRequest, "")
 	require.ErrorIs(t, err, rst.ErrJobAlreadyExists)
+	require.NotNil(t, result)
+
 	require.NotNil(t, result)
 
 	// Test job request with failed-precondition. This should be distinguished from job request
@@ -1123,7 +1114,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	testFailedPreconditionJobRequest.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
 		State: beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 	})
-	result, err = jobManager.SubmitJobRequest(testFailedPreconditionJobRequest)
+	result, err = jobManager.SubmitJobRequest(testFailedPreconditionJobRequest, "")
 	require.Equal(t, result.Job.Status.State, beeremote.Job_CANCELLED)
 	require.ErrorIs(t, err, rst.ErrJobFailedPrecondition)
 	require.NotNil(t, result)
@@ -1133,7 +1124,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 	testFailedJobRequest.Type = &beeremote.JobRequest_Mock{
 		Mock: &flex.MockJob{ShouldFail: true},
 	}
-	result, err = jobManager.SubmitJobRequest(testFailedJobRequest)
+	result, err = jobManager.SubmitJobRequest(testFailedJobRequest, "")
 	require.NotNil(t, err)
 	require.Equal(t, result.Job.Status.State, beeremote.Job_FAILED)
 }
@@ -1417,7 +1408,6 @@ func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
-	m.ready = true
 
 	cleanup := func() {
 		cancel()
@@ -1685,7 +1675,7 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 			counts := jobActiveValues(t, reader)
 			assert.Equal(t, int64(0), counts[counterKey{"scheduled", 1}], "baseline: counter must start at zero")
 
-			js, err := m.SubmitJobRequest(jr)
+			js, err := m.SubmitJobRequest(jr, "")
 			require.NoError(t, err)
 
 			// After submit: job +1 scheduled; both WRs active as scheduled.
@@ -1760,7 +1750,7 @@ func TestJobCounterMixedWorkResults(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	js, err := m.SubmitJobRequest(jr)
+	js, err := m.SubmitJobRequest(jr, "")
 	require.NoError(t, err)
 
 	// Send mismatched terminal results: WR 0 completes, WR 1 is cancelled.
@@ -1852,7 +1842,7 @@ func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
 			}
 			req.SetGenerationStatus(tc.genStatus)
 
-			_, err := m.SubmitJobRequest(req)
+			_, err := m.SubmitJobRequest(req, "")
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
 			} else {
@@ -1925,7 +1915,6 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 		},
 		releaseUnusedFileLockFunc: func(string, map[string]*Job) error { return nil },
 	}
-	m.ready = true
 
 	cleanup := func() {
 		workerManager.Stop()
@@ -2165,7 +2154,7 @@ func TestJobCounterGC(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	_, err = m.SubmitJobRequest(jr)
+	_, err = m.SubmitJobRequest(jr, "")
 	require.NoError(t, err)
 
 	counts = jobActiveValues(t, reader)
@@ -2343,7 +2332,7 @@ func TestSubmitJobRequestGCOnlyTouchesRequestRST(t *testing.T) {
 		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	_, err = m.SubmitJobRequest(jr)
+	_, err = m.SubmitJobRequest(jr, "")
 	require.NoError(t, err)
 
 	storedEntry, releaseFn, err := m.pathStore.GetAndLockEntry("/test/file")
@@ -2392,7 +2381,7 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 		RemoteStorageTarget: 1,
 	}.Build()
 
-	_, err := m.SubmitJobRequest(jr)
+	_, err := m.SubmitJobRequest(jr, "")
 	require.Error(t, err, "SubmitJobRequest must return an error when SubmitWork fails")
 
 	counts := jobActiveValues(t, reader)
@@ -2533,7 +2522,7 @@ func submitJobWith2WRs(t *testing.T, m *Manager, path string) *beeremote.JobResu
 		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
 		RemoteStorageTarget: 1,
 	}.Build()
-	js, err := m.SubmitJobRequest(jr)
+	js, err := m.SubmitJobRequest(jr, "")
 	require.NoError(t, err)
 	return js
 }
@@ -2692,7 +2681,7 @@ func TestWorkCounterRSTIsolation(t *testing.T) {
 		Name:                "job-a",
 		Mock:                flex.MockJob_builder{NumTestSegments: 2}.Build(),
 		RemoteStorageTarget: 1,
-	}.Build())
+	}.Build(), "")
 	require.NoError(t, err)
 
 	// Job B: RST 2, 1 WR.
@@ -2701,7 +2690,7 @@ func TestWorkCounterRSTIsolation(t *testing.T) {
 		Name:                "job-b",
 		Mock:                flex.MockJob_builder{NumTestSegments: 1}.Build(),
 		RemoteStorageTarget: 2,
-	}.Build())
+	}.Build(), "")
 	require.NoError(t, err)
 	// jsB is intentionally left in-progress to keep RST 2 WRs in WorkActive.
 	_ = jsB

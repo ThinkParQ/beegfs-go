@@ -71,6 +71,10 @@ type Manager struct {
 type JobSubmission struct {
 	JobID        string
 	WorkRequests []*flex.WorkRequest
+	// OriginNode is the ID of the worker node that submitted this job, or empty when it came from
+	// somewhere that is not a worker node (such as the CLI). It is only a hint used to break ties
+	// when the request has to go to a draining node, see Pool.assignmentCandidates.
+	OriginNode string
 }
 
 type JobUpdate struct {
@@ -208,6 +212,18 @@ func (m *Manager) Start() error {
 // failed if one or more requests cannot be cancelled after an initial failure. If an error occurs
 // the map and status should be checked to ensure they are not nil, otherwise they can be used to
 // further diagnose the issue without requiring additional requests to get the status of the job.
+// AvailableWorkers returns how many work requests the pool for nodeType can run concurrently right
+// now. It is used to size jobs so a transfer is not split into far more segments than the cluster
+// can ever run at once. Zero means there is no pool for the type or no node in it is currently
+// eligible for work.
+func (m *Manager) AvailableWorkers(nodeType worker.Type) int {
+	pool, ok := m.nodePools[nodeType]
+	if !ok {
+		return 0
+	}
+	return pool.AvailableWorkers()
+}
+
 func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *beeremote.Job_Status, error) {
 
 	workResults := make(map[string]worker.WorkResult)
@@ -225,19 +241,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 		// If an error occurs return it as the message in the work response status.
 		var err error
 
-		// Map work request types to worker nodes. If a new request type and
-		// worker node are added this should be updated.
-		var nodeType worker.Type
-		switch workRequest.WhichType() {
-		case flex.WorkRequest_Mock_case:
-			nodeType = worker.Mock
-		case flex.WorkRequest_Sync_case:
-			nodeType = worker.BeeSync
-		case flex.WorkRequest_Builder_case:
-			nodeType = worker.BeeSync
-		default:
-			nodeType = worker.Unknown
-		}
+		nodeType := NodeTypeForWorkRequest(workRequest)
 
 		pool, ok := m.nodePools[nodeType]
 		if !ok {
@@ -254,7 +258,7 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 			allScheduled = false
 		} else {
 			var work *flex.Work
-			workerID, work, err = pool.assignToLeastBusyWorker(workRequest)
+			workerID, work, err = pool.assignToLeastBusyWorker(workRequest, js.OriginNode)
 			if err != nil {
 				// If there was a failure assemble a minimal work result. An error from
 				// assignToLeastBusyWorker() means the request was not not assigned to any nodes so
@@ -270,6 +274,12 @@ func (m *Manager) SubmitJob(js JobSubmission) (map[string]worker.WorkResult, *be
 						Message: "error communicating to node: " + err.Error(),
 					}.Build(),
 				}.Build()
+			} else if work.GetStatus() == nil {
+				// Nothing here can track or later update a result with no status, and recording one
+				// would hand a nil status to UpdateJob below. Treat it as a node that failed to
+				// accept the request, which it effectively did.
+				allScheduled = false
+				workerID = ""
 			} else {
 				if work.GetStatus().GetState() != flex.Work_SCHEDULED {
 					allScheduled = false
@@ -336,6 +346,19 @@ func (m *Manager) UpdateJob(jobUpdate JobUpdate) (map[string]worker.WorkResult, 
 	allUpdated := true
 
 	for reqID, workResult := range jobUpdate.WorkResults {
+		// Every branch below updates the status in place, so a result without one has to be given a
+		// minimal stand-in first. Results are also decoded from the database, so this cannot be ruled
+		// out by how they are built during submission alone.
+		if workResult.Status() == nil {
+			workResult.WorkResult = flex.Work_builder{
+				JobId:     jobUpdate.JobID,
+				RequestId: reqID,
+				Status: flex.Work_Status_builder{
+					State:   flex.Work_UNKNOWN,
+					Message: "no work result was recorded for this request",
+				}.Build(),
+			}.Build()
+		}
 		oldState := workResult.Status().GetState()
 
 		// If the WR was never assigned we can just cancel it.

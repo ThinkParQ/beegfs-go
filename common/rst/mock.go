@@ -60,7 +60,20 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastSyncedJob *
 			return nil, fmt.Errorf("test requested an error")
 		}
 
-		workRequests := RecreateWorkRequests(job, generateSegments(job.Request.GetMock().FileSize, int64(job.Request.GetMock().NumTestSegments), 1))
+		numSegments := int64(job.Request.GetMock().NumTestSegments)
+		if numSegments <= 0 {
+			numSegments = 1
+		}
+
+		// Most tests only care how many work requests come back and leave FileSize unset. Segments
+		// must contain at least one byte each to stay distinguishable, so give the mock file just
+		// enough bytes to hand out one per requested segment.
+		fileSize := job.Request.GetMock().FileSize
+		if fileSize < numSegments {
+			fileSize = numSegments
+		}
+
+		workRequests := RecreateWorkRequests(job, generateSegments(fileSize, numSegments, 1))
 		return workRequests, nil
 	}
 
@@ -71,22 +84,23 @@ func (rst *MockClient) GenerateWorkRequests(ctx context.Context, lastSyncedJob *
 	return args.Get(0).([]*flex.WorkRequest), nil
 }
 
-func (rst *MockClient) ExecuteWorkRequestPart(ctx context.Context, request *flex.WorkRequest, part *flex.Work_Part) error {
+func (m *MockClient) ExecuteWorkRequestPart(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest, part *flex.Work_Part) *SchedulingResult {
 
 	if request.GetMock() != nil {
 		if request.GetMock().ShouldFail {
-			return fmt.Errorf("test requested an error")
+			return &SchedulingResult{Err: fmt.Errorf("test requested an error")}
 		}
 		part.Completed = true
 		return nil
 	}
 
-	args := rst.Called(ctx, request, part)
+	args := m.Called(workCtx, request, part)
 	err := args.Error(0)
-	if err == nil {
-		part.Completed = true
+	if err != nil {
+		return &SchedulingResult{Err: err}
 	}
-	return err
+	part.Completed = true
+	return nil
 }
 
 // ExecuteJobBuilderRequest is not implemented and should never be called.
@@ -128,7 +142,7 @@ func (r *MockClient) GenerateExternalId(ctx context.Context, cfg *flex.JobReques
 	return "", ErrUnsupportedOpForRST
 }
 
-func (r *MockClient) IsWorkRequestReady(ctx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
-	args := r.Called(request)
+func (m *MockClient) IsWorkRequestReady(shutdownCtx context.Context, workCtx context.Context, request *flex.WorkRequest) (bool, time.Duration, error) {
+	args := m.Called(request)
 	return args.Bool(0), args.Get(1).(time.Duration), args.Error(2)
 }

@@ -3,6 +3,7 @@ package workmgr
 import (
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,8 @@ import (
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -157,7 +160,7 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 	err = mgr.UpdateConfig(config.rstConfigs, flex.BeeRemoteNode_builder{
 		Id:      "0",
 		Address: "mock:0",
-	}.Build())
+	}.Build(), "test-sync-node")
 	return mgr, deferredFuncs, err
 
 }
@@ -191,14 +194,14 @@ func TestUpdateConfig(t *testing.T) {
 	}.Build()
 
 	// No change to the config should not return an error:
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, equalBRConfig, ""))
 
 	// Updating BR config is allowed:
 	notEqualBRConfig := flex.BeeRemoteNode_builder{
 		Id:      "1",
 		Address: "mock:0",
 	}.Build()
-	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig))
+	assert.NoError(t, mgr.UpdateConfig(rstConfigs, notEqualBRConfig, ""))
 }
 
 func TestSubmitWorkRequest(t *testing.T) {
@@ -243,13 +246,15 @@ func TestSubmitWorkRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep a bit to allow time for the requests to process.
-	time.Sleep(defaultSleepTime * time.Second)
-
-	// If requests are in a terminal state and we were able to send responses to BeeRemote then
-	// all internal stores should be empty.
-	require.NoError(t, assertDBEntriesLenForTesting(mgr, 0))
-	require.Len(t, mgr.activeWork, 0)
+	// If requests are in a terminal state and we were able to send responses to BeeRemote then all
+	// internal stores should be empty. activeWork is read under activeWorkMu because the manage
+	// goroutine deletes from it as work completes.
+	require.Eventually(t, func() bool {
+		mgr.activeWorkMu.RLock()
+		activeLen := len(mgr.activeWork)
+		mgr.activeWorkMu.RUnlock()
+		return assertDBEntriesLenForTesting(mgr, 0) == nil && activeLen == 0
+	}, 5*time.Second, 25*time.Millisecond)
 
 	// Then simulate the request completing, but it was not able to be sent to BeeRemote.
 	// Also for some "reason" a job ID was skipped, but it should still get picked up.
@@ -268,8 +273,13 @@ func TestSubmitWorkRequest(t *testing.T) {
 	time.Sleep(defaultSleepTime * time.Second)
 
 	// Because we can't send the item to BeeRemote it should still be in the DB and activeWork map.
+	// The sleep above already gave the request time to reach that state, so this asserts it stayed
+	// there rather than waiting for it to arrive.
 	require.NoError(t, assertDBEntriesLenForTesting(mgr, 1))
-	require.Len(t, mgr.activeWork, 1)
+	mgr.activeWorkMu.RLock()
+	activeLen := len(mgr.activeWork)
+	mgr.activeWorkMu.RUnlock()
+	require.Equal(t, 1, activeLen)
 
 	// Assert all expectations set for the entire test were met.
 	mockRST.AssertExpectations(t)
@@ -278,6 +288,122 @@ func TestSubmitWorkRequest(t *testing.T) {
 	// At this point we're still trying to send the result for one of the work requests to
 	// BeeRemote. This should be cancelled when we return and stop the manager. If the test times
 	// out more than likely something went wrong around how contexts are setup.
+}
+
+// Verifies that a request waiting to become ready does not run again when remote answers its
+// RESCHEDULED update with NotFound. The worker must drop the request and its entries instead of
+// checking readiness again after the delay.
+func TestNotReadyRescheduleDiscardedWhenRemoteJobIsGone(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	// The expectations have no call limit so a second readiness check, if one runs, is counted
+	// below instead of panicking inside the worker goroutine.
+	rescheduleSent := make(chan struct{})
+	var rescheduleOnce sync.Once
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(false, workDelayMinimum, nil)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_RESCHEDULED)).
+		Run(func(mock.Arguments) { rescheduleOnce.Do(func() { close(rescheduleSent) }) }).
+		Return(status.Error(codes.NotFound, "job not found"))
+
+	_, err = mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.NoError(t, err)
+
+	select {
+	case <-rescheduleSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the not ready reschedule update")
+	}
+	require.Eventually(t, func() bool { return assertDBEntriesLenForTesting(mgr, 0) == nil }, 2*time.Second, 25*time.Millisecond)
+
+	// Wait past the delay so a wrongly scheduled second check has time to start.
+	time.Sleep(2 * workDelayMinimum)
+	mockRST.AssertNumberOfCalls(t, "IsWorkRequestReady", 1)
+	mockRST.AssertNotCalled(t, "ExecuteWorkRequestPart", mock.Anything, mock.Anything, mock.Anything)
+}
+
+// A cancel that arrives while a worker sends a request's final result must not deadlock. UpdateWork
+// locks the job entry and waits for the journal entry. The worker holds the journal entry until the
+// result is sent and then cleans up both entries. The final result is sent detached from the
+// request's context, so the cancel does not abort it and the cleanup always runs.
+func TestCancelDuringFinalUpdateDoesNotDeadlock(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+
+	mockRST := &rst.MockClient{}
+	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
+	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
+
+	inFinalRPC := make(chan struct{})
+	releaseFinalRPC := make(chan struct{})
+	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("0", "0")).Return(true, time.Duration(0), nil).Times(1)
+	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("0", "0"), mock.Anything).Return(nil).Times(2)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_RUNNING)).Return(nil).Times(1)
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("0", "0", flex.Work_COMPLETED)).
+		Run(func(mock.Arguments) {
+			close(inFinalRPC)
+			<-releaseFinalRPC
+		}).Return(nil).Times(1)
+
+	_, err = mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.NoError(t, err)
+
+	select {
+	case <-inFinalRPC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never reached the final UpdateWork RPC")
+	}
+
+	type result struct {
+		work *flex.Work
+		err  error
+	}
+	updateDone := make(chan result, 1)
+	go func() {
+		work, err := mgr.UpdateWork(flex.UpdateWorkRequest_builder{JobId: "0", RequestId: "0", NewState: flex.UpdateWorkRequest_CANCELLED}.Build())
+		updateDone <- result{work, err}
+	}()
+	// Give UpdateWork time to lock the job entry and block on the journal entry, then let the final
+	// RPC succeed so the worker moves on to its cleanup.
+	time.Sleep(300 * time.Millisecond)
+	close(releaseFinalRPC)
+
+	select {
+	case r := <-updateDone:
+		// The worker already reported COMPLETED, so the cancel finds nothing left to cancel.
+		require.Nil(t, r.work)
+		require.Equal(t, codes.NotFound, status.Code(r.err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: UpdateWork did not return after the worker's final RPC succeeded")
+	}
+
+	require.Eventually(t, func() bool { return assertDBEntriesLenForTesting(mgr, 0) == nil }, 5*time.Second, 25*time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return, the worker is still blocked in its cleanup")
+	}
 }
 
 // This test intentionally reuses the same job ID (potentially with different requests for that
@@ -300,13 +426,28 @@ func TestUpdateRequests(t *testing.T) {
 	mgr.remoteStorageTargets.SetMockClientForTesting(0, mockRST)
 	mockBeeRemote, _ := mgr.beeRemoteClient.Provider.(*beeremote.MockProvider)
 
+	// newFailedSent returns a channel signalling that a work result remote refused has been
+	// attempted, along with the Run function that signals it. The expectations below deliberately
+	// keep failing, so the worker retries them and a draining worker takes one final attempt once
+	// remote is told to stop, meaning each can be called more than once. Every block also gets its
+	// own channel because the expectations from earlier blocks stay registered for the rest of the
+	// test.
+	newFailedSent := func() (chan struct{}, func(mock.Arguments)) {
+		ch := make(chan struct{})
+		var once sync.Once
+		return ch, func(mock.Arguments) { once.Do(func() { close(ch) }) }
+	}
+
 	// Simulate a request that isn't completed due to an error from the RST (note if an error
 	// happens the state is always failed). Force the the request to stay active because it can't
 	// send a response to BeeRemote.
+	failedSent, onFailedSent := newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(fmt.Errorf("test wants an error")).Times(1)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_FAILED)).
+		Run(onFailedSent).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2.SetJobId("1")
 	testRequest2.SetRequestId("2")
@@ -314,8 +455,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow the request enough time to get to an error state:
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failed work result")
+	}
 
 	// Now try to cancel the request:
 	updateRequest := flex.UpdateWorkRequest_builder{
@@ -332,10 +476,13 @@ func TestUpdateRequests(t *testing.T) {
 
 	// Resubmit the same job ID and request. This time there is no error on the RST.
 	// Force the the request to stay active because it can't send a response to BeeRemote.
+	failedSent, onFailedSent = newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "2"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "2")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "2", flex.Work_COMPLETED)).
+		Run(onFailedSent).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest2_2 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest2_2.SetJobId("1")
 	testRequest2_2.SetRequestId("2")
@@ -343,8 +490,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow the request enough time to get to an error state:
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for completed work result")
+	}
 
 	// We should not be able to cancel completed requests:
 	resp, err = mgr.UpdateWork(updateRequest)
@@ -358,10 +508,13 @@ func TestUpdateRequests(t *testing.T) {
 	// worker should no longer be trying to send the request to BeeRemote making it available for
 	// another request. Force the the request to stay active (tying up the worker) because it can't
 	// send a response to BeeRemote.
+	failedSent, onFailedSent = newFailedSent()
 	mockRST.On("ExecuteWorkRequestPart", mock.Anything, matchJobAndRequestID("1", "3"), mock.Anything).Return(nil).Times(2)
 	mockRST.On("IsWorkRequestReady", matchJobAndRequestID("1", "3")).Return(true, time.Duration(0), nil).Times(1)
 	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_RUNNING)).Return(nil).Times(1)
-	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).Return(fmt.Errorf("test requests a failed response from BeeRemote"))
+	mockBeeRemote.On("updateWork", matchRespIDsAndStatus("1", "3", flex.Work_COMPLETED)).
+		Run(onFailedSent).
+		Return(fmt.Errorf("test requests a failed response from BeeRemote"))
 	testRequest3 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
 	testRequest3.SetJobId("1")
 	testRequest3.SetRequestId("3")
@@ -369,8 +522,11 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Sleep to allow enough time for the request to get picked up and become active
-	time.Sleep(defaultSleepTime * time.Second)
+	select {
+	case <-failedSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for third completed work result")
+	}
 
 	// Now submit another request for the same job:
 	testRequest4 := proto.Clone(baseTestRequest).(*flex.WorkRequest)
@@ -380,8 +536,12 @@ func TestUpdateRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// Because the worker is busy and activeWQSize=1 this request should not become active.
-	require.Len(t, mgr.activeWork, 1)
+	// Because the worker is busy and activeWQSize=1 this request should not become active. Read
+	// under activeWorkMu because the manage goroutine deletes from the map as work completes.
+	mgr.activeWorkMu.RLock()
+	activeLen := len(mgr.activeWork)
+	mgr.activeWorkMu.RUnlock()
+	require.Equal(t, 1, activeLen)
 
 	// Then cancel the inactive request:
 	updateRequest.SetRequestId("4")
@@ -629,4 +789,64 @@ func BenchmarkJobStore(b *testing.B) {
 		commit2()
 	}
 	b.StopTimer()
+}
+
+// Stop must not close the job store or work journal while a call admitted on behalf of Remote is
+// still using them. The call is held open directly through admitRPC because the real calls finish
+// too quickly to observe the wait.
+func TestStopWaitsForAdmittedRPCs(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+
+	releaseRPC, err := mgr.admitRPC()
+	require.NoError(t, err)
+
+	stopped := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an admitted call was still in progress")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The manager context is only cancelled after the admitted call finishes, so the stores are
+	// still open.
+	require.NoError(t, mgr.mgrCtx.Err())
+
+	releaseRPC()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the admitted call finished")
+	}
+}
+
+// Once Stop has run, calls on behalf of Remote are rejected without touching the closed stores. A
+// rejected submission must return the bare ErrStopping so the server can tell Remote that nothing
+// was recorded.
+func TestRPCsRejectedAfterStop(t *testing.T) {
+	mgr, deferredFuncs, err := getTestManager(t)
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	mgr.Stop()
+
+	work, err := mgr.SubmitWorkRequest(proto.Clone(baseTestRequest).(*flex.WorkRequest))
+	require.Nil(t, work)
+	require.ErrorIs(t, err, ErrStopping)
+
+	work, err = mgr.UpdateWork(flex.UpdateWorkRequest_builder{JobId: "0", RequestId: "0", NewState: flex.UpdateWorkRequest_CANCELLED}.Build())
+	require.Nil(t, work)
+	require.Equal(t, codes.Unavailable, status.Code(err))
 }

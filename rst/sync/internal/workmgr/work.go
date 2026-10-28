@@ -25,6 +25,29 @@ const (
 	workDelayMinimum         time.Duration = time.Second
 )
 
+// sendOutcome is what sendWorkResult learned about the work result.
+type sendOutcome int
+
+const (
+	// sendDelivered means remote accepted the work result.
+	sendDelivered sendOutcome = iota
+	// sendDiscarded means remote no longer knows the work request, for example after a force delete
+	// while sync was unreachable. There is nothing left to update and nothing left to resume.
+	sendDiscarded
+	// sendJobCancelled means the user cancelled the work request before the result reached
+	// remote. The journal entry must stay because the cancel path waits for it and cleans it up.
+	sendJobCancelled
+	// sendFailedSyncShutDown means the node is shutting down and the one allowed attempt failed. The
+	// journal entry must stay so the replay after the restart sends the result again.
+	sendFailedSyncShutDown
+)
+
+// settled reports whether remote either has the work result or no longer wants it. A settled
+// result leaves nothing for the journal entry to do, so a request in a final state can delete it.
+func (o sendOutcome) settled() bool {
+	return o == sendDelivered || o == sendDiscarded
+}
+
 // Register custom types for serialization/deserialization via Gob when the
 // package is initialized.
 func init() {
@@ -136,26 +159,37 @@ type worker struct {
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
 	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
+	workerSaturation     []func() float64
 	metrics              managerMetrics
 }
 
 func (w *worker) run(ctx context.Context) {
-	for {
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
 		case work := <-w.workQueue:
-			w.process(work)
+			w.process(ctx, work)
 		}
 	}
 }
 
-func (w *worker) process(work workAssignment) {
+// process carries out a single work assignment. The shutdownCtx is the worker pool's context and is
+// the parent of every work.ctx. Both being cancelled means BeeSync is stopping and the request
+// should be left resumable, whereas only work.ctx being cancelled means this particular request was
+// cancelled (for example by `beegfs remote job cancel`) and must not resume.
+func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 
 	// Regardless if the work request was processed successfully, tell WorkMgr when we stop
 	// processing this work item so it can pull more work into the queue.
 	defer func() {
-		w.completedWork <- work.workIdentifier
+		if shutdownCtx.Err() != nil {
+			return
+		}
+		select {
+		case w.completedWork <- work.workIdentifier:
+		case <-shutdownCtx.Done():
+		}
 	}()
 
 	if work.ctx.Err() != nil {
@@ -206,57 +240,55 @@ func (w *worker) process(work workAssignment) {
 	// database entries.
 	defer func() {
 		if cleanupEntries {
-
-			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(work.jobID)
-			if err != nil {
-				log.Warn("error getting job entry while trying to complete work request", zap.Error(err))
-			} else {
-				_, ok := jobEntry.Value[work.workRequestID]
-				if !ok {
-					// If this happens we'll still remove the journal entry because there is nothing
-					// to cleanup in the job entry anyway.
-					log.Warn("got job entry but it does not contain an entry for this work request (ignoring)")
-				} else {
-					if len(jobEntry.Value) == 1 {
-						// If this is the last/only work request for this job, delete the entire
-						// MapStore entry.
-						err = commitJob(kvstore.WithDeleteEntry(true))
-					} else {
-						// Otherwise just delete the single work request:
-						delete(jobEntry.Value, work.workRequestID)
-						err = commitJob()
-					}
-					if err != nil {
-						log.Warn("error cleaning up job entry while completing work request", zap.Error(err))
-					}
-				}
+			// The journal entry is deleted and its lock released before the job entry is locked.
+			// UpdateWork locks the job entry and then waits for the journal entry so waiting for
+			// the job entry while still holding the journal entry deadlocks with a cancel that
+			// arrives while this request is finishing. UpdateWork treats a journal entry that is
+			// gone as a request that already finished and removes its job index entry itself.
+			if err := commitJournalEntry(kvstore.WithDeleteEntry(true)); err != nil {
+				// The lock is released either way. The entry and its job index entry are kept, so
+				// the journal replay after a restart sends the result again and retries cleanup.
+				log.Warn("error deleting journal work entry", zap.Error(err))
+				return
 			}
-
-			// If for some reason the jobEntry no longer exists, just ignore the error. All we were
-			// going to do was clean up the entry anyway. A kvstore.ErrEntryNotInDB should only ever
-			// happen after a crash where we were able to clean up the jobStore entry, but didn't
-			// get a chance to cleanup the journalEntry. When we replayed the journal we would have
-			// tried to send the result to BeeRemote again, and if we were told to cleanupEntries
-			// that must have happened successfully so there is nothing left to do.
-			if err != nil && !errors.Is(err, kvstore.ErrEntryNotInDB) {
-				// Don't clean up the journal entry if there was an error, we may have an
-				// opportunity to try again later.
-				err = commitJournalEntry()
-			} else {
-				err = commitJournalEntry(kvstore.WithDeleteEntry(true))
-			}
-			if err != nil {
-				log.Warn("error releasing journal work entry", zap.Error(err))
-			}
-
 			w.metrics.workRequests.Add(context.Background(), 1,
 				metric.WithAttributes(
 					attrState.String("completed"),
 					attrPriority.Int(normalizedPriority(request.GetPriority())),
 				),
 			)
+
+			// From here on a failure only leaves a stale job index entry that points at a deleted
+			// journal entry. UpdateWork removes it the next time the request is cancelled.
+			jobEntry, commitJob, err := w.jobStore.GetAndLockEntry(work.jobID)
+			if err != nil {
+				// UpdateWork deletes the job entry when it removes the last index entry so the
+				// entry being gone is expected after a cancel raced this request's completion.
+				if !errors.Is(err, kvstore.ErrEntryNotInDB) && !errors.Is(err, kvstore.ErrEntryAlreadyDeleted) {
+					log.Warn("error getting job entry while trying to complete work request", zap.Error(err))
+				}
+				return
+			}
+
+			if _, ok := jobEntry.Value[work.workRequestID]; !ok {
+				// UpdateWork already removed the index entry after a cancel raced this request's
+				// completion. Release the job entry unchanged.
+				err = commitJob()
+			} else if len(jobEntry.Value) == 1 {
+				// If this is the last work request for this job, delete the entire
+				// MapStore entry.
+				err = commitJob(kvstore.WithDeleteEntry(true))
+			} else {
+				// Otherwise just delete the single work request.
+				delete(jobEntry.Value, work.workRequestID)
+				err = commitJob()
+			}
+			if err != nil {
+				log.Warn("error cleaning up job entry while completing work request", zap.Error(err))
+			}
 			return
 		}
+
 		// Otherwise just commit the work entries to the database.
 		if err := commitJournalEntry(); err != nil {
 			log.Warn("error updating and releasing journal work entry", zap.Error(err))
@@ -278,7 +310,7 @@ func (w *worker) process(work workAssignment) {
 			status.SetState(flex.Work_FAILED)
 			status.SetMessage("unable to execute work request: invalid starting state " + state.String())
 		}
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
@@ -289,17 +321,30 @@ func (w *worker) process(work workAssignment) {
 		log.Debug("work request specifies an unknown RST")
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("work request specifies an unknown RST")
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
 	}
 
 	// Check whether the work request is ready. If not, reschedule the work for a later time.
-	if isWorkReady, workDelay, err := client.IsWorkRequestReady(work.ctx, request.WorkRequest); err != nil {
+	isWorkReady, workDelay, err := client.IsWorkRequestReady(shutdownCtx, work.ctx, request.WorkRequest)
+	if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before the work request started because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+		}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("work request was aborted")
+		return
+	} else if err != nil {
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("failed to determine if work request is ready: " + err.Error())
-		if w.sendWorkResult(work, result.Work) {
+		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
 		return
@@ -310,7 +355,10 @@ func (w *worker) process(work workAssignment) {
 		entry.ExecuteAfter = time.Now().Add(workDelay)
 		status.SetState(flex.Work_RESCHEDULED)
 		status.SetMessage("waiting for work request to be ready")
-		w.sendWorkResult(work, result.Work)
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+			return
+		}
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -322,8 +370,13 @@ func (w *worker) process(work workAssignment) {
 	}
 
 	// Update the entry in BadgerDB so other goroutines can get read only access to the result.
+	if state == flex.Work_SCHEDULED {
+		// Rescheduled work status messages will carry information aggregative status information.
+		// So, just set the running state information when the status state is scheduled.
+		status.SetMessage("attempting to carry out the work request")
+	}
 	status.SetState(flex.Work_RUNNING)
-	status.SetMessage("attempting to carry out the work request")
+
 	if err := commitJournalEntry(kvstore.WithUpdateOnly(true)); err != nil {
 		log.Warn("error updating journal work entry to running", zap.Error(err))
 	}
@@ -338,13 +391,16 @@ func (w *worker) process(work workAssignment) {
 	cancel()
 
 	if request.HasBuilder() {
-		cleanupEntries = w.processBuilder(work, client, entry)
+		cleanupEntries = w.processBuilder(shutdownCtx, work, client, entry, log)
 	} else {
-		cleanupEntries = w.processWork(work, client, entry, func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }, log)
+		// processWork can run for a long time without returning, so it checkpoints the entry after
+		// each completed part instead of relying on the commit in the deferred function above.
+		commitWorkPart := func() { commitJournalEntry(kvstore.WithUpdateOnly(true)) }
+		cleanupEntries = w.processWork(shutdownCtx, work, client, entry, commitWorkPart, log)
 	}
 }
 
-func (w *worker) processWork(work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
+func (w *worker) processWork(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, commitWorkPart func(), log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -358,11 +414,12 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry *wo
 			continue
 		}
 
-		// Block until the request is completed. We pass a context to the request to handle
-		// graceful cancellation. If the context is cancelled we still want to update the
-		// journal with the latest result before exiting so we can resume later on. The part
-		// will simply not be marked completed if the context was cancelled.
-		if err := client.ExecuteWorkRequestPart(work.ctx, request.WorkRequest, part); err != nil {
+		partResult := client.ExecuteWorkRequestPart(shutdownCtx, work.ctx, request.WorkRequest, part)
+		if partResult == nil {
+			partResult = &rst.SchedulingResult{}
+		}
+
+		if err := partResult.Err; err != nil {
 			// TODO: https://github.com/ThinkParQ/bee-remote/issues/55. ExecuteWorkRequestPart
 			// should return a boolean indicating if the specified error can be retried. Some
 			// ephemeral errors will be retried by the RST, but longer lasting error states such as
@@ -380,44 +437,74 @@ func (w *worker) processWork(work workAssignment, client rst.Provider, entry *wo
 			} else {
 				status.SetMessage("error transferring part: " + err.Error())
 			}
-			if w.sendWorkResult(work, result.Work) {
+			if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 				cleanupEntries = true
 			}
+			return
+		}
+
+		if partResult.Reschedule {
+			commitWorkPart()
+			status.SetState(flex.Work_RESCHEDULED)
+			if shutdownCtx.Err() != nil {
+				status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+				entry.ExecuteAfter = time.Time{}
+				if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+					cleanupEntries = true
+				}
+				return
+			}
+			status.SetMessage("stopped before all parts were synced")
+			entry.ExecuteAfter = time.Now().Add(partResult.Delay)
+			if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+				cleanupEntries = true
+				return
+			}
+			w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
+			w.metrics.workRequests.Add(context.Background(), 1,
+				metric.WithAttributes(
+					attrState.String("rescheduled"),
+					attrPriority.Int(normalizedPriority(request.GetPriority())),
+				),
+			)
 			return
 		}
 
 		if part.GetCompleted() {
 			completedParts++
 		}
-		// Commit each part as they are completed so other readers can monitor progress.
 		commitWorkPart()
 	}
 
 	if len(result.Parts) == completedParts {
 		status.SetState(flex.Work_COMPLETED)
 		status.SetMessage("all parts of this work request are completed")
-	} else {
-		if work.ctx.Err() != nil {
-			status.SetState(flex.Work_CANCELLED)
-			status.SetMessage("the work context was cancelled before all parts can be synced")
-			// Don't send the work result and don't try to cleanup entries. We don't know why we
-			// were asked to be done early so we'll let the caller handle either sending the result
-			// or retrying the request later.
-			return
+	} else if shutdownCtx.Err() != nil {
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("stopped before all parts were synced because the node is shutting down (it will resume)")
+		entry.ExecuteAfter = time.Time{}
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
 		}
+		return
+	} else if work.ctx.Err() != nil {
+		status.SetState(flex.Work_CANCELLED)
+		status.SetMessage("the work context was cancelled before all parts can be synced")
+		return
+	} else {
 		// This shouldn't happen so we set the state to failed to avoid making things worse and
 		// ensure we don't silently retry this forever.
 		status.SetState(flex.Work_FAILED)
 		status.SetMessage("request completed but not all parts are completed (this should not happen and likely indicates a bug)")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 		cleanupEntries = true
 	}
 	return
 }
 
-func (w *worker) processBuilder(work workAssignment, client rst.Provider, entry *workEntry) (cleanupEntries bool) {
+func (w *worker) processBuilder(shutdownCtx context.Context, work workAssignment, client rst.Provider, entry *workEntry, log *zap.Logger) (cleanupEntries bool) {
 	request := entry.WorkRequest
 	result := entry.WorkResult
 	status := result.GetStatus()
@@ -438,7 +525,7 @@ processJobs:
 		case <-work.ctx.Done():
 			status.SetState(flex.Work_CANCELLED)
 			status.SetMessage("work context was cancelled before job requests could be created")
-			if w.sendWorkResult(work, result.Work) {
+			if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 				cleanupEntries = true
 			}
 			for range jobSubmissionChan {
@@ -467,7 +554,7 @@ processJobs:
 		}
 		status.SetMessage(message)
 		entry.ExecuteAfter = time.Now()
-		w.sendWorkResult(work, result.Work)
+		w.sendWorkResult(shutdownCtx, work, result.Work)
 		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		w.metrics.workRequests.Add(context.Background(), 1,
 			metric.WithAttributes(
@@ -484,43 +571,48 @@ processJobs:
 		status.SetMessage("all jobs were submitted")
 	}
 
-	if w.sendWorkResult(work, result.Work) {
+	if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 		cleanupEntries = true
 	}
 	return
 }
 
-// Returns true if the work result was sent, or for some reason cannot be sent but the overall state
-// is such we should not keep retrying and the work result is no longer needed (this should only
-// happen if the job was deleted on BeeRemote so there is nothing to update).
-func (w *worker) sendWorkResult(work workAssignment, workResult *flex.Work) bool {
+// sendWorkResult reports a work result to remote and returns the outcome. The caller decides what
+// to do with the journal entry based on the returned sendOutcome.
+func (w *worker) sendWorkResult(shutdownCtx context.Context, work workAssignment, workResult *flex.Work) sendOutcome {
 	log := w.log.With(zap.Any("jobID", work.jobID), zap.Any("requestID", work.workRequestID), zap.Any("submissionID", work.submissionID))
-	for {
-		select {
-		case <-work.ctx.Done():
-			return false
-		default:
-			canRetry, err := w.beeRemoteClient.UpdateWorkRequest(work.ctx, workResult)
-			if err != nil {
-				if !canRetry {
-					log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on BeeRemote?)")
-					return true
-				}
-				log.Warn("error sending work result to BeeRemote (retrying indefinitely)", zap.Error(err))
-			} else {
-				return true
-			}
-			// Don't block on shutdown waiting to retry if there is a problem sending the updated
-			// work request to BeeRemote. This particularly causes problems when testing because the
-			// test timeout can be exceeded because of all the time spent waiting here.
-			select {
-			case <-time.After(1 * time.Second):
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
-				// Evaluate if we should add an exponential backoff here and not log every time above.
-			case <-work.ctx.Done():
-				return false
-			}
 
+	for work.ctx.Err() == nil || shutdownCtx.Err() != nil {
+		// Detached from work.ctx so cancelling it cannot abort an attempt already inflight and leave the
+		// outcome unknown.
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(work.ctx), UpdateWorkRequestTimeout)
+		canRetry, err := w.beeRemoteClient.UpdateWorkRequest(updateCtx, workResult)
+		cancel()
+
+		if err == nil {
+			return sendDelivered
+		} else if !canRetry {
+			log.Error("unable to send work result and unable to retry, discarding work result (does the work request still exist on remote?)", zap.Error(err))
+			return sendDiscarded
+		} else if shutdownCtx.Err() != nil {
+			// Only allowed shutdown one attempt and it failed so keep the entries.
+			log.Warn("error sending work result to remote", zap.Error(err))
+			return sendFailedSyncShutDown
+		}
+
+		log.Warn("error sending work result to remote (retrying indefinitely)", zap.Error(err))
+
+		// Don't block on shutdown waiting to retry if there is a problem sending the updated
+		// work request to BeeRemote. This particularly causes problems when testing because the
+		// test timeout can be exceeded because of all the time spent waiting here.
+		select {
+		case <-time.After(1 * time.Second):
+			// TODO: https://github.com/ThinkParQ/bee-remote/issues/58
+			// Evaluate if we should add an exponential backoff here and not log every time above.
+		case <-work.ctx.Done():
 		}
 	}
+
+	// The user cancelled the work request. The cancel path owns the journal entry from here.
+	return sendJobCancelled
 }
