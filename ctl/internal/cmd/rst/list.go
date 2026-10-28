@@ -52,18 +52,16 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 
 		switch rst.WhichType() {
 		case flex.RemoteStorageTarget_S3_case:
-			stringBuilder := strings.Builder{}
 			rstType = "s3"
-			rst.GetS3().ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
-				if string(fd.Name()) == "secret_key" && !cfg.ShowSecrets {
-					stringBuilder.WriteString(fmt.Sprintf("%s: *****, ", fd.Name()))
-				} else {
-					stringBuilder.WriteString(fmt.Sprintf("%s: %s, ", fd.Name(), v))
-				}
-				return true
-			})
-			// Get rid of the last comma+space in the printed configuration.
-			rstConfiguration = stringBuilder.String()[:stringBuilder.Len()-2]
+			rstConfiguration = formatS3RSTConfiguration(rst.GetS3(), cfg.ShowSecrets)
+		case flex.RemoteStorageTarget_Xtreemstore_case:
+			rstType = "xtreemstore"
+			xtreemstoreConfig := rst.GetXtreemstore()
+			if xtreemstoreConfig == nil {
+				rstConfiguration = "xtreemstore configuration is not set"
+				break
+			}
+			rstConfiguration = formatS3RSTConfiguration(xtreemstoreConfig.GetS3(), cfg.ShowSecrets)
 		default:
 			if !cfg.ShowSecrets {
 				rstType = "unknown"
@@ -84,4 +82,26 @@ func runListCmd(cmd *cobra.Command, cfg rst.GetRSTCfg) error {
 	}
 
 	return nil
+}
+
+func formatS3RSTConfiguration(s3Config *flex.RemoteStorageTarget_S3, showSecrets bool) string {
+	if s3Config == nil {
+		return "s3 configuration is not set"
+	}
+
+	stringBuilder := strings.Builder{}
+	s3Config.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		if string(fd.Name()) == "secret_key" && !showSecrets {
+			fmt.Fprintf(&stringBuilder, "%s: *****, ", fd.Name())
+		} else {
+			fmt.Fprintf(&stringBuilder, "%s: %s, ", fd.Name(), v)
+		}
+		return true
+	})
+
+	if stringBuilder.Len() == 0 {
+		return ""
+	}
+	// Get rid of the last comma+space in the printed configuration.
+	return stringBuilder.String()[:stringBuilder.Len()-2]
 }
