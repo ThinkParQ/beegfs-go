@@ -37,6 +37,7 @@ func NewCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&globalCfg.IndexAddr, "index-addr", "", "Index execution mode: local (default) or ssh:<host>. If unset, read from .beegfs.index at the BeeGFS mount root.")
 	cmd.Flags().StringVar(&globalCfg.IndexRoot, "index-root", "", "Root path of the index tree. Required: pass this flag or set it in .beegfs.index at the BeeGFS mount root (no default).")
+	cmd.Flags().StringVar(&globalCfg.UpdaterAddr, "updater-addr", "", "Address (host:port) of the beegfs-index-updater service, used by 'update'. If unset, read from .beegfs.index at the BeeGFS mount root.")
 
 	cmd.AddCommand(newCreateCmd(&globalCfg, cmd.Flags()))
 	cmd.AddCommand(newFindCmd(&globalCfg, cmd.Flags()))
@@ -47,6 +48,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newQueryCmd(&globalCfg, cmd.Flags()))
 	cmd.AddCommand(newRescanCmd(&globalCfg, cmd.Flags()))
 	cmd.AddCommand(newMigrateCmd(&globalCfg, cmd.Flags()))
+	cmd.AddCommand(newUpdateCmd(&globalCfg, cmd.Flags()))
 
 	return cmd
 }

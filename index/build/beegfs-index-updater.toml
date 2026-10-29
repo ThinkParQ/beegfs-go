@@ -1,0 +1,255 @@
+# This is a config file for BeeGFS Index Updater.
+# http://www.beegfs.com
+
+
+# --- [Table of Contents] ---
+#
+# 1) Settings
+# 2) Command Line Arguments
+# 3) Settings Documentation
+
+#
+# --- Section 1: [Settings] ---
+#
+
+[log]
+level = 3
+type = "syslog"
+
+[management]
+address = "127.0.0.1:8010"
+auth-file = "/etc/beegfs/conn.auth"
+auth-disable = false
+tls-cert-file = "/etc/beegfs/cert.pem"
+tls-disable-verification = false
+tls-disable = false
+
+[collector]
+listen = "0.0.0.0:50052"
+checkpoint = "/var/lib/beegfs/index-updater/checkpoint.json"
+ack-frequency = "1s"
+batch-every = "30s"
+batch-events = 50000
+batch-queue = 2
+high-water-mark = 2097152
+tls-cert-file = "/etc/beegfs/cert.pem"
+tls-key-file = "/etc/beegfs/key.pem"
+tls-disable = false
+
+[markwalk]
+work = "/var/lib/beegfs/index-updater/markwalk"
+index = "/mnt/index/beegfs"
+query = "/opt/beegfs/bin/index/gufi_query"
+sqlite = "/opt/beegfs/bin/index/gufi_sqlite3"
+track-opens = false
+max-work-size = 1024
+
+[update]
+mount = "/mnt/beegfs"
+binary = "/opt/beegfs/bin/index/gufi_incremental_update"
+treesummary = "/opt/beegfs/bin/index/gufi_treesummary"
+plugin = "beegfs_index_ops:/opt/beegfs/lib/libbeegfs_indexing.so"
+no-beegfs-metadata = false
+compress = false
+max-subtrees = 0
+keep-artifacts = ""
+every = "0s"
+state = "/var/lib/beegfs/index-updater/update.json"
+
+
+#
+# --- Section 2: [Command Line Arguments] ---
+#
+
+# Use the command line argument "--cfg-file=/etc/another-config.conf" to specify a different config
+# file. All other options in this file can also be used as command line arguments, or set using
+# environment variables, overriding the corresponding config file values. See `--help` for details
+# on how to configure using flags and/or environment variables.
+
+
+#
+# --- Section 3: [Settings Documentation] ---
+#
+
+# BeeGFS Index Updater keeps a GUFI index in step with a BeeGFS file system. The collector is a
+# BeeGFS Watch subscriber: it receives file system events over gRPC and gathers them into batches
+# in memory. Markwalk looks up each batch's directories in the index itself, never in the file
+# system, and keeps their inodes in memory. When an update starts, markwalk writes them to one
+# suspect file, and only then are the events acknowledged to Watch, which keeps everything not yet
+# acknowledged. The updater applies the file to the index with gufi_incremental_update, on the
+# schedule below or when `beegfs index update` asks, and repairs a gap in the event stream with a
+# full rebuild of the index. The configuration is read once at start.
+
+
+#
+# --- Section 3.1: [Logging Settings] ---
+#
+
+# Logging configuration must be specified under [log].
+
+# level: Adjust the logging verbosity. Supported levels:
+# 0 - Fatal Only (not recommended).
+# 1 - Fatal + Error
+# 2 - Warn + Error + Fatal
+# 3 - Info + Warn + Error + Fatal
+# 4, 5 - Debug, Info, Warn, Error, Fatal
+# Note: Levels above 3 might decrease performance.
+
+# type: Defines the logger type. This can either be "syslog" to send log messages to the general
+# system logger, "logfile", "stderr", or "stdout". If set to "logfile" logs will be written to the
+# below file and rotated based on the provided settings.
+
+# file: The path to the desired log file when logType is "logfile". As needed the directory and all
+# parent directories will be created.
+
+# max-size: When type is set to "logfile" this is the maximum size of the file in megabytes before
+# it is rotated.
+
+# num-rotated-files: When type is "logfile" the maximum number old file(s) to keep when max-size is
+# reached and the log is rotated.
+
+
+#
+# --- Section 3.2: [Management Settings] ---
+#
+
+# Management configuration must be specified under [management]. The service verifies the index
+# license with management at start.
+
+# address: The address (host:port) of the BeeGFS management service.
+
+# auth-file: The file containing the shared secret for BeeGFS connection authentication.
+
+# auth-disable: Disable connection authentication (not recommended).
+
+# tls-cert-file, tls-disable-verification, tls-disable: TLS settings for the management
+# connection, as for the other BeeGFS services.
+
+
+#
+# --- Section 3.3: [Collector Settings] ---
+#
+
+# Collector configuration must be specified under [collector]. Configure each BeeGFS Watch instance
+# with a gRPC subscriber pointing at the listen address.
+
+# listen: The address and port Watch connects to. The beegfs CLI connects here too for
+# `beegfs index update`.
+
+# checkpoint: The file where the sequence IDs acknowledged to Watch are recorded, so a restart
+# resumes where it left off.
+
+# ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
+
+# batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
+# system before the next update starts.
+
+# batch-events: Close the open batch once it holds this many events.
+
+# batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
+# the collector stops reading from Watch, which then keeps the events in its own buffer.
+
+# high-water-mark: Ask for an update once one metadata server has this many unacknowledged events.
+# Events are acknowledged only when an update starts, so Watch's buffer holds every event since the
+# last one. Watch drops the oldest events once its event-buffer-size is reached, which schedules a
+# full repair. Keep the mark well below that size: the default is half of Watch's default of
+# 4194304. A running update is not interrupted, so Watch must also hold the events of one whole
+# update. 0 disables the mark.
+
+# tls-cert-file, tls-key-file: The certificate and key that identify this server to Watch and
+# the beegfs CLI, the same files the other BeeGFS services use. Each Watch subscriber entry for
+# this service must then have grpc-tls-disable = false and the certificate in grpc-tls-cert-file.
+
+# tls-disable: Disable TLS for the gRPC server Watch and the CLI connect to.
+
+# A failing batch is retried with a growing delay and never skipped. The service does not stop,
+# so it resumes by itself once the cause is gone. `beegfs index update --status` shows a batch
+# that keeps failing and why.
+
+
+#
+# --- Section 3.4: [Markwalk Settings] ---
+#
+
+# Markwalk configuration must be specified under [markwalk].
+
+# work: The directory each update's suspect file is written to, as suspects-<N>. A file stays until
+# an update applies it, so a failed update leaves it for the next one.
+
+# index: The GUFI index root: the index directory that corresponds to the BeeGFS mount, that is
+# <index root>/<mount name> as `beegfs index create` lays it out. Its name must match the name of
+# update.mount, because gufi_incremental_update finds index directories by the mount's name. A
+# symlink is resolved at startup.
+
+# query: The gufi_query binary. Each batch runs it once to read the inodes of the directories the
+# events named. A batch that touched a hard-linked file runs it twice more: once over the
+# directories that hold such files, to read their inodes, and once over the whole index, to find
+# the directories of their other names. It runs with update.threads threads.
+
+# sqlite: The gufi_sqlite3 binary. It writes the inodes of a batch's hard-linked files to a small
+# database that the hard-link lookup attaches, so one walk of the index serves any number of them.
+
+# track-opens: Include open events so atime changes are indexed.
+
+# max-work-size: The most disk space, in MiB, the work directory may hold, counted in disk
+# blocks. Once it holds that much, no further batch is processed: the batch waits, the collector
+# stops reading from Watch, and Watch keeps the events in its own buffer until an update deletes
+# the suspect files it has applied. The space is measured before each batch.
+
+
+#
+# --- Section 3.5: [Update Settings] ---
+#
+
+# Update configuration must be specified under [update].
+
+# mount: The BeeGFS mount point the index describes. gufi_incremental_update walks it. No update
+# runs while it is not the mount point of a mounted BeeGFS: over an empty mount point the tool
+# would delete every directory of the index. Such a run fails and is retried later.
+
+# binary: The gufi_incremental_update binary.
+
+# treesummary: The gufi_treesummary binary, run on the index root after a successful update so
+# `beegfs index info --treesummary` and `stats` stay current. Empty skips it.
+
+# plugin: The BeeGFS indexing plugin, passed to the update so rebuilt directories keep their
+# BeeGFS metadata tables.
+
+# no-beegfs-metadata: Skip the plugin for every run, for an index created with
+# `beegfs index create -B` or to update without BeeGFS metadata. `beegfs index update -B` skips it
+# for one run.
+
+# threads: The thread count handed to the GUFI binaries, gufi_query included. Defaults to the
+# number of CPUs.
+
+# The next three keys are gufi_incremental_update's own options under the tool's names, passed
+# through when set. The suspect method with its file or time, and the index, mount and parking
+# lot paths, are set by the service: they are how a normal run differs from a repair.
+
+# compress: Pass --compress, so the tool compresses its work items; saves memory on large trees.
+
+# max-subtrees: Pass --max-subtrees, the number of subtrees processed in parallel, which bounds
+# the open file descriptors. 0 leaves the tool's default.
+
+# keep-artifacts: Pass --keep-artifacts with this directory, which must exist, so the run's
+# artifacts are kept there instead of deleted. Empty deletes them.
+
+# every: Run an update at least this often. 0 disables the timer. Otherwise it must be at least 1m.
+
+# `beegfs index update --every` changes every until the service restarts. After a restart the
+# value here applies again.
+
+# With every 0, updates run when `beegfs index update` asks or when collector.high-water-mark is
+# reached.
+
+# A full repair is scheduled when Watch lost events. It rebuilds every directory of the index,
+# because nothing says which directories the lost events changed. A failed repair stays pending and
+# is retried after a growing delay. It does not hold back normal updates.
+
+# state: The file that keeps the pending repair and the highest processed sequence ID per metadata
+# node across restarts.
+
+# The parking lot: gufi_incremental_update parks index directories in
+# .index-updater-parking-<index name>, next to the markwalk index directory, while it runs.
+# Stopping the service kills a running update, which can leave directories there. The next start
+# deletes them and queues a full repair, which indexes them again.

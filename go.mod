@@ -15,10 +15,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/aws/smithy-go v1.24.3
 	github.com/bmatcuk/doublestar/v4 v4.8.1
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dgraph-io/badger/v4 v4.7.0
 	github.com/dsnet/golib/unitconv v1.0.2
 	github.com/expr-lang/expr v1.17.7
 	github.com/go-viper/mapstructure/v2 v2.4.0
+	github.com/google/renameio/v2 v2.0.2
 	github.com/google/uuid v1.6.0
 	github.com/jedib0t/go-pretty/v6 v6.6.7
 	github.com/mitchellh/go-wordwrap v1.0.1
@@ -28,7 +30,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thinkparq/protobuf v0.8.5-0.20261022082505-128afdd5c17a
+	github.com/thinkparq/protobuf v0.8.5-0.20261027081935-c02eee2e5cb6
 	go.opentelemetry.io/contrib/bridges/otelzap v0.20.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.21.0
@@ -63,7 +65,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.25.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.21 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
