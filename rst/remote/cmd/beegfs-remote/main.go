@@ -98,6 +98,7 @@ func main() {
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Remote node's gRPC server.")
 	pflag.String("job.path-db", "/var/lib/beegfs/remote/path.badger", "Path where the database tracking jobs for each path will be created/maintained.")
+	pflag.Int64("job.path-db-block-cache", 256<<20, "Size in bytes of the in-memory block cache used to speed up reads from the path DB. Increase this on nodes tracking a large number of paths/jobs to avoid excessive disk reads.")
 	pflag.Int("job.request-queue-depth", 1024, "Number of requests that can be made to JobMgr before new requests are blocked.")
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
 	pflag.Int("job.max-job-entries-per-rst", 4, "Once this threshold is exceeded, older jobs will be deleted (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.")
