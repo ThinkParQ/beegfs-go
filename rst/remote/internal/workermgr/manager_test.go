@@ -134,7 +134,7 @@ func schedulingWorkerConfig() worker.Config {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork", Args: []any{mock.Anything},
 					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
@@ -152,7 +152,7 @@ func schedulingAndCancellingWorkerConfig() worker.Config {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork", Args: []any{mock.Anything},
 					ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
@@ -174,7 +174,7 @@ func TestWorkCounterNoPool(t *testing.T) {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -207,7 +207,7 @@ func TestWorkCounterSubmitWorkError(t *testing.T) {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork", Args: []any{mock.Anything},
 					ReturnArgs: []any{nil, fmt.Errorf("simulated submit failure")},
@@ -324,7 +324,7 @@ func TestWorkCounterUpdateJobUnassigned(t *testing.T) {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -370,7 +370,7 @@ func TestWorkCounterUpdateJobPoolNotFound(t *testing.T) {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -433,7 +433,7 @@ func TestWorkCounterUpdateJobNodeResponse(t *testing.T) {
 				ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 				MockConfig: worker.MockConfig{
 					Expectations: []worker.MockExpectation{
-						{MethodName: "connect", ReturnArgs: []any{false, nil}},
+						{MethodName: "connect", ReturnArgs: []any{nil}},
 						{
 							MethodName: "SubmitWork", Args: []any{mock.Anything},
 							ReturnArgs: []any{flex.Work_Status_builder{State: flex.Work_SCHEDULED}.Build(), nil},
@@ -477,7 +477,7 @@ func minimalWorkerConfig() worker.Config {
 		ID: "0", Name: "test-node-0", Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
