@@ -63,9 +63,12 @@ Because jobs can exist for paths that no longer exist in BeeGFS, recursive updat
 	cmd.Flags().StringVar(&cfg.JobID, "job-id", "", "If there are multiple jobs for this path, only update the specified job.")
 	cmd.Flags().BoolVar(&cfg.Force, "force", false, `Use force to attempt to cancel a job and all work requests regardless of their current state.
 	This attempts to be as thorough as possible and will ignore errors it encounters along the way to complete the following:
-	(a) Always verifies worker nodes are no longer running work requests even if they were already cancelled.
+	(a) Always attempts to verify worker nodes are no longer running work requests even if they were already cancelled.
 	(b) Aborts outstanding external transfers (such as multipart uploads), even if some work requests could not be definitely cancelled.
 	(c) Updates the job state to cancelled so it can be cleaned up (deleted).
+	WARNING: If a worker node cannot be reached, its work requests are cancelled without confirmation. If that node later rejoins
+	with its work journal intact, it resumes those work requests, which can overwrite newer data for the same path. Only force cancel
+	a job with unreachable worker nodes when those nodes will not return.
 	The force flag can also be used to cancel completed jobs, which are normally ignored by job updates.
 	Force cancelling already completed jobs should generally never be necessary during normal operation.`)
 	cmd.Flags().UintSliceVar(&cfg.RemoteTargets, "remote-targets", nil, "Only update jobs for the specified remote targets. By default jobs for all remote targets are updated.")

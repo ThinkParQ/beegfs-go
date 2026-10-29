@@ -1,0 +1,396 @@
+package workmgr
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
+	pbr "github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// TestSendBuilderJobRequestCounters pins how each submission moves the builder job's counters. A
+// path a bulk operation takes is submitted twice: a reserve when the operation takes it and a claim
+// once the operation knows what work it needs. It must still be counted once, by the claim's
+// outcome, while JobsReserved tracks the reservations whose claim has not been answered yet.
+func TestSendBuilderJobRequestCounters(t *testing.T) {
+	reserve := func() *pbr.JobRequest {
+		request := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_RESERVE}.Build()
+		request.SetJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
+		return request
+	}
+	claim := func() *pbr.JobRequest {
+		request := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build()
+		request.SetJobId("48d3cf27-3e99-4f59-9c49-aec4bdc331be")
+		return request
+	}
+	plain := func() *pbr.JobRequest {
+		return pbr.JobRequest_builder{Path: "/f"}.Build()
+	}
+
+	type submission struct {
+		request *pbr.JobRequest
+		err     error
+		// job is the job remote answers with, when the case needs one.
+		job *pbr.Job
+	}
+	cases := []struct {
+		name        string
+		submissions []submission
+		want        *flex.BuilderJob
+	}{
+		{
+			name:        "an accepted reserve is held, not submitted",
+			submissions: []submission{{reserve(), nil, nil}},
+			want:        flex.BuilderJob_builder{JobsReserved: 1}.Build(),
+		},
+		{
+			name:        "an accepted claim releases its reservation and counts as submitted",
+			submissions: []submission{{reserve(), nil, nil}, {claim(), nil, nil}},
+			want:        flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:        "a refused claim releases its reservation and counts its refusal",
+			submissions: []submission{{reserve(), nil, nil}, {claim(), rst.ErrReservationMissing, nil}},
+			want:        flex.BuilderJob_builder{JobsNotReserved: 1}.Build(),
+		},
+		{
+			name:        "a claim that fails for another reason still releases its reservation",
+			submissions: []submission{{reserve(), nil, nil}, {claim(), rst.ErrJobFailedPrecondition, nil}},
+			want:        flex.BuilderJob_builder{Errors: 1}.Build(),
+		},
+		{
+			// The reserve never held anything, so nothing is waiting on a claim.
+			name:        "a refused reserve counts its refusal and holds nothing",
+			submissions: []submission{{reserve(), rst.ErrJobNotAllowed, nil}},
+			want:        flex.BuilderJob_builder{JobsNotAllowed: 1}.Build(),
+		},
+		{
+			// A crash loses the counters of a round that had not committed, including its reserves,
+			// while the claims for them still arrive. The count must not go negative.
+			name:        "a claim with no counted reservation leaves the count at zero",
+			submissions: []submission{{claim(), nil, nil}},
+			want:        flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			// A rescheduled builder job reserves its paths again under the same IDs. A path whose
+			// reservation an earlier pass claimed comes back with the claimed job, and that claim was
+			// counted when it was answered.
+			name: "a replayed reserve of a job already claimed is not counted again",
+			submissions: []submission{{reserve(), nil, pbr.Job_builder{
+				Id:      reserve().GetJobId(),
+				Request: pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build(),
+			}.Build()}},
+			want: &flex.BuilderJob{},
+		},
+		{
+			// Remote answers a refused reserve with the job that blocked it, which is claimed when
+			// it is an earlier run's job still running on the path. Its ID is not this request's, so
+			// the refusal is counted like any other.
+			name: "a reserve refused by another job's claim is counted as refused",
+			submissions: []submission{{reserve(), rst.ErrJobNotAllowed, pbr.Job_builder{
+				Id:      "11111111-1111-1111-1111-111111111111",
+				Request: pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_CLAIM}.Build(),
+			}.Build()}},
+			want: flex.BuilderJob_builder{JobsNotAllowed: 1}.Build(),
+		},
+		{
+			name:        "a request outside any bulk operation does not touch the count",
+			submissions: []submission{{reserve(), nil, nil}, {plain(), nil, nil}},
+			want:        flex.BuilderJob_builder{JobsReserved: 1, Submitted: 1}.Build(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := beeremote.New(beeremote.Config{})
+			require.NoError(t, err)
+			// The address "mock:0" is what makes the client use the mock provider.
+			require.NoError(t, client.UpdateConfig(flex.BeeRemoteNode_builder{Address: "mock:0"}.Build(), "0"))
+			mockRemote, ok := client.Provider.(*beeremote.MockProvider)
+			require.True(t, ok)
+			w := &worker{beeRemoteClient: client}
+
+			builder := &flex.BuilderJob{}
+			mu := &sync.Mutex{}
+			for _, s := range tc.submissions {
+				call := mockRemote.On("submitJob", mock.Anything).Return(s.err, s.job).Once()
+				_, gotErr := w.sendBuilderJobRequest(context.Background(), mu, builder, s.request)
+				if s.err == nil {
+					require.NoError(t, gotErr)
+				} else {
+					require.ErrorIs(t, gotErr, s.err)
+				}
+				call.Unset()
+			}
+
+			assert.Equal(t, tc.want.GetSubmitted(), builder.GetSubmitted(), "submitted")
+			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
+			assert.Equal(t, tc.want.GetJobsNotAllowed(), builder.GetJobsNotAllowed(), "not allowed")
+			assert.Equal(t, tc.want.GetJobsNotReserved(), builder.GetJobsNotReserved(), "not reserved")
+			assert.Equal(t, tc.want.GetJobsReserved(), builder.GetJobsReserved(), "reserved")
+		})
+	}
+}
+
+// TestSendBuilderJobRequestRetries pins which submit failures sendBuilderJobRequest retries. It
+// retries only while remote has not decided the request: remote cannot be reached, or the
+// connection was closed under a call the caller did not cancel. A refusal remote decided is counted
+// once, because remote gives the same answer on every retry. A call the caller cancelled is
+// returned without being counted, because nothing is wrong with the request. It is also marked
+// rst.ErrRequestNotDelivered, because remote may never have seen it. A claim remote reports as
+// already claimed was accepted by an earlier attempt, so it is returned as accepted. The same answer
+// to any other request is a refusal. The retry cases each
+// wait out the first one second backoff, so the cases run in parallel.
+func TestSendBuilderJobRequestRetries(t *testing.T) {
+	unavailable := fmt.Errorf("%w: %w", beeremote.ErrUnavailable, status.Error(codes.Unavailable, "connection refused"))
+	canceled := fmt.Errorf("%w: %w", context.Canceled, status.Error(codes.Canceled, "grpc: the client connection is closing"))
+	refused := status.Error(codes.Unknown, "unable to generate job from job request")
+
+	cases := []struct {
+		name          string
+		callerCancels bool
+		// claim is whether the request claims a reserved job.
+		claim bool
+		// results are what remote answers to each submit, in order.
+		results []error
+		wantErr error
+		// notDelivered is whether the error must wrap rst.ErrRequestNotDelivered.
+		notDelivered bool
+		want         *flex.BuilderJob
+	}{
+		{
+			name:    "a refusal remote decided is counted once and not retried",
+			results: []error{refused},
+			wantErr: refused,
+			want:    flex.BuilderJob_builder{Errors: 1}.Build(),
+		},
+		{
+			name:    "remote that cannot be reached is retried until it accepts",
+			results: []error{unavailable, nil},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:    "a connection closed under a live call is retried until remote accepts",
+			results: []error{canceled, nil},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:    "a claim whose reply was lost is accepted when the retry finds it claimed",
+			claim:   true,
+			results: []error{canceled, rst.ErrJobAlreadyExists},
+			want:    flex.BuilderJob_builder{Submitted: 1}.Build(),
+		},
+		{
+			name:    "an existing job is a refusal for a request that is not a claim",
+			results: []error{rst.ErrJobAlreadyExists},
+			wantErr: rst.ErrJobAlreadyExists,
+			want:    &flex.BuilderJob{},
+		},
+		{
+			name:          "a call the caller cancelled is returned and not counted",
+			callerCancels: true,
+			results:       []error{canceled},
+			wantErr:       context.Canceled,
+			notDelivered:  true,
+			want:          &flex.BuilderJob{},
+		},
+		{
+			name:          "remote that cannot be reached is not retried once the caller cancels",
+			callerCancels: true,
+			results:       []error{unavailable},
+			wantErr:       beeremote.ErrUnavailable,
+			notDelivered:  true,
+			want:          &flex.BuilderJob{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, err := beeremote.New(beeremote.Config{})
+			require.NoError(t, err)
+			// The address "mock:0" is what makes the client use the mock provider.
+			require.NoError(t, client.UpdateConfig(flex.BeeRemoteNode_builder{Address: "mock:0"}.Build(), "0"))
+			mockRemote, ok := client.Provider.(*beeremote.MockProvider)
+			require.True(t, ok)
+			for _, result := range tc.results {
+				mockRemote.On("submitJob", mock.Anything).Return(result).Once()
+			}
+			w := &worker{beeRemoteClient: client, log: zaptest.NewLogger(t)}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.callerCancels {
+				cancel()
+			}
+
+			builder := &flex.BuilderJob{}
+			request := pbr.JobRequest_builder{Path: "/f"}.Build()
+			if tc.claim {
+				request.SetJobId("00000000-0000-0000-0000-000000000001")
+				request.SetReservation(pbr.JobRequest_CLAIM)
+			}
+			_, gotErr := w.sendBuilderJobRequest(ctx, &sync.Mutex{}, builder, request)
+			if tc.wantErr == nil {
+				require.NoError(t, gotErr)
+			} else {
+				require.ErrorIs(t, gotErr, tc.wantErr)
+				assert.Equal(t, tc.notDelivered, errors.Is(gotErr, rst.ErrRequestNotDelivered), "not delivered")
+			}
+
+			mockRemote.AssertNumberOfCalls(t, "submitJob", len(tc.results))
+			assert.Equal(t, tc.want.GetSubmitted(), builder.GetSubmitted(), "submitted")
+			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
+		})
+	}
+}
+
+// TestCancelBuilderReservation pins how sync ends a reservation the builder will not claim, because
+// the file changed or could not be locked. The cancel is a claim carrying FAILED_PRECONDITION, which
+// remote records as CANCELLED. Remote's FAILED_PRECONDITION answer means the cancel landed, so it
+// is not reported as an error. The reservation leaves JobsReserved, and the path is counted once:
+// as changed when the file changed, and as an error otherwise.
+func TestCancelBuilderReservation(t *testing.T) {
+	unavailable := fmt.Errorf("%w: %w", beeremote.ErrUnavailable, status.Error(codes.Unavailable, "connection refused"))
+	changed := fmt.Errorf("%w: its size changed", rst.ErrFileChangedDuringBuild)
+
+	cases := []struct {
+		name          string
+		reason        error
+		callerCancels bool
+		answer        error
+		wantErr       error
+		want          *flex.BuilderJob
+	}{
+		{
+			name:   "a file that changed is counted as changed",
+			reason: changed,
+			answer: rst.ErrJobFailedPrecondition,
+			want:   flex.BuilderJob_builder{JobsChangedDuringBuild: 1}.Build(),
+		},
+		{
+			name:   "a file that could not be locked is counted as an error",
+			reason: errors.New("unable to lock /f"),
+			answer: rst.ErrJobFailedPrecondition,
+			want:   flex.BuilderJob_builder{Errors: 1}.Build(),
+		},
+		{
+			// A user cancelled the reservation first. Remote's release at the end of the call still
+			// decided the lock, so the cancel is done.
+			name:   "a reservation something else already ended is done",
+			reason: changed,
+			answer: rst.ErrJobNotReserved,
+			want:   flex.BuilderJob_builder{JobsChangedDuringBuild: 1}.Build(),
+		},
+		{
+			name:          "a cancel remote may not have seen is returned and not counted",
+			reason:        changed,
+			callerCancels: true,
+			answer:        unavailable,
+			wantErr:       rst.ErrRequestNotDelivered,
+			want:          flex.BuilderJob_builder{JobsReserved: 1}.Build(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := beeremote.New(beeremote.Config{})
+			require.NoError(t, err)
+			// The address "mock:0" is what makes the client use the mock provider.
+			require.NoError(t, client.UpdateConfig(flex.BeeRemoteNode_builder{Address: "mock:0"}.Build(), "0"))
+			mockRemote, ok := client.Provider.(*beeremote.MockProvider)
+			require.True(t, ok)
+			var sent *pbr.JobRequest
+			mockRemote.On("submitJob", mock.Anything).Run(func(args mock.Arguments) {
+				sent = args.Get(0).(*pbr.JobRequest)
+			}).Return(tc.answer).Once()
+			w := &worker{beeRemoteClient: client, log: zaptest.NewLogger(t)}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.callerCancels {
+				cancel()
+			}
+
+			reserved := pbr.JobRequest_builder{Path: "/f", Reservation: pbr.JobRequest_RESERVE}.Build()
+			reserved.SetJobId("00000000-0000-0000-0000-000000000001")
+			builder := flex.BuilderJob_builder{JobsReserved: 1}.Build()
+			gotErr := w.cancelBuilderReservation(ctx, &sync.Mutex{}, builder, reserved, tc.reason)
+
+			if tc.wantErr == nil {
+				require.NoError(t, gotErr)
+			} else {
+				require.ErrorIs(t, gotErr, tc.wantErr)
+			}
+			require.NotNil(t, sent)
+			assert.Equal(t, pbr.JobRequest_CLAIM, sent.GetReservation(), "the cancel claims the reservation")
+			assert.Equal(t, reserved.GetJobId(), sent.GetJobId())
+			assert.Equal(t, pbr.JobRequest_GenerationStatus_FAILED_PRECONDITION, sent.GetGenerationStatus().GetState())
+			assert.Equal(t, tc.reason.Error(), sent.GetGenerationStatus().GetMessage())
+			assert.Equal(t, pbr.JobRequest_RESERVE, reserved.GetReservation(), "the builder's request must not change")
+			assert.Equal(t, tc.want.GetJobsReserved(), builder.GetJobsReserved(), "reserved")
+			assert.Equal(t, tc.want.GetJobsChangedDuringBuild(), builder.GetJobsChangedDuringBuild(), "changed")
+			assert.Equal(t, tc.want.GetErrors(), builder.GetErrors(), "errors")
+		})
+	}
+}
+
+// TestGetBuilderResultsReserved pins what the builder job reports while reservations wait for
+// their claim, and when some are left at the end. A bulk operation claims its reservations late,
+// and the builder claims the rest as it goes.
+func TestGetBuilderResultsReserved(t *testing.T) {
+	cfg := &flex.JobRequestCfg{Download: true, RemotePath: "prefix"}
+
+	t.Run("reservations alone are not reported as no matches", func(t *testing.T) {
+		// Every path the walk found was taken by a bulk operation, so none has been claimed yet.
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: cfg, JobsReserved: 4446}.Build())
+		assert.Equal(t, "4446 reserved and not yet claimed", message)
+		assert.NotContains(t, message, "no matches found")
+		// hasErrors is only read once the builder job ends. A reservation left then never got a job.
+		assert.True(t, hasErrors)
+	})
+
+	t.Run("configured directories alone are not reported as no matches", func(t *testing.T) {
+		// An --update walk over a tree with no eligible files configures every directory and
+		// submits nothing. That walk did what was asked, so it must not end with errors.
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: &flex.JobRequestCfg{Path: "/dir"}, DirsConfigured: 3}.Build())
+		assert.Equal(t, "3 director(ies) configured", message)
+		assert.False(t, hasErrors)
+	})
+
+	t.Run("files that changed during the build are reported as errors", func(t *testing.T) {
+		// Nothing ran for them, so the push is incomplete until it runs again.
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: cfg, Submitted: 3, JobsChangedDuringBuild: 2}.Build())
+		assert.Equal(t, "3 job request(s) submitted; 2 changed while the job was being built and were skipped", message)
+		assert.True(t, hasErrors)
+	})
+
+	t.Run("no line is added once every reservation is claimed", func(t *testing.T) {
+		message, hasErrors := getBuilderResults(flex.BuilderJob_builder{Cfg: cfg, Submitted: 4446}.Build())
+		assert.Equal(t, "4446 job request(s) submitted", message)
+		assert.False(t, hasErrors)
+	})
+}
+
+// A builder request can arrive without a Cfg, and its work then ends with no counters set. Building
+// the "no matches" message must not dereference the missing Cfg.
+func TestGetBuilderResultsNilCfg(t *testing.T) {
+	var message string
+	var hasErrors bool
+	require.NotPanics(t, func() {
+		message, hasErrors = getBuilderResults(flex.BuilderJob_builder{}.Build())
+	})
+	assert.Contains(t, message, "no matches found")
+	assert.True(t, hasErrors)
+}

@@ -54,6 +54,8 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	}
 
 	n.client = flex.NewWorkerNodeClient(n.conn)
+	config = proto.Clone(config).(*flex.UpdateConfigRequest)
+	config.SetNodeId(n.GetID())
 
 	// Verify the remote address is specified. If it's not specified (e.g. 0.0.0.0:9010) then use
 	// a heartbeat rpc call to determine a valid address for the sync node to reach remote.
@@ -77,7 +79,6 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		if err != nil {
 			return false, fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
-		config = proto.Clone(config).(*flex.UpdateConfigRequest)
 		remoteAddr := net.JoinHostPort(host, port)
 		n.log.Info("automatically determined address for sync node to communicate with remote", zap.String("remoteAddr", remoteAddr))
 		config.BeeRemote.SetAddress(remoteAddr)
@@ -141,7 +142,10 @@ func (n *BeeSyncNode) disconnect() error {
 func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
+
+	// Draining nodes are offered work as a last resort, so only an unreachable node is refused
+	// outright here. A draining node may still decline, which is handled from its response below.
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
 
@@ -162,9 +166,21 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 				time.Sleep(time.Duration(n.config.RetryInterval) * time.Second)
 				continue
 			} else if rpcStatus.Code() == codes.AlreadyExists {
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/39
-				// Ideally don't panic here and figure out how to handle more gracefully.
-				panic("work request already exists on node, this should never happen unless something is misconfigured or there is a new bug: " + err.Error())
+				// The node already tracks this request. This happens when a job is submitted again
+				// under the same job ID after remote lost the commit that recorded the first
+				// submission, so the same work request reaches the node twice. The node keeps
+				// running its copy and reports progress through UpdateWork, so the request is
+				// treated as scheduled here.
+				n.log.Warn("work request was already submitted to this node, treating it as scheduled", zap.String("jobId", request.GetJobId()), zap.String("requestId", request.GetRequestId()))
+				return flex.Work_builder{
+					Path:      request.GetPath(),
+					JobId:     request.GetJobId(),
+					RequestId: request.GetRequestId(),
+					Status: flex.Work_Status_builder{
+						State:   flex.Work_SCHEDULED,
+						Message: "the node already had this work request",
+					}.Build(),
+				}.Build(), nil
 			}
 		}
 		break
@@ -176,7 +192,27 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 		}
 		return nil, err
 	}
-	return resp.GetWork(), nil
+
+	// A node declines when it is too far into shutting down to record the request, and nodes
+	// predating support for accepting while draining decline every request. Either way nothing was
+	// created there, so the request is unassigned and may be offered elsewhere.
+	if resp.GetStatus() == flex.SubmitWorkResponse_DRAINING {
+		if n.GetState() != DRAINING {
+			n.log.Info("node declined a work request because it is draining, further requests will only be assigned to it as a last resort")
+			n.setState(DRAINING)
+		}
+		return nil, ErrNodeDraining
+	}
+
+	// Callers treat a nil error as proof the request is now tracked on this node, and a result with
+	// no status cannot be tracked or updated. Refusing it here keeps that contract from depending on
+	// what a node chooses to put in its response.
+	work := resp.GetWork()
+	if work.GetStatus() == nil {
+		return nil, fmt.Errorf("node accepted the work request but returned no work result")
+	}
+
+	return work, nil
 }
 
 func (n *BeeSyncNode) reportError(err error) {
@@ -189,8 +225,9 @@ func (n *BeeSyncNode) reportError(err error) {
 func (n *BeeSyncNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
 	n.rpcWG.Add(1)
 	defer n.rpcWG.Done()
-	if n.GetState() != ONLINE {
-		return nil, fmt.Errorf("unable to submit work request to an offline node")
+
+	if state := n.GetState(); state != ONLINE && state != DRAINING {
+		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
 
 	var resp *flex.UpdateWorkResponse

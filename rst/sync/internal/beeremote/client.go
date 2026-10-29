@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
 	"google.golang.org/grpc/codes"
@@ -15,7 +16,12 @@ import (
 
 type Config struct {
 	// Dynamic configuration is typically set by BeeRemote through the gRPC server.
-	dynamic                *flex.BeeRemoteNode
+	dynamic *flex.BeeRemoteNode
+	// nodeId is the ID BeeRemote knows this node by, learned from the configuration BeeRemote
+	// pushes. It is reported with each job request this node submits so BeeRemote can tell the
+	// request originated here. Empty when talking to a BeeRemote that does not report it, in which
+	// case submissions carry no origin and BeeRemote assigns them as it always has.
+	nodeId                 string
 	TlsCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"tls-disable"`
@@ -35,7 +41,7 @@ type Provider interface {
 	init(config Config) error
 	disconnect() error
 	updateWork(ctx context.Context, workResult *flex.Work) error
-	submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) error
+	submitJob(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error)
 }
 
 // New returns an initialized BeeRemote client. The dynamic portion of the initialCfg can be set to
@@ -51,7 +57,7 @@ func New(initialCfg Config) (*Client, error) {
 	}
 
 	c.config = initialCfg
-	err := c.UpdateConfig(initialCfg.dynamic)
+	err := c.UpdateConfig(initialCfg.dynamic, "")
 	if errors.Is(err, ErrNilConfiguration) {
 		return c, nil
 	} else if err != nil {
@@ -71,12 +77,13 @@ func (c *Client) CompareConfig(newConfig *flex.BeeRemoteNode) bool {
 // should not be a problem because worker goroutines will get an error if there is some
 // misconfiguration that would prevent ever sending a response, then wait some time before trying to
 // resend the result, which gives enough time for the configuration to be updated.
-func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode) error {
+func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode, nodeId string) error {
 	c.readyMu.Lock()
 	defer c.readyMu.Unlock()
 	if newCfg == nil {
 		return ErrNilConfiguration
 	}
+	c.config.nodeId = nodeId
 
 	// Cleanup the old provider before swapping it out.
 	if c.Provider != nil {
@@ -101,6 +108,62 @@ func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode) error {
 		return nil
 	}
 	return ErrInvalidAddress
+}
+
+// RequireFeatures checks that the remote newCfg names supports every feature in required. It runs
+// before the node applies newCfg, so a remote this node can't work with is refused while the node
+// still has its previous configuration. It opens its own short-lived connection, because
+// UpdateConfig closes the current connection before it opens the new one.
+//
+// It returns:
+//   - nil when the remote supports every feature, or when newCfg names the mock remote used in
+//     tests.
+//   - an error wrapping ErrIncompatibleRemote when the remote answered but lacks a feature, or
+//     predates capabilities. Upgrading the remote is the fix.
+//   - an error wrapping ErrUnavailable when the remote could not be reached. Remote connects to
+//     its sync nodes before its own server listens, so this is expected while remote starts, and
+//     the caller should let remote retry.
+//   - any other error as is.
+func (c *Client) RequireFeatures(ctx context.Context, newCfg *flex.BeeRemoteNode, required ...string) error {
+	if newCfg == nil {
+		return ErrNilConfiguration
+	}
+	switch newCfg.GetAddress() {
+	case "mock:0":
+		return nil
+	case "":
+		return ErrInvalidAddress
+	}
+
+	c.readyMu.RLock()
+	cfg := c.config
+	c.readyMu.RUnlock()
+	cfg.dynamic = newCfg
+
+	conn, err := newClientConn(cfg)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return requireFeatures(ctx, beeremote.NewBeeRemoteClient(conn), required...)
+}
+
+// requireFeatures asks client for the remote's capabilities and checks each feature in required.
+// It maps the answer as RequireFeatures documents.
+func requireFeatures(ctx context.Context, client registry.RegistryGetter, required ...string) error {
+	remoteRegistry, _, err := registry.GetComponentRegistry(ctx, client)
+	if err != nil {
+		if errors.Is(err, registry.ErrCapabilitiesNotSupported) {
+			return fmt.Errorf("%w: %w (upgrade BeeGFS Remote)", ErrIncompatibleRemote, err)
+		}
+		return fmt.Errorf("unable to check BeeGFS Remote capabilities: %w", classifyRPCError(err))
+	}
+	for _, feature := range required {
+		if err := remoteRegistry.RequireFeature(feature); err != nil {
+			return fmt.Errorf("%w: %w (upgrade BeeGFS Remote)", ErrIncompatibleRemote, err)
+		}
+	}
+	return nil
 }
 
 // UpdateWorkRequest will forward the provided work result to BeeRemote. If the provider has not
@@ -139,21 +202,16 @@ func (c *Client) UpdateWorkRequest(ctx context.Context, workResult *flex.Work) (
 	return false, nil
 }
 
-// SubmitJobRequest will forward the provided job request to BeeRemote.
-func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.JobRequest) error {
+// SubmitJobRequest will forward the provided job request to BeeRemote. It returns the job remote
+// answered with, which may be nil for a refusal, together with remote's answer as an error.
+func (c *Client) SubmitJobRequest(ctx context.Context, jobRequest *beeremote.JobRequest) (*beeremote.Job, error) {
 	c.readyMu.RLock()
 	defer c.readyMu.RUnlock()
 	if c.Provider == nil {
-		return fmt.Errorf("BeeRemote client is not ready")
+		return nil, fmt.Errorf("BeeRemote client is not ready")
 	}
 
-	if err := c.submitJob(ctx, jobRequest); err != nil {
-		if _, ok := status.FromError(err); !ok {
-			return fmt.Errorf("received an unknown error (no gRPC status), most likely this is a bug: %w", err)
-		}
-		return err
-	}
-	return nil
+	return c.submitJob(ctx, jobRequest)
 }
 
 func (c *Client) Disconnect() error {

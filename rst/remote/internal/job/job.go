@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/thinkparq/beegfs-go/common/rst"
@@ -67,9 +68,202 @@ func (j *Job) InTerminalState() bool {
 	return j.GetStatus().GetState() == beeremote.Job_COMPLETED || j.GetStatus().GetState() == beeremote.Job_OFFLOADED || j.GetStatus().GetState() == beeremote.Job_CANCELLED
 }
 
+// InReservedState returns true when the job has been reserved but not scheduled.
+func (j *Job) InReservedState() bool {
+	return j.GetStatus().GetState() == beeremote.Job_RESERVED
+}
+
 // InActiveState() returns true if the job is active and not in a failed or terminal state.
 func (j *Job) InActiveState() bool {
 	return j.GetStatus().GetState() == beeremote.Job_SCHEDULED || j.GetStatus().GetState() == beeremote.Job_RUNNING
+}
+
+// IsReadOnly reports whether the job leaves the BeeGFS file at the job's path untouched.
+// Unrecognized request types are treated as a write to be safe.
+func (j *Job) IsReadOnly() bool {
+	request := j.GetRequest()
+
+	var cfg *flex.JobRequestCfg
+	switch request.WhichType() {
+	case beeremote.JobRequest_Sync_case:
+		cfg = &flex.JobRequestCfg{
+			Download:  request.GetSync().GetOperation() == flex.SyncJob_DOWNLOAD,
+			StubLocal: request.StubLocal,
+		}
+	case beeremote.JobRequest_Builder_case:
+		cfg = request.GetBuilder().GetCfg()
+	case beeremote.JobRequest_Mock_case:
+		cfg = request.GetMock().GetCfg()
+	}
+
+	return cfg != nil && !(cfg.GetDownload() || cfg.GetStubLocal())
+}
+
+// effectiveRST returns the remote storage target the job moves data to or from.
+func (j *Job) effectiveRST() uint32 {
+	request := j.GetRequest()
+	if request.HasBuilder() {
+		return request.GetBuilder().GetCfg().GetRemoteStorageTarget()
+	}
+	return request.GetRemoteStorageTarget()
+}
+
+// remotePath returns the remote path regardless of the job type.
+func (j *Job) remotePath() string {
+	request := j.GetRequest()
+	switch request.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return request.GetBuilder().GetCfg().RemotePath
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetRemotePath()
+	case beeremote.JobRequest_Mock_case:
+		return request.GetMock().GetCfg().GetRemotePath()
+	default:
+		return ""
+	}
+}
+
+// isDownload reports whether the job was a download. Unrecognized request types report false.
+func (j *Job) isDownload() bool {
+	request := j.GetRequest()
+	switch request.WhichType() {
+	case beeremote.JobRequest_Builder_case:
+		return request.GetBuilder().GetCfg().GetDownload()
+	case beeremote.JobRequest_Sync_case:
+		return request.GetSync().GetOperation() == flex.SyncJob_DOWNLOAD
+	case beeremote.JobRequest_Mock_case:
+		return request.GetMock().GetCfg().GetDownload()
+	default:
+		return false
+	}
+}
+
+// outcomeRecordedBy reports whether the lastJob already records the outcome resolved by this job.
+func (j *Job) outcomeRecordedBy(lastJob *Job, wantState beeremote.Job_State, mtime time.Time) bool {
+	// A claimed reservation is this request's own record. It must take the outcome so it leaves
+	// reserved, because a reserved job blocks every later job for its path and RST.
+	if j.InReservedState() || lastJob == nil || lastJob.GetStatus().GetState() != wantState {
+		return false
+	}
+	if j.GetRequest().WhichType() != lastJob.GetRequest().WhichType() || j.isDownload() != lastJob.isDownload() {
+		return false
+	}
+	if remotePath := j.remotePath(); remotePath != "" && remotePath != lastJob.remotePath() {
+		return false
+	}
+	if !mtime.IsZero() && mtime.Unix() != lastJob.GetStopMtime().GetSeconds() {
+		return false
+	}
+	return true
+}
+
+// ConflictsWith reports whether existingJob prevents job from starting. This assumes both jobs are
+// for the same path and existingJob is not in a terminal state.
+func (j *Job) ConflictsWith(existingJob *Job) bool {
+	existingRequest := existingJob.GetRequest()
+	request := j.GetRequest()
+	if request.Path != existingRequest.Path {
+		return false
+	}
+
+	// A builder job does not take the access lock for it's own path and also does not perform
+	// and writes to it. So a builder job must conflict with existing builder jobs.
+	if existingRequest.HasBuilder() {
+		// A running builder must not block other job types on its path. The requests it produces
+		// may write to that path. For example, a download of a file that does not exist locally yet
+		// targets the builder's own path, because the builder cannot tell yet whether the path is a
+		// key or a prefix.
+		return request.HasBuilder()
+	}
+
+	// Any job that modifies the file must conflict with all other jobs. Whereas, read-only
+	// operations can safely co-exist.
+	if !j.IsReadOnly() || !existingJob.IsReadOnly() {
+		return true
+	}
+
+	return existingJob.effectiveRST() == j.effectiveRST()
+}
+
+// isReplayOf reports whether request is the request that created existing, sent again under the
+// same job_id after its submitter lost the response. Remote keys jobs by path, so both are for the
+// same path already. They must also agree on:
+//   - the RST;
+//   - the request type, and for a sync request its operation;
+//   - being a plain request. A reserved or claimed job is replayed through the reservation
+//     handling instead.
+//
+// The generation status is not compared. A submitter may learn more about the file between two
+// attempts, and the job the first attempt recorded is still the answer.
+func isReplayOf(request *beeremote.JobRequest, existing *Job) bool {
+	recorded := existing.GetRequest()
+	if recorded.GetReservation() != beeremote.JobRequest_NO_RESERVATION || request.GetReservation() != beeremote.JobRequest_NO_RESERVATION {
+		return false
+	}
+	if recorded.GetRemoteStorageTarget() != request.GetRemoteStorageTarget() {
+		return false
+	}
+	if recorded.WhichType() != request.WhichType() {
+		return false
+	}
+	if request.HasSync() && recorded.GetSync().GetOperation() != request.GetSync().GetOperation() {
+		return false
+	}
+	return true
+}
+
+type selectedConflict struct {
+	job         *Job
+	isReserved  bool // is the job in the reserved state
+	isActive    bool // true means active, false means blocking
+	jobsMatch   bool
+	rstIdsMatch bool
+}
+
+// selectConflict returns details about the conflicting job if any. The returned conflicting job
+// will be selected from the same remote target first. This assumes the job and all conflictingJobs
+// are for the same path.
+func (j *Job) selectConflict(conflictingJobs []*Job) *selectedConflict {
+	var sameTarget, otherTarget *selectedConflict
+
+	for _, existing := range conflictingJobs {
+		isActive := false
+		switch existing.GetStatus().GetState() {
+		case beeremote.Job_COMPLETED, beeremote.Job_OFFLOADED, beeremote.Job_CANCELLED:
+			continue
+		case beeremote.Job_UNASSIGNED, beeremote.Job_RESERVED, beeremote.Job_SCHEDULED, beeremote.Job_RUNNING, beeremote.Job_ERROR:
+			isActive = true
+		}
+		rstIdsMatch := existing.effectiveRST() == j.effectiveRST()
+		remotePathsMatch := existing.remotePath() == j.remotePath()
+
+		conflictingJob := &selectedConflict{
+			job:         existing,
+			isReserved:  existing.InReservedState(),
+			isActive:    isActive,
+			rstIdsMatch: rstIdsMatch,
+			jobsMatch:   rstIdsMatch && remotePathsMatch,
+		}
+		if conflictingJob.jobsMatch {
+			return conflictingJob
+		}
+
+		if conflictingJob.rstIdsMatch {
+			if sameTarget == nil || (!sameTarget.isActive && conflictingJob.isActive) {
+				sameTarget = conflictingJob
+			}
+		} else if otherTarget == nil || (!otherTarget.isActive && conflictingJob.isActive) {
+			otherTarget = conflictingJob
+		}
+	}
+
+	if sameTarget != nil {
+		return sameTarget
+	}
+	if otherTarget != nil {
+		return otherTarget
+	}
+	return nil
 }
 
 // GenerateSubmission creates a JobSubmission containing one or more work requests that can be
@@ -88,19 +282,24 @@ func (j *Job) InActiveState() bool {
 // multiple times to check on the status of outstanding work requests (e.g., after an app crash or
 // because a user requests this).
 //
+// availableWorkers is how many work requests the cluster can run concurrently, used to avoid
+// splitting a transfer into far more segments than can ever run at once. Like the file size it is
+// only consulted while segments are first generated, so the segments reflect the cluster as it was
+// when the job was submitted rather than as it is when the job runs.
+//
 // IMPORTANT: After initially generating segments subsequent calls to GenerateSubmission will not
 // recheck the size of the file to determine if the generated segments are still valid, the original
 // segments will always be returned. This is to discourage misuse of the GenerateSubmission()
 // function as a method to determine if a file has changed and it is safe to resume a job or if it
 // should be cancelled. It also ensures even if the file changes the original job submission can be
 // recreated for troubleshooting.
-func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rst.Provider) (workermgr.JobSubmission, error) {
+func (j *Job) GenerateSubmission(ctx context.Context, lastSyncedJob *Job, rstClient rst.Provider, availableWorkers int) (workermgr.JobSubmission, error) {
 
 	var workRequests []*flex.WorkRequest
 
 	if j.Segments == nil {
 		var err error
-		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastJob.Get(), j.Get(), 0)
+		workRequests, err = rstClient.GenerateWorkRequests(ctx, lastSyncedJob.Get(), j.Get(), availableWorkers)
 		if err != nil {
 			return workermgr.JobSubmission{}, err
 		}
@@ -129,7 +328,6 @@ func (j *Job) GenerateSubmission(ctx context.Context, lastJob *Job, rstClient rs
 // largely just a wrapper around the rst.Client CompleteRequests method to handle converting between
 // data types used by the Job and the RST packages.
 func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) error {
-
 	workResults := make([]*flex.Work, 0, len(j.WorkResults))
 	for _, r := range j.WorkResults {
 		workResults = append(workResults, r.WorkResult)
@@ -137,36 +335,58 @@ func (j *Job) Complete(ctx context.Context, client rst.Provider, abort bool) err
 	return client.CompleteWorkRequests(ctx, j.Get(), workResults, abort)
 }
 
+func (j *Job) CompleteBuilder(ctx context.Context, client rst.Provider, abort bool, cancelReservation rst.CancelRequestFn) error {
+	workResults := make([]*flex.Work, 0, len(j.WorkResults))
+	for _, r := range j.WorkResults {
+		workResults = append(workResults, r.WorkResult)
+	}
+	return client.CompleteJobBuilderRequest(ctx, j.Get(), workResults, cancelReservation, abort)
+}
+
+// cleanJobPath returns the key remote records a path's jobs under. It is an absolute path in the
+// mount with no ".", "..", repeated slashes or trailing slash. Each spelling of one path then finds
+// the same path entry. That matters most for the content lock: remote clears it only when no job in
+// the path entry needs it, so a spelling that found an empty entry would clear the lock under a
+// running job. Every lookup that can release the lock cleans its path with this function.
+//
+// The cleaning is lexical. It does not cover:
+//   - a ".." after a symlinked directory, which the kernel resolves against the link's target;
+//   - a path through a symlinked directory, or a hardlink, which names the same file differently.
+func cleanJobPath(path string) string {
+	return filepath.Clean("/" + path)
+}
+
 // New is the standard way to generate a Job from a JobRequest.
 func New(jobRequest *beeremote.JobRequest) (*Job, error) {
 
-	// Generate a random UUID for the job ID. Note the chance of collisions is very very (very) low,
-	// but not nil. Currently if we ended up with a duplicate job ID this causes problems in two
-	// places: (1) if the duplicate job ID happened to be for the same path then we would reject the
-	// job, and (2) if we tried to schedule a work request for a duplicate job ID to a worker node
-	// already handling a work request with the same job+request ID, the worker would reject the
-	// request and BeeRemote will panic. So we already gracefully handle this very unlikely event.
-	// If this happens, buy a lottery ticket.
+	// Generate a random UUID for the job ID. SubmitJobRequest replaces it with the caller's job_id
+	// when the request carries one. The job builder sets one on every request it makes for a path.
+	// A CLI push or pull, and the request that starts a builder job, carry none, so they keep this
+	// random ID. A random ID can collide in two ways:
+	//   - It names another job on the same path. SubmitJobRequest's conflict scan compares every job
+	//     on the path with the new one's ID and refuses the request as a bug.
+	//   - It names a job on another path. Nothing checks this. Sync keys work by job ID, so it
+	//     would treat the new work as already scheduled.
+	// A random version 4 UUID makes either case unlikely enough to ignore.
 	jobID := uuid.New()
 
 	// Normalize all paths so they start with a slash. This means if the user wants to get jobs for
 	// all paths (a potentially resource intensive request) they have to consciously specify "/" and
 	// BeeRemote clients can use "" as a check for invalid/no input when querying by path. This also
 	// clearly establishes all paths are specified as absolute paths (relative to the mount
-	// point/root directory).
-	if !filepath.IsAbs(jobRequest.GetPath()) {
-		jobRequest.SetPath("/" + jobRequest.GetPath())
-	}
+	// point/root directory). See cleanJobPath for why the path is also cleaned.
+	jobRequest.SetPath(cleanJobPath(jobRequest.GetPath()))
 
+	timestamp := timestamppb.Now()
 	newJob := &Job{
 		Job: beeremote.Job_builder{
 			Id:      fmt.Sprint(jobID),
 			Request: jobRequest,
-			Created: timestamppb.Now(),
+			Created: timestamp,
 			Status: beeremote.Job_Status_builder{
 				State:   beeremote.Job_UNASSIGNED,
 				Message: "created",
-				Updated: timestamppb.Now(),
+				Updated: timestamp,
 			}.Build(),
 		}.Build(),
 		WorkResults: make(map[string]worker.WorkResult),
@@ -212,6 +432,21 @@ func (j *Job) GobEncode() ([]byte, error) {
 		return nil, err
 	}
 
+	// Gob omits zero values even behind a pointer, so it decodes a part's Started=false as unset,
+	// and an unset Started means the part started. Record which parts have Started=false so
+	// GobDecode can restore them. Older versions stop reading before this value and ignore it.
+	notStartedParts := make(map[string][]int)
+	for id, wr := range j.WorkResults {
+		for i, part := range wr.WorkResult.GetParts() {
+			if part.HasStarted() && !part.GetStarted() {
+				notStartedParts[id] = append(notStartedParts[id], i)
+			}
+		}
+	}
+	if err := enc.Encode(notStartedParts); err != nil {
+		return nil, err
+	}
+
 	// Prefix the serialized jobData with the length as a uint16.
 	// We'll use this when decoding.
 	jobFieldLength := make([]byte, 2)
@@ -250,7 +485,26 @@ func (j *Job) GobDecode(data []byte) error {
 	if err := dec.Decode(&j.Segments); err != nil {
 		return nil
 	}
-	return dec.Decode(&j.WorkResults)
+	if err := dec.Decode(&j.WorkResults); err != nil {
+		return err
+	}
+
+	// Jobs stored by older versions have no not-started parts recorded. Development builds stored a
+	// bool here instead. Both decode with plain gob's Started values.
+	var notStartedParts map[string][]int
+	if err := dec.Decode(&notStartedParts); err != nil {
+		return nil
+	}
+	for id, indexes := range notStartedParts {
+		parts := j.WorkResults[id].WorkResult.GetParts()
+		for _, i := range indexes {
+			if i < 0 || i >= len(parts) {
+				return fmt.Errorf("work result %s lists part index %d as not started, but it has %d parts", id, i, len(parts))
+			}
+			parts[i].SetStarted(false)
+		}
+	}
+	return nil
 }
 
 // Segment is a wrapper around the protobuf defined Segment type to
