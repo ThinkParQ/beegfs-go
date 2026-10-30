@@ -90,7 +90,7 @@ func withReserveFakes(w *jobRequestBuilder) *jobRequestBuilder {
 			pathState.EntryInfo = &entry.GetEntryCombinedInfo{Entry: entry.Entry{Type: beegfs.EntryRegularFile}}
 			pathState.LockedInfo.SetExists(true)
 			pathState.LockedInfo.SetSize(stat.Size())
-			if mode == PathStateWithLock {
+			if mode == PathStateReadThenLock {
 				pathState.LockedInfo.SetReadWriteLocked(true)
 				pathState.LockAcquired = true
 			}

@@ -39,6 +39,9 @@ var (
 	// ErrFileChangedDuringBuild means the file changed between the builder reading it without the
 	// content lock and locking it, so the builder cancelled the job it reserved for the file.
 	ErrFileChangedDuringBuild = errors.New("file changed while the job was being built")
+	// ErrFileChangedDuringLock means GetPathState with PathStateReadUnderLock set the content lock,
+	// then found the path naming another entry, or the entry no longer locked.
+	ErrFileChangedDuringLock = errors.New("file changed while the content lock was being acquired")
 )
 
 // blockedByActiveJobError reports that a job cannot start because another active job holds the same
