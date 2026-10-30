@@ -1271,8 +1271,14 @@ func IsContentLocked(ctx context.Context, path string) (bool, error) {
 type PathStateMode int
 
 const (
+	// PathStateWithLock reads the entry info, then takes the content lock if it is not held. The
+	// entry info is read before the lock unless the lock was already held.
 	PathStateWithLock PathStateMode = iota
+	// PathStateNoLock reads the path and never takes the content lock.
 	PathStateNoLock
+	// PathStateReadUnderLock is PathStateWithLock with every value read under the lock.
+	// It costs a second read when the lock was not held at the first one.
+	PathStateReadUnderLock
 )
 
 type PathState struct {
@@ -1346,7 +1352,7 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 	}
 
 	isFileLocked := entryDetails.FileState.IsReadWriteLocked()
-	if !isFileLocked && mode == PathStateWithLock {
+	if !isFileLocked && (mode == PathStateWithLock || mode == PathStateReadUnderLock) {
 		if err = entry.SetAccessFlagsWithEntryInfo(ctx, inMountPath, beegfs.LockedContentAccessFlags, *entryInfoMsg, result.OwnerNode); err != nil {
 			if !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
 				return result, err
@@ -1355,6 +1361,19 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 		} else {
 			isFileLocked = true
 			result.LockAcquired = true
+		}
+
+		if mode == PathStateReadUnderLock {
+			// The lock was set after the first read, so read the path again under it.
+			underLock, err := GetPathState(ctx, mountPoint, inMountPath, PathStateNoLock)
+			if err == nil {
+				sameEntry := underLock.EntryInfo != nil && underLock.EntryInfo.Entry.EntryID == entryInfo.Entry.EntryID
+				if !sameEntry || !IsFileLocked(underLock.LockedInfo) {
+					err = fmt.Errorf("%w: %s", ErrFileChangedDuringLock, inMountPath)
+				}
+			}
+			underLock.LockAcquired = result.LockAcquired
+			return underLock, err
 		}
 	}
 	result.LockedInfo.SetReadWriteLocked(isFileLocked)
