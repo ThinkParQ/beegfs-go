@@ -277,15 +277,41 @@ func SetFileState(path string, fileState beegfs.FileState) error {
 // because the Length field in the GetEntryInfoResponse struct is only populated during
 // deserialization and ignored for serialization as the length is calculated by the serializer.
 func GetEntryInfoV2(path string) (msg.EntryInfo, msg.GetEntryInfoResponse, error) {
+	entryInfo, entryInfoResp, _, err := GetEntryInfoV2WithLstat(path, nil)
+	return entryInfo, entryInfoResp, err
+}
+
+// GetEntryInfoV2WithLstat is GetEntryInfoV2 that also hands back the lstat result it uses. The
+// ioctl is sent to a directory, so the lstat decides whether to open path itself or its parent.
+//
+//   - When lstat is nil, it calls lstat on path and returns the result.
+//   - When the caller already holds an lstat result for path, it passes it in. No lstat is made,
+//     and the same value is returned.
+//
+// The lstat is taken before the ioctl runs, so it can be slightly older than the entry info. A
+// passed-in lstat that no longer matches the entry type at path makes the ioctl fail.
+func GetEntryInfoV2WithLstat(path string, lstat os.FileInfo) (msg.EntryInfo, msg.GetEntryInfoResponse, os.FileInfo, error) {
+	entryInfo, entryInfoResp, err := getEntryInfoV2(path, &lstat)
+	if err != nil {
+		return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, nil, err
+	}
+	return entryInfo, entryInfoResp, lstat, nil
+}
+
+// getEntryInfoV2 sends the GetEntryInfoV2 ioctl for path. When *lstat is nil it calls lstat on path
+// first and stores the result in *lstat.
+func getEntryInfoV2(path string, lstat *os.FileInfo) (msg.EntryInfo, msg.GetEntryInfoResponse, error) {
 
 	var arg = &getEntryInfoV2Arg{}
 	var fileName [filenameMaxLen]byte
 	var dir *os.File
-	lstat, err := os.Lstat(path)
-	if err != nil {
-		return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("unable to get entry info for %q via ioctl: %w", path, err)
+	var err error
+	if *lstat == nil {
+		if *lstat, err = os.Lstat(path); err != nil {
+			return msg.EntryInfo{}, msg.GetEntryInfoResponse{}, fmt.Errorf("unable to get entry info for %q via ioctl: %w", path, err)
+		}
 	}
-	if !lstat.IsDir() {
+	if !(*lstat).IsDir() {
 		// If this is a file open the parent directory then include the filename in the ioctl args.
 		fileNameStr := filepath.Base(path)
 		// Subtract one here to account for the null byte added below.
