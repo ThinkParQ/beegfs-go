@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -59,6 +60,9 @@ type GetEntryCombinedInfo struct {
 	// and Verbose. These fields are not currently needed to print verbose details about the entry,
 	// and would require a second RPC to collect.
 	Parent Entry
+	// Lstat is provided via the WithLstat functional option or retrieved by the
+	// GetEntryInfoV2 ioctl path. It is nil if neither occurs.
+	Lstat os.FileInfo
 }
 
 // Entry combines details from the BeeMsg EntryInfo and GetEntryInfoResponse messages along with
@@ -304,9 +308,14 @@ func GetEntries(ctx context.Context, pm util.PathInputMethod, cfg GetEntriesCfg)
 }
 
 // GetEntry retrieves GetEntryCombinedInfo based on the provided information. If mappings is nil
-// then GetCachedMappings() will be used.
-func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string) (*GetEntryCombinedInfo, error) {
-	entry, resp, ownerNode, err := GetEntryAndOwnerFromPath(ctx, mappings, path, setGetEntryNoIoctl(cfg.NoIoctl))
+// then GetCachedMappings() will be used. Use the functional option WithLstat when lstat is already
+// known.
+func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, path string, opts ...getEntryOpt) (*GetEntryCombinedInfo, error) {
+	entryCfg := &getEntryCfg{noIoctl: cfg.NoIoctl}
+	for _, opt := range opts {
+		opt(entryCfg)
+	}
+	entry, resp, ownerNode, err := getEntryAndOwnerFromPath(ctx, mappings, path, entryCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +340,8 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 	}
 
 	var entryWithParent = GetEntryCombinedInfo{
-		Path: path,
+		Path:  path,
+		Lstat: entryCfg.lstat,
 	}
 	entryWithParent.Entry = newEntry(ctx, mappings, entry, ownerNode, *resp)
 	if cfg.IncludeOrigMsg {
@@ -371,6 +381,7 @@ func GetEntry(ctx context.Context, mappings *util.Mappings, cfg GetEntriesCfg, p
 
 type getEntryCfg struct {
 	noIoctl bool
+	lstat   os.FileInfo
 }
 
 type getEntryOpt func(*getEntryCfg)
@@ -378,6 +389,14 @@ type getEntryOpt func(*getEntryCfg)
 func setGetEntryNoIoctl(noIoctl bool) getEntryOpt {
 	return func(cfg *getEntryCfg) {
 		cfg.noIoctl = noIoctl
+	}
+}
+
+// WithLstat passes an lstat result the caller already holds for the path, so the GetEntryInfoV2
+// ioctl path does not call lstat again.
+func WithLstat(lstat os.FileInfo) getEntryOpt {
+	return func(cfg *getEntryCfg) {
+		cfg.lstat = lstat
 	}
 }
 
@@ -399,6 +418,12 @@ func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return getEntryAndOwnerFromPath(ctx, mappings, path, cfg)
+}
+
+// getEntryAndOwnerFromPath is GetEntryAndOwnerFromPath with the options already applied. The
+// GetEntryInfoV2 ioctl path stores the lstat result it takes in cfg.lstat.
+func getEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path string, cfg *getEntryCfg) (msg.EntryInfo, *msg.GetEntryInfoResponse, beegfs.Node, error) {
 	if !cfg.noIoctl {
 		beegfsClient, err := config.BeeGFSClient(path)
 		if err != nil {
@@ -406,7 +431,7 @@ func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path
 		}
 		// Default to using an ioctl to get entry info if BeeGFS is mounted.
 		if beegfsClient.GetMountPath() != "" {
-			entry, entryInfoResp, ownerNode, err := getEntryAndOwnerFromPathViaIoctl(ctx, mappings, beegfsClient, path)
+			entry, entryInfoResp, ownerNode, err := getEntryAndOwnerFromPathViaIoctl(ctx, mappings, beegfsClient, path, &cfg.lstat)
 			if err != nil {
 				return msg.EntryInfo{}, nil, beegfs.Node{}, err
 			}
@@ -430,7 +455,10 @@ func GetEntryAndOwnerFromPath(ctx context.Context, mappings *util.Mappings, path
 // it is the equivalent of the useMountedPath code path from the C++ getEntryAndOwnerFromPath()
 // implementation. On clients where GetEntryInfoV2 is available, it takes a more optimized and
 // simplified path as the new ioctl resolves limitations of the original.
-func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappings, beegfsClient filesystem.Provider, searchPath string) (msg.EntryInfo, *msg.GetEntryInfoResponse, beegfs.Node, error) {
+//
+// The GetEntryInfoV2 ioctl path uses *lstat when it is set, and otherwise stores the lstat result
+// it takes there. The original ioctl path leaves *lstat unchanged.
+func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappings, beegfsClient filesystem.Provider, searchPath string, lstat *os.FileInfo) (msg.EntryInfo, *msg.GetEntryInfoResponse, beegfs.Node, error) {
 	store, err := config.NodeStore(ctx)
 	if err != nil {
 		return msg.EntryInfo{}, nil, beegfs.Node{}, err
@@ -444,8 +472,9 @@ func getEntryAndOwnerFromPathViaIoctl(ctx context.Context, mappings *util.Mappin
 	// unavailable this result is cached to minimize wasted syscalls. The cached result expires
 	// periodically to allow for rolling upgrades where eventually the syscall is available.
 	if getEntryInfoV2Ioctl.ShouldAttempt() {
-		entryInfo, entryInfoResp, err := ioctl.GetEntryInfoV2(absPath)
+		entryInfo, entryInfoResp, entryLstat, err := ioctl.GetEntryInfoV2WithLstat(absPath, *lstat)
 		if err == nil {
+			*lstat = entryLstat
 			metaNodeNumID, err := getPrimaryMetaNode(ctx, mappings, entryInfo)
 			if err != nil {
 				return msg.EntryInfo{}, nil, beegfs.Node{}, err
