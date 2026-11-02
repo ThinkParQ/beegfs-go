@@ -3,18 +3,21 @@
 // queues the next run, so a slow run never overlaps the next, and a request made during a run is
 // served by the run that follows it.
 //
-// A normal run starts with the hand-over: markwalk writes its run set to a new suspect file, and
-// the collector acknowledges the events the file covers. The run applies that file and any a
-// failed run left, and deletes them on success. A repair run passes the tool a time instead of a
-// file: the tool stats every entry and rebuilds each directory with anything changed at or after
-// that time. A repair limited by time takes no hand-over and touches no suspect file, so it fits
-// between two normal runs. The repair that follows a gap passes time 0, so every directory is
-// rebuilt. It takes a hand-over too, because the rebuild covers every change made before it
-// started. So a full repair replaces the normal run queued before it and deletes the suspect
-// files when it succeeds. A normal run requested while it runs waits and runs after it.
+// A normal run starts with the hand-over: it takes the collector's changed-directory list,
+// markwalk looks the list up and writes a new suspect file, and the collector acknowledges the
+// events the file covers. The run applies that file and any a failed run left, and deletes them
+// on success. A repair run passes the tool a time instead of a file: the tool stats every entry
+// and rebuilds each directory with anything changed at or after that time. A repair limited by
+// time takes no hand-over and touches no suspect file, so it fits between two normal runs. The
+// repair that follows a gap passes time 0, so every directory is rebuilt. It takes a hand-over
+// too, because the rebuild covers every change made before it started. So a full repair replaces
+// the normal run queued before it and deletes the suspect files when it succeeds. A normal run
+// requested while it runs waits and runs after it.
 //
-// Runs start on the interval, on request, or when the collector reports that Watch holds many
-// unacknowledged events, see Due.
+// Runs start on fixed slots, on request, or when the collector asks for one, see Due. Slots are
+// counted from local midnight, every Config.Every, so 15 minutes gives :00, :15, :30 and :45. A
+// slot that passes while a run is going is skipped and logged, see skipSlots. A failed normal run
+// is queued again and waits out a backoff.
 //
 // The tool walks the whole mount and diffs it against the whole index by inode. It deletes every
 // index directory whose inode it does not find in the tree, so it runs only over a mounted BeeGFS,
@@ -49,8 +52,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// MinEvery is the shortest interval a schedule may set. A run with anything to apply walks the
-// whole mount, so a shorter interval only queues runs back to back.
+// MinEvery is the shortest slot a schedule may set. A run with anything to apply walks the whole
+// mount, so shorter slots would only be skipped while the runs go on.
 const MinEvery = time.Minute
 
 // parkingPrefix starts the parking lot's name. The dot makes the beegfs CLI skip the lot when it
@@ -71,17 +74,26 @@ type Config struct {
 	Compress      bool   `mapstructure:"compress"`
 	MaxSubtrees   int    `mapstructure:"max-subtrees"`
 	KeepArtifacts string `mapstructure:"keep-artifacts"`
-	// Every is the interval at startup. SetSchedule changes it until a restart.
+	// Every is the slot length at startup. SetSchedule changes it until a restart.
 	Every time.Duration `mapstructure:"every"`
 	State string        `mapstructure:"state"`
 }
 
-// ValidEvery accepts 0, which disables the timer, or at least MinEvery.
+// ValidEvery accepts 0, which disables the slots, or a slot of at least MinEvery that divides a
+// day evenly, so the slots fall at the same times every day.
 func ValidEvery(d time.Duration) error {
-	if d != 0 && d < MinEvery {
-		return fmt.Errorf("the update interval must be 0, which disables it, or at least %s; got %s", MinEvery, d)
+	if d != 0 && (d < MinEvery || (24*time.Hour)%d != 0) {
+		return fmt.Errorf("the update interval must be 0, which disables it, or at least %s and divide a day evenly, such as 15m or 1h; got %s", MinEvery, d)
 	}
 	return nil
+}
+
+// slotAfter returns the first slot after t. Slots are counted in real time from local midnight,
+// so a slot that divides an hour keeps its minutes across a daylight saving change.
+func slotAfter(t time.Time, every time.Duration) time.Time {
+	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	n := t.Sub(midnight) / every
+	return midnight.Add((n + 1) * every)
 }
 
 // state is what survives a restart.
@@ -96,7 +108,7 @@ type state struct {
 // totals counts the runs since the service started, for Status.
 type totals struct {
 	runs, repairs, failed uint64
-	batches, suspectDirs  uint64 // covered by the hand-overs, and named in the suspect files, of the runs that succeeded
+	batches, suspectDirs  uint64 // suspect files applied, and the lines in them, by the runs that succeeded
 	time                  time.Duration
 }
 
@@ -120,9 +132,9 @@ type Updater struct {
 	parking string
 	mounted func() error // reports why cfg.Mount is not a mounted BeeGFS, or nil
 	marker  *markwalk.Marker
-	// acknowledge is the collector's, set before Run. See handover.
-	acknowledge func(markwalk.Dumped)
-	log         *zap.Logger
+	// collector holds the changed-directory list, set before Run. See handover.
+	collector Collector
+	log       *zap.Logger
 
 	mu         sync.Mutex
 	st         state
@@ -133,17 +145,28 @@ type Updater struct {
 	nextRepair *Run
 	repairGap  bool // Watch lost events while the running full repair walked the tree
 	last       *beeindex.RunSummary
-	lastNormal time.Time // start of the last normal run, for the interval
+	nextSlot   time.Time // the next slot to queue a normal run at; zero while every is 0
 	totals     totals
 	normalHold hold
 	repairHold hold
 	wake       chan struct{}
 }
 
+// Collector is what the hand-over needs from the collector, which owns the changed-directory
+// list.
+type Collector interface {
+	// Take returns the list and starts an empty one.
+	Take() *markwalk.ChangeList
+	// Restore puts back a list whose hand-over failed, in front of what arrived since.
+	Restore(*markwalk.ChangeList)
+	// Acknowledge acknowledges the events a suspect file on disk covers.
+	Acknowledge(markwalk.Dumped)
+}
+
 // New loads the state, cleans the parking lot and finds the suspect files already in the work
 // directory, which failed or killed runs left. Each is complete, because markwalk renames it into
-// place. mounted is called before every run of the tool, see tool. marker gives up its run set at
-// each hand-over.
+// place. mounted is called before every run of the tool, see tool. marker looks up the
+// collector's list at each hand-over.
 //
 // A parking lot that is not empty means a run was killed while it had index directories parked.
 // Cleaning the lot deletes them from the index. New then queues a full repair, which finds them
@@ -157,9 +180,10 @@ func New(cfg Config, index, work string, mounted func() error, marker *markwalk.
 	}
 	u := &Updater{
 		cfg: cfg, index: index, work: work, mounted: mounted, marker: marker, log: log,
-		every: cfg.Every, normalHold: newHold(), repairHold: newHold(),
+		normalHold: newHold(), repairHold: newHold(),
 		wake: make(chan struct{}, 1),
 	}
+	u.setEvery(cfg.Every, time.Now())
 	if err := u.load(); err != nil {
 		return nil, fmt.Errorf("state file %s: %w", cfg.State, err)
 	}
@@ -287,14 +311,15 @@ func (u *Updater) LastSeq() map[uint32]uint64 {
 	return maps.Clone(u.st.LastSeq)
 }
 
-// SetAcknowledge sets the collector's acknowledgement for the hand-over. Call it before Run.
-func (u *Updater) SetAcknowledge(ack func(markwalk.Dumped)) {
-	u.acknowledge = ack
+// SetCollector sets the collector the hand-over takes the list from. Call it before Run.
+func (u *Updater) SetCollector(c Collector) {
+	u.collector = c
 }
 
 // Due queues a normal run, because Watch holds many unacknowledged events for one metadata
-// server and only a hand-over acknowledges them. A run in progress made its hand-over when it
-// started, so the queued run starts when that run ends. A failure backoff still holds it back.
+// server, or the collector's list reached its bound. Only a hand-over acknowledges the events and
+// empties the list. A run in progress made its hand-over when it started, so the queued run starts
+// when that run ends. A failure backoff still holds it back.
 func (u *Updater) Due() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -362,10 +387,19 @@ func (u *Updater) SetSchedule(req *beeindex.SetScheduleRequest) (*beeindex.Sched
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if req.Every != nil {
-		u.every = req.GetEvery().AsDuration()
+		u.setEvery(req.GetEvery().AsDuration(), time.Now())
 	}
 	u.signal()
 	return u.schedule(), nil
+}
+
+// setEvery sets the slot length and the first slot after now. The caller holds the lock, or is
+// New.
+func (u *Updater) setEvery(every time.Duration, now time.Time) {
+	u.every, u.nextSlot = every, time.Time{}
+	if every > 0 {
+		u.nextSlot = slotAfter(now, every)
+	}
 }
 
 // Status reports the schedule, the run in progress or the next one due, the last run and the
@@ -492,20 +526,37 @@ func (u *Updater) next(now time.Time) *Run {
 // queue adds the automatic runs that are due at now. take decides whether one starts. The caller
 // holds the lock. The rules:
 //   - A full repair is queued while one is pending.
-//   - A normal run is queued when the interval since the last one started has passed.
+//   - A normal run is queued when a slot is reached. A normal run queued already serves the slot.
 func (u *Updater) queue(now time.Time) {
 	if u.st.RepairPending && u.nextRepair == nil {
 		u.nextRepair = newRun(beeindex.RunUpdateRequest_REPAIR, time.Time{}, false)
 	}
-	if u.nextNormal == nil && u.every > 0 && !now.Before(u.lastNormal.Add(u.every)) {
-		u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
+	if u.every > 0 && !now.Before(u.nextSlot) {
+		if u.nextNormal == nil {
+			u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
+		}
+		u.nextSlot = slotAfter(now, u.every)
 	}
 }
 
+// skipSlots runs after run r finished. It logs the slots that passed while r went on, and moves
+// to the first slot after finished. No run starts for a skipped slot: the next slot starts the
+// next run, so a run that overruns its slot is not followed at once by another. The caller holds
+// the lock.
+func (u *Updater) skipSlots(r *Run, finished time.Time) {
+	if u.every == 0 || u.nextSlot.After(finished) {
+		return
+	}
+	n := finished.Sub(u.nextSlot)/u.every + 1
+	u.log.Warn("update slots skipped: a run was still going", zap.Time("first_slot", u.nextSlot), zap.Int64("slots", int64(n)),
+		zap.String("mode", r.Mode.String()), zap.Time("run_started", r.started))
+	u.nextSlot = slotAfter(finished, u.every)
+}
+
 // take pops the run that may start at now, a repair first because the events it covers are older
-// than any batch. While a repair is pending, a requested repair limited by time is widened to a
+// than any list. While a repair is pending, a requested repair limited by time is widened to a
 // full one, because only a full rebuild covers the events Watch lost. A full repair takes over
-// the queued normal run: the rebuild covers every batch on disk, so that run would only walk the
+// the queued normal run: the rebuild covers every suspect file, so that run would only walk the
 // mount again. Its requester gets the repair's summary. The caller holds the lock.
 func (u *Updater) take(now time.Time) *Run {
 	if r := u.nextRepair; r != nil && (r.explicit || !now.Before(u.repairHold.notBefore)) {
@@ -524,7 +575,6 @@ func (u *Updater) take(now time.Time) *Run {
 	}
 	if r := u.nextNormal; r != nil && (r.explicit || !now.Before(u.normalHold.notBefore)) {
 		u.nextNormal = nil
-		u.lastNormal = now
 		r.started = now
 		u.running = r
 		return r
@@ -532,7 +582,7 @@ func (u *Updater) take(now time.Time) *Run {
 	return nil
 }
 
-// wakeAt returns when a backoff that holds a queued run ends, or when the interval ends. Zero
+// wakeAt returns when a backoff that holds a queued run ends, or when the next slot comes. Zero
 // means only a wake-up can make a run due. take has just found that no queued run may start, so
 // each queued run waits for its backoff. The caller holds the lock.
 func (u *Updater) wakeAt(now time.Time) time.Time {
@@ -551,7 +601,7 @@ func (u *Updater) wakeAt(now time.Time) time.Time {
 	if u.nextNormal != nil {
 		earliest(u.normalHold.notBefore)
 	} else if u.every > 0 {
-		earliest(u.lastNormal.Add(u.every))
+		earliest(u.nextSlot)
 	}
 	return at
 }
@@ -575,6 +625,14 @@ func (u *Updater) execute(ctx context.Context, r *Run) {
 	u.running = nil
 	u.last = summary
 	u.count(summary)
+	u.skipSlots(r, summary.Finished.AsTime())
+	// A failed normal run is queued again, so its list and its suspect files wait only for the
+	// backoff, not for the next trigger. A run whose hand-over a full work directory skipped is
+	// followed by a normal run too, which makes the hand-over in the space this run freed.
+	failed := summary.Error != "" && !stopped && r.Mode == beeindex.RunUpdateRequest_NORMAL
+	if (failed || r.again) && u.nextNormal == nil {
+		u.nextNormal = newRun(beeindex.RunUpdateRequest_NORMAL, time.Time{}, false)
+	}
 	h := &u.normalHold
 	if r.Mode == beeindex.RunUpdateRequest_REPAIR {
 		h = &u.repairHold
@@ -594,7 +652,7 @@ func (u *Updater) execute(ctx context.Context, r *Run) {
 		close(r.replaced.done)
 	}
 
-	fields := []zap.Field{zap.String("mode", r.Mode.String()), zap.Uint64("batches", summary.Batches),
+	fields := []zap.Field{zap.String("mode", r.Mode.String()), zap.Uint64("suspect_files", summary.Batches),
 		zap.Uint64("suspect_dirs", summary.SuspectDirs), zap.Uint64("error_lines", summary.ErrorLines),
 		zap.Int32("exit_code", summary.ExitCode), zap.Duration("took", summary.Finished.AsTime().Sub(summary.Started.AsTime()))}
 	if summary.Since != nil {
@@ -616,7 +674,7 @@ func (u *Updater) execute(ctx context.Context, r *Run) {
 // them. A run with no directory to rebuild skips the tool: its full walk would find nothing a
 // later run does not find too.
 func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
-	upTo, err := u.handover(summary)
+	upTo, skipped, err := u.handover(ctx)
 	if err != nil {
 		summary.Error = err.Error()
 		return
@@ -627,6 +685,9 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 		return
 	}
 	if len(nums) == 0 {
+		if skipped {
+			summary.Error = "the work directory is at markwalk.max-work-size but holds no suspect file to apply"
+		}
 		return
 	}
 	file := filepath.Join(u.work, "update-suspects")
@@ -642,6 +703,7 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 		summary.Error = err.Error()
 		return
 	}
+	r.again = skipped
 	u.treesummary(ctx, summary)
 }
 
@@ -653,12 +715,14 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
 	var since int64
 	var nums []uint64
+	var skipped bool
 	if r.Since.IsZero() {
-		upTo, err := u.handover(summary)
+		upTo, s, err := u.handover(ctx)
 		if err != nil {
 			summary.Error = err.Error()
 			return
 		}
+		skipped = s
 		if nums, _, err = u.pending(upTo, summary); err != nil {
 			summary.Error = err.Error()
 			return
@@ -681,26 +745,43 @@ func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSumma
 			summary.Error = err.Error()
 			return
 		}
+		r.again = skipped
 	}
 	u.treesummary(ctx, summary)
 }
 
 // handover runs at the start of a normal run and of a full repair. It returns the number of the
-// newest suspect file the run applies. The steps:
-//   - markwalk writes its run set to the next suspect file and syncs it, see markwalk.Dump;
+// newest suspect file the run applies, and whether a full work directory skipped the hand-over.
+// The steps:
+//   - it takes the collector's changed-directory list, and markwalk looks the list up and writes
+//     the next suspect file, synced, see markwalk.Dump;
 //   - the state saves the highest sequence IDs the file covers;
 //   - the collector acknowledges those events to Watch.
 //
 // The state is saved before the acknowledgement. After a crash Watch may resume above the SDK's
 // checkpoint, but never above LastSeq, so the collector does not count the events in between as
-// lost. A failed write acknowledges nothing, and the run set waits for the next hand-over.
-func (u *Updater) handover(summary *beeindex.RunSummary) (uint64, error) {
+// lost. A failed lookup or write acknowledges nothing, and the list goes back to the collector
+// for the next hand-over. A full work directory does the same, but then the run goes on: it
+// applies the files already there, and deleting them frees the space.
+func (u *Updater) handover(ctx context.Context) (upTo uint64, skipped bool, err error) {
+	if u.collector == nil {
+		return 0, false, errors.New("no collector is set, so there is no list to hand over")
+	}
 	u.mu.Lock()
 	n := u.lastFile + 1
 	u.mu.Unlock()
-	d, err := u.marker.Dump(suspectFile(u.work, n))
+	l := u.collector.Take()
+	d, err := u.marker.Dump(ctx, l, suspectFile(u.work, n))
 	if err != nil {
-		return 0, err
+		u.collector.Restore(l)
+		if !errors.Is(err, markwalk.ErrWorkFull) {
+			return 0, false, err
+		}
+		u.log.Warn("hand-over skipped: the work directory is full, so the run applies the suspect files already there first",
+			zap.Error(err))
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		return u.lastFile, true, nil
 	}
 	u.mu.Lock()
 	if d.Inodes > 0 {
@@ -712,17 +793,16 @@ func (u *Updater) handover(summary *beeindex.RunSummary) (uint64, error) {
 	if len(d.Seqs) > 0 {
 		u.save()
 	}
-	upTo := u.lastFile
+	upTo = u.lastFile
 	u.mu.Unlock()
-	if u.acknowledge != nil && len(d.Seqs) > 0 {
-		u.acknowledge(d)
+	if len(d.Seqs) > 0 {
+		u.collector.Acknowledge(d)
 	}
-	summary.Batches = uint64(d.Batches)
-	u.log.Info("hand-over done", zap.Int("batches", d.Batches), zap.Int("inodes", d.Inodes), zap.Uint64("suspect_file", n))
-	return upTo, nil
+	u.log.Info("hand-over done", zap.Int("events", d.Events), zap.Int("inodes", d.Inodes), zap.Uint64("suspect_file", n))
+	return upTo, false, nil
 }
 
-// pending merges the suspect files up to upTo and counts their lines into the summary.
+// pending merges the suspect files up to upTo and counts them and their lines into the summary.
 func (u *Updater) pending(upTo uint64, summary *beeindex.RunSummary) (nums []uint64, merged []byte, err error) {
 	if nums, err = u.files(upTo); err != nil {
 		return nil, nil, err
@@ -734,6 +814,7 @@ func (u *Updater) pending(upTo uint64, summary *beeindex.RunSummary) (nums []uin
 		}
 		merged = append(merged, data...)
 	}
+	summary.Batches = uint64(len(nums))
 	summary.SuspectDirs = uint64(strings.Count(string(merged), "\n"))
 	return nums, merged, nil
 }
@@ -786,7 +867,8 @@ func (u *Updater) tool(ctx context.Context, r *Run, summary *beeindex.RunSummary
 	return true
 }
 
-// treesummary fails the run but keeps its batches deleted, because the index itself is updated.
+// treesummary fails the run but keeps its suspect files deleted, because the index itself is
+// updated.
 func (u *Updater) treesummary(ctx context.Context, summary *beeindex.RunSummary) {
 	if u.cfg.Treesummary == "" {
 		return
@@ -873,6 +955,7 @@ type Run struct {
 	Since    time.Time // for a repair; zero rebuilds every directory
 	NoPlugin bool
 	explicit bool      // requested over the API, so a failure backoff does not hold it
+	again    bool      // a full work directory skipped its hand-over, so a normal run follows it
 	started  time.Time // set by take
 	replaced *Run      // for a full repair: the queued normal run it took over, released with its summary
 	done     chan struct{}

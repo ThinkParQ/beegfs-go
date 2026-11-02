@@ -28,9 +28,7 @@ tls-disable = false
 listen = "0.0.0.0:50052"
 checkpoint = "/var/lib/beegfs/index-updater/checkpoint.json"
 ack-frequency = "1s"
-batch-every = "30s"
-batch-events = 50000
-batch-queue = 2
+max-paths = 524288
 high-water-mark = 2097152
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-key-file = "/etc/beegfs/key.pem"
@@ -53,7 +51,7 @@ no-beegfs-metadata = false
 compress = false
 max-subtrees = 0
 keep-artifacts = ""
-every = "0s"
+every = "15m"
 state = "/var/lib/beegfs/index-updater/update.json"
 
 
@@ -72,10 +70,10 @@ state = "/var/lib/beegfs/index-updater/update.json"
 #
 
 # BeeGFS Index Updater keeps a GUFI index in step with a BeeGFS file system. The collector is a
-# BeeGFS Watch subscriber: it receives file system events over gRPC and gathers them into batches
-# in memory. Markwalk looks up each batch's directories in the index itself, never in the file
-# system, and keeps their inodes in memory. When an update starts, markwalk writes them to one
-# suspect file, and only then are the events acknowledged to Watch, which keeps everything not yet
+# BeeGFS Watch subscriber: it receives file system events over gRPC and keeps the changed-directory
+# list in memory, the distinct paths the events named. When an update starts, markwalk looks the
+# list up in the index itself, never in the file system, and writes the directories' inodes to one
+# suspect file. Only then are the events acknowledged to Watch, which keeps everything not yet
 # acknowledged. The updater applies the file to the index with gufi_incremental_update, on the
 # schedule below or when `beegfs index update` asks, and repairs a gap in the event stream with a
 # full rebuild of the index. The configuration is read once at start.
@@ -141,13 +139,10 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
 
-# batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
-# system before the next update starts.
-
-# batch-events: Close the open batch once it holds this many events.
-
-# batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
-# the collector stops reading from Watch, which then keeps the events in its own buffer.
+# max-paths: The most distinct paths the changed-directory list holds between two updates. Each
+# path is held once, however many events name it, and holds at most 4 KiB, so this bounds the
+# collector's memory. At the bound the collector asks for an update and reads no event from Watch
+# until that update takes the list. Watch then keeps the events in its own buffer.
 
 # high-water-mark: Ask for an update once one metadata server has this many unacknowledged events.
 # Events are acknowledged only when an update starts, so Watch's buffer holds every event since the
@@ -162,9 +157,10 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # tls-disable: Disable TLS for the gRPC server Watch and the CLI connect to.
 
-# A failing batch is retried with a growing delay and never skipped. The service does not stop,
-# so it resumes by itself once the cause is gone. `beegfs index update --status` shows a batch
-# that keeps failing and why.
+# An update whose lookup fails acknowledges nothing and gives the list back to the collector. A
+# failed update is queued again and retried with a growing delay. The service does not stop, so
+# it resumes by itself once the cause is gone. `beegfs index update --status` shows a lookup that
+# keeps failing and why.
 
 
 #
@@ -181,20 +177,21 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # update.mount, because gufi_incremental_update finds index directories by the mount's name. A
 # symlink is resolved at startup.
 
-# query: The gufi_query binary. Each batch runs it once to read the inodes of the directories the
-# events named. A batch that touched a hard-linked file runs it twice more: once over the
+# query: The gufi_query binary. Each update runs it once to read the inodes of the directories
+# the events named. A list that holds a hard-linked file runs it twice more: once over the
 # directories that hold such files, to read their inodes, and once over the whole index, to find
 # the directories of their other names. It runs with update.threads threads.
 
-# sqlite: The gufi_sqlite3 binary. It writes the inodes of a batch's hard-linked files to a small
+# sqlite: The gufi_sqlite3 binary. It writes the inodes of the list's hard-linked files to a small
 # database that the hard-link lookup attaches, so one walk of the index serves any number of them.
 
 # track-opens: Include open events so atime changes are indexed.
 
 # max-work-size: The most disk space, in MiB, the work directory may hold, counted in disk
-# blocks. Once it holds that much, no further batch is processed: the batch waits, the collector
-# stops reading from Watch, and Watch keeps the events in its own buffer until an update deletes
-# the suspect files it has applied. The space is measured before each batch.
+# blocks. Suspect files pile up only while updates fail. Once the directory holds that much, an
+# update writes no new suspect file and acknowledges no event: it applies the files already there,
+# and deleting them frees the space for the next update. The space is measured when an update
+# starts.
 
 
 #
@@ -234,7 +231,11 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # keep-artifacts: Pass --keep-artifacts with this directory, which must exist, so the run's
 # artifacts are kept there instead of deleted. Empty deletes them.
 
-# every: Run an update at least this often. 0 disables the timer. Otherwise it must be at least 1m.
+# every: Start an update on fixed slots this far apart, counted from local midnight: "15m" runs at
+# :00, :15, :30 and :45. A slot that finds an update still going is skipped and logged, so the
+# next update starts at the next slot. 0 disables the slots. Otherwise it must be at least 1m and
+# divide 24h evenly. Updates also start when `beegfs index update` asks, at the high-water mark,
+# and at max-paths.
 
 # `beegfs index update --every` changes every until the service restarts. After a restart the
 # value here applies again.

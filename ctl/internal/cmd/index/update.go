@@ -30,11 +30,11 @@ func newUpdateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *co
 		Long: `Apply the changes beegfs-index-updater collected to the index.
 
 beegfs-index-updater receives file system events from BeeGFS Watch and keeps
-the list of directories whose index entries changed. An update writes that
-list to a suspect file and applies it to the index with
-gufi_incremental_update. Only then are the events acknowledged to Watch. This
-command talks to the service at --updater-addr, or the "updater" entry of
-.beegfs.index.
+the list of directories whose index entries changed. An update looks that
+list up in the index, writes it to a suspect file and applies it to the index
+with gufi_incremental_update. Only then are the events acknowledged to Watch.
+This command talks to the service at --updater-addr, or the "updater" entry
+of .beegfs.index.
 
 Without flags it runs an update now and prints its summary. If an update is
 already running, the request is served by the run that follows it. The exit
@@ -48,17 +48,20 @@ started: it consumes the list and serves an update queued before it.
 entry changed since the given time ago, unless a full repair is pending: then
 the run is a full repair.
 
-The interval set with --every lasts until the service restarts. The service's
-configuration file sets the interval it starts with. The service also starts
-an update on its own when Watch holds many unacknowledged events.
+The service starts updates on fixed slots, counted from local midnight. A
+slot that finds an update still going is skipped. The slots set with --every
+last until the service restarts; the service's configuration file sets the
+ones it starts with. The service also starts an update on its own when Watch
+holds many unacknowledged events, or when its list of changed directories
+reaches its bound.
 
 Example: run an update now
 
   beegfs index update
 
-Example: run an update every ten minutes
+Example: start updates at :00, :15, :30 and :45
 
-  beegfs index update --every 10m
+  beegfs index update --every 15m
 
 Example: repair everything changed in the last two hours
 
@@ -105,7 +108,7 @@ Example: show what each stage is doing, the backlog, the schedule and the last r
 	}
 
 	cmd.Flags().AddFlagSet(parentFlags)
-	cmd.Flags().DurationVar(&every, "every", 0, "Run an update at least this often, until the service restarts. 0 disables the timer, otherwise at least 1m.")
+	cmd.Flags().DurationVar(&every, "every", 0, "Start updates on fixed slots this far apart, counted from local midnight, until the service restarts. 0 disables the slots, otherwise at least 1m and a divisor of 24h.")
 	cmd.Flags().BoolVar(&showStatus, "status", false, "Show the service status instead of running an update.")
 	cmd.Flags().BoolVar(&repair, "repair", false, "Run a full repair now: rebuild every directory.")
 	cmd.Flags().DurationVar(&since, "since", 0, "Run a repair of the directories with an entry changed this long ago or later. A pending full repair makes it full.")
@@ -146,7 +149,7 @@ func printSummary(s *beeindex.RunSummary, prefix string) {
 	} else if s.GetMode() == beeindex.RunUpdateRequest_REPAIR {
 		fmt.Printf("%ssince: the beginning (full rebuild)\n", prefix)
 	}
-	fmt.Printf("%sbatches: %d, directories: %d, error lines: %d, exit code: %d\n",
+	fmt.Printf("%ssuspect files: %d, directories: %d, error lines: %d, exit code: %d\n",
 		prefix, s.GetBatches(), s.GetSuspectDirs(), s.GetErrorLines(), s.GetExitCode())
 	if s.GetError() != "" {
 		fmt.Printf("%serror: %s\n", prefix, s.GetError())
@@ -154,7 +157,11 @@ func printSummary(s *beeindex.RunSummary, prefix string) {
 }
 
 func printSchedule(s *beeindex.Schedule, prefix string) {
-	fmt.Printf("%srun every: %s\n", prefix, s.GetEvery().AsDuration())
+	if every := s.GetEvery().AsDuration(); every > 0 {
+		fmt.Printf("%sslots: every %s from midnight\n", prefix, every)
+	} else {
+		fmt.Printf("%sslots: off\n", prefix)
+	}
 }
 
 func local(t *timestamppb.Timestamp) string {
@@ -172,18 +179,21 @@ func printStatus(ctx context.Context, client beeindex.IndexUpdaterClient) error 
 	return nil
 }
 
+// printCollector prints the collector's status. The service reports the changed-directory list
+// in the open batch fields: its distinct paths against their bound, and the lists hand-overs took
+// and acknowledged.
 func printCollector(c *beeindex.CollectorStatus) {
-	state := "idle, no event since the last batch closed"
+	state := "idle, no event since the last update took the list of changed directories"
 	switch c.GetState() {
 	case beeindex.CollectorStatus_GATHERING:
-		state = "gathering events into the open batch"
+		state = "listing changed directories"
 	case beeindex.CollectorStatus_BLOCKED:
-		state = "blocked, a closed batch waits for markwalk, so nothing is read from Watch"
+		state = "blocked, the list of changed directories is at its bound, so nothing is read from Watch until an update takes it"
 	}
 	fmt.Printf("collector: %s\n", state)
-	fmt.Printf("  queued events: %s, open batch: %s, batches waiting for markwalk: %s, acknowledgements waiting: %s\n",
-		queue(c.GetEvents()), queue(c.GetOpenBatch()), queue(c.GetBatches()), queue(c.GetAcks()))
-	fmt.Printf("  since start: events %d, batches closed %d, acknowledged %d\n",
+	fmt.Printf("  queued events: %s, changed paths: %s, acknowledgements waiting: %s\n",
+		queue(c.GetEvents()), queue(c.GetOpenBatch()), queue(c.GetAcks()))
+	fmt.Printf("  since start: events %d, lists taken by updates %d, acknowledged %d\n",
 		c.GetEventsReceived(), c.GetBatchesClosed(), c.GetBatchesAcknowledged())
 	for _, m := range c.GetMetas() {
 		fmt.Printf("  metadata node %d: received %d, acknowledged %d, waiting for an update %d", m.GetMeta(),
@@ -199,18 +209,20 @@ func queue(q *beeindex.Queue) string {
 	return fmt.Sprintf("%d of %d", q.GetSize(), q.GetCapacity())
 }
 
+// printMarkwalk prints markwalk's status. Markwalk runs only when an update starts, and the
+// service reports the lookups it finished in the batch fields.
 func printMarkwalk(m *beeindex.MarkwalkStatus) {
 	switch m.GetState() {
 	case beeindex.MarkwalkStatus_PROCESSING:
-		fmt.Printf("markwalk: processing batch %d (%d events) since %s: %s\n",
-			m.GetBatch(), m.GetEvents(), local(m.GetSince()), m.GetStep())
+		fmt.Printf("markwalk: looking up the changed directories (%d events) since %s: %s\n",
+			m.GetEvents(), local(m.GetSince()), m.GetStep())
 	case beeindex.MarkwalkStatus_FAILING:
-		fmt.Printf("markwalk: batch %d (%d events) failing since %s: %s\n",
-			m.GetBatch(), m.GetEvents(), local(m.GetSince()), m.GetError())
+		fmt.Printf("markwalk: lookups failing since %s (%d events): %s\n",
+			local(m.GetSince()), m.GetEvents(), m.GetError())
 	default:
-		fmt.Println("markwalk: waiting for a batch")
+		fmt.Println("markwalk: waiting for an update to start")
 	}
-	fmt.Printf("  since start: batches done %d, directories named %d\n", m.GetBatchesDone(), m.GetSuspectDirs())
+	fmt.Printf("  since start: lookups done %d, directories named %d\n", m.GetBatchesDone(), m.GetSuspectDirs())
 }
 
 func printUpdate(u *beeindex.UpdateStatus) {
@@ -236,7 +248,7 @@ func printUpdate(u *beeindex.UpdateStatus) {
 		fmt.Println("  last run:")
 		printSummary(last, "    ")
 	}
-	fmt.Printf("  since start: runs %d (repairs %d, failed %d), batches applied %d, directories named %d, time in runs %s\n",
+	fmt.Printf("  since start: runs %d (repairs %d, failed %d), suspect files applied %d, directories named %d, time in runs %s\n",
 		u.GetRuns(), u.GetRepairs(), u.GetFailedRuns(), u.GetBatchesApplied(), u.GetSuspectDirsApplied(),
 		u.GetRunTime().AsDuration().Round(time.Millisecond))
 }

@@ -1,14 +1,15 @@
 // Package markwalk turns BeeGFS Watch events into a GUFI suspect file: one "<inode> d" line per
 // directory whose own index database must be rebuilt.
 //
-// It works in two steps, at two paces:
-//   - Process looks up one batch in the index as the batch arrives, and adds the inodes to the run
-//     set: every inode found since the last Dump, each held once, in memory only.
-//   - Dump writes the run set to the file the updater names when a run starts, and starts an empty
-//     one. It reads no index and processes no batch.
+// It works in two steps:
+//   - Add folds each event into the changed-directory list, see ChangeList. The collector keeps
+//     the list between two updates.
+//   - Dump runs at the hand-over, when an update starts. It looks the whole list up in the index
+//     in one pass and writes the suspect file. The update runs after it, so no lookup reads the
+//     index while gufi_incremental_update rewrites it.
 //
-// The run set is not on disk until Dump, so the events behind it stay unacknowledged until then.
-// After a crash Watch resends them, and Process looks them up again.
+// The list is not on disk until Dump, so the events behind it stay unacknowledged until then.
+// After a crash Watch resends them, and the collector lists them again.
 //
 // gufi_incremental_update finds new, moved and deleted directories by itself, so a line is
 // needed only for a directory that is in the index at its current path and whose own rows
@@ -70,8 +71,9 @@ type Config struct {
 	MaxWorkSize int64 `mapstructure:"max-work-size"`
 }
 
-// ErrWorkFull holds a batch back until the updater deletes applied suspect files. The batch is
-// neither added to the run set nor acknowledged.
+// ErrWorkFull means the work directory holds max-work-size, so a hand-over writes no file. The
+// list stays with the collector and is not acknowledged. The updater deletes suspect files only
+// after a successful run, so the run applies the files already there, which frees the space.
 var ErrWorkFull = errors.New("work directory full")
 
 // errIndex marks a failure to read the index tree itself, as opposed to a query over it.
@@ -80,11 +82,11 @@ var errIndex = errors.New("index not readable")
 // errQuery marks a failed gufi_query run.
 var errQuery = errors.New("index query failed")
 
-// Batch is what the collector keeps of a batch's events: the directories they changed, the names
-// that may have other names elsewhere, and the sequence IDs delivered per metadata server. Add
-// fills it, so the collector never holds whole events.
-type Batch struct {
-	N         uint64 // for the log only
+// ChangeList is the changed-directory list: what the collector keeps of the events since the last
+// hand-over. It holds the directories they changed, the names that may have other names
+// elsewhere, and the sequence IDs delivered per metadata server. Add fills it, so the collector
+// never holds whole events. A path is held once, however many events name it.
+type ChangeList struct {
 	Events    int
 	Dirs      map[string]struct{}
 	Links     map[string]struct{}
@@ -94,14 +96,34 @@ type Batch struct {
 // SeqRange is a run of consecutive sequence IDs delivered by one metadata server, First and Last
 // included. The subscriber SDK reports progress to Watch only once every delivered event is
 // acknowledged on its own, so the collector must acknowledge each sequence ID, not just the
-// highest. Watch numbers each server's events one by one, so a run set usually holds one range
-// per server. A new range starts after a gap, where Watch lost events, and where Watch
-// redelivers events after a reconnect.
+// highest. Watch numbers each server's events one by one, so a list usually holds one range per
+// server. A new range starts after a gap, where Watch lost events, and where Watch redelivers
+// events after a reconnect.
 type SeqRange struct{ First, Last uint64 }
 
-// NewBatch returns an empty batch numbered n.
-func NewBatch(n uint64) *Batch {
-	return &Batch{N: n, Dirs: map[string]struct{}{}, Links: map[string]struct{}{}, Delivered: map[uint32][]SeqRange{}}
+// NewChangeList returns an empty list.
+func NewChangeList() *ChangeList {
+	return &ChangeList{Dirs: map[string]struct{}{}, Links: map[string]struct{}{}, Delivered: map[uint32][]SeqRange{}}
+}
+
+// Paths is the number of distinct paths l holds. The collector bounds the list by it, because
+// the list's memory follows its paths, not its events.
+func (l *ChangeList) Paths() int {
+	return len(l.Dirs) + len(l.Links)
+}
+
+// Append adds the paths and sequence IDs of later to l. A failed hand-over puts its list back in
+// front of the events that arrived since, so the ranges of later go after those of l, and each
+// metadata server's IDs stay in delivery order.
+func (l *ChangeList) Append(later *ChangeList) {
+	l.Events += later.Events
+	maps.Copy(l.Dirs, later.Dirs)
+	maps.Copy(l.Links, later.Links)
+	for meta, ranges := range later.Delivered {
+		for _, r := range ranges {
+			l.Delivered[meta] = extend(l.Delivered[meta], r)
+		}
+	}
 }
 
 type Marker struct {
@@ -109,32 +131,25 @@ type Marker struct {
 	threads int
 	log     *zap.Logger
 
-	mu sync.Mutex
-	// The run set and the sequence IDs of the batches in it, in delivery order per metadata
-	// server. Process adds to them, Dump takes them.
-	set       map[uint64]struct{}
-	delivered map[uint32][]SeqRange
-	batches   int
-	// What Process is doing, for Status. Process writes these fields, Status reads them.
+	// What Dump is doing, for Status. Dump writes these fields, Status reads them.
+	mu      sync.Mutex
 	state   beeindex.MarkwalkStatus_State
-	batch   uint64 // the batch in markwalk, while processing or failing
 	events  int
-	since   time.Time // when the batch entered markwalk, or, while failing, when it first failed
+	since   time.Time // when the lookup started, or, while failing, when the first failure was
 	step    string
 	failure string
-	// failingSince is when the batch in markwalk first failed. The caller retries a batch until
-	// it succeeds, so a success clears it.
+	// failingSince is when hand-overs started failing. A successful Dump clears it.
 	failingSince time.Time
-	batchesDone  uint64
+	handovers    uint64
 	suspectDirs  uint64
 }
 
 // New returns a Marker whose gufi_query runs use threads threads. GUFI's own default is one.
 func New(cfg Config, threads int, log *zap.Logger) *Marker {
-	return &Marker{cfg: cfg, threads: threads, log: log, set: map[uint64]struct{}{}, delivered: map[uint32][]SeqRange{}}
+	return &Marker{cfg: cfg, threads: threads, log: log}
 }
 
-// Check refuses a wrong setting at startup instead of failing every batch.
+// Check refuses a wrong setting at startup instead of failing every hand-over.
 func (m *Marker) Check(ctx context.Context) error {
 	for _, bin := range []string{m.cfg.Query, m.cfg.Sqlite} {
 		if _, err := exec.LookPath(bin); err != nil {
@@ -158,90 +173,19 @@ func (m *Marker) Check(ctx context.Context) error {
 	return nil
 }
 
-// Add records what ev changed in b: the directories, and the name when the entry may have
+// Add records what ev changed in l: the directories, and the name when the entry may have
 // another name elsewhere. It records ev's sequence ID too, because Dump's caller acknowledges
 // every delivered event.
-func (m *Marker) Add(b *Batch, ev *bw.Event) {
+func (m *Marker) Add(l *ChangeList, ev *bw.Event) {
 	paths, link := pathsFor(ev.GetV2(), m.cfg.TrackOpens)
 	for _, p := range paths {
-		b.Dirs[p] = struct{}{}
+		l.Dirs[p] = struct{}{}
 	}
 	if link != "" {
-		b.Links[link] = struct{}{}
+		l.Links[link] = struct{}{}
 	}
-	b.Delivered[ev.GetMetaId()] = extend(b.Delivered[ev.GetMetaId()], SeqRange{ev.GetSeqId(), ev.GetSeqId()})
-	b.Events++
-}
-
-// Process looks up batch b in the index and adds the inodes to the run set, together with the
-// batch's sequence IDs. A batch that fails adds nothing, so its events stay unacknowledged until
-// the caller's retry succeeds. The space limit is checked before the batch, because the updater
-// deletes suspect files only after a successful run. Status reports each step.
-func (m *Marker) Process(ctx context.Context, b *Batch) (err error) {
-	m.begin(b.N, b.Events)
-	marks := 0
-	defer func() { m.end(marks, err) }()
-	m.setStep("checking the work directory's size")
-	used, err := allocated(m.cfg.Work)
-	if err != nil {
-		return err
-	}
-	if limit := m.cfg.MaxWorkSize << 20; used >= limit {
-		return fmt.Errorf("%w: %s holds %d of %d bytes", ErrWorkFull, m.cfg.Work, used, limit)
-	}
-	m.setStep("finding the batch's directories in the index")
-	listed, dropped, err := m.indexDirs(b.Dirs)
-	if err != nil {
-		return err
-	}
-	m.log.Debug("directories of the batch", zap.Uint64("batch", b.N), zap.Strings("in_index", listed), zap.Int("not_in_index", dropped))
-	fields := []zap.Field{zap.Uint64("batch", b.N), zap.Int("events", b.Events),
-		zap.Int("directories", len(listed)), zap.Int("not_index_directories", dropped)}
-	if len(listed) == 0 {
-		m.add(nil, b.Delivered)
-		m.log.Info("batch done: no directory of the index changed", fields...)
-		return nil
-	}
-	// The path lists and the hard-link database go to a scratch directory. One batch is processed
-	// at a time, so one directory serves them all.
-	scratch := filepath.Join(m.cfg.Work, "lookup")
-	if err := os.MkdirAll(scratch, 0o755); err != nil {
-		return err
-	}
-	defer os.RemoveAll(scratch)
-	m.setStep("looking up inodes in the index")
-	found, files, err := m.indexInodes(ctx, scratch, listed, linkedDirs(listed, b.Links))
-	if err != nil {
-		return err
-	}
-	m.setStep("looking up the other names of hard links")
-	others, err := m.otherNames(ctx, scratch, files)
-	if err != nil {
-		return err
-	}
-	inos := slices.Concat(found, others)
-	marks = len(inos)
-	held := m.add(inos, b.Delivered)
-	m.log.Info("batch done", append(fields, zap.Int("marks", marks), zap.Int("multi_name_files", len(files)),
-		zap.Int("other_name_dirs", len(others)), zap.Int("run_set", held))...)
-	return nil
-}
-
-// add puts one batch's inodes and sequence IDs into the run set and returns its size. Batches
-// arrive in delivery order, so the ranges keep that order.
-func (m *Marker) add(inodes []uint64, delivered map[uint32][]SeqRange) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.batches++
-	for _, ino := range inodes {
-		m.set[ino] = struct{}{}
-	}
-	for meta, ranges := range delivered {
-		for _, r := range ranges {
-			m.delivered[meta] = extend(m.delivered[meta], r)
-		}
-	}
-	return len(m.set)
+	l.Delivered[ev.GetMetaId()] = extend(l.Delivered[ev.GetMetaId()], SeqRange{ev.GetSeqId(), ev.GetSeqId()})
+	l.Events++
 }
 
 // extend appends r to ranges, merging it into the last range when it follows on directly.
@@ -253,58 +197,92 @@ func extend(ranges []SeqRange, r SeqRange) []SeqRange {
 	return append(ranges, r)
 }
 
-// Dumped is what one Dump took from the run set.
+// Dumped is what one Dump wrote.
 type Dumped struct {
 	// Delivered is every sequence ID per metadata server the file covers, in delivery order.
 	Delivered map[uint32][]SeqRange
 	// Seqs is the highest of them per metadata server.
-	Seqs    map[uint32]uint64
-	Inodes  int // lines written; zero means no file
-	Batches int
+	Seqs   map[uint32]uint64
+	Inodes int // lines written; zero means no file
+	Events int
 }
 
-// Dump runs when the updater starts a run. It writes the run set to file and starts an empty one.
-// The rules:
-//   - It takes the run set as it is. A batch still in Process goes into the new run set, and so
-//     does every batch after it.
-//   - The file is synced before Dump returns, so the caller may then acknowledge every
-//     delivered sequence ID it returns.
-//   - An empty run set writes no file. Its sequence IDs are still returned, because those
-//     events changed nothing in the index.
-//   - A failed write puts the taken run set back, so the next Dump writes it.
-func (m *Marker) Dump(file string) (Dumped, error) {
-	m.mu.Lock()
-	d := Dumped{Delivered: m.delivered, Seqs: map[uint32]uint64{}, Inodes: len(m.set), Batches: m.batches}
-	set := m.set
-	m.set, m.delivered, m.batches = map[uint64]struct{}{}, map[uint32][]SeqRange{}, 0
-	m.mu.Unlock()
-	for meta, ranges := range d.Delivered {
+// Dump runs at the hand-over, when an update starts. It looks list l up in the index and writes
+// the inodes to file. Status reports each step. The rules:
+//   - The work directory's size is checked first. At max-work-size Dump writes nothing and
+//     returns ErrWorkFull, because the updater deletes suspect files only after a successful run.
+//   - A list that names no directory of the index writes no file. Its sequence IDs are still
+//     returned, because those events changed nothing in the index.
+//   - The file is synced before Dump returns, so the caller may then acknowledge every sequence
+//     ID it returns.
+//   - On an error Dump writes nothing and returns nothing. The caller keeps the list for the
+//     next hand-over, so its events stay unacknowledged.
+func (m *Marker) Dump(ctx context.Context, l *ChangeList, file string) (d Dumped, err error) {
+	m.begin(l.Events)
+	defer func() { m.end(d.Inodes, err) }()
+	m.setStep("checking the work directory's size")
+	used, err := allocated(m.cfg.Work)
+	if err != nil {
+		return Dumped{}, err
+	}
+	if limit := m.cfg.MaxWorkSize << 20; used >= limit {
+		return Dumped{}, fmt.Errorf("%w: %s holds %d of %d bytes", ErrWorkFull, m.cfg.Work, used, limit)
+	}
+	m.setStep("finding the changed directories in the index")
+	listed, dropped, err := m.indexDirs(l.Dirs)
+	if err != nil {
+		return Dumped{}, err
+	}
+	m.log.Debug("changed directories", zap.Strings("in_index", listed), zap.Int("not_in_index", dropped))
+	fields := []zap.Field{zap.Int("events", l.Events), zap.Int("directories", len(listed)),
+		zap.Int("not_index_directories", dropped)}
+	d = Dumped{Delivered: l.Delivered, Seqs: map[uint32]uint64{}, Events: l.Events}
+	for meta, ranges := range l.Delivered {
 		for _, r := range ranges {
 			d.Seqs[meta] = max(d.Seqs[meta], r.Last)
 		}
 	}
-	if len(set) == 0 {
+	if len(listed) == 0 {
+		m.log.Info("lookup done: no directory of the index changed", fields...)
 		return d, nil
 	}
+	// The path lists and the hard-link database go to a scratch directory. One hand-over runs at
+	// a time, so one directory serves them all.
+	scratch := filepath.Join(m.cfg.Work, "lookup")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		return Dumped{}, err
+	}
+	defer os.RemoveAll(scratch)
+	m.setStep("looking up inodes in the index")
+	found, files, err := m.indexInodes(ctx, scratch, listed, linkedDirs(listed, l.Links))
+	if err != nil {
+		return Dumped{}, err
+	}
+	m.setStep("looking up the other names of hard links")
+	others, err := m.otherNames(ctx, scratch, files)
+	if err != nil {
+		return Dumped{}, err
+	}
+	// A directory can be found both ways, so the set holds each inode once.
+	set := map[uint64]struct{}{}
+	for _, ino := range slices.Concat(found, others) {
+		set[ino] = struct{}{}
+	}
+	m.setStep("writing the suspect file")
 	if err := writeSuspects(set, file); err != nil {
-		// The taken ranges are older than any added since, so they go in front.
-		m.mu.Lock()
-		maps.Copy(m.set, set)
-		for meta, ranges := range d.Delivered {
-			m.delivered[meta] = append(ranges, m.delivered[meta]...)
-		}
-		m.batches += d.Batches
-		m.mu.Unlock()
 		return Dumped{}, fmt.Errorf("write %s: %w", file, err)
 	}
+	d.Inodes = len(set)
+	m.log.Info("lookup done", append(fields, zap.Int("inodes", d.Inodes), zap.Int("multi_name_files", len(files)),
+		zap.Int("other_name_dirs", len(others)))...)
 	return d, nil
 }
 
-// begin records that batch n entered markwalk.
-func (m *Marker) begin(n uint64, events int) {
+// begin records that a lookup started.
+func (m *Marker) begin(events int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state, m.batch, m.events, m.since = beeindex.MarkwalkStatus_PROCESSING, n, events, time.Now()
+	m.state, m.events, m.since = beeindex.MarkwalkStatus_PROCESSING, events, time.Now()
 	m.step, m.failure = "", ""
 }
 
@@ -314,8 +292,8 @@ func (m *Marker) setStep(step string) {
 	m.step = step
 }
 
-// end records how Process ended. A failed batch stays in markwalk, because the caller retries it
-// until it succeeds, and the status keeps the time of its first failure across the retries.
+// end records how Dump ended. A failure stays in the status until a later Dump succeeds, and the
+// status keeps the time of the first failure across the hand-overs that fail after it.
 func (m *Marker) end(marks int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -326,27 +304,28 @@ func (m *Marker) end(marks int, err error) {
 		m.state, m.since, m.step, m.failure = beeindex.MarkwalkStatus_FAILING, m.failingSince, "", reason(err)
 		return
 	}
-	m.state, m.batch, m.events, m.since = beeindex.MarkwalkStatus_WAITING, 0, 0, time.Time{}
+	m.state, m.events, m.since = beeindex.MarkwalkStatus_WAITING, 0, time.Time{}
 	m.step, m.failure, m.failingSince = "", "", time.Time{}
-	m.batchesDone++
+	m.handovers++
 	m.suspectDirs += uint64(marks)
 }
 
-// Status reports what Process is doing, for the IndexUpdater API.
+// Status reports what Dump is doing, for the IndexUpdater API. BatchesDone counts the hand-overs
+// whose lookup succeeded, and SuspectDirs the lines their suspect files hold.
 func (m *Marker) Status() *beeindex.MarkwalkStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := &beeindex.MarkwalkStatus{State: m.state, BatchesDone: m.batchesDone, SuspectDirs: m.suspectDirs}
+	s := &beeindex.MarkwalkStatus{State: m.state, BatchesDone: m.handovers, SuspectDirs: m.suspectDirs}
 	if m.state != beeindex.MarkwalkStatus_WAITING {
-		s.Batch, s.Events, s.Since = m.batch, uint64(m.events), timestamppb.New(m.since)
+		s.Events, s.Since = uint64(m.events), timestamppb.New(m.since)
 		s.Step, s.Error = m.step, m.failure
 	}
 	return s
 }
 
-// reason is what Status reports for a failed batch, in fixed words. The full error goes to the
-// log only, because it can quote file names and tool output, and any client with the secret may
-// ask. The first rule that matches wins:
+// reason is what Status reports for a failed lookup, in fixed words. The full error goes to the
+// log only, because it can quote file names and tool output, and any client that reaches the
+// service may ask. The first rule that matches wins:
 //   - the work directory holds its limit, so an update must apply and delete suspect files first;
 //   - the work directory's file system is out of space;
 //   - the index tree cannot be read, reported with the system error;
@@ -365,11 +344,11 @@ func reason(err error) string {
 	case errors.Is(err, errQuery):
 		return "an index query failed; the service log has its output"
 	}
-	return "the batch failed; the service log has the error"
+	return "the lookup failed; the service log has the error"
 }
 
-// allocated skips a path that vanishes during the walk, because the updater deletes applied
-// suspect files concurrently.
+// allocated skips a path that vanishes during the walk, so a file deleted meanwhile does not fail
+// the hand-over.
 func allocated(dir string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
@@ -477,7 +456,7 @@ func dirOf(p string) string {
 
 // indexDirs keeps the paths that are directories in the index tree and drops the rest. gufi_query
 // opens every path-list entry as a directory, and any failure but ENOENT prints an "Error:" line
-// that fails the batch on every retry. The cases dropped:
+// that fails every hand-over until the path changes. The cases dropped:
 //   - a file, or a path through a file, such as a user file named db.db where the parent's
 //     database sits;
 //   - a missing path or one too long to be in the index;
@@ -518,7 +497,7 @@ func (m *Marker) indexInodes(ctx context.Context, scratch string, listed, linked
 }
 
 // queryList writes dirs to the path-list file list and runs one query over those directories.
-// A failed run fails the batch, so it is retried rather than acknowledged incomplete.
+// A failed run fails the hand-over, so the list is kept rather than acknowledged incomplete.
 func (m *Marker) queryList(ctx context.Context, list string, dirs []string, sql ...string) ([]uint64, error) {
 	if err := os.WriteFile(list, []byte(strings.Join(dirs, "\n")+"\n"), 0o644); err != nil {
 		return nil, err
@@ -534,8 +513,8 @@ func (m *Marker) queryList(ctx context.Context, list string, dirs []string, sql 
 // fileInodes, in one walk of the whole index. The inodes go into <scratch>/links.db, which every
 // gufi_query thread attaches through -I. In the SQL text they would cost one walk per few
 // thousand inodes, because Linux caps one argument at 128 KiB. The walk has no time limit, so a
-// large index makes the batch wait for it. A failed lookup loses only the batch's hard-link marks:
-// the other names keep a stale row until their directory changes again.
+// large index makes the hand-over wait for it. A failed lookup loses only the list's hard-link
+// marks: the other names keep a stale row until their directory changes again.
 func (m *Marker) otherNames(ctx context.Context, scratch string, fileInodes []uint64) ([]uint64, error) {
 	if len(fileInodes) == 0 {
 		return nil, nil
@@ -589,7 +568,7 @@ func sqlString(s string) string {
 // them on stderr only:
 //   - "Error:" means rows are missing, so the query fails.
 //   - "Cannot attach database" means one directory's database is unreadable, for example
-//     corrupt. A retry would fail the same way and hold the batch forever, so the line is logged
+//     corrupt. A retry would fail the same way and hold the list forever, so the line is logged
 //     and that directory's rows are left out.
 func (m *Marker) query(ctx context.Context, args ...string) ([]byte, error) {
 	args = append(append([]string{"-n", strconv.Itoa(m.threads), "-d", " "}, args...), m.cfg.Index)
@@ -605,7 +584,7 @@ func (m *Marker) query(ctx context.Context, args ...string) ([]byte, error) {
 		case strings.HasPrefix(line, "Error:"):
 			return nil, fmt.Errorf("%w: gufi_query: %s", errQuery, strings.TrimSpace(line))
 		case strings.HasPrefix(line, "Cannot attach database"):
-			m.log.Warn("gufi_query could not read a directory's index database; its rows are missing from this batch",
+			m.log.Warn("gufi_query could not read a directory's index database; its rows are missing from this hand-over",
 				zap.String("detail", strings.TrimSpace(line)))
 		}
 	}

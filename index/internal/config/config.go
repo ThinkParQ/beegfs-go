@@ -59,8 +59,8 @@ func (c *AppConfig) ValidateConfig() error {
 	if co := c.Collector; co.Listen == "" || co.Checkpoint == "" {
 		errs = append(errs, errors.New("collector.listen and collector.checkpoint are required"))
 	}
-	if co := c.Collector; co.BatchEvents < 1 || co.BatchQueue < 1 || co.BatchEvery <= 0 || co.AckFrequency <= 0 {
-		errs = append(errs, errors.New("collector.batch-events and collector.batch-queue must be at least 1, collector.batch-every and collector.ack-frequency above 0"))
+	if co := c.Collector; co.MaxPaths < 1 || co.AckFrequency <= 0 {
+		errs = append(errs, errors.New("collector.max-paths must be at least 1, collector.ack-frequency above 0"))
 	}
 	if m := c.Markwalk; m.Work == "" || m.Index == "" || m.Query == "" || m.Sqlite == "" {
 		errs = append(errs, errors.New("markwalk.work, markwalk.index, markwalk.query and markwalk.sqlite are required"))
