@@ -94,7 +94,7 @@ func TestBeeSyncNodeConnectRequiresAllFeatures(t *testing.T) {
 		"extra-feature":             nil,
 	}
 	config, bulk := connectInputs()
-	err := node.connect(config, bulk, required)
+	err := node.connect(context.Background(), config, bulk, required)
 
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "incompatible sync node")
@@ -114,7 +114,7 @@ func TestBeeSyncNodeConnectHandlesUnimplementedCapabilities(t *testing.T) {
 		registry.FeatureFilterFiles: nil,
 	}
 	config, bulk := connectInputs()
-	err := node.connect(config, bulk, required)
+	err := node.connect(context.Background(), config, bulk, required)
 
 	assert.ErrorIs(t, err, registry.ErrCapabilitiesNotSupported)
 }
@@ -129,7 +129,7 @@ func TestBeeSyncNodeDisconnectAfterFailedConnect(t *testing.T) {
 
 	node := newTestBeeSyncNode(t, addr)
 	config, bulk := connectInputs()
-	require.Error(t, node.connect(config, bulk, nil))
+	require.Error(t, node.connect(context.Background(), config, bulk, nil))
 	require.NotNil(t, node.conn)
 
 	assert.NoError(t, node.disconnect())

@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -110,4 +112,36 @@ func TestHandleLogsConfigRejectedOnce(t *testing.T) {
 	assert.Contains(t, errorLogs.All()[0].Message, "rejected its configuration")
 	warnLogs := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("unable to connect")
 	assert.Equal(t, rejections-1, warnLogs.Len())
+}
+
+// RPCs attempted on an offline node must not touch rpcWG. setOffline waits on rpcWG while the node
+// is offline, and sync.WaitGroup panics when an Add from zero runs concurrently with a Wait. The
+// waits here stand in for setOffline, and the RPCs stand in for the pool still calling the node.
+func TestRPCsOnOfflineNodeDoNotRaceWithWait(t *testing.T) {
+	node, err := newWorkerNodeFromConfig(zap.NewNop(), Config{ID: "0", Name: "test-node-0", Type: Mock})
+	require.NoError(t, err)
+	mockNode, ok := node.(*MockNode)
+	require.True(t, ok)
+	mockNode.setState(OFFLINE)
+
+	var stop atomic.Bool
+	var callers sync.WaitGroup
+	for range 8 {
+		callers.Go(func() {
+			for !stop.Load() {
+				_, err := mockNode.SubmitWork(flex.WorkRequest_builder{}.Build())
+				assert.Error(t, err)
+				_, err = mockNode.UpdateWork(flex.UpdateWorkRequest_builder{}.Build())
+				assert.Error(t, err)
+			}
+		})
+	}
+
+	// An RPC that calls Add before it checks the state makes this panic within a few milliseconds.
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mockNode.rpcWG.Wait()
+	}
+	stop.Store(true)
+	callers.Wait()
 }
