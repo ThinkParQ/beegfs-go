@@ -628,7 +628,7 @@ func getPathStatusFromDatabase(
 			remoteTargets[t] = nil
 		}
 	} else {
-		entry, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, fsPath)
+		entry, err := entry.GetEntry(ctx, nil, entry.GetEntriesCfg{}, fsPath, entry.WithLstat(lStat))
 		if err != nil {
 			return nil, err
 		}

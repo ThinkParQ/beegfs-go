@@ -977,7 +977,7 @@ func prepareStubLocalOffload(mountPoint filesystem.Provider, cfg *flex.JobReques
 				return undo, fmt.Errorf("unable to create stub file: %w", err)
 			}
 
-			if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
+			if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateReadThenLock); err != nil {
 				return undo, fmt.Errorf("failed to collect information for stub file: %w", err)
 			}
 			info := pathState.LockedInfo
@@ -1163,7 +1163,7 @@ func prepareDownloadNoFile(mountPoint filesystem.Provider, cfg *flex.JobRequestC
 			return undo, fmt.Errorf("unable to preallocate space for file: %w", err)
 		}
 
-		if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateWithLock); err != nil {
+		if *pathState, err = GetPathState(ctx, mountPoint, cfg.Path, PathStateReadThenLock); err != nil {
 			return undo, fmt.Errorf("failed to collect information for new file: %w", err)
 		}
 		info := pathState.LockedInfo
@@ -1271,8 +1271,14 @@ func IsContentLocked(ctx context.Context, path string) (bool, error) {
 type PathStateMode int
 
 const (
-	PathStateWithLock PathStateMode = iota
-	PathStateNoLock
+	// PathStateNoLock reads the path and never takes the content lock.
+	PathStateNoLock PathStateMode = iota
+	// PathStateReadThenLock reads the path, then takes the content lock if it is not held. Values
+	// read before the lock are advisory unless the lock was already held.
+	PathStateReadThenLock
+	// PathStateReadUnderLock is PathStateReadThenLock with every value read under the lock.
+	// It costs a second read when the lock was not held at the first one.
+	PathStateReadUnderLock
 )
 
 type PathState struct {
@@ -1346,7 +1352,7 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 	}
 
 	isFileLocked := entryDetails.FileState.IsReadWriteLocked()
-	if !isFileLocked && mode == PathStateWithLock {
+	if !isFileLocked && (mode == PathStateReadThenLock || mode == PathStateReadUnderLock) {
 		if err = entry.SetAccessFlagsWithEntryInfo(ctx, inMountPath, beegfs.LockedContentAccessFlags, *entryInfoMsg, result.OwnerNode); err != nil {
 			if !errors.Is(err, entry.ErrAccessFlagsUnchanged) {
 				return result, err
@@ -1355,6 +1361,19 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 		} else {
 			isFileLocked = true
 			result.LockAcquired = true
+		}
+
+		if mode == PathStateReadUnderLock {
+			// The lock was set after the first read, so read the path again under it.
+			underLock, err := GetPathState(ctx, mountPoint, inMountPath, PathStateNoLock)
+			if err == nil {
+				sameEntry := underLock.EntryInfo != nil && underLock.EntryInfo.Entry.EntryID == entryInfo.Entry.EntryID
+				if !sameEntry || !IsFileLocked(underLock.LockedInfo) {
+					err = fmt.Errorf("%w: %s", ErrFileChangedDuringLock, inMountPath)
+				}
+			}
+			underLock.LockAcquired = result.LockAcquired
+			return underLock, err
 		}
 	}
 	result.LockedInfo.SetReadWriteLocked(isFileLocked)
@@ -1373,9 +1392,11 @@ func GetPathState(ctx context.Context, mountPoint filesystem.Provider, inMountPa
 		result.RstCfg.RSTIDs = []uint32{result.LockedInfo.StubUrlRstId}
 	}
 
-	stat, err := mountPoint.Lstat(inMountPath)
-	if err != nil {
-		return result, err
+	stat := entryInfo.Lstat
+	if stat == nil || mode == PathStateReadUnderLock {
+		if stat, err = mountPoint.Lstat(inMountPath); err != nil {
+			return result, err
+		}
 	}
 	result.LockedInfo.Size = stat.Size()
 	result.LockedInfo.Mtime = timestamppb.New(stat.ModTime())

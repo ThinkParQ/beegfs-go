@@ -1221,7 +1221,7 @@ func isWorkStarted(workResults []*flex.Work) *bool {
 }
 
 func (r *S3Client) getLockedInfo(ctx context.Context, cfg *flex.JobRequestCfg) (PathState, error) {
-	pathState, err := GetPathState(ctx, r.mountPoint, cfg.Path, PathStateWithLock)
+	pathState, err := GetPathState(ctx, r.mountPoint, cfg.Path, PathStateReadUnderLock)
 	if err != nil {
 		return pathState, fmt.Errorf("failed to get path state information: %w", err)
 	}

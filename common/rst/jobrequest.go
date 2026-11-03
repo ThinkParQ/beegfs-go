@@ -202,7 +202,7 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 		return []*beeremote.JobRequest{request}, nil
 	}
 
-	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, pathInfo.Path)
+	entryInfo, err := entry.GetEntry(ctx, mappings, entry.GetEntriesCfg{}, pathInfo.Path, entry.WithLstat(pathInfo.Lstat))
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +250,9 @@ type mountPathInfo struct {
 	Exists bool
 	IsDir  bool
 	IsGlob bool
-	StatT  *syscall.Stat_t
+	// Lstat and StatT are set only when the path exists.
+	Lstat os.FileInfo
+	StatT *syscall.Stat_t
 }
 
 func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInfo, error) {
@@ -271,6 +273,7 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 	}
 	result.Exists = true
 	result.IsDir = info.IsDir()
+	result.Lstat = info
 
 	var ok bool
 	result.StatT, ok = info.Sys().(*syscall.Stat_t)

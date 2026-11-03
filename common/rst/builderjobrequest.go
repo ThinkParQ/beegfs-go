@@ -203,7 +203,7 @@ func (w *jobRequestBuilder) ProcessPathFromBulkOperation(ctx context.Context, re
 	//   - An existing file found unlocked. The reservation is gone or the lock was cleared by hand.
 	//     The lock is taken again and logged, and the claim is most likely refused. Remote's release
 	//     at the end of that claim clears the lock again, so this pass never has to release it.
-	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, result.InMountPath, PathStateWithLock)
+	pathState, pathStateErr := w.getPathState(workCtx, w.mountPoint, result.InMountPath, PathStateReadThenLock)
 	if errors.Is(pathStateErr, ErrGetPathStateFatal) {
 		err = pathStateErr
 		return
@@ -743,7 +743,7 @@ func (w *jobRequestBuilder) createPlaceholder(ctx context.Context, path string) 
 		return fmt.Errorf("unable to create a placeholder for %s: %w", path, err)
 	}
 
-	pathState, lockErr := w.getPathState(ctx, w.mountPoint, path, PathStateWithLock)
+	pathState, lockErr := w.getPathState(ctx, w.mountPoint, path, PathStateReadThenLock)
 	if lockErr == nil && !pathState.LockAcquired {
 		// A file the builder just created can't already hold the lock, so another process
 		// replaced it.
@@ -758,7 +758,7 @@ func (w *jobRequestBuilder) createPlaceholder(ctx context.Context, path string) 
 	return nil
 }
 
-// isPlaceholder reports whether pathState, read with PathStateWithLock at a bulk claim, shows the
+// isPlaceholder reports whether pathState, read with PathStateReadThenLock at a bulk claim, shows the
 // placeholder createPlaceholder left: an empty regular file that already held the content lock
 // before the read. Only the reservation can have locked a file at the path, because it refuses
 // every other job there. A file that is not the placeholder was put there by someone else.

@@ -110,6 +110,24 @@ func TestGetEntryInfo(t *testing.T) {
 	assert.Equal(t, beegfs.EntryRegularFile, fileEntryInfo2.EntryType)
 	assert.NotEqual(t, beegfs.StripePatternInvalid, fileEntryInfoResp2.Pattern.Type)
 
+	// Without an lstat it takes one and hands it back:
+	fileEntryInfo3, _, fileLstat, err := GetEntryInfoV2WithLstat(testPath, nil)
+	require.NoError(t, err)
+	assert.Equal(t, fileEntryInfo2, fileEntryInfo3)
+	require.NotNil(t, fileLstat)
+	assert.True(t, fileLstat.Mode().IsRegular())
+
+	// With an lstat it uses that one and hands it back unchanged:
+	dirLstat, err := os.Lstat(filepath.Dir(testDir))
+	require.NoError(t, err)
+	dirEntryInfo3, _, dirLstat3, err := GetEntryInfoV2WithLstat(filepath.Dir(testDir), dirLstat)
+	require.NoError(t, err)
+	assert.Equal(t, dirEntryInfo2, dirEntryInfo3)
+	assert.Same(t, dirLstat, dirLstat3)
+
+	// An lstat that no longer matches the entry type makes the ioctl fail:
+	_, _, _, err = GetEntryInfoV2WithLstat(testPath, dirLstat)
+	assert.Error(t, err)
 }
 
 func TestCreateFileStripeHints(t *testing.T) {
