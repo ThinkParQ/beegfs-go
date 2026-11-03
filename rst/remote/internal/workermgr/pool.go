@@ -173,10 +173,10 @@ func (p *Pool) assignmentCandidates(originNodeID string) (candidates []worker.Wo
 				draining = append(draining, node)
 			}
 		case worker.UNKNOWN:
-			// Technically, workers that are offline could also come back online but don't retry for
-			// them since their connection handler's retry is based on an exponential backoff delay
-			// which is mostly likely MaxReconnectBackoff (user configurable) and likely on the
-			// order of minutes.
+			// UNKNOWN nodes have not finished their first connect attempt, so they may come online
+			// in a moment. OFFLINE nodes are not waited for. They have failed at least one attempt,
+			// and their next one follows an exponential backoff of up to MaxReconnectBackoff (user
+			// configurable), which is likely on the order of minutes.
 			stillStarting = true
 		}
 	}
