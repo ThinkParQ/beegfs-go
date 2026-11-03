@@ -94,9 +94,8 @@ func TestBeeSyncNodeConnectRequiresAllFeatures(t *testing.T) {
 		"extra-feature":             nil,
 	}
 	config, bulk := connectInputs()
-	retry, err := node.connect(config, bulk, required)
+	err := node.connect(config, bulk, required)
 
-	assert.True(t, retry)
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "incompatible sync node")
 	assert.ErrorIs(t, err, registry.ErrUnsupportedFeature)
@@ -115,8 +114,25 @@ func TestBeeSyncNodeConnectHandlesUnimplementedCapabilities(t *testing.T) {
 		registry.FeatureFilterFiles: nil,
 	}
 	config, bulk := connectInputs()
-	retry, err := node.connect(config, bulk, required)
+	err := node.connect(config, bulk, required)
 
-	assert.True(t, retry)
 	assert.ErrorIs(t, err, registry.ErrCapabilitiesNotSupported)
+}
+
+// A connect that fails after opening its connection is disconnected once before the retry, and
+// again when the node goes offline. The second disconnect must not report an error.
+func TestBeeSyncNodeDisconnectAfterFailedConnect(t *testing.T) {
+	// The test server does not implement UpdateConfig, so connect fails after it opens the
+	// connection and checks capabilities.
+	addr, cleanup := startWorkerNodeServer(t, &testWorkerNodeServer{})
+	defer cleanup()
+
+	node := newTestBeeSyncNode(t, addr)
+	config, bulk := connectInputs()
+	require.Error(t, node.connect(config, bulk, nil))
+	require.NotNil(t, node.conn)
+
+	assert.NoError(t, node.disconnect())
+	assert.Nil(t, node.conn)
+	assert.NoError(t, node.disconnect())
 }
