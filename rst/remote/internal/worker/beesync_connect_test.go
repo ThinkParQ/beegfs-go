@@ -97,7 +97,7 @@ func TestBeeSyncNodeConnectRequiresAllFeatures(t *testing.T) {
 		"extra-feature":             nil,
 	}
 	config, bulk := connectInputs()
-	err := node.connect(config, bulk, required)
+	err := node.connect(context.Background(), config, bulk, required)
 
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "incompatible sync node")
@@ -117,7 +117,7 @@ func TestBeeSyncNodeConnectHandlesUnimplementedCapabilities(t *testing.T) {
 		registry.FeatureFilterFiles: nil,
 	}
 	config, bulk := connectInputs()
-	err := node.connect(config, bulk, required)
+	err := node.connect(context.Background(), config, bulk, required)
 
 	assert.ErrorIs(t, err, registry.ErrCapabilitiesNotSupported)
 }
@@ -132,7 +132,7 @@ func TestBeeSyncNodeDisconnectAfterFailedConnect(t *testing.T) {
 
 	node := newTestBeeSyncNode(t, addr)
 	config, bulk := connectInputs()
-	require.Error(t, node.connect(config, bulk, nil))
+	require.Error(t, node.connect(context.Background(), config, bulk, nil))
 	require.NotNil(t, node.conn)
 
 	assert.NoError(t, node.disconnect())
@@ -172,7 +172,7 @@ func TestBeeSyncNodeConnectSendsAuthSecret(t *testing.T) {
 			}
 			// The worker loop retries both failures with backoff. A Sync node that rejects
 			// Remote's secret may be fixed by an operator without restarting Remote.
-			err := node.connect(config, bulk, required)
+			err := node.connect(context.Background(), config, bulk, required)
 			require.Error(t, err)
 			if tc.wantAuthErr {
 				assert.ErrorContains(t, err, codes.Unauthenticated.String())
@@ -218,7 +218,7 @@ func TestBeeSyncNodeConnectConfigRejected(t *testing.T) {
 	node.config.SetAuthSecret(secret)
 
 	config, bulk := connectInputs()
-	err := node.connect(config, bulk, map[string]*flex.Feature{registry.FeatureFilterFiles: nil})
+	err := node.connect(context.Background(), config, bulk, map[string]*flex.Feature{registry.FeatureFilterFiles: nil})
 	assert.ErrorIs(t, err, ErrConfigRejected)
 	assert.ErrorContains(t, err, "connAuthFile", "the node's hint reaches Remote's log")
 
