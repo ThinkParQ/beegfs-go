@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,12 +26,12 @@ func newMockNode(baseNode *baseNode) Worker {
 	return mockNode
 }
 
-func (n *MockNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
+func (n *MockNode) connect(ctx context.Context, config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	args := n.Called()
 	return args.Error(0)
 }
 
-func (n *MockNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
+func (n *MockNode) heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
 	// We could mock heartbeat responses if it ever becomes necessary. However for now they are
 	// disabled because it causes confusing errors when tests run longer than 10 seconds because it
 	// will panic unless the test mocked a heartbeat (which is not the focus of most tests).
@@ -47,19 +48,18 @@ func (n *MockNode) disconnect() error {
 }
 
 func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
 	// Matches BeeSyncNode: a draining node may still be offered work as a last resort, so only an
 	// unreachable node is refused outright here.
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	if _, ok := n.beginRPC(); !ok {
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
+	defer n.rpcWG.Done()
 	args := n.Called(request)
 
 	// A mock node simulates declining while draining by returning ErrNodeDraining, which is handled
 	// the same way BeeSyncNode handles a node that answers with SubmitWorkResponse_DRAINING.
 	if errors.Is(args.Error(1), ErrNodeDraining) {
-		n.setState(DRAINING)
+		n.compareAndSetState(ONLINE, DRAINING)
 		return nil, ErrNodeDraining
 	}
 
@@ -90,12 +90,12 @@ func (n *MockNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 }
 
 func (n *MockNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
 	// Matches BeeSyncNode: work already assigned to a draining node can still be updated.
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	state, ok := n.beginRPC()
+	if !ok {
 		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
+	defer n.rpcWG.Done()
 	args := n.Called(request)
 
 	if args.Error(1) != nil {

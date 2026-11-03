@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -33,7 +34,7 @@ func newBeeSyncNode(baseNode *baseNode) Worker {
 	return beeSyncNode
 }
 
-func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
+func (n *BeeSyncNode) connect(ctx context.Context, config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var cert []byte
 	var err error
 	if !n.config.TlsDisable && n.config.TlsCertFile != "" {
@@ -66,7 +67,7 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsUnspecified() {
 		var pr peer.Peer
-		_, err := n.client.Heartbeat(n.nodeCtx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
+		_, err := n.client.Heartbeat(ctx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
 		if err != nil {
 			return fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
@@ -85,13 +86,13 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	}
 
 	// Verify the sync node capabilities support remote.
-	if clientRegistry, _, err := registry.GetComponentRegistry(n.rpcCtx, n.client); err != nil {
+	if clientRegistry, _, err := registry.GetComponentRegistry(ctx, n.client); err != nil {
 		return fmt.Errorf("failed to determine sync node capabilities: %w", err)
 	} else if err = clientRegistry.RequireFeatures(requiredFeatures); err != nil {
 		return fmt.Errorf("incompatible sync node: %w", err)
 	}
 
-	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)
+	configureResp, err := n.client.UpdateConfig(ctx, config)
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
@@ -110,7 +111,7 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		return fmt.Errorf("%w: %s: %s", ErrConfigRejected, configureResp.GetResult(), configureResp.GetMessage())
 	}
 
-	updateWRResp, err := n.client.BulkUpdateWork(n.rpcCtx, bulkUpdate)
+	updateWRResp, err := n.client.BulkUpdateWork(ctx, bulkUpdate)
 	if err != nil {
 		return err
 	}
@@ -124,8 +125,8 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	return nil
 }
 
-func (n *BeeSyncNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
-	return n.client.Heartbeat(n.rpcCtx, request)
+func (n *BeeSyncNode) heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
+	return n.client.Heartbeat(ctx, request)
 }
 
 func (n *BeeSyncNode) disconnect() error {
@@ -141,14 +142,12 @@ func (n *BeeSyncNode) disconnect() error {
 }
 
 func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
-
 	// Draining nodes are offered work as a last resort, so only an unreachable node is refused
 	// outright here. A draining node may still decline, which is handled from its response below.
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	if _, ok := n.beginRPC(); !ok {
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
+	defer n.rpcWG.Done()
 
 	var resp *flex.SubmitWorkResponse
 	var err error
@@ -198,9 +197,11 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 	// predating support for accepting while draining decline every request. Either way nothing was
 	// created there, so the request is unassigned and may be offered elsewhere.
 	if resp.GetStatus() == flex.SubmitWorkResponse_DRAINING {
-		if n.GetState() != DRAINING {
+		// Only an ONLINE node moves to DRAINING here. Handle may have placed the node offline
+		// while this RPC ran, and OFFLINE must stand so the node is not offered work while it
+		// reconnects.
+		if n.compareAndSetState(ONLINE, DRAINING) {
 			n.log.Info("node declined a work request because it is draining, further requests will only be assigned to it as a last resort")
-			n.setState(DRAINING)
 		}
 		return nil, ErrNodeDraining
 	}
@@ -224,12 +225,11 @@ func (n *BeeSyncNode) reportError(err error) {
 }
 
 func (n *BeeSyncNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
-
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	state, ok := n.beginRPC()
+	if !ok {
 		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
+	defer n.rpcWG.Done()
 
 	var resp *flex.UpdateWorkResponse
 	var err error

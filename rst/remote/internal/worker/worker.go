@@ -12,6 +12,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// connectTimeout bounds one connect attempt. Without it, a node that accepts the connection but
+// never answers would block Handle forever, and on a first attempt it would never leave UNKNOWN. It
+// is generous because the node only answers UpdateConfig after it has checked back with remote and
+// set up its remote storage targets. It is a variable so tests can shorten it.
+var connectTimeout = time.Minute
+
 // Worker defines the external facing interface used to interact with all worker
 // node types. Specific worker node types must implement this interface along
 // with the grpcClientHandler interface and add a typed constant in Config
@@ -47,15 +53,16 @@ type Worker interface {
 //
 //   - connect: Establishes a gRPC connection and initializes a gRPC client of the appropriate type
 //     that is reused for all unary RPCs. After the new client is setup it should update the
-//     configuration and state of any existing work requests on the node.
-//   - heartbeat: Sends a heartbeat request to verify the node is online and ready.
+//     configuration and state of any existing work requests on the node. Its RPCs must use ctx,
+//     which bounds one attempt and is cancelled by Stop().
+//   - heartbeat: Sends a heartbeat request on ctx to verify the node is online and ready.
 //   - disconnect: Cleanup the gRPC connection and client that was created for this node.
 //     It should return an error if there were any problems freeing these resources.
 //
 // Note: Connect and disconnect operations should be idempotent and safe to call multiple times.
 type grpcClientHandler interface {
-	connect(*flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) error
-	heartbeat(*flex.HeartbeatRequest) (*flex.HeartbeatResponse, error)
+	connect(context.Context, *flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature) error
+	heartbeat(context.Context, *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error)
 	disconnect() error
 }
 
@@ -85,8 +92,12 @@ type baseNode struct {
 	// when a disconnect is requested, allowing us to wait up to the
 	// DisconnectTimeout for RPCs to complete before cancelling them.
 	rpcWG *sync.WaitGroup
-	// Context used for all RPCs. Can be cancelled to force outstanding RPCs to
-	// complete if the DisconnectTimeout is exceeded. Note tis context is
+	// Context used by RPCs that run outside Handle, such as SubmitWork and
+	// UpdateWork. RPCs made by Handle itself (connect and heartbeat) use
+	// contexts derived from nodeCtx instead, so Stop() can interrupt them. rpcCtx is not derived from
+	// nodeCtx because Stop() must not cancel outstanding work RPCs at once. Can
+	// be cancelled to force outstanding RPCs to complete if the
+	// DisconnectTimeout is exceeded. Note this context is
 	// initialized when the node is created using newWorkerNodeFromConfig(),
 	// then also reinitialized every time connect is called otherwise we'd
 	// never be able to reconnect or call any RPCs after a disconnect. Note the
@@ -172,6 +183,42 @@ func (n *baseNode) GetState() State {
 	n.stateMu.RLock()
 	defer n.stateMu.RUnlock()
 	return n.State
+}
+
+// compareAndSetState sets the state to next only if it is still expected, and reports whether it
+// did. RPC methods use it to change the state based on a response, so a state Handle set while the
+// RPC was running is not overwritten.
+func (n *baseNode) compareAndSetState(expected State, next State) bool {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.State != expected {
+		return false
+	}
+	n.State = next
+	return true
+}
+
+// beginRPC is called by every RPC method before it uses the node's client. It registers the RPC
+// with rpcWG, but only while the node is ONLINE or DRAINING. It returns the state it read and
+// whether the RPC was registered. A caller that gets true must call rpcWG.Done when the RPC
+// finishes. A caller that gets false must not call the node at all.
+//
+// The state check and the Add happen under one stateMu lock, which is what makes rpcWG safe:
+//   - setOffline sets OFFLINE under stateMu before it waits on rpcWG, so every Add happens before
+//     that Wait starts.
+//   - No Add happens again until Handle sets ONLINE after a reconnect, and setOffline has returned
+//     from all its waits by then.
+//
+// sync.WaitGroup panics when an Add from zero runs concurrently with a Wait. An Add made before
+// the state check allowed exactly that whenever an RPC was attempted on an offline node.
+func (n *baseNode) beginRPC() (State, bool) {
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.State != ONLINE && n.State != DRAINING {
+		return n.State, false
+	}
+	n.rpcWG.Add(1)
+	return n.State, true
 }
 
 // GetNumWorkers returns how many work requests this node runs concurrently, or zero when the node
@@ -271,7 +318,10 @@ func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdate
 			if err := n.nodeCtx.Err(); err != nil {
 				return err
 			}
-			if err := n.connect(config, wrUpdates, requiredFeatures); err != nil {
+			connectCtx, cancel := context.WithTimeout(n.nodeCtx, connectTimeout)
+			err := n.connect(connectCtx, config, wrUpdates, requiredFeatures)
+			cancel()
+			if err != nil {
 				// Leave UNKNOWN after the first failed attempt. The pool briefly waits for UNKNOWN
 				// nodes to finish starting, but the next attempt only comes after a backoff.
 				n.setState(OFFLINE)
@@ -326,7 +376,12 @@ func (n *baseNode) manageConnection() error {
 			// immediately detect when a node is offline or rebooted (because unary RPCs will
 			// trigger a reconnect and retry automatically), the heartbeat mechanism ensures worker
 			// nodes aren't stuck indefinitely waiting for configuration from BeeRemote.
-			resp, err := n.heartbeat(&flex.HeartbeatRequest{})
+			// The heartbeat is bounded by the interval. A node that accepts the connection but
+			// never answers is placed offline instead of staying ONLINE and getting work. Its context
+			// is derived from nodeCtx so Stop() interrupts it.
+			heartbeatCtx, cancel := context.WithTimeout(n.nodeCtx, time.Duration(n.config.HeartbeatInterval)*time.Second)
+			resp, err := n.heartbeat(heartbeatCtx, &flex.HeartbeatRequest{})
+			cancel()
 			if err != nil {
 				return fmt.Errorf("failed to receive heartbeat response: %w", err)
 			}
@@ -388,6 +443,9 @@ func (n *baseNode) setOffline() {
 	// ensure they complete before disconnecting.
 	n.rpcCancel()
 	n.rpcWG.Wait()
+	// Also wait for the goroutine's Wait to return. A reconnect can register new RPCs, and
+	// sync.WaitGroup panics if an Add runs before every earlier Wait has returned.
+	<-allDone
 
 	err := n.disconnect()
 	if err != nil {
