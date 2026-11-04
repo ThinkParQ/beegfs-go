@@ -29,12 +29,12 @@ func newUpdateCmd(globalCfg *indexPkg.GlobalCfg, parentFlags *pflag.FlagSet) *co
 		Short: "Apply the changes beegfs-index-updater collected to the index",
 		Long: `Apply the changes beegfs-index-updater collected to the index.
 
-beegfs-index-updater receives file system events from BeeGFS Watch and keeps
-the list of directories whose index entries changed. An update writes that
-list to a suspect file and applies it to the index with
-gufi_incremental_update. Only then are the events acknowledged to Watch. This
-command talks to the service at --updater-addr, or the "updater" entry of
-.beegfs.index.
+beegfs-index-updater receives file system events from BeeGFS Watch in
+batches, looks each batch up in the index and keeps the inodes of the
+directories whose index entries changed. An update writes those inodes to a
+suspect file and applies it to the index with gufi_incremental_update. Only
+then are the events acknowledged to Watch. This command talks to the service
+at --updater-addr, or the "updater" entry of .beegfs.index.
 
 Without flags it runs an update now and prints its summary. If an update is
 already running, the request is served by the run that follows it. The exit
@@ -43,14 +43,15 @@ status is non-zero when the run failed.
 A repair rebuilds directories judged from file times rather than events. When
 Watch lost events, the service schedules a full repair on its own, which
 rebuilds every directory. A full repair covers every change made before it
-started: it consumes the list and serves an update queued before it.
+started: it takes the inodes and serves an update queued before it.
 --repair runs a full repair now. --since rebuilds only the directories with an
 entry changed since the given time ago, unless a full repair is pending: then
 the run is a full repair.
 
 The interval set with --every lasts until the service restarts. The service's
 configuration file sets the interval it starts with. The service also starts
-an update on its own when Watch holds many unacknowledged events.
+an update on its own when Watch holds many unacknowledged events, or when the
+inodes it keeps reach their bound.
 
 Example: run an update now
 
@@ -167,21 +168,23 @@ func printStatus(ctx context.Context, client beeindex.IndexUpdaterClient) error 
 		return err
 	}
 	printCollector(s.GetCollector())
-	printMarkwalk(s.GetMarkwalk())
+	printLookup(s.GetMarkwalk())
 	printUpdate(s.GetUpdate())
 	return nil
 }
 
+// printCollector prints the collector's status. The service reports the inodes kept for the next
+// update in the batches field, against their bound.
 func printCollector(c *beeindex.CollectorStatus) {
-	state := "idle, no event since the last batch closed"
+	state := "idle, no batch open"
 	switch c.GetState() {
 	case beeindex.CollectorStatus_GATHERING:
 		state = "gathering events into the open batch"
 	case beeindex.CollectorStatus_BLOCKED:
-		state = "blocked, a closed batch waits for markwalk, so nothing is read from Watch"
+		state = "blocked, nothing is read from Watch until an update takes the inodes or a failing lookup succeeds"
 	}
 	fmt.Printf("collector: %s\n", state)
-	fmt.Printf("  queued events: %s, open batch: %s, batches waiting for markwalk: %s, acknowledgements waiting: %s\n",
+	fmt.Printf("  queued events: %s, open batch: %s events, inodes for the next update: %s, acknowledgements waiting: %s\n",
 		queue(c.GetEvents()), queue(c.GetOpenBatch()), queue(c.GetBatches()), queue(c.GetAcks()))
 	fmt.Printf("  since start: events %d, batches closed %d, acknowledged %d\n",
 		c.GetEventsReceived(), c.GetBatchesClosed(), c.GetBatchesAcknowledged())
@@ -199,18 +202,20 @@ func queue(q *beeindex.Queue) string {
 	return fmt.Sprintf("%d of %d", q.GetSize(), q.GetCapacity())
 }
 
-func printMarkwalk(m *beeindex.MarkwalkStatus) {
+// printLookup prints the status of the collector's lookup, which the service reports in the
+// markwalk field. The lookup turns each closed batch into the inodes of its changed directories.
+func printLookup(m *beeindex.MarkwalkStatus) {
 	switch m.GetState() {
 	case beeindex.MarkwalkStatus_PROCESSING:
-		fmt.Printf("markwalk: processing batch %d (%d events) since %s: %s\n",
+		fmt.Printf("lookup: looking up batch %d (%d events) since %s: %s\n",
 			m.GetBatch(), m.GetEvents(), local(m.GetSince()), m.GetStep())
 	case beeindex.MarkwalkStatus_FAILING:
-		fmt.Printf("markwalk: batch %d (%d events) failing since %s: %s\n",
+		fmt.Printf("lookup: batch %d (%d events) failing since %s: %s\n",
 			m.GetBatch(), m.GetEvents(), local(m.GetSince()), m.GetError())
 	default:
-		fmt.Println("markwalk: waiting for a batch")
+		fmt.Println("lookup: waiting for a batch to close")
 	}
-	fmt.Printf("  since start: batches done %d, directories named %d\n", m.GetBatchesDone(), m.GetSuspectDirs())
+	fmt.Printf("  since start: batches looked up %d, directories found %d\n", m.GetBatchesDone(), m.GetSuspectDirs())
 }
 
 func printUpdate(u *beeindex.UpdateStatus) {

@@ -3,8 +3,8 @@
 // queues the next run, so a slow run never overlaps the next, and a request made during a run is
 // served by the run that follows it.
 //
-// A normal run starts with the hand-over: markwalk writes its run set to a new suspect file, and
-// the collector acknowledges the events the file covers. The run applies that file and any a
+// A normal run starts with the hand-over: it takes the inodes the collector has looked up, writes
+// them to a new suspect file, and the collector acknowledges the events the file covers. The run applies that file and any a
 // failed run left, and deletes them on success. A repair run passes the tool a time instead of a
 // file: the tool stats every entry and rebuilds each directory with anything changed at or after
 // that time. A repair limited by time takes no hand-over and touches no suspect file, so it fits
@@ -13,8 +13,7 @@
 // started. So a full repair replaces the normal run queued before it and deletes the suspect
 // files when it succeeds. A normal run requested while it runs waits and runs after it.
 //
-// Runs start on the interval, on request, or when the collector reports that Watch holds many
-// unacknowledged events, see Due.
+// Runs start on the interval, on request, or when the collector asks for one, see Due.
 //
 // The tool walks the whole mount and diffs it against the whole index by inode. It deletes every
 // index directory whose inode it does not find in the tree, so it runs only over a mounted BeeGFS,
@@ -28,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -42,7 +42,6 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/google/renameio/v2"
-	"github.com/thinkparq/beegfs-go/index/internal/markwalk"
 	"github.com/thinkparq/protobuf/go/beeindex"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -53,12 +52,22 @@ import (
 // whole mount, so a shorter interval only queues runs back to back.
 const MinEvery = time.Minute
 
+// MaxWorkSizeLimit is the largest Config.MaxWorkSize, in MiB, whose size in bytes fits an int64.
+const MaxWorkSizeLimit = math.MaxInt64 >> 20
+
 // parkingPrefix starts the parking lot's name. The dot makes the beegfs CLI skip the lot when it
 // looks for the index tree beside it.
 const parkingPrefix = ".index-updater-parking-"
 
 type Config struct {
-	Mount       string `mapstructure:"mount"`
+	// Index is the index directory that corresponds to Mount. The tool rebuilds it, and the
+	// collector looks the changed directories up in it.
+	Index string `mapstructure:"index"`
+	Mount string `mapstructure:"mount"`
+	// Work holds the suspect files, as suspects-<N>. MaxWorkSize is in MiB of allocated blocks,
+	// not bytes written, because it protects the disk.
+	Work        string `mapstructure:"work"`
+	MaxWorkSize int64  `mapstructure:"max-work-size"`
 	Binary      string `mapstructure:"binary"`
 	Treesummary string `mapstructure:"treesummary"` // empty skips it
 	// Plugin is <entrypoint>:<path>. NoBeegfsMetadata leaves it out of every run, to match an
@@ -119,10 +128,9 @@ type Updater struct {
 	work    string
 	parking string
 	mounted func() error // reports why cfg.Mount is not a mounted BeeGFS, or nil
-	marker  *markwalk.Marker
-	// acknowledge is the collector's, set before Run. See handover.
-	acknowledge func(markwalk.Dumped)
-	log         *zap.Logger
+	// collector holds the looked-up inodes, set before Run. See handover.
+	collector Collector
+	log       *zap.Logger
 
 	mu         sync.Mutex
 	st         state
@@ -140,23 +148,66 @@ type Updater struct {
 	wake       chan struct{}
 }
 
+// Collector is what the hand-over needs from the collector, which looks up each batch of events
+// and keeps the inodes it found.
+type Collector interface {
+	// Take returns the inodes looked up so far and starts an empty set.
+	Take() Handover
+	// Restore puts back inodes whose hand-over failed, in front of what was looked up since.
+	Restore(Handover)
+	// Acknowledge acknowledges the events a suspect file on disk covers.
+	Acknowledge(Handover)
+}
+
+// Handover is what the collector hands over when a run starts: the own inodes of the index
+// directories its lookups found, each held once, and the events they came from. The type lives
+// here, not in the collector, because the collector imports this package.
+type Handover struct {
+	Inodes map[uint64]struct{}
+	// Delivered is every sequence ID per metadata server the events had, in delivery order.
+	Delivered map[uint32][]SeqRange
+	Events    int
+	Batches   int // the batches looked up into Inodes
+}
+
+// SeqRange is a run of consecutive sequence IDs delivered by one metadata server, First and Last
+// included. The subscriber SDK reports progress to Watch only once every delivered event is
+// acknowledged on its own, so the collector must acknowledge each sequence ID, not just the
+// highest. Watch numbers each server's events one by one, so a handover usually holds one range
+// per server. A new range starts after a gap, where Watch lost events, and where Watch
+// redelivers events after a reconnect.
+type SeqRange struct{ First, Last uint64 }
+
+// Seqs returns the highest sequence ID per metadata server.
+func (h Handover) Seqs() map[uint32]uint64 {
+	seqs := map[uint32]uint64{}
+	for meta, ranges := range h.Delivered {
+		for _, r := range ranges {
+			seqs[meta] = max(seqs[meta], r.Last)
+		}
+	}
+	return seqs
+}
+
 // New loads the state, cleans the parking lot and finds the suspect files already in the work
-// directory, which failed or killed runs left. Each is complete, because markwalk renames it into
-// place. mounted is called before every run of the tool, see tool. marker gives up its run set at
-// each hand-over.
+// directory, which failed or killed runs left. Each is complete, because the hand-over renames it
+// into place. mounted is called before every run of the tool, see tool.
 //
 // A parking lot that is not empty means a run was killed while it had index directories parked.
 // Cleaning the lot deletes them from the index. New then queues a full repair, which finds them
 // in the tree again. It does so after a killed normal run too, because the lot does not say which
 // kind of run left it, and a full repair covers both.
-func New(cfg Config, index, work string, mounted func() error, marker *markwalk.Marker, log *zap.Logger) (*Updater, error) {
+func New(cfg Config, mounted func() error, log *zap.Logger) (*Updater, error) {
 	cfg.Mount = filepath.Clean(cfg.Mount)
-	index = filepath.Clean(index)
+	index := filepath.Clean(cfg.Index)
 	if err := checkConfig(cfg, index); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(cfg.Work, 0o755); err != nil {
+		return nil, fmt.Errorf("work directory: %w", err)
+	}
 	u := &Updater{
-		cfg: cfg, index: index, work: work, mounted: mounted, marker: marker, log: log,
+		cfg: cfg, index: index, work: cfg.Work, mounted: mounted, log: log,
 		every: cfg.Every, normalHold: newHold(), repairHold: newHold(),
 		wake: make(chan struct{}, 1),
 	}
@@ -287,13 +338,14 @@ func (u *Updater) LastSeq() map[uint32]uint64 {
 	return maps.Clone(u.st.LastSeq)
 }
 
-// SetAcknowledge sets the collector's acknowledgement for the hand-over. Call it before Run.
-func (u *Updater) SetAcknowledge(ack func(markwalk.Dumped)) {
-	u.acknowledge = ack
+// SetCollector sets the collector the hand-over takes the inodes from. Call it before Run.
+func (u *Updater) SetCollector(c Collector) {
+	u.collector = c
 }
 
 // Due queues a normal run, because Watch holds many unacknowledged events for one metadata
-// server and only a hand-over acknowledges them. A run in progress made its hand-over when it
+// server, or the collector's inodes reached their bound. Only a hand-over acknowledges the events
+// and empties the set. A run in progress made its hand-over when it
 // started, so the queued run starts when that run ends. A failure backoff still holds it back.
 func (u *Updater) Due() {
 	u.mu.Lock()
@@ -614,9 +666,10 @@ func (u *Updater) execute(ctx context.Context, r *Run) {
 
 // normal makes the hand-over, applies every suspect file up to the one it wrote, then deletes
 // them. A run with no directory to rebuild skips the tool: its full walk would find nothing a
-// later run does not find too.
+// later run does not find too. A run whose hand-over a full work directory skipped queues a
+// normal run after it, which makes the hand-over in the space this run freed.
 func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
-	upTo, err := u.handover(summary)
+	upTo, skipped, err := u.handover(summary)
 	if err != nil {
 		summary.Error = err.Error()
 		return
@@ -627,6 +680,9 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 		return
 	}
 	if len(nums) == 0 {
+		if skipped {
+			summary.Error = "the work directory is at update.max-work-size but holds no suspect file to apply"
+		}
 		return
 	}
 	file := filepath.Join(u.work, "update-suspects")
@@ -642,6 +698,9 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 		summary.Error = err.Error()
 		return
 	}
+	if skipped {
+		u.Due()
+	}
 	u.treesummary(ctx, summary)
 }
 
@@ -653,8 +712,10 @@ func (u *Updater) normal(ctx context.Context, r *Run, summary *beeindex.RunSumma
 func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSummary) {
 	var since int64
 	var nums []uint64
+	var skipped bool
 	if r.Since.IsZero() {
-		upTo, err := u.handover(summary)
+		upTo, s, err := u.handover(summary)
+		skipped = s
 		if err != nil {
 			summary.Error = err.Error()
 			return
@@ -681,45 +742,72 @@ func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSumma
 			summary.Error = err.Error()
 			return
 		}
+		if skipped {
+			u.Due()
+		}
 	}
 	u.treesummary(ctx, summary)
 }
 
 // handover runs at the start of a normal run and of a full repair. It returns the number of the
-// newest suspect file the run applies. The steps:
-//   - markwalk writes its run set to the next suspect file and syncs it, see markwalk.Dump;
-//   - the state saves the highest sequence IDs the file covers;
+// newest suspect file the run applies, and whether a full work directory skipped the hand-over.
+// The steps:
+//   - it checks the work directory's size. At Config.MaxWorkSize it takes nothing, and the run
+//     applies the files already there, because deleting them frees the space;
+//   - it takes the collector's inodes and writes them to the next suspect file, synced;
+//   - the state saves the highest sequence IDs the handover covers;
 //   - the collector acknowledges those events to Watch.
 //
 // The state is saved before the acknowledgement. After a crash Watch may resume above the SDK's
 // checkpoint, but never above LastSeq, so the collector does not count the events in between as
-// lost. A failed write acknowledges nothing, and the run set waits for the next hand-over.
-func (u *Updater) handover(summary *beeindex.RunSummary) (uint64, error) {
+// lost. A failed write acknowledges nothing, and the inodes go back to the collector for the next
+// hand-over. A handover without inodes writes no file but is acknowledged, because its events
+// changed no directory of the index.
+func (u *Updater) handover(summary *beeindex.RunSummary) (upTo uint64, skipped bool, err error) {
+	if u.collector == nil {
+		return 0, false, errors.New("no collector is set, so there is nothing to hand over")
+	}
+	used, err := allocated(u.work)
+	if err != nil {
+		return 0, false, err
+	}
+	if limit := u.cfg.MaxWorkSize << 20; used >= limit {
+		u.log.Warn("hand-over skipped: the work directory is full, so the run applies the suspect files already there first",
+			zap.String("work", u.work), zap.Int64("used", used), zap.Int64("limit", limit))
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		return u.lastFile, true, nil
+	}
 	u.mu.Lock()
 	n := u.lastFile + 1
 	u.mu.Unlock()
-	d, err := u.marker.Dump(suspectFile(u.work, n))
-	if err != nil {
-		return 0, err
+	h := u.collector.Take()
+	if len(h.Inodes) > 0 {
+		if err := writeSuspects(h.Inodes, suspectFile(u.work, n)); err != nil {
+			u.collector.Restore(h)
+			return 0, false, fmt.Errorf("write suspect file: %w", err)
+		}
 	}
+	seqs := h.Seqs()
 	u.mu.Lock()
-	if d.Inodes > 0 {
+	if len(h.Inodes) > 0 {
 		u.lastFile = n
 	}
-	for meta, seq := range d.Seqs {
+	for meta, seq := range seqs {
 		u.st.LastSeq[meta] = max(u.st.LastSeq[meta], seq)
 	}
-	if len(d.Seqs) > 0 {
+	if len(seqs) > 0 {
 		u.save()
 	}
-	upTo := u.lastFile
+	upTo = u.lastFile
 	u.mu.Unlock()
-	if u.acknowledge != nil && len(d.Seqs) > 0 {
-		u.acknowledge(d)
+	if len(seqs) > 0 {
+		u.collector.Acknowledge(h)
 	}
-	summary.Batches = uint64(d.Batches)
-	u.log.Info("hand-over done", zap.Int("batches", d.Batches), zap.Int("inodes", d.Inodes), zap.Uint64("suspect_file", n))
-	return upTo, nil
+	summary.Batches = uint64(h.Batches)
+	u.log.Info("hand-over done", zap.Int("batches", h.Batches), zap.Int("events", h.Events), zap.Int("inodes", len(h.Inodes)),
+		zap.Uint64("suspect_file", n))
+	return upTo, false, nil
 }
 
 // pending merges the suspect files up to upTo and counts their lines into the summary.
@@ -752,6 +840,40 @@ func (u *Updater) consume(nums []uint64) error {
 // suspectFile zero-pads n so that suspect files list in number order.
 func suspectFile(work string, n uint64) string {
 	return filepath.Join(work, fmt.Sprintf("suspects-%010d", n))
+}
+
+// writeSuspects writes the file gufi_incremental_update reads with --suspect-method 1: one
+// "<inode> d" line per directory whose own index database must be rebuilt. It renames the file
+// into place and syncs the directory, because the events behind it are acknowledged next.
+func writeSuspects(dirs map[uint64]struct{}, out string) error {
+	var b []byte
+	for _, ino := range slices.Sorted(maps.Keys(dirs)) {
+		b = fmt.Appendf(b, "%d d\n", ino)
+	}
+	if err := renameio.WriteFile(out, b, 0o644); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(out))
+}
+
+// allocated returns the bytes dir's files take on disk. It skips a path that vanishes during the
+// walk, so a file deleted meanwhile does not fail the hand-over.
+func allocated(dir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil {
+			var info fs.FileInfo
+			if info, err = d.Info(); err == nil {
+				total += info.Sys().(*syscall.Stat_t).Blocks * 512
+				return nil
+			}
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	})
+	return total, err
 }
 
 // tool runs gufi_incremental_update and reports whether it exited zero. It first checks the

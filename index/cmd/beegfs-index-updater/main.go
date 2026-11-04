@@ -21,7 +21,6 @@ import (
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/index/internal/collector"
 	"github.com/thinkparq/beegfs-go/index/internal/config"
-	"github.com/thinkparq/beegfs-go/index/internal/markwalk"
 	"github.com/thinkparq/beegfs-go/index/internal/updater"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -59,19 +58,19 @@ func main() {
 	pflag.String("collector.listen", "0.0.0.0:50052", "The address Watch and the beegfs CLI connect to.")
 	pflag.String("collector.checkpoint", "/var/lib/beegfs/index-updater/checkpoint.json", "The file where acknowledged sequence IDs are recorded.")
 	pflag.Duration("collector.ack-frequency", time.Second, "How often acknowledgements are sent to Watch and written to the checkpoint.")
-	pflag.Duration("collector.batch-every", 30*time.Second, "Close the open batch at least this often.")
-	pflag.Int("collector.batch-events", 50_000, "Close the open batch once it holds this many events.")
-	pflag.Int("collector.batch-queue", 2, "The number of closed batches that may wait for markwalk before receiving blocks.")
+	pflag.Duration("collector.batch-every", 30*time.Second, "Close a batch at the latest this long after its first event, so events reach the index on a quiet system.")
+	pflag.Int("collector.batch-events", 50_000, "Close a batch once it holds this many events, and look it up in the index.")
+	pflag.Int("collector.max-inodes", 524_288, "The most inodes the collector keeps between two updates. At this bound the collector asks for an update and reads no event from Watch until the update takes them.")
 	pflag.Uint64("collector.high-water-mark", 2_097_152, "Ask for an update once one metadata server has this many unacknowledged events, because only an update acknowledges them. Keep it well below Watch's event-buffer-size; the default is half of Watch's default. 0 disables it.")
 	pflag.String("collector.tls-cert-file", "/etc/beegfs/cert.pem", "The certificate that identifies this server to Watch and the CLI.")
 	pflag.String("collector.tls-key-file", "/etc/beegfs/key.pem", "The key belonging to collector.tls-cert-file.")
 	pflag.Bool("collector.tls-disable", false, "Disable TLS for the gRPC server Watch and the CLI connect to.")
-	pflag.String("markwalk.work", "/var/lib/beegfs/index-updater/markwalk", "The directory each update's suspect file is written to, as suspects-<N>.")
-	pflag.String("markwalk.index", "/mnt/index/beegfs", "The GUFI index root: the index directory that corresponds to the BeeGFS mount, <index root>/<mount name> as 'beegfs index create' lays it out. Its name must match update.mount.")
-	pflag.String("markwalk.query", "/opt/beegfs/bin/index/gufi_query", "The gufi_query binary, which reads directory inodes from the index and finds the other names of a hard-linked file.")
-	pflag.String("markwalk.sqlite", "/opt/beegfs/bin/index/gufi_sqlite3", "The gufi_sqlite3 binary, which writes a batch's hard-linked inodes to a database the hard-link lookup attaches.")
-	pflag.Bool("markwalk.track-opens", false, "Include open events so atime changes are indexed.")
-	pflag.Int64("markwalk.max-work-size", 1024, "The most disk space, in MiB, the work directory may hold. Once it does, batches wait and Watch keeps the events.")
+	pflag.String("collector.query", "/opt/beegfs/bin/index/gufi_query", "The gufi_query binary, which reads directory inodes from the index and finds the other names of a hard-linked file.")
+	pflag.String("collector.sqlite", "/opt/beegfs/bin/index/gufi_sqlite3", "The gufi_sqlite3 binary, which writes a batch's hard-linked inodes to a database the hard-link lookup attaches.")
+	pflag.Bool("collector.track-opens", false, "Include open events so atime changes are indexed.")
+	pflag.String("update.index", "/mnt/index/beegfs", "The GUFI index root: the index directory that corresponds to the BeeGFS mount, <index root>/<mount name> as 'beegfs index create' lays it out. Its name must match update.mount.")
+	pflag.String("update.work", "/var/lib/beegfs/index-updater/work", "The directory each update's suspect file is written to, as suspects-<N>. Lookups keep their scratch files in it too.")
+	pflag.Int64("update.max-work-size", 1024, "The most disk space, in MiB, the work directory may hold. Once it does, an update writes no suspect file and acknowledges no event until it has applied the files already there.")
 	pflag.String("update.mount", "/mnt/beegfs", "The BeeGFS mount point the index describes. No update runs while it is not a mounted BeeGFS.")
 	pflag.String("update.binary", "/opt/beegfs/bin/index/gufi_incremental_update", "The gufi_incremental_update binary.")
 	pflag.String("update.treesummary", "/opt/beegfs/bin/index/gufi_treesummary", "The gufi_treesummary binary, run after a successful update. Empty skips it.")
@@ -159,17 +158,12 @@ Using environment variables:
 	}
 	logger.Info("index license verified", license...)
 
-	// markwalk looks up index paths with lstat, which does not follow a symlinked index root.
-	index, err := filepath.EvalSymlinks(cfg.Markwalk.Index)
+	// The lookup checks index paths with lstat, which does not follow a symlinked index root.
+	index, err := filepath.EvalSymlinks(cfg.Update.Index)
 	if err != nil {
 		logger.Fatal("unable to resolve the index", zap.Error(err))
 	}
-	cfg.Markwalk.Index = index
-	marker := markwalk.New(cfg.Markwalk, cfg.Update.Threads, logger.Logger)
-	if err := marker.Check(ctx); err != nil {
-		logger.Fatal("unable to check the index", zap.Error(err))
-	}
-	logger.Info("index checked", zap.String("index", index))
+	cfg.Update.Index = index
 	// The updater checks the mount before every run, not here: collecting events does not need
 	// it, and a mount that comes up later lets the next run go ahead. The path must be the mount
 	// point itself: the tool deletes every index directory it does not find in the tree, so over a
@@ -185,14 +179,15 @@ Using environment variables:
 		}
 		return nil
 	}
-	up, err := updater.New(cfg.Update, index, cfg.Markwalk.Work, mounted, marker, logger.Logger)
+	up, err := updater.New(cfg.Update, mounted, logger.Logger)
 	if err != nil {
 		logger.Fatal("unable to load updater state", zap.Error(err))
 	}
-	col, err := collector.New(cfg.Collector, marker, up, logger.Logger)
+	col, err := collector.New(ctx, cfg.Collector, index, cfg.Update.Work, cfg.Update.Threads, up, logger.Logger)
 	if err != nil {
 		logger.Fatal("unable to start collector", zap.Error(err))
 	}
+	logger.Info("index checked", zap.String("index", index))
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return up.Run(gctx) })

@@ -9,7 +9,6 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/index/internal/collector"
-	"github.com/thinkparq/beegfs-go/index/internal/markwalk"
 	"github.com/thinkparq/beegfs-go/index/internal/updater"
 )
 
@@ -29,7 +28,6 @@ type Management struct {
 
 type AppConfig struct {
 	Collector  collector.Config `mapstructure:"collector"`
-	Markwalk   markwalk.Config  `mapstructure:"markwalk"`
 	Management Management       `mapstructure:"management"`
 	Update     updater.Config   `mapstructure:"update"`
 	Log        logger.Config    `mapstructure:"log"`
@@ -52,21 +50,24 @@ func (c *AppConfig) UpdateAllowed(configmgr.Configurable) error {
 // starts and then quietly does nothing:
 //   - collector.ack-frequency must be above 0. With 0 the subscriber SDK never answers Watch's
 //     connect, and Watch, by default, waits for that answer forever before it sends any event.
-//   - markwalk.work is required. Empty, suspect files would land in the working directory, and
+//   - update.work is required. Empty, suspect files would land in the working directory, and
 //     the updater, which lists the work directory, would never find them.
 func (c *AppConfig) ValidateConfig() error {
 	var errs []error
 	if co := c.Collector; co.Listen == "" || co.Checkpoint == "" {
 		errs = append(errs, errors.New("collector.listen and collector.checkpoint are required"))
 	}
-	if co := c.Collector; co.BatchEvents < 1 || co.BatchQueue < 1 || co.BatchEvery <= 0 || co.AckFrequency <= 0 {
-		errs = append(errs, errors.New("collector.batch-events and collector.batch-queue must be at least 1, collector.batch-every and collector.ack-frequency above 0"))
+	if co := c.Collector; co.BatchEvents < 1 || co.BatchEvery <= 0 || co.MaxInodes < 1 || co.AckFrequency <= 0 {
+		errs = append(errs, errors.New("collector.batch-events and collector.max-inodes must be at least 1, collector.batch-every and collector.ack-frequency above 0"))
 	}
-	if m := c.Markwalk; m.Work == "" || m.Index == "" || m.Query == "" || m.Sqlite == "" {
-		errs = append(errs, errors.New("markwalk.work, markwalk.index, markwalk.query and markwalk.sqlite are required"))
+	if co := c.Collector; co.Query == "" || co.Sqlite == "" {
+		errs = append(errs, errors.New("collector.query and collector.sqlite are required"))
 	}
-	if m := c.Markwalk; m.MaxWorkSize < 1 || m.MaxWorkSize > markwalk.MaxWorkSizeLimit {
-		errs = append(errs, fmt.Errorf("markwalk.max-work-size must be between 1 and %d", markwalk.MaxWorkSizeLimit))
+	if u := c.Update; u.Work == "" || u.Index == "" {
+		errs = append(errs, errors.New("update.work and update.index are required"))
+	}
+	if u := c.Update; u.MaxWorkSize < 1 || u.MaxWorkSize > updater.MaxWorkSizeLimit {
+		errs = append(errs, fmt.Errorf("update.max-work-size must be between 1 and %d", updater.MaxWorkSizeLimit))
 	}
 	if c.Management.Address == "" {
 		errs = append(errs, errors.New("management.address is required"))

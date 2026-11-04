@@ -30,21 +30,19 @@ checkpoint = "/var/lib/beegfs/index-updater/checkpoint.json"
 ack-frequency = "1s"
 batch-every = "30s"
 batch-events = 50000
-batch-queue = 2
+max-inodes = 524288
 high-water-mark = 2097152
+query = "/opt/beegfs/bin/index/gufi_query"
+sqlite = "/opt/beegfs/bin/index/gufi_sqlite3"
+track-opens = false
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-key-file = "/etc/beegfs/key.pem"
 tls-disable = false
 
-[markwalk]
-work = "/var/lib/beegfs/index-updater/markwalk"
-index = "/mnt/index/beegfs"
-query = "/opt/beegfs/bin/index/gufi_query"
-sqlite = "/opt/beegfs/bin/index/gufi_sqlite3"
-track-opens = false
-max-work-size = 1024
-
 [update]
+index = "/mnt/index/beegfs"
+work = "/var/lib/beegfs/index-updater/work"
+max-work-size = 1024
 mount = "/mnt/beegfs"
 binary = "/opt/beegfs/bin/index/gufi_incremental_update"
 treesummary = "/opt/beegfs/bin/index/gufi_treesummary"
@@ -73,9 +71,9 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # BeeGFS Index Updater keeps a GUFI index in step with a BeeGFS file system. The collector is a
 # BeeGFS Watch subscriber: it receives file system events over gRPC and gathers them into batches
-# in memory. Markwalk looks up each batch's directories in the index itself, never in the file
-# system, and keeps their inodes in memory. When an update starts, markwalk writes them to one
-# suspect file, and only then are the events acknowledged to Watch, which keeps everything not yet
+# of changed paths. It looks each batch up in the index itself, never in the file system, and keeps
+# the inodes of the changed directories in memory. When an update starts, it writes those inodes to
+# one suspect file. Only then are the events acknowledged to Watch, which keeps everything not yet
 # acknowledged. The updater applies the file to the index with gufi_incremental_update, on the
 # schedule below or when `beegfs index update` asks, and repairs a gap in the event stream with a
 # full rebuild of the index. The configuration is read once at start.
@@ -141,13 +139,17 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # ack-frequency: How often acknowledgements are sent to Watch and written to the checkpoint.
 
-# batch-every: Close the open batch at least this often, so events reach markwalk on a quiet
-# system before the next update starts.
+# batch-every, batch-events: A batch closes batch-every after its first event, or once it holds
+# batch-events events, whichever comes first. The timer lets events reach the index on a quiet
+# system. The collector looks a closed batch up in the index at once and reads no event until the
+# lookup is done. A batch holds each changed path once, however many events name it. A path takes
+# up to about 4 KiB, and an event names up to two, so batch-events bounds the batch's memory:
+# about 400 MB for 50000 events of the longest paths.
 
-# batch-events: Close the open batch once it holds this many events.
-
-# batch-queue: The number of closed batches that may wait for markwalk. When they are all waiting
-# the collector stops reading from Watch, which then keeps the events in its own buffer.
+# max-inodes: The most inodes the collector keeps between two updates. An inode takes a few dozen
+# bytes. At the bound the collector asks for an update and reads no event from Watch until that
+# update takes the inodes. Watch then keeps the events in its own buffer. One lookup adds its whole
+# batch, so the inodes can pass the bound by one batch's worth.
 
 # high-water-mark: Ask for an update once one metadata server has this many unacknowledged events.
 # Events are acknowledged only when an update starts, so Watch's buffer holds every event since the
@@ -162,25 +164,6 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # tls-disable: Disable TLS for the gRPC server Watch and the CLI connect to.
 
-# A failing batch is retried with a growing delay and never skipped. The service does not stop,
-# so it resumes by itself once the cause is gone. `beegfs index update --status` shows a batch
-# that keeps failing and why.
-
-
-#
-# --- Section 3.4: [Markwalk Settings] ---
-#
-
-# Markwalk configuration must be specified under [markwalk].
-
-# work: The directory each update's suspect file is written to, as suspects-<N>. A file stays until
-# an update applies it, so a failed update leaves it for the next one.
-
-# index: The GUFI index root: the index directory that corresponds to the BeeGFS mount, that is
-# <index root>/<mount name> as `beegfs index create` lays it out. Its name must match the name of
-# update.mount, because gufi_incremental_update finds index directories by the mount's name. A
-# symlink is resolved at startup.
-
 # query: The gufi_query binary. Each batch runs it once to read the inodes of the directories the
 # events named. A batch that touched a hard-linked file runs it twice more: once over the
 # directories that hold such files, to read their inodes, and once over the whole index, to find
@@ -191,17 +174,32 @@ state = "/var/lib/beegfs/index-updater/update.json"
 
 # track-opens: Include open events so atime changes are indexed.
 
-# max-work-size: The most disk space, in MiB, the work directory may hold, counted in disk
-# blocks. Once it holds that much, no further batch is processed: the batch waits, the collector
-# stops reading from Watch, and Watch keeps the events in its own buffer until an update deletes
-# the suspect files it has applied. The space is measured before each batch.
+# Lookups also run while an update runs. A failing batch is retried with a growing delay and never
+# skipped, and the collector reads no event meanwhile. The service does not stop, so it resumes by
+# itself once the cause is gone. `beegfs index update --status` shows a batch that keeps failing
+# and why.
 
 
 #
-# --- Section 3.5: [Update Settings] ---
+# --- Section 3.4: [Update Settings] ---
 #
 
 # Update configuration must be specified under [update].
+
+# index: The GUFI index root: the index directory that corresponds to the BeeGFS mount, that is
+# <index root>/<mount name> as `beegfs index create` lays it out. Its name must match the name of
+# mount, because gufi_incremental_update finds index directories by the mount's name. A symlink is
+# resolved at startup.
+
+# work: The directory each update's suspect file is written to, as suspects-<N>. A file stays until
+# an update applies it, so a failed update leaves it for the next one. Lookups keep their scratch
+# files here too.
+
+# max-work-size: The most disk space, in MiB, the work directory may hold, counted in disk
+# blocks. Suspect files pile up only while updates fail. Once the directory holds that much, an
+# update writes no new suspect file and acknowledges no event: it applies the files already there,
+# and an update follows at once to write the new file in the space freed. The space is measured
+# when an update starts.
 
 # mount: The BeeGFS mount point the index describes. gufi_incremental_update walks it. No update
 # runs while it is not the mount point of a mounted BeeGFS: over an empty mount point the tool
@@ -239,8 +237,8 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # `beegfs index update --every` changes every until the service restarts. After a restart the
 # value here applies again.
 
-# With every 0, updates run when `beegfs index update` asks or when collector.high-water-mark is
-# reached.
+# With every 0, updates run when `beegfs index update` asks, when collector.high-water-mark is
+# reached, or when the inodes reach collector.max-inodes.
 
 # A full repair is scheduled when Watch lost events. It rebuilds every directory of the index,
 # because nothing says which directories the lost events changed. A failed repair stays pending and
@@ -250,6 +248,6 @@ state = "/var/lib/beegfs/index-updater/update.json"
 # node across restarts.
 
 # The parking lot: gufi_incremental_update parks index directories in
-# .index-updater-parking-<index name>, next to the markwalk index directory, while it runs.
+# .index-updater-parking-<index name>, next to the index directory, while it runs.
 # Stopping the service kills a running update, which can leave directories there. The next start
 # deletes them and queues a full repair, which indexes them again.

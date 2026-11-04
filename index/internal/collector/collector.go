@@ -1,15 +1,24 @@
-// Package collector receives events from BeeGFS Watch, batches them in memory and hands each
-// batch to markwalk, which adds it to its run set. Nothing is acknowledged then. When the updater
-// starts a run, markwalk writes the run set to the run's suspect file, and only then does the
-// collector acknowledge every event the file covers. Watch keeps every unacknowledged event and
-// resends it after a reconnect, so a crash costs a replay and nothing else.
+// Package collector receives events from BeeGFS Watch, gathers them into batches and looks each
+// batch up in the index when it closes. It keeps the inodes the lookups found, each once, and the
+// sequence IDs of their events. Nothing is acknowledged then. When the updater starts a run, its
+// hand-over takes the inodes and writes the run's suspect file, and only then does the collector
+// acknowledge every event the file covers. Watch keeps every unacknowledged event and resends it
+// after a reconnect, so a crash costs a replay and nothing else.
+//
+// A batch holds the changed paths, so its memory follows the path length. An inode takes a few
+// dozen bytes, whatever the path length. So the open batch costs most of the memory, and
+// Config.BatchEvents bounds it.
 //
 // Watch never waits for a subscriber: once its buffer is full, it drops the oldest events. So
-// Watch's buffer holds every event since the last run started. When one metadata server's
-// unacknowledged events reach Config.HighWaterMark, the collector asks the updater for a run,
-// whose start acknowledges them. The queues here are small on purpose. When markwalk is slower
-// than events arrive or its work directory is full, the batcher blocks, the event queue fills,
-// the streams stop reading and Watch holds the rest.
+// Watch's buffer holds every event since the last run started. Two limits ask the updater for a
+// run:
+//   - Config.HighWaterMark, when one metadata server's unacknowledged events reach it. It
+//     protects Watch's buffer.
+//   - Config.MaxInodes, when the lookups found that many inodes. At this bound the collector also
+//     stops reading until a hand-over takes them, so the streams stop and Watch holds the rest.
+//
+// Lookups go on while gufi_incremental_update runs. Nothing orders a lookup against the run, so a
+// lookup may read index directories the run is rewriting or moving.
 //
 // The collector runs the gRPC server itself, so the IndexUpdater API the beegfs CLI uses shares
 // the listener Watch connects to; the subscriber SDK's handler is registered on it.
@@ -21,13 +30,13 @@ import (
 	"maps"
 	"math"
 	"net"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
-	"github.com/thinkparq/beegfs-go/index/internal/markwalk"
 	"github.com/thinkparq/beegfs-go/index/internal/updater"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
 	"github.com/thinkparq/protobuf/go/beeindex"
@@ -39,16 +48,28 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// eventQueue is the capacity of the channel from the SDK's stream handlers to collect. An event
+// waits there while collect adds the one before it or looks up a batch. A backlog stays in
+// Watch's buffer, not here, so the channel is small.
+const eventQueue = 1024
+
 type Config struct {
 	Listen       string        `mapstructure:"listen"`
 	Checkpoint   string        `mapstructure:"checkpoint"` // the subscriber SDK's acknowledged sequence IDs
 	AckFrequency time.Duration `mapstructure:"ack-frequency"`
-	BatchEvery   time.Duration `mapstructure:"batch-every"`
-	BatchEvents  int           `mapstructure:"batch-events"`
-	BatchQueue   int           `mapstructure:"batch-queue"`
+	// BatchEvents and BatchEvery close a batch: at that many events, or that long after its first
+	// event, whichever comes first.
+	BatchEvents int           `mapstructure:"batch-events"`
+	BatchEvery  time.Duration `mapstructure:"batch-every"`
+	// MaxInodes bounds the inodes kept between two hand-overs. A lookup adds its whole batch, so
+	// the inodes can pass the bound by one batch's worth.
+	MaxInodes int `mapstructure:"max-inodes"`
 	// HighWaterMark is in unacknowledged events per metadata server. Watch's event-buffer-size is
 	// also per metadata server, so the mark should stay well below it.
 	HighWaterMark uint64 `mapstructure:"high-water-mark"`
+	Query         string `mapstructure:"query"`  // the gufi_query binary
+	Sqlite        string `mapstructure:"sqlite"` // the gufi_sqlite3 binary
+	TrackOpens    bool   `mapstructure:"track-opens"`
 	TLSCertFile   string `mapstructure:"tls-cert-file"`
 	TLSKeyFile    string `mapstructure:"tls-key-file"`
 	TLSDisable    bool   `mapstructure:"tls-disable"`
@@ -58,35 +79,54 @@ type Collector struct {
 	beeindex.UnimplementedIndexUpdaterServer
 	log     *zap.Logger
 	cfg     Config
-	marker  *markwalk.Marker
+	lookup  *lookup
 	updater *updater.Updater
 	server  *grpc.Server
 	svc     *subscriber.Service
 
-	events  chan *bw.Event       // from the SDK's stream handlers to the batcher
-	batches chan *markwalk.Batch // from the batcher to the processor; the batcher closes it
-	acks    chan subscriber.Ack  // from Acknowledge to the SDK; Run closes it last
+	events chan *bw.Event      // from the SDK's stream handlers to collect
+	acks   chan subscriber.Ack // from Acknowledge to the SDK; Run closes it last
 
 	// ackMu orders Acknowledge, which the updater calls, against Run closing acks.
 	ackMu      sync.Mutex
 	acksClosed bool
 
-	// Owned by the batcher.
-	cur  *markwalk.Batch
-	last uint64 // number of the newest batch, for the log only
+	// Owned by collect.
+	open *batch // the batch being gathered, or a closed one waiting for its retry; nil when none
+	last uint64 // number of the newest batch, for the log and the status
+
+	// The inodes looked up since the last hand-over. collect adds to them. The updater's
+	// hand-over swaps them through Take and Restore.
+	setMu sync.Mutex
+	set   updater.Handover
+	// boundDue says the inodes reached Config.MaxInodes and the updater was asked for a run. Take
+	// and Restore clear it, so each set asks once, and a set put back asks again.
+	boundDue bool
+	// swapped wakes collect after Take or Restore, so it checks the bound again.
+	swapped chan struct{}
+
 	seqs *seqTracker
 
-	// What the loops are doing, for GetStatus. The batcher writes all but acked.
+	// What the collector is doing, for GetStatus.
 	state    atomic.Int32  // a beeindex.CollectorStatus_State
-	open     atomic.Uint64 // events in the open batch
+	opened   atomic.Uint64 // events in the open batch
 	received atomic.Uint64 // events received since the service started
-	closed   atomic.Uint64 // batches closed since the service started
+	closed   atomic.Uint64 // batches looked up since the service started
 	acked    atomic.Uint64 // batches whose events were acknowledged since the service started
 }
 
-// New opens the checkpoint and builds the gRPC server with the subscriber and IndexUpdater
-// services on it. Nothing listens until Run.
-func New(cfg Config, marker *markwalk.Marker, up *updater.Updater, log *zap.Logger) (*Collector, error) {
+// New checks the lookup's binaries and the index, opens the checkpoint, and builds the gRPC
+// server with the subscriber and IndexUpdater services on it. Nothing listens until Run. Its
+// inputs besides the configuration:
+//   - index is the index root with symlinks resolved, because the lookup checks paths with lstat;
+//   - work is the updater's work directory, where each lookup keeps its scratch files;
+//   - threads is the thread count for gufi_query.
+func New(ctx context.Context, cfg Config, index, work string, threads int, up *updater.Updater, log *zap.Logger) (*Collector, error) {
+	lk := &lookup{index: index, gufiQuery: cfg.Query, gufiSqlite: cfg.Sqlite, scratch: filepath.Join(work, "lookup"),
+		threads: threads, log: log}
+	if err := lk.check(ctx); err != nil {
+		return nil, fmt.Errorf("unable to check the index: %w", err)
+	}
 	store, err := subscriber.NewDiskStore(cfg.Checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open checkpoint: %w", err)
@@ -96,15 +136,16 @@ func New(cfg Config, marker *markwalk.Marker, up *updater.Updater, log *zap.Logg
 		return nil, fmt.Errorf("unable to read checkpoint: %w", err)
 	}
 	c := &Collector{
-		log: log, cfg: cfg, marker: marker, updater: up,
+		log: log, cfg: cfg, lookup: lk, updater: up,
 		seqs:    newSeqTracker(stored, up.LastSeq()),
-		events:  make(chan *bw.Event, cfg.BatchEvents),
-		batches: make(chan *markwalk.Batch, cfg.BatchQueue),
+		events:  make(chan *bw.Event, eventQueue),
 		acks:    make(chan subscriber.Ack, 1<<16),
+		set:     newHandover(),
+		swapped: make(chan struct{}, 1),
 	}
-	up.SetAcknowledge(c.Acknowledge)
+	up.SetCollector(c)
 	// WaitForHandlers makes Stop return only once every stream handler has, so no handler
-	// outlives the loops it sends to.
+	// outlives the loop it sends to.
 	opts := []grpc.ServerOption{grpc.WaitForHandlers(true)}
 	if cfg.TLSDisable {
 		log.Warn("serving Watch and the CLI without TLS because it was disabled")
@@ -123,6 +164,10 @@ func New(cfg Config, marker *markwalk.Marker, up *updater.Updater, log *zap.Logg
 	return c, nil
 }
 
+func newHandover() updater.Handover {
+	return updater.Handover{Inodes: map[uint64]struct{}{}, Delivered: map[uint32][]updater.SeqRange{}}
+}
+
 // Run serves Watch and the CLI until ctx is done, then stops without draining: whatever was not
 // acknowledged is still in Watch and comes back on the next connect. It returns early only when
 // the gRPC server fails.
@@ -132,13 +177,13 @@ func (c *Collector) Run(ctx context.Context) error {
 		return fmt.Errorf("unable to listen on %s: %w", c.cfg.Listen, err)
 	}
 	loopCtx, cancel := context.WithCancel(context.Background())
-	var loops sync.WaitGroup
-	loops.Go(func() { c.batcher(loopCtx) })
-	loops.Go(func() { c.processor(loopCtx) })
+	var loop sync.WaitGroup
+	loop.Go(func() { c.collect(loopCtx) })
 	c.svc.Start(c.events, c.acks)
 	served := make(chan error, 1)
 	go func() { served <- c.server.Serve(lis) }()
-	c.log.Info("collector started", zap.String("listen", c.cfg.Listen), zap.Uint64("after_batch", c.last))
+	c.log.Info("collector started", zap.String("listen", c.cfg.Listen), zap.Int("batch_events", c.cfg.BatchEvents),
+		zap.Duration("batch_every", c.cfg.BatchEvery), zap.Int("max_inodes", c.cfg.MaxInodes))
 
 	var serveErr error
 	select {
@@ -146,11 +191,11 @@ func (c *Collector) Run(ctx context.Context) error {
 		c.log.Error("gRPC server failed", zap.Error(serveErr))
 	case <-ctx.Done():
 	}
-	// Inflow first, then the loops, then the acks. Acknowledgements the SDK had not written to
-	// the checkpoint yet are delivered again after a restart.
+	// Inflow first, then collect, then the acks. Acknowledgements the SDK had not written to the
+	// checkpoint yet are delivered again after a restart.
 	c.server.Stop()
 	cancel()
-	loops.Wait()
+	loop.Wait()
 	c.ackMu.Lock()
 	close(c.acks)
 	c.acksClosed = true
@@ -160,52 +205,66 @@ func (c *Collector) Run(ctx context.Context) error {
 	return serveErr
 }
 
-// batcher is the only goroutine that touches cur and last. Acknowledge updates seqs too, under
-// the tracker's own lock. The hand-off to the processor blocks while BatchQueue batches wait,
-// which is what slows the streams, and so Watch, down. On ctx done the open batch is dropped: it
-// is unacknowledged, so Watch resends it.
-func (c *Collector) batcher(ctx context.Context) {
-	defer close(c.batches)
-	tick := time.NewTicker(c.cfg.BatchEvery)
-	defer tick.Stop()
+// collect is the only goroutine that reads events and looks up batches. A batch closes at
+// Config.BatchEvents events or Config.BatchEvery after its first event, and is looked up at once.
+// collect reads no event in three cases, so the SDK's stream handlers block on the full event
+// channel and Watch keeps the events in its buffer:
+//   - while a lookup runs;
+//   - while a lookup fails: the batch is kept and retried after a growing delay;
+//   - while the inodes are at Config.MaxInodes, until a hand-over takes them.
+//
+// On ctx done the batch and the inodes are dropped: they are unacknowledged, so Watch resends
+// them.
+func (c *Collector) collect(ctx context.Context) {
+	retry := backoff.NewExponentialBackOff()
+	var deadline, retryAt <-chan time.Time
+	full := false
 	for {
-		var closedBy string
+		events := c.events
+		if full || retryAt != nil {
+			events = nil // a nil channel is never ready
+		}
 		select {
-		case ev := <-c.events:
+		case ev := <-events:
+			if c.open == nil {
+				c.last++
+				c.open = newBatch(c.last)
+				deadline = time.After(c.cfg.BatchEvery)
+			}
 			c.add(ev)
-			if c.cur.Events < c.cfg.BatchEvents {
+			if c.open.events < c.cfg.BatchEvents {
+				c.report(full, false)
 				continue
 			}
-			closedBy = "size"
-		case <-tick.C:
-			if c.cur == nil {
-				continue
-			}
-			closedBy = "timer"
+		case <-deadline:
+		case <-retryAt:
+		case <-c.swapped:
+			full = c.atBound()
+			c.report(full, retryAt != nil)
+			continue
 		case <-ctx.Done():
 			return
 		}
-		c.log.Info("batch closed", zap.Uint64("batch", c.cur.N), zap.Int("events", c.cur.Events), zap.String("closed_by", closedBy))
-		c.closed.Add(1)
-		select {
-		case c.batches <- c.cur:
+		deadline, retryAt = nil, nil
+		atBound, err := c.lookUp(ctx)
+		switch {
+		case err == nil:
+			full = atBound
+			retry.Reset()
+		case ctx.Err() != nil:
+			return
 		default:
-			// Every slot is taken: markwalk is behind. The state says so for as long as the wait lasts.
-			c.state.Store(int32(beeindex.CollectorStatus_BLOCKED))
-			select {
-			case c.batches <- c.cur:
-			case <-ctx.Done():
-				return
-			}
+			d := retry.NextBackOff()
+			retryAt = time.After(d)
+			c.log.Error("lookup failed; the batch is kept and retried, and no event is read from Watch meanwhile",
+				zap.Uint64("batch", c.open.n), zap.Error(err), zap.Duration("retry_after", d))
 		}
-		c.cur = nil
-		c.open.Store(0)
-		c.state.Store(int32(beeindex.CollectorStatus_IDLE))
+		c.report(full, retryAt != nil)
 	}
 }
 
-// add records ev in the open batch, opening one when needed. The batch keeps what markwalk needs,
-// not the event. The checks per event:
+// add records ev in the open batch. The batch keeps what the lookup needs, not the event. The
+// checks per event:
 //   - A hole in the meta's sequence IDs means Watch no longer had those events. They are
 //     counted, and a full repair is requested, because nothing else says which directories the
 //     lost events changed.
@@ -229,48 +288,112 @@ func (c *Collector) add(ev *bw.Event) {
 		c.log.Warn("high-water mark reached: an update is due to acknowledge the events Watch holds",
 			zap.Uint32("meta", meta), zap.Uint64("seq", seq), zap.Uint64("high_water_mark", c.cfg.HighWaterMark))
 	}
-	if c.cur == nil {
-		c.last++
-		c.cur = markwalk.NewBatch(c.last)
-		c.state.Store(int32(beeindex.CollectorStatus_GATHERING))
-	}
-	c.marker.Add(c.cur, ev)
-	c.open.Store(uint64(c.cur.Events))
+	c.open.add(ev, c.cfg.TrackOpens)
 	c.received.Add(1)
 }
 
-// processor hands each batch to markwalk, which adds it to the run set. A failed batch,
-// including one held back by a full work directory, is retried with a growing delay and never
-// added, so nothing is skipped. On ctx done it returns at once, even mid-batch: Watch resends
-// what is unacknowledged.
-func (c *Collector) processor(ctx context.Context) {
-	retry := backoff.NewExponentialBackOff()
-	for b := range c.batches {
-		var failing time.Time
-		for {
-			err := c.marker.Process(ctx, b)
-			if err == nil {
-				break
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			if failing.IsZero() {
-				failing = time.Now()
-			}
-			d := retry.NextBackOff()
-			c.log.Error("batch failed, retrying", zap.Uint64("batch", b.N), zap.Error(err),
-				zap.Duration("failing_for", time.Since(failing)), zap.Duration("after", d))
-			select {
-			case <-time.After(d):
-			case <-ctx.Done():
-				return
-			}
+// lookUp looks the open batch up and adds its inodes and sequence IDs to the set. It reports
+// whether the set is at Config.MaxInodes, see atBound. A batch adds all its inodes, so the set can
+// pass the bound by one batch's worth. A failed lookup keeps the batch, so its events stay
+// unacknowledged until a retry succeeds.
+func (c *Collector) lookUp(ctx context.Context) (full bool, err error) {
+	b := c.open
+	inos, err := c.lookup.convert(ctx, b)
+	if err != nil {
+		return false, err
+	}
+	c.setMu.Lock()
+	for _, ino := range inos {
+		c.set.Inodes[ino] = struct{}{}
+	}
+	appendRanges(c.set.Delivered, b.delivered)
+	c.set.Events += b.events
+	c.set.Batches++
+	c.setMu.Unlock()
+	c.open = nil
+	c.closed.Add(1)
+	return c.atBound(), nil
+}
+
+// atBound reports whether the set is at Config.MaxInodes. The first time a set gets there, it asks
+// the updater for a run. A set put back by Restore asks again, because the run that failed to
+// take it may have been the only one queued.
+func (c *Collector) atBound() bool {
+	c.setMu.Lock()
+	n := len(c.set.Inodes)
+	full := n >= c.cfg.MaxInodes
+	ask := full && !c.boundDue
+	if ask {
+		c.boundDue = true
+	}
+	c.setMu.Unlock()
+	if ask {
+		c.updater.Due()
+		c.log.Warn("inode bound reached: an update is due, and no event is read from Watch until it takes the inodes",
+			zap.Int("inodes", n), zap.Int("max_inodes", c.cfg.MaxInodes))
+	}
+	return full
+}
+
+// appendRanges adds the ranges of later after those already in to, per meta, so each meta's
+// sequence IDs stay in delivery order.
+func appendRanges(to, later map[uint32][]updater.SeqRange) {
+	for meta, ranges := range later {
+		for _, r := range ranges {
+			to[meta] = extend(to[meta], r)
 		}
-		if !failing.IsZero() {
-			c.log.Info("batch recovered", zap.Uint64("batch", b.N), zap.Duration("after", time.Since(failing)))
-		}
-		retry.Reset()
+	}
+}
+
+// report sets the state GetStatus shows. The collector is blocked while it reads nothing for a
+// reason other than a lookup in progress: at the bound, or while a lookup fails.
+func (c *Collector) report(full, failing bool) {
+	state := beeindex.CollectorStatus_GATHERING
+	switch {
+	case full || failing:
+		state = beeindex.CollectorStatus_BLOCKED
+	case c.open == nil:
+		state = beeindex.CollectorStatus_IDLE
+	}
+	c.state.Store(int32(state))
+	var opened uint64
+	if c.open != nil {
+		opened = uint64(c.open.events)
+	}
+	c.opened.Store(opened)
+}
+
+// Take runs at the hand-over, on the updater's goroutine. It returns the inodes looked up so far
+// and starts an empty set. A batch whose lookup is still running goes into the new set. A collect
+// stopped at the bound then reads again.
+func (c *Collector) Take() updater.Handover {
+	c.setMu.Lock()
+	h := c.set
+	c.set, c.boundDue = newHandover(), false
+	c.setMu.Unlock()
+	c.wake()
+	return h
+}
+
+// Restore runs when a hand-over failed. It puts h back in front of what was looked up since, so
+// the next hand-over covers both, and each meta's sequence IDs stay in delivery order. The set
+// can then be past the bound, and collect stops reading until a hand-over succeeds.
+func (c *Collector) Restore(h updater.Handover) {
+	c.setMu.Lock()
+	maps.Copy(h.Inodes, c.set.Inodes)
+	appendRanges(h.Delivered, c.set.Delivered)
+	h.Events += c.set.Events
+	h.Batches += c.set.Batches
+	c.set, c.boundDue = h, false
+	c.setMu.Unlock()
+	c.wake()
+}
+
+// wake tells collect that Take or Restore changed the set, so it checks the bound again.
+func (c *Collector) wake() {
+	select {
+	case c.swapped <- struct{}{}:
+	default: // collect has a wake-up pending already
 	}
 }
 
@@ -279,15 +402,16 @@ func (c *Collector) processor(ctx context.Context) {
 // to Watch only past events acknowledged one by one. Each meta's acks go in delivery order, so
 // the SDK finds each at the front of its list. After Run has closed the acks channel the acks
 // are dropped, and Watch resends those events after the restart.
-func (c *Collector) Acknowledge(d markwalk.Dumped) {
+func (c *Collector) Acknowledge(h updater.Handover) {
+	seqs := h.Seqs()
 	c.ackMu.Lock()
 	defer c.ackMu.Unlock()
 	if c.acksClosed {
-		c.log.Info("not acknowledging: the collector stopped; Watch resends these events", zap.Any("highest_seq", d.Seqs))
+		c.log.Info("not acknowledging: the collector stopped; Watch resends these events", zap.Any("highest_seq", seqs))
 		return
 	}
 	// The SDK reads acks until Run closes the channel, so the send only waits for it to catch up.
-	for meta, ranges := range d.Delivered {
+	for meta, ranges := range h.Delivered {
 		for _, r := range ranges {
 			// Stop at Last, not past it, so a range ending at the largest ID cannot wrap around.
 			for seq := r.First; ; seq++ {
@@ -298,9 +422,9 @@ func (c *Collector) Acknowledge(d markwalk.Dumped) {
 			}
 		}
 	}
-	c.seqs.acknowledged(d.Seqs)
-	c.acked.Add(uint64(d.Batches))
-	c.log.Info("events acknowledged", zap.Int("batches", d.Batches), zap.Any("highest_seq", d.Seqs))
+	c.seqs.acknowledged(seqs)
+	c.acked.Add(uint64(h.Batches))
+	c.log.Info("events acknowledged", zap.Int("batches", h.Batches), zap.Int("events", h.Events), zap.Any("highest_seq", seqs))
 }
 
 func (c *Collector) RunUpdate(ctx context.Context, req *beeindex.RunUpdateRequest) (*beeindex.RunUpdateResponse, error) {
@@ -327,22 +451,31 @@ func (c *Collector) SetSchedule(_ context.Context, req *beeindex.SetScheduleRequ
 	return &beeindex.SetScheduleResponse{Schedule: schedule}, nil
 }
 
-// GetStatus reports the three stages. Each queue length is a snapshot taken without a lock, so
-// the numbers of one reply are from slightly different moments.
+// GetStatus reports the three stages. Each number is read on its own, so the numbers of one reply
+// are from slightly different moments. The collector fills the batch fields of the status:
+//   - OpenBatch is the open batch's events against Config.BatchEvents.
+//   - Batches is the inodes kept for the next hand-over against Config.MaxInodes.
+//   - BatchesClosed counts the batches looked up, BatchesAcknowledged those whose events were
+//     acknowledged.
+//
+// The Markwalk field reports the lookup.
 func (c *Collector) GetStatus(context.Context, *beeindex.GetStatusRequest) (*beeindex.GetStatusResponse, error) {
+	c.setMu.Lock()
+	inodes := len(c.set.Inodes)
+	c.setMu.Unlock()
 	return &beeindex.GetStatusResponse{
 		Collector: &beeindex.CollectorStatus{
 			State:               beeindex.CollectorStatus_State(c.state.Load()),
 			Events:              queue(len(c.events), cap(c.events)),
-			OpenBatch:           &beeindex.Queue{Size: c.open.Load(), Capacity: uint64(c.cfg.BatchEvents)},
-			Batches:             queue(len(c.batches), cap(c.batches)),
+			OpenBatch:           queue(int(c.opened.Load()), c.cfg.BatchEvents),
+			Batches:             queue(inodes, c.cfg.MaxInodes),
 			Acks:                queue(len(c.acks), cap(c.acks)),
 			Metas:               c.seqs.progress(),
 			EventsReceived:      c.received.Load(),
 			BatchesClosed:       c.closed.Load(),
 			BatchesAcknowledged: c.acked.Load(),
 		},
-		Markwalk: c.marker.Status(),
+		Markwalk: c.lookup.status(),
 		Update:   c.updater.Status(),
 	}, nil
 }
@@ -352,7 +485,7 @@ func queue(size, capacity int) *beeindex.Queue {
 }
 
 // seqTracker finds holes in each meta's sequence IDs and tells when a meta's unacknowledged
-// events reach the high-water mark. The batcher and Acknowledge write it; GetStatus reads the
+// events reach the high-water mark. collect and Acknowledge write it; GetStatus reads the
 // counts.
 type seqTracker struct {
 	mu      sync.Mutex
