@@ -3,6 +3,7 @@ package collector
 import (
 	"path"
 	"strings"
+	"time"
 
 	"github.com/thinkparq/beegfs-go/index/internal/updater"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
@@ -13,15 +14,23 @@ import (
 // metadata server. A path is held once, however many events name it, so the batch never holds
 // whole events. The lookup turns a closed batch into inodes, see lookup.convert.
 type batch struct {
-	n         uint64 // the batch's number since the service started, for the log and the status
-	events    int
+	n      uint64 // the batch's number since the service started, for the log and the status
+	events int
+	// The times the lookup's log line reports, so a test can tell the time to gather a batch from
+	// the collector's own share of it:
+	//   - opened is when the first event arrived;
+	//   - gathered is the time from opened until the batch closed, set when it first closes;
+	//   - adding is the time collect spent adding the events, see Collector.add.
+	opened    time.Time
+	gathered  time.Duration
+	adding    time.Duration
 	dirs      map[string]struct{}
 	links     map[string]struct{}
 	delivered map[uint32][]updater.SeqRange
 }
 
 func newBatch(n uint64) *batch {
-	return &batch{n: n, dirs: map[string]struct{}{}, links: map[string]struct{}{}, delivered: map[uint32][]updater.SeqRange{}}
+	return &batch{n: n, opened: time.Now(), dirs: map[string]struct{}{}, links: map[string]struct{}{}, delivered: map[uint32][]updater.SeqRange{}}
 }
 
 // add records what ev changed in b: the directories, and the name when the entry may have

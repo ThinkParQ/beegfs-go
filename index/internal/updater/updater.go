@@ -762,7 +762,8 @@ func (u *Updater) repair(ctx context.Context, r *Run, summary *beeindex.RunSumma
 // checkpoint, but never above LastSeq, so the collector does not count the events in between as
 // lost. A failed write acknowledges nothing, and the inodes go back to the collector for the next
 // hand-over. A handover without inodes writes no file but is acknowledged, because its events
-// changed no directory of the index.
+// changed no directory of the index. The log line reports the time to take the inodes and write
+// the file, and the time to acknowledge.
 func (u *Updater) handover(summary *beeindex.RunSummary) (upTo uint64, skipped bool, err error) {
 	if u.collector == nil {
 		return 0, false, errors.New("no collector is set, so there is nothing to hand over")
@@ -781,6 +782,7 @@ func (u *Updater) handover(summary *beeindex.RunSummary) (upTo uint64, skipped b
 	u.mu.Lock()
 	n := u.lastFile + 1
 	u.mu.Unlock()
+	began := time.Now()
 	h := u.collector.Take()
 	if len(h.Inodes) > 0 {
 		if err := writeSuspects(h.Inodes, suspectFile(u.work, n)); err != nil {
@@ -788,6 +790,7 @@ func (u *Updater) handover(summary *beeindex.RunSummary) (upTo uint64, skipped b
 			return 0, false, fmt.Errorf("write suspect file: %w", err)
 		}
 	}
+	wrote := time.Since(began)
 	seqs := h.Seqs()
 	u.mu.Lock()
 	if len(h.Inodes) > 0 {
@@ -801,12 +804,13 @@ func (u *Updater) handover(summary *beeindex.RunSummary) (upTo uint64, skipped b
 	}
 	upTo = u.lastFile
 	u.mu.Unlock()
+	began = time.Now()
 	if len(seqs) > 0 {
 		u.collector.Acknowledge(h)
 	}
 	summary.Batches = uint64(h.Batches)
 	u.log.Info("hand-over done", zap.Int("batches", h.Batches), zap.Int("events", h.Events), zap.Int("inodes", len(h.Inodes)),
-		zap.Uint64("suspect_file", n))
+		zap.Uint64("suspect_file", n), zap.Duration("suspect_file_took", wrote), zap.Duration("acknowledge_took", time.Since(began)))
 	return upTo, false, nil
 }
 
@@ -952,7 +956,8 @@ const maxLine = 1 << 20
 // run returns the exit code and the number of output lines starting with "Error:". Those lines
 // are logged as warnings, because the tool exits zero after a failed apply step and only its
 // output says so. The output is always read to the end, because Wait returns only after the child
-// exits, and a child blocked on a full pipe never would.
+// exits, and a child blocked on a full pipe never would. It logs how long the tool ran, so a test
+// can tell gufi_incremental_update from gufi_treesummary in a run's time.
 func (u *Updater) run(ctx context.Context, bin string, args []string) (code int, errLines uint64, err error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	stdout, err := cmd.StdoutPipe()
@@ -960,6 +965,7 @@ func (u *Updater) run(ctx context.Context, bin string, args []string) (code int,
 		return 0, 0, err
 	}
 	cmd.Stderr = cmd.Stdout
+	began := time.Now()
 	if err := cmd.Start(); err != nil {
 		return 0, 0, err
 	}
@@ -984,9 +990,11 @@ func (u *Updater) run(ctx context.Context, bin string, args []string) (code int,
 	err = cmd.Wait()
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return exit.ExitCode(), errLines, errors.New(exit.ProcessState.String())
+		code, err = exit.ExitCode(), errors.New(exit.ProcessState.String())
 	}
-	return 0, errLines, err
+	u.log.Info(name+" exited", zap.Int("exit_code", code), zap.Uint64("error_lines", errLines),
+		zap.Duration("took", time.Since(began)))
+	return code, errLines, err
 }
 
 // Run is one queued or running update.

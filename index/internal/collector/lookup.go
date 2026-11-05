@@ -95,47 +95,45 @@ func (l *lookup) check(ctx context.Context) error {
 	return nil
 }
 
-// convert looks batch b up in the index and returns the inodes to rebuild. A directory can be
-// found both ways, through its path and through a hard link's other name, so an inode can come
-// back twice. The status reports each step. The rules:
+// convert looks batch b up in the index and returns the inodes to rebuild, with what it found for
+// the caller's log line. A directory can be found both ways, through its path and through a hard
+// link's other name, so an inode can come back twice. The status reports each step. The rules:
 //   - A batch that names no directory of the index runs no query and returns no inode. Its events
 //     changed nothing in the index, so the hand-over may acknowledge them.
 //   - On an error convert returns nothing. The caller keeps the batch and retries it, so its
 //     events stay unacknowledged.
-func (l *lookup) convert(ctx context.Context, b *batch) (inos []uint64, err error) {
+func (l *lookup) convert(ctx context.Context, b *batch) (inos []uint64, fields []zap.Field, err error) {
 	l.begin(b)
 	defer func() { l.end(len(inos), err) }()
 	l.setStep("finding the changed directories in the index")
 	listed, dropped, err := l.indexDirs(b.dirs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	l.log.Debug("changed directories", zap.Uint64("batch", b.n), zap.Strings("in_index", listed), zap.Int("not_in_index", dropped))
-	fields := []zap.Field{zap.Uint64("batch", b.n), zap.Int("events", b.events), zap.Int("directories", len(listed)),
+	fields = []zap.Field{zap.Uint64("batch", b.n), zap.Int("events", b.events), zap.Int("directories", len(listed)),
 		zap.Int("not_index_directories", dropped)}
 	if len(listed) == 0 {
-		l.log.Info("lookup done: no directory of the index changed", fields...)
-		return nil, nil
+		return nil, append(fields, zap.Int("inodes", 0)), nil
 	}
 	// One lookup runs at a time, so one scratch directory serves them all.
 	if err := os.MkdirAll(l.scratch, 0o755); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer os.RemoveAll(l.scratch)
 	l.setStep("looking up inodes in the index")
 	found, files, err := l.indexInodes(ctx, l.scratch, listed, linkedDirs(listed, b.links))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	l.setStep("looking up the other names of hard links")
 	others, err := l.otherNames(ctx, l.scratch, files)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	inos = slices.Concat(found, others)
-	l.log.Info("lookup done", append(fields, zap.Int("inodes", len(inos)), zap.Int("multi_name_files", len(files)),
-		zap.Int("other_name_dirs", len(others)))...)
-	return inos, nil
+	return inos, append(fields, zap.Int("inodes", len(inos)), zap.Int("multi_name_files", len(files)),
+		zap.Int("other_name_dirs", len(others))), nil
 }
 
 // begin records that the lookup of b started.

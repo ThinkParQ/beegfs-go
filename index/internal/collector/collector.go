@@ -231,7 +231,9 @@ func (c *Collector) collect(ctx context.Context) {
 				c.open = newBatch(c.last)
 				deadline = time.After(c.cfg.BatchEvery)
 			}
+			began := time.Now()
 			c.add(ev)
+			c.open.adding += time.Since(began)
 			if c.open.events < c.cfg.BatchEvents {
 				c.report(full, false)
 				continue
@@ -246,6 +248,9 @@ func (c *Collector) collect(ctx context.Context) {
 			return
 		}
 		deadline, retryAt = nil, nil
+		if c.open.gathered == 0 { // a retry keeps the time of the first close
+			c.open.gathered = time.Since(c.open.opened)
+		}
 		atBound, err := c.lookUp(ctx)
 		switch {
 		case err == nil:
@@ -296,12 +301,19 @@ func (c *Collector) add(ev *bw.Event) {
 // whether the set is at Config.MaxInodes, see atBound. A batch adds all its inodes, so the set can
 // pass the bound by one batch's worth. A failed lookup keeps the batch, so its events stay
 // unacknowledged until a retry succeeds.
+//
+// It logs one line per batch with the time of each step the batch went through: gathering it,
+// adding its events, the lookup, and adding the inodes to the set. A retried batch reports its
+// last lookup only.
 func (c *Collector) lookUp(ctx context.Context) (full bool, err error) {
 	b := c.open
-	inos, err := c.lookup.convert(ctx, b)
+	began := time.Now()
+	inos, fields, err := c.lookup.convert(ctx, b)
 	if err != nil {
 		return false, err
 	}
+	looked := time.Since(began)
+	began = time.Now()
 	c.setMu.Lock()
 	for _, ino := range inos {
 		c.set.Inodes[ino] = struct{}{}
@@ -309,9 +321,13 @@ func (c *Collector) lookUp(ctx context.Context) (full bool, err error) {
 	appendRanges(c.set.Delivered, b.delivered)
 	c.set.Events += b.events
 	c.set.Batches++
+	kept := len(c.set.Inodes)
 	c.setMu.Unlock()
+	inserted := time.Since(began)
 	c.open = nil
 	c.closed.Add(1)
+	c.log.Info("lookup done", append(fields, zap.Int("inodes_kept", kept), zap.Duration("gather_took", b.gathered),
+		zap.Duration("add_took", b.adding), zap.Duration("lookup_took", looked), zap.Duration("insert_took", inserted))...)
 	return c.atBound(), nil
 }
 
