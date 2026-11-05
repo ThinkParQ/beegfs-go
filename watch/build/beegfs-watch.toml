@@ -185,7 +185,8 @@ poll-frequency = 1
 
 # max-reconnect-backoff: When a connection cannot be made to a subscriber subscriber reconnection
 # attempts will be made with an exponential backoff. This is the maximum time in seconds between
-# reconnection attempts to avoid increasing the backoff timer forever.
+# reconnection attempts to avoid increasing the backoff timer forever. Attempts are always at least
+# one second apart, so values below 1 act as 1.
 
 # max-wait-for-response-after-connect: When a subscriber connects/reconnects wait this long for the
 # subscriber to acknowledge the sequence ID of the last event it received successfully. Starting in

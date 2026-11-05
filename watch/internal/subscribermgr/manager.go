@@ -1,8 +1,9 @@
 /*
 Package subscribermgr provides functionality for managing multiple subscribers.
 
-It accepts a JSON configuration with one or more subscribers, then creates a handler for each subscriber.
-It also adds cursors to the metaEventBuffer so each subscriber has their own unique window into the shared ring buffer space.
+It accepts a JSON configuration with one or more subscribers, then creates a handler for each
+subscriber on each meta's event buffer. It also adds a cursor for each subscriber to each event
+buffer so each subscriber has their own unique window into that buffer's ring space.
 When the app is shutting down is also coordinates shutting down all handlers.
 */
 package subscribermgr
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"slices"
 	"sync"
 
 	"github.com/thinkparq/beegfs-go/common/configmgr"
@@ -22,23 +24,52 @@ import (
 )
 
 type Manager struct {
-	log             *logger.Logger
-	handlers        []*Handler
-	metaEventBuffer *types.MultiCursorRingBuffer
-	wg              *sync.WaitGroup
+	log *logger.Logger
+	wg  *sync.WaitGroup
+	// mu guards the fields below.
+	mu            sync.Mutex
+	handlerConfig HandlerConfig
+	// subscribers is the subscriber configuration last applied.
+	subscribers []subscriber.Config
+	buffers     []*types.MultiCursorRingBuffer
+	// handlers has one handler per subscriber and meta. Each one sends that meta's events to that
+	// subscriber.
+	handlers map[subscription]*Handler
+}
+
+// subscription is one subscriber receiving the events of one meta.
+type subscription struct {
+	subscriberID int
+	buffer       *types.MultiCursorRingBuffer
 }
 
 // Verify all interfaces that depend on Manager are satisfied:
 var _ configmgr.Listener = &Manager{}
 
-func New(log *logger.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup) *Manager {
+// New returns a manager with no subscribers and no event buffers.
+func New(log *logger.Logger, wg *sync.WaitGroup) *Manager {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	return &Manager{
-		log:             log,
-		handlers:        make([]*Handler, 0),
-		metaEventBuffer: metaEventBuffer,
-		wg:              wg,
+		log:      log,
+		handlers: make(map[subscription]*Handler),
+		wg:       wg,
+	}
+}
+
+// AddEventBuffer starts serving the event buffer of one meta. Before it returns, it adds a cursor
+// for every configured subscriber and starts their handlers.
+func (sm *Manager) AddEventBuffer(buf *types.MultiCursorRingBuffer) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if slices.Contains(sm.buffers, buf) {
+		sm.log.Error("ignoring an event buffer that was already added (most likely this indicates a bug and a report should be filed)", zap.Uint64("ringID", buf.GetRingID()))
+		return
+	}
+	sm.buffers = append(sm.buffers, buf)
+	if err := sm.startHandlers(buf, sm.subscribers); err != nil {
+		// UpdateConfiguration stores only configurations that built subscribers without an error.
+		sm.log.Error("unable to start subscriber handlers for a new event buffer (most likely this indicates a bug and a report should be filed)", zap.Error(err))
 	}
 }
 
@@ -50,10 +81,10 @@ type Configurer interface {
 }
 
 // UpdateConfiguration satisfies the ConfigListener interface and is used to
-// dynamically update the handlers and subscribers they manage. The provided
-// configuration should contain all subscribers including any changes to
-// existing ones. Any subscribers found in the old configuration but not in the
-// new will be removed.
+// dynamically update the handlers and subscribers they manage on every event
+// buffer. The provided configuration should contain all subscribers including
+// any changes to existing ones. Any subscribers found in the old configuration
+// but not in the new will be removed.
 func (sm *Manager) UpdateConfiguration(newConfig any) error {
 
 	// Use type assertion to verify the newConfig interface variable is of the
@@ -65,95 +96,111 @@ func (sm *Manager) UpdateConfiguration(newConfig any) error {
 	newHandlerConfig, newSubscribersConfig := configurer.GetSMConfig()
 
 	// Make sure the new subscriber configuration is valid before we start making changes.
-	newSubscribers, err := subscriber.NewSubscribersFromConfig(newSubscribersConfig)
-	if err != nil {
+	if _, err := subscriber.NewSubscribersFromConfig(newSubscribersConfig); err != nil {
 		return err
 	}
 
-	toAdd, toRemove, toVerify := evaluateAddedAndRemovedSubscribers(sm.handlers, newSubscribers)
-	noUpdates := true
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 
-	// We handle removing subscribers by keeping track of only those we want to keep.
-	var handlersToKeep []*Handler
-	for i, h := range sm.handlers {
-		if toRemove[h.ID] {
-			sm.log.Info("removing subscriber", zap.Int("id", h.ID))
-			h.Stop()
-			h.mu.Lock() // Lock the handler so we're sure its not still in use before deleting it.
-			// We only want to remove cursors when subscribers are removed.
-			// This ensures we don't drop events while updating subscriber config.
-			sm.metaEventBuffer.RemoveCursor(h.ID)
-		} else {
-			// Check if the subscriber or handler configuration was modified.
-			// With the current handler configuration it is likely we could swap
-			// out the configuration without restarting the handler. However
-			// we don't know what could get added in the future so we'll always
-			// stop the handler to be safe.
-			if h.Subscriber.Config != toVerify[h.ID].Config || h.config != newHandlerConfig {
-				noUpdates = false
-				sm.log.Info("updating subscriber configuration", zap.Int("id", h.ID))
-				h.Stop()
-				h.mu.Lock() // Lock the handler so we're sure its not still in use before swapping it out.
-				// We don't need to unlock the mutex because it won't exist after we perform the swap.
-				// Swap out the handler. Note is important we don't just swap out the subscriber.
-				// Otherwise we'd have to worry about resetting the context and other state.
-				sm.handlers[i] = newHandler(sm.log.Logger, toVerify[h.ID], sm.metaEventBuffer, newHandlerConfig)
-				go sm.handlers[i].Handle(sm.wg)
-			}
-			handlersToKeep = append(handlersToKeep, sm.handlers[i])
+	toAdd, toRestart, toRemove := planSubscriberChanges(sm.handlerConfig, newHandlerConfig, sm.subscribers, newSubscribersConfig)
+
+	// Removing a subscriber removes its cursor from every buffer. Cursors are removed only here,
+	// so a configuration update never drops events.
+	for _, c := range toRemove {
+		sm.log.Info("removing subscriber", zap.Int("id", c.ID))
+		for _, buf := range sm.buffers {
+			sm.stopHandler(subscription{subscriberID: c.ID, buffer: buf})
+			buf.RemoveCursor(c.ID)
 		}
 	}
-	// Update handlers with only those we want to keep.
-	sm.handlers = handlersToKeep
 
-	for _, v := range toAdd {
-		sm.log.Info("adding subscriber", zap.Int("id", v.ID))
-		h := newHandler(sm.log.Logger, v, sm.metaEventBuffer, newHandlerConfig)
-		sm.handlers = append(sm.handlers, h)
-		go h.Handle(sm.wg)
+	for _, c := range toRestart {
+		sm.log.Info("updating subscriber configuration", zap.Int("id", c.ID))
+	}
+	for _, c := range toAdd {
+		sm.log.Info("adding subscriber", zap.Int("id", c.ID))
 	}
 
-	if len(toAdd) == 0 && len(toRemove) == 0 && noUpdates {
+	toStart := make([]subscriber.Config, 0, len(toRestart)+len(toAdd))
+	toStart = append(toStart, toRestart...)
+	toStart = append(toStart, toAdd...)
+
+	sm.handlerConfig = newHandlerConfig
+	sm.subscribers = newSubscribersConfig
+	for _, buf := range sm.buffers {
+		if err := sm.startHandlers(buf, toStart); err != nil {
+			return fmt.Errorf("unable to start subscriber handlers (most likely this indicates a bug and a report should be filed): %w", err)
+		}
+	}
+
+	if len(toAdd) == 0 && len(toRemove) == 0 && len(toRestart) == 0 {
 		sm.log.Debug("no change to subscriber configuration")
 	}
 
 	return nil
 }
 
-// evaluateAddedAndRemovedSubscribers takes a slice of current subscriber
-// handlers and a slice of new subscriber configuration. It returns a slice of
-// IDs that need new handlers, and a slice of IDs that no longer need handlers.
-// It also returns a slice of IDs that weren't added or removed that should be
-// checked for configuration updates.
-func evaluateAddedAndRemovedSubscribers(current []*Handler, new []*subscriber.Subscriber) (toAdd map[int]*subscriber.Subscriber, toRemove map[int]bool, toVerify map[int]*subscriber.Subscriber) {
+// starts a handler on buf for each subscriber in configs.
+func (sm *Manager) startHandlers(buf *types.MultiCursorRingBuffer, configs []subscriber.Config) error {
+	subscribers, err := subscriber.NewSubscribersFromConfig(configs)
+	if err != nil {
+		return err
+	}
+	for _, s := range subscribers {
+		key := subscription{subscriberID: s.ID, buffer: buf}
+		sm.stopHandler(key)
+		h := newHandler(sm.log.Logger, s, buf, sm.handlerConfig)
+		sm.handlers[key] = h
+		go h.Handle(sm.wg)
+	}
+	return nil
+}
 
-	toAdd = make(map[int]*subscriber.Subscriber)
-	toRemove = make(map[int]bool)
-	toVerify = make(map[int]*subscriber.Subscriber)
+// stopHandler stops the handler named by key, waits until it no longer uses its buffer cursor,
+// and forgets it. The caller holds sm.mu lock.
+func (sm *Manager) stopHandler(key subscription) {
+	h, ok := sm.handlers[key]
+	if !ok {
+		return
+	}
+	h.Stop()
+	<-h.done
+	delete(sm.handlers, key)
+}
 
-	currentMap := make(map[int]bool)
-	newMap := make(map[int]bool)
+// planSubscriberChanges decides what a configuration update does to each subscriber. It compares
+// the applied configuration with the new one by subscriber ID. It returns:
+//   - toAdd: subscribers only in the new configuration.
+//   - toRestart: subscribers in both whose configuration or the handler configuration changed.
+//   - toRemove: subscribers only in the applied configuration.
+func planSubscriberChanges(appliedHandlerConfig, newHandlerConfig HandlerConfig, applied, newConfigs []subscriber.Config) (toAdd, toRestart, toRemove []subscriber.Config) {
 
-	for _, c := range current {
-		currentMap[c.ID] = true
+	appliedByID := make(map[int]subscriber.Config)
+	newIDs := make(map[int]bool)
+
+	for _, a := range applied {
+		appliedByID[a.ID] = a
 	}
 
-	for _, n := range new {
-		if !currentMap[n.ID] {
-			toAdd[n.ID] = n
-		} else {
-			toVerify[n.ID] = n
+	for _, n := range newConfigs {
+		newIDs[n.ID] = true
+		before, ok := appliedByID[n.ID]
+		switch {
+		case !ok:
+			toAdd = append(toAdd, n)
+		case before != n || appliedHandlerConfig != newHandlerConfig:
+			toRestart = append(toRestart, n)
 		}
-		newMap[n.ID] = true
 	}
 
-	for _, c := range current {
-		if !newMap[c.ID] {
-			toRemove[c.ID] = true
+	for _, a := range applied {
+		if !newIDs[a.ID] {
+			toRemove = append(toRemove, a)
 		}
 	}
 
-	return toAdd, toRemove, toVerify
+	return toAdd, toRestart, toRemove
 }
 
 // Manage handles shutting down all subscribers when the app is shutting down.
@@ -166,6 +213,8 @@ func (sm *Manager) Manage(ctx context.Context, wg *sync.WaitGroup) {
 
 	<-ctx.Done()
 	sm.log.Info("shutting down subscriber handlers because the app is shutting down")
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	for _, h := range sm.handlers {
 		h.Stop()
 	}
