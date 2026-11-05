@@ -11,7 +11,6 @@ type Config struct {
 	Type                        string `mapstructure:"type"`
 	ID                          int    `mapstructure:"id"`
 	Name                        string `mapstructure:"name"`
-	SkipNodeIDDetection         bool   `mapstructure:"skip-node-id-detection"`
 	WaitForResponseAfterConnect *int   `mapstructure:"wait-for-response-after-connect"`
 	// All embedded subscriber types must specify `mapstructure:",squash"` to tell
 	// Viper to squash the fields of the embedded struct into the subscriber Config.
