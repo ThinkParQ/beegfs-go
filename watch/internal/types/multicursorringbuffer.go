@@ -13,7 +13,6 @@ type EventTypeVersion uint8
 
 const (
 	EventTypeUnknown EventTypeVersion = 0
-	EventTypeV1      EventTypeVersion = 1
 	EventTypeV2      EventTypeVersion = 2
 )
 
@@ -77,11 +76,6 @@ type MultiCursorRingBuffer struct {
 	gcFrequency int
 	ringID      uint64
 	ringIDMu    sync.RWMutex
-	// v1Protocol records that events are delivered using the v1 event protocol. Unlike v2 there is
-	// no handshake carrying the metadata node ID, so the ring ID will never be set. Components
-	// waiting on the ring ID use this to warn about the misconfiguration instead of waiting
-	// silently forever.
-	v1Protocol atomic.Bool
 }
 
 // SubscriberCursor is a single subscribers view into the buffer.
@@ -131,19 +125,6 @@ func (b *MultiCursorRingBuffer) GetRingID() uint64 {
 	return b.ringID
 }
 
-// MarkV1ProtocolInUse records that events in this buffer come from a metadata service using the v1
-// event protocol, which has no way to communicate its node ID (see SetRingID). It allows anyone
-// waiting for the ring ID to warn that it will never become available.
-func (b *MultiCursorRingBuffer) MarkV1ProtocolInUse() {
-	b.v1Protocol.Store(true)
-}
-
-// V1ProtocolInUse returns true when events come from a metadata service using the v1 event
-// protocol, meaning the ring ID will never be set.
-func (b *MultiCursorRingBuffer) V1ProtocolInUse() bool {
-	return b.v1Protocol.Load()
-}
-
 // Add cursor accepts a subscriberID and adds a new cursor for that subscriber to the ring buffer.
 // It does not return an error if a cursor already exists for the provided subscriberID.
 // It is idempotent and multiple calls can be used to definitively confirm a subscriber was added.
@@ -184,7 +165,11 @@ func (b *MultiCursorRingBuffer) AllEventsAcknowledged() bool {
 	done := true
 
 	for _, c := range b.cursors {
-		if b.buffer[c.ackCursor] != nil && !c.ackError {
+		// Handlers keep acknowledging while shutdown polls this, so read the cursor under its lock.
+		c.cursorMutex.RLock()
+		pending := b.buffer[c.ackCursor] != nil && !c.ackError
+		c.cursorMutex.RUnlock()
+		if pending {
 			return false
 		}
 	}
@@ -203,9 +188,6 @@ func (b *MultiCursorRingBuffer) AllEventsAcknowledged() bool {
 func (b *MultiCursorRingBuffer) Push(event *pb.Event) (*uint64, error) {
 	meta := EventMeta{SeqId: event.SeqId}
 	switch e := event.EventData.(type) {
-	case *pb.Event_V1:
-		meta.Version = EventTypeV1
-		meta.EventType = int32(e.V1.GetType())
 	case *pb.Event_V2:
 		meta.Version = EventTypeV2
 		meta.EventType = int32(e.V2.GetType())

@@ -247,9 +247,8 @@ func (m *SendMessage) MsgID() MsgID {
 }
 
 // Deserialize handles deserializing SendMessage packets into the protocol buffer defined events. It
-// handles deserializing fields specific to the >=2.0 events, and the bulk of the event payload is
-// handled by deserializeEvent() to allow Watch to support both v1 and v2 events. If support was
-// dropped for v1 events then deserializeEvent() could just be merged into this function.
+// handles deserializing the fields of the SendMessage itself, and the bulk of the event payload is
+// handled by deserializeEvent().
 func (m *SendMessage) Deserialize(d *Deserializer) error {
 	// Use direct LittleEndian accessors instead of binary.Read: binary.Read uses reflection
 	// internally which allocates on every call. Since SendMessage is deserialized for every

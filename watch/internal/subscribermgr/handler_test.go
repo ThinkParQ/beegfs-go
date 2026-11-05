@@ -1,17 +1,18 @@
 package subscribermgr
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/watch/internal/subscriber"
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -38,45 +39,28 @@ func TestNewHandler(t *testing.T) {
 	})
 }
 
-func TestEvaluateChangedSubscribers(t *testing.T) {
+// planSubscriberChanges sorts each subscriber into add, restart or remove by comparing the applied
+// configuration with the new one. A subscriber restarts when its own settings change, or when the
+// [handler] settings change, because those apply to every handler.
+func TestPlanSubscriberChanges(t *testing.T) {
 
-	currentHandlers := []*Handler{
-		{
-			Subscriber: &subscriber.Subscriber{
-				Config: subscriber.Config{
-					ID: 1,
-				},
-			},
-		},
-		{
-			Subscriber: &subscriber.Subscriber{
-				Config: subscriber.Config{
-					ID: 2,
-				},
-			},
-		},
-	}
-	// newSubscribers := []*subscriber.Subscriber{{ID: 1}, {ID: 3}}
-	newSubscribers := []*subscriber.Subscriber{
-		{
-			Config: subscriber.Config{
-				ID: 1,
-			},
-		},
-		{
-			Config: subscriber.Config{
-				ID: 3,
-			},
-		},
-	}
+	applied := []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two"}, {ID: 3, Name: "three"}}
+	newConfigs := []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two renamed"}, {ID: 4, Name: "four"}}
+	handlerConfig := HandlerConfig{PollFrequency: 1}
 
-	toAdd, toRemove, toVerify := evaluateAddedAndRemovedSubscribers(currentHandlers, newSubscribers)
-	assert.Contains(t, toAdd, 3)
-	assert.Contains(t, toRemove, 2)
-	assert.Contains(t, toVerify, 1)
-	assert.Len(t, toAdd, 1)
-	assert.Len(t, toRemove, 1)
-	assert.Len(t, toVerify, 1)
+	t.Run("only changed subscribers restart when the handler configuration is unchanged", func(t *testing.T) {
+		toAdd, toRestart, toRemove := planSubscriberChanges(handlerConfig, handlerConfig, applied, newConfigs)
+		assert.Equal(t, []subscriber.Config{{ID: 4, Name: "four"}}, toAdd)
+		assert.Equal(t, []subscriber.Config{{ID: 2, Name: "two renamed"}}, toRestart)
+		assert.Equal(t, []subscriber.Config{{ID: 3, Name: "three"}}, toRemove)
+	})
+
+	t.Run("every kept subscriber restarts when the handler configuration changed", func(t *testing.T) {
+		toAdd, toRestart, toRemove := planSubscriberChanges(handlerConfig, HandlerConfig{PollFrequency: 2}, applied, newConfigs)
+		assert.Equal(t, []subscriber.Config{{ID: 4, Name: "four"}}, toAdd)
+		assert.Equal(t, []subscriber.Config{{ID: 1, Name: "one"}, {ID: 2, Name: "two renamed"}}, toRestart)
+		assert.Equal(t, []subscriber.Config{{ID: 3, Name: "three"}}, toRemove)
+	})
 }
 
 // fakeSubscriberConn is a minimal subscriber.Interface used to drive sendLoop and receiveLoop
@@ -310,37 +294,45 @@ func TestSeekToEndEmptyBufferDeliversSeqIdZero(t *testing.T) {
 	<-done
 }
 
-// TestConnectLoopWarnsWhenV1ProtocolInUse verifies a subscriber configured to wait for metadata
-// node ID detection (skip-node-id-detection=false, the default) logs a warning when the metadata
-// service uses the v1 event protocol: a v1 metadata service can never identify itself, so without
-// the warning the handler waits silently forever with no indication of the misconfiguration.
-func TestConnectLoopWarnsWhenV1ProtocolInUse(t *testing.T) {
-	core, observed := observer.New(zap.WarnLevel)
-	fake := &fakeSubscriberConn{}
+// refusingSubscriberConn is a subscriber.Interface whose Connect always fails with an error the
+// handler retries. It records when each attempt was made.
+type refusingSubscriberConn struct {
+	fakeSubscriberConn
+	attemptsMu sync.Mutex
+	attempts   []time.Time
+}
+
+func (f *refusingSubscriberConn) Connect(forMetaID beegfs.NumId) (retry bool, err error) {
+	f.attemptsMu.Lock()
+	defer f.attemptsMu.Unlock()
+	f.attempts = append(f.attempts, time.Now())
+	return true, errors.New("connection refused")
+}
+
+func (f *refusingSubscriberConn) attemptTimes() []time.Time {
+	f.attemptsMu.Lock()
+	defer f.attemptsMu.Unlock()
+	return append([]time.Time{}, f.attempts...)
+}
+
+// TestConnectLoopWaitsBetweenFailedAttempts verifies a handler waits at least minReconnectDelay
+// between two failed connection attempts when max-reconnect-backoff is 1 second. A capped wait
+// below one second must not shrink to zero, or the handler retries without pause. Every attempt
+// of a real subscriber opens a connection, so such a loop burns CPU and memory.
+func TestConnectLoopWaitsBetweenFailedAttempts(t *testing.T) {
+	fake := &refusingSubscriberConn{}
 	sub := &subscriber.Subscriber{
-		// SkipNodeIDDetection is intentionally left false (the default).
 		Config:    subscriber.Config{ID: 1, Name: "test"},
 		Interface: fake,
 	}
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	buffer.MarkV1ProtocolInUse()
-	handler := newHandler(zap.New(core), sub, buffer, HandlerConfig{
-		MaxReconnectBackOff:            1,
-		MaxWaitForResponseAfterConnect: 1,
-		PollFrequency:                  0,
-	})
+	// connectLoop waits until the buffer knows its meta ID, so set one to reach the connect attempts.
+	buffer.SetRingID(1)
+	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{MaxReconnectBackOff: 1})
 
 	done := make(chan bool, 1)
 	go func() { done <- handler.connectLoop() }()
-
-	// The ring ID never becomes available, so the wait loop (which polls once per second) must
-	// notice the v1 protocol and warn.
-	assert.Eventually(t, func() bool {
-		return observed.FilterMessageSnippet("v1 event protocol").Len() > 0
-	}, 5*time.Second, 10*time.Millisecond)
-
-	// The handler is still waiting (only a warning was requested, not a behavior change), so
-	// shutting it down must release connectLoop.
+	require.Eventually(t, func() bool { return len(fake.attemptTimes()) >= 2 }, 5*time.Second, 10*time.Millisecond)
 	handler.Stop()
 	select {
 	case connected := <-done:
@@ -348,8 +340,25 @@ func TestConnectLoopWarnsWhenV1ProtocolInUse(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("connectLoop did not exit after the handler was stopped")
 	}
-	// The warning is logged once per connection attempt, not once per poll tick.
-	assert.Equal(t, 1, observed.FilterMessageSnippet("v1 event protocol").Len())
+
+	attempts := fake.attemptTimes()
+	assert.GreaterOrEqual(t, attempts[1].Sub(attempts[0]), minReconnectDelay)
+}
+
+// TestNextReconnectDelay verifies the wait between connection attempts stays between
+// minReconnectDelay and max-reconnect-backoff. A setting of 1 second or less holds the wait at
+// minReconnectDelay instead of shrinking it to zero.
+func TestNextReconnectDelay(t *testing.T) {
+	for _, maxSeconds := range []int{-1, 0, 1, 2, 60} {
+		upper := max(time.Duration(maxSeconds)*time.Second, minReconnectDelay)
+		delay := minReconnectDelay
+		// Enough steps for the wait to grow from minReconnectDelay past every limit above.
+		for range 10 {
+			delay = nextReconnectDelay(delay, maxSeconds)
+			assert.GreaterOrEqual(t, delay, minReconnectDelay, "max-reconnect-backoff %d", maxSeconds)
+			assert.LessOrEqual(t, delay, upper, "max-reconnect-backoff %d", maxSeconds)
+		}
+	}
 }
 
 // TestReceiveLoopLateInitialResponse verifies a subscriber's initial response arriving after a
