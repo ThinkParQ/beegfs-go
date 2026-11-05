@@ -60,7 +60,7 @@ type bulkOperationRegistry struct {
 	// stateRoot is the mount-relative path for storing persistent state information and is use here
 	// for maintaining bulk operation state.
 	stateRoot    string
-	rstMap       map[uint32]Provider
+	providers    ProviderLookup
 	builderJobId string
 }
 
@@ -133,7 +133,7 @@ func (m *bulkOperationRegistry) UpdateBulkRequest(ctx context.Context, request *
 // operation never blocks requests bound for a different one. Requests sharing a manager are still
 // serialized by the manager itself, which is what the provider relies on to assign job indexes.
 func (m *bulkOperationRegistry) getOrAddManager(ctx context.Context, rstId uint32, operation string) (*bulkOperationManager, error) {
-	client, ok := m.rstMap[rstId]
+	client, ok := m.providers.Get(rstId)
 	if !ok {
 		return nil, fmt.Errorf("missing remote storage target %d: %w", rstId, ErrConfigRSTTypeIsUnknown)
 	}
@@ -248,7 +248,8 @@ func (m *bulkOperationRegistry) loadBulkOperationEntries(ctx context.Context) er
 			continue
 		}
 
-		manager := newBulkOperationManager(ctx, m.rstMap[entry.RstId], m.mountPath, m.stateRoot, m.builderJobId, entry)
+		client, _ := m.providers.Get(entry.RstId)
+		manager := newBulkOperationManager(ctx, client, m.mountPath, m.stateRoot, m.builderJobId, entry)
 
 		if entry.Destroying {
 			// An earlier Destroy was interrupted, so whatever provider state is left belongs to an

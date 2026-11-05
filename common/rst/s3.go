@@ -193,14 +193,56 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 
 const s3ClientMinMaxIdleConns = 200
 
-// s3ClientMaxIdleConns overrides the AWS SDK's default MaxIdleConns/MaxIdleConnsPerHost. A single
-// RST config only ever talks to one host, so per-host reuse shouldn't be capped well below the
-// total. It scales with GOMAXPROCS, using the same multiplier the request build controller uses for
-// its own concurrency, so it stays proportional to the actual concurrency source instead of
-// drifting out of sync with it as a second, unrelated constant.
-func s3ClientMaxIdleConns() int {
+// s3ClientMaxIdleConnsPerHost overrides the AWS SDK's default MaxIdleConnsPerHost. Every S3 client
+// shares one connection pool (see sharedS3HTTPClient), so this caps the idle connections kept to
+// one endpoint across all RSTs that use it. The concurrency that fills the pool comes from the
+// request build controller and the workers, which are per process, not per RST. So the cap scales
+// with GOMAXPROCS, using the multiplier the request build controller uses for its own concurrency,
+// instead of being a second, unrelated constant. It caps only idle connections: a burst may open
+// more, and the extra ones are closed when they become idle.
+func s3ClientMaxIdleConnsPerHost() int {
 	return max(s3ClientMinMaxIdleConns, 2*int(requestBuildControllerWorkerMultiplier)*runtime.GOMAXPROCS(0))
 }
+
+// sharedS3HTTPClient returns the one HTTP client every S3 client uses, so all RSTs share one
+// connection pool. Without it, every provider has a pool of its own. A change to an RST builds a new
+// provider, so it would drop that RST's warm connections. A change to a parent would drop them for
+// every RST below it.
+//
+// Sharing is safe for every RST, whatever endpoint or credentials it has:
+//   - http.Transport keys idle connections by scheme, host, port and proxy. RSTs on different
+//     endpoints never share a connection.
+//   - Credentials are not tied to a connection. The SDK signs each request (SigV4).
+//   - Nothing an RST configures changes the transport. Only the environment does (see below).
+//
+// Two facts about the AWS SDK shape how the client is built and handed over:
+//   - The SDK derives transport settings from the environment, not from the RST. AWS_CA_BUNDLE adds
+//     root CAs in config.LoadDefaultConfig. AWS_DEFAULTS_MODE sets connect and TLS handshake
+//     timeouts in s3.New (resolveHTTPClient). So the shared client is built once through those
+//     same two steps, and gets what each RST's client would have got.
+//   - When AWS_DEFAULTS_MODE names a mode other than the default "legacy", s3.New copies an
+//     *awshttp.BuildableClient it is given, because the defaults-mode step calls its With*
+//     methods. Each copy builds its own transport, so passing the shared client through aws.Config
+//     would share nothing in those modes. s3.New runs the caller's option functions after that
+//     step, so newS3WithOptions assigns the shared client in one, where nothing copies it.
+//
+// The environment is read once, on first use, so a change to it needs a restart. One mode differs
+// from what each RST's client would have got. With AWS_DEFAULTS_MODE=auto, the SDK compares the
+// client's region with the region the host runs in. A match gives the "in-region" timeouts (1.1 s).
+// The shared client is built without a region, so it falls back to "standard" (3.1 s) for all RSTs.
+var sharedS3HTTPClient = sync.OnceValues(func() (s3.HTTPClient, error) {
+	maxIdleConnsPerHost := s3ClientMaxIdleConnsPerHost()
+	buildable := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		// No limit across endpoints. A site with many endpoints keeps the warm connections of each.
+		tr.MaxIdleConns = 0
+		tr.MaxIdleConnsPerHost = maxIdleConnsPerHost
+	})
+	awsCfg, err := awsConfig.LoadDefaultConfig(context.Background(), awsConfig.WithHTTPClient(buildable))
+	if err != nil {
+		return nil, fmt.Errorf("unable to load the AWS SDK configuration for the shared HTTP client: %w", err)
+	}
+	return s3.NewFromConfig(awsCfg).Options().HTTPClient, nil
+})
 
 // newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
 // created, so shared wrapper state can rely on apiClient already being populated. It returns the
@@ -218,17 +260,15 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 		}
 	}
 
-	maxIdleConns := s3ClientMaxIdleConns()
-	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
-		tr.MaxIdleConns = maxIdleConns
-		tr.MaxIdleConnsPerHost = maxIdleConns
-	})
+	httpClient, err := sharedS3HTTPClient()
+	if err != nil {
+		return nil, err
+	}
 
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
 		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
 		awsConfig.WithRegion(s3Config.GetRegion()),
-		awsConfig.WithHTTPClient(httpClient),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
 				s3Config.GetAccessKey(),
@@ -253,6 +293,9 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 	host := endpointUrl.Hostname()
 	usePathStyle := !strings.HasPrefix(host, bucket+".")
 	awsClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		// Assigned here, after s3.New resolved its own client, so the SDK does not copy it. See
+		// sharedS3HTTPClient.
+		o.HTTPClient = httpClient
 		o.UsePathStyle = usePathStyle
 		for _, optFn := range buildCfg.s3Options {
 			optFn(o)
@@ -274,47 +317,76 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 	}
 
 	for _, class := range s3Config.StorageClass {
-		name := types.StorageClass(class.GetName())
-		if name == "" {
-			return nil, fmt.Errorf("storage class must specify a valid storage class name")
-		}
-
-		archive := class.GetArchival()
-		if archive == nil {
-			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
-		}
-
-		retrievalTier := types.Tier(archive.GetRetrievalTier())
-		retentionDays := archive.GetRetentionDays()
-		if retentionDays == 0 {
-			retentionDays = 1
-		} else if retentionDays < 1 {
-			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionDays)
-		}
-		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
+		parsed, err := parseS3StorageClass(class)
 		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
-		} else if checkTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1s'", name)
+			return nil, err
 		}
-		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
-		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", name, err)
-		} else if recheckTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
-		}
-
-		s3Client.storageClasses[name] = S3StorageClass{
-			retrievalTier: retrievalTier,
-			archival:      true,
-			retentionDays: retentionDays,
-			checkTime:     checkTime,
-			recheckTime:   recheckTime,
-			autoRestore:   archive.GetAutoRestore(),
-		}
+		s3Client.storageClasses[types.StorageClass(class.GetName())] = parsed
 	}
 
 	return s3Client, nil
+}
+
+// parseS3StorageClass checks one storage class entry on its own and returns it parsed. The provider
+// calls it for every class it is built with. s3StorageClasses.ValidateEntries calls it for a parent's
+// classes, because a parent never builds a provider, and every target below it inherits each class
+// whole. Rules:
+//   - The class needs a name, and must be archival.
+//   - retention-days 0 means 1 day. A negative value is refused.
+//   - check-time and recheck-time are required, and must be at least one second.
+//
+// Errors name each field the way the CLI and its output do, such as check-time, because admins
+// configure targets through the CLI. The TOML file, read once on the first start, spells them in
+// camelCase.
+func parseS3StorageClass(class *flex.RemoteStorageTarget_S3_StorageClass) (S3StorageClass, error) {
+	name := types.StorageClass(class.GetName())
+	if name == "" {
+		return S3StorageClass{}, fmt.Errorf("storage class must specify a valid storage class name")
+	}
+
+	archive := class.GetArchival()
+	if archive == nil {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
+	}
+
+	retentionDays := archive.GetRetentionDays()
+	if retentionDays == 0 {
+		retentionDays = 1
+	} else if retentionDays < 1 {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, has invalid retention-days: %d", name, retentionDays)
+	}
+	checkTime, err := parseArchivalDelay(name, "check-time", archive.GetCheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+	recheckTime, err := parseArchivalDelay(name, "recheck-time", archive.GetRecheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+
+	return S3StorageClass{
+		retrievalTier: types.Tier(archive.GetRetrievalTier()),
+		archival:      true,
+		retentionDays: retentionDays,
+		checkTime:     checkTime,
+		recheckTime:   recheckTime,
+		autoRestore:   archive.GetAutoRestore(),
+	}, nil
+}
+
+// parseArchivalDelay parses the delay called field of the storage class name. It is required, and
+// must be at least one second.
+func parseArchivalDelay(name types.StorageClass, field string, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, fmt.Errorf("storage class, %s, must specify %s", name, field)
+	}
+	delay, err := time.ParseDuration(strings.ToLower(value))
+	if err != nil {
+		return 0, fmt.Errorf("storage class, %s, has invalid %s: %w", name, field, err)
+	} else if delay < time.Second {
+		return 0, fmt.Errorf("storage class, %s, must specify %s >= '1s'", name, field)
+	}
+	return delay, nil
 }
 
 func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {

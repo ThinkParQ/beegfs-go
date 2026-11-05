@@ -81,6 +81,7 @@ func TestDeprecatedRequestQueueDepthStillParses(t *testing.T) {
 	const baseCfg = `
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
+rst-db = "/var/lib/beegfs/remote/rst.badger"
 min-job-entries-per-rst = 2
 max-job-entries-per-rst = 4
 `
@@ -123,6 +124,7 @@ func TestProtoEnumsInRSTConfigParseByName(t *testing.T) {
 	const baseCfg = `
 [job]
 path-db = "/var/lib/beegfs/remote/path.badger"
+rst-db = "/var/lib/beegfs/remote/rst.badger"
 min-job-entries-per-rst = 2
 max-job-entries-per-rst = 4
 
@@ -199,6 +201,7 @@ func TestValidateStateRoot(t *testing.T) {
 			ServiceName: "test-svc",
 			Job: job.Config{
 				PathDBPath:          "/var/lib/beegfs/remote/path.badger",
+				RSTDBPath:           "/var/lib/beegfs/remote/rst.badger",
 				StateRoot:           stateRoot,
 				MinJobEntriesPerRST: 2,
 				MaxJobEntriesPerRST: 4,
@@ -251,4 +254,27 @@ func TestStringToProtoEnumHookOptionalEnum(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, target.Operation)
 	assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, *target.Operation)
+}
+
+func TestRSTDBDefaultsNextToPathDB(t *testing.T) {
+	load := func(t *testing.T, body string) *AppConfig {
+		t.Helper()
+		cfgFile := filepath.Join(t.TempDir(), "beegfs-remote.toml")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(body), 0644))
+		flags := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+		flags.String(configmgr.FlagConfigFile, cfgFile, "")
+		cfgMgr, err := configmgr.New(flags, "BEEREMOTE_", &AppConfig{}, SetRSTTypeHook())
+		require.NoError(t, err)
+		cfg, ok := cfgMgr.Get().(*AppConfig)
+		require.True(t, ok)
+		return cfg
+	}
+	const job = `
+[job]
+path-db = "/data/remote/path.badger"
+min-job-entries-per-rst = 2
+max-job-entries-per-rst = 4
+`
+	assert.Equal(t, "/data/remote/rst.badger", load(t, job).Job.RSTDBPath, "rst-db lives wherever path-db does")
+	assert.Equal(t, "/elsewhere/rst.badger", load(t, job+`rst-db = "/elsewhere/rst.badger"`+"\n").Job.RSTDBPath, "an explicit rst-db is kept")
 }

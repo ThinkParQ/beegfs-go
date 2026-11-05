@@ -80,7 +80,7 @@ func TestManage(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -117,7 +117,7 @@ func TestManage(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 0), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -246,7 +246,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -283,7 +283,7 @@ func TestUpdateJobRequestDelete(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile2", make([]byte, 20), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build(), flex.RemoteStorageTarget_builder{Id: 2, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -556,7 +556,7 @@ func TestManageErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -587,7 +587,7 @@ func TestManageErrorHandling(t *testing.T) {
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 30), 0644, false)
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -712,7 +712,7 @@ func TestUpdateJobResults(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -737,7 +737,7 @@ func TestUpdateJobResults(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -903,7 +903,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -928,7 +928,7 @@ func TestUpdateWorkIgnoresTerminalStateJob(t *testing.T) {
 	mountPoint := filesystem.NewMockFS()
 	mountPoint.CreateWriteClose("/test/myfile", make([]byte, 15), 0644, false)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1034,7 +1034,7 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -1058,11 +1058,12 @@ func TestUpdateJobsCancelsFailedBuilderJob(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
-	mockRST, ok := workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	provider, _, _ := workerManager.GetRST(1)
+	mockRST, ok := provider.(*rst.MockClient)
 	require.True(t, ok)
 
 	jobMgrConfig := Config{
@@ -1179,7 +1180,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 				Expectations: []worker.MockExpectation{
 					{
 						MethodName: "connect",
-						ReturnArgs: []any{false, nil},
+						ReturnArgs: []any{nil},
 					},
 					{
 						MethodName: "SubmitWork",
@@ -1203,7 +1204,7 @@ func TestSubmitJobRequestSentinelErrorHandling(t *testing.T) {
 
 	mountPoint := filesystem.NewMockFS()
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workerMgrConfig, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -1466,7 +1467,7 @@ func TestUpdateJobStateDeferFiresOnTerminalTransition(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -1540,7 +1541,7 @@ func TestJobStateString(t *testing.T) {
 // start the manager or wire up a workerManager — callers must only invoke methods
 // that do not dereference workerManager. Safe paths: updateJobState with DELETED
 // (terminal initial state) and CANCELLED→CANCELLED no-op. Unsafe: any cancel/update
-// path that reaches workerManager.UpdateJob or workerManager.RemoteStorageTargets.
+// path that reaches workerManager.UpdateJob or workerManager.GetRST.
 func newCountingManager(t *testing.T) (*Manager, *sdkmetric.ManualReader, func()) {
 	t.Helper()
 	tmpPath, cleanupPath, err := tempPathForTesting(testDBBasePath)
@@ -1816,7 +1817,7 @@ func TestJobCounterOnSubmitAndWork(t *testing.T) {
 				MaxReconnectBackOff: 5,
 				MockConfig: worker.MockConfig{
 					Expectations: []worker.MockExpectation{
-						{MethodName: "connect", ReturnArgs: []any{false, nil}},
+						{MethodName: "connect", ReturnArgs: []any{nil}},
 						{
 							MethodName: "SubmitWork",
 							Args:       []any{mock.Anything},
@@ -1897,7 +1898,7 @@ func TestJobCounterMixedWorkResults(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -1951,7 +1952,7 @@ func TestJobCounterOnSubmitSentinelErrors(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -2036,7 +2037,7 @@ func newFullCountingManager(t *testing.T, workerConfigs []worker.Config, remoteS
 	log, err := logger.New(logger.Config{Type: "stdout", Level: 5}, nil)
 	require.NoError(t, err)
 
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -2108,7 +2109,7 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -2172,7 +2173,7 @@ func TestJobCounterCancelFromFailed(t *testing.T) {
 		require.NoError(t, commit())
 
 		// Remove the RST so the cancel path detects it is gone.
-		delete(m.workerManager.RemoteStorageTargets, 1)
+		m.workerManager.RemoveRSTForTesting(1)
 
 		req := beeremote.UpdateJobsRequest_builder{
 			Path:     "/test/failed",
@@ -2207,7 +2208,7 @@ func TestJobCounterForceCancelUnknown(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "UpdateWork",
 					Args:       []any{mock.Anything},
@@ -2275,7 +2276,7 @@ func TestJobCounterGC(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2460,7 +2461,7 @@ func TestSubmitJobRequestGCOnlyTouchesRequestRST(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2528,7 +2529,7 @@ func TestJobCounterOnSubmitWorkError(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2575,7 +2576,7 @@ func TestJobCounterNeverNegativeOnRestart(t *testing.T) {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{MethodName: "disconnect", ReturnArgs: []any{nil}},
 			},
 		},
@@ -2719,7 +2720,7 @@ func scheduledWorkerConfigs() []worker.Config {
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork",
 					Args:       []any{mock.Anything},
@@ -2810,7 +2811,7 @@ func TestUpdateWorkCounters(t *testing.T) {
 		sendWorkResult(t, m, js, "0", flex.Work_COMPLETED)
 
 		// Remove RST before second WR arrives.
-		delete(m.workerManager.RemoteStorageTargets, 1)
+		m.workerManager.RemoveRSTForTesting(1)
 
 		sendWorkResult(t, m, js, "1", flex.Work_COMPLETED)
 
@@ -2926,7 +2927,7 @@ func newReservationManager(t *testing.T) *Manager {
 		Type:                worker.Mock,
 		MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{Expectations: []worker.MockExpectation{
-			{MethodName: "connect", ReturnArgs: []any{false, nil}},
+			{MethodName: "connect", ReturnArgs: []any{nil}},
 			{MethodName: "SubmitWork", Args: []any{mock.Anything}, ReturnArgs: []any{scheduled, nil}},
 			{MethodName: "UpdateWork", Args: []any{mock.Anything}, ReturnArgs: []any{scheduled, nil}},
 			{MethodName: "disconnect", ReturnArgs: []any{nil}},
@@ -2934,7 +2935,7 @@ func newReservationManager(t *testing.T) *Manager {
 	}}
 
 	remoteStorageTargets := []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
-	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
+	workerManager, err := workermgr.NewManager(context.Background(), log, workermgr.Config{}, workerConfigs, remoteStorageTargets, nil, &flex.BeeRemoteNode{}, mountPoint, map[string]*flex.Feature{}, rst.DefaultStateRoot)
 	require.NoError(t, err)
 	require.NoError(t, workerManager.Start())
 
@@ -3086,7 +3087,7 @@ func TestSubmitJobRequestReservations(t *testing.T) {
 			reservedJobId := uuid.NewString()
 			_, err := m.SubmitJobRequest(newReservationRequest(true, reservedJobId), "")
 			require.NoError(t, err)
-			delete(m.workerManager.RemoteStorageTargets, 1)
+			m.workerManager.RemoveRSTForTesting(1)
 
 			claim := newReservationRequest(false, reservedJobId)
 			if tc.generationStatus != nil {
@@ -3658,7 +3659,8 @@ func TestSubmitStatus(t *testing.T) {
 // the active job the answer refers to, and a sync node counts EXISTING as success for a claim.
 func TestSubmitJobRequestRejectsAlreadyExistsFromGeneration(t *testing.T) {
 	m := newReservationManager(t)
-	mockRST, ok := m.workerManager.RemoteStorageTargets[1].(*rst.MockClient)
+	provider, _, _ := m.workerManager.GetRST(1)
+	mockRST, ok := provider.(*rst.MockClient)
 	require.True(t, ok)
 	mockRST.On("GenerateWorkRequests", mock.Anything, mock.Anything).Return(nil, nil, rst.ErrJobAlreadyExists)
 
@@ -3850,8 +3852,9 @@ func (r *abortRecorder) CompleteWorkRequests(ctx context.Context, job *beeremote
 
 // recordAborts replaces RST 1 of m with an abortRecorder and returns it.
 func recordAborts(m *Manager) *abortRecorder {
-	recorder := &abortRecorder{Provider: m.workerManager.RemoteStorageTargets[1]}
-	m.workerManager.RemoteStorageTargets[1] = recorder
+	provider, _, _ := m.workerManager.GetRST(1)
+	recorder := &abortRecorder{Provider: provider}
+	m.workerManager.SetRSTForTesting(1, recorder)
 	return recorder
 }
 
@@ -3985,11 +3988,11 @@ func TestCancelJobAbort(t *testing.T) {
 		_, err := m.SubmitJobRequest(newReservationRequest(true, jobId), "")
 		require.NoError(t, err)
 		// Remote refuses the claim because RST 1 is gone, then the RST is configured again.
-		provider := m.workerManager.RemoteStorageTargets[1]
-		delete(m.workerManager.RemoteStorageTargets, 1)
+		provider, _, _ := m.workerManager.GetRST(1)
+		m.workerManager.RemoveRSTForTesting(1)
 		_, err = m.SubmitJobRequest(newReservationRequest(false, jobId), "")
 		require.Error(t, err)
-		m.workerManager.RemoteStorageTargets[1] = provider
+		m.workerManager.SetRSTForTesting(1, provider)
 		require.Equal(t, beeremote.Job_FAILED, getReservationTestJob(t, m, jobId).GetStatus().GetState())
 		recorder := recordAborts(m)
 

@@ -39,6 +39,9 @@ type Mappings struct {
 	StorageTargetsToBuddyGroup  Mapper[beegfs.EntityIdSet]
 	MirroredTargetToPrimary     Mapper[beegfs.EntityIdSet]
 	RstIdToConfig               map[uint32]*flex.RemoteStorageTarget
+	// RstIdToDeleted holds the record of each RST that was deleted, so an error about an RST ID
+	// that is not configured can say why. It is empty with a Remote that predates RST management.
+	RstIdToDeleted map[uint32]*beeremote.DeletedRST
 }
 
 var (
@@ -187,7 +190,7 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 		return mappings, fmt.Errorf("%w: %w", ErrMappingRSTs, err)
 	}
 	// Don't call the RST package because that calls GetEntry which would cause an import cycle.
-	rsts, err := beeRemote.GetRSTConfig(ctx, &beeremote.GetRSTConfigRequest{})
+	rsts, err := beeRemote.GetRSTConfig(ctx, beeremote.GetRSTConfigRequest_builder{IncludeDeleted: true}.Build())
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			if st.Code() == codes.Unavailable {
@@ -197,6 +200,10 @@ func GetMappings(ctx context.Context) (*Mappings, error) {
 		return mappings, fmt.Errorf("%w: %w", ErrMappingRSTs, err)
 	}
 	mappings.RstIdToConfig = MapRstIdToConfig(rsts)
+	mappings.RstIdToDeleted = map[uint32]*beeremote.DeletedRST{}
+	for _, d := range rsts.GetDeleted() {
+		mappings.RstIdToDeleted[d.GetId()] = d
+	}
 
 	return mappings, nil
 
