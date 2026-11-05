@@ -79,7 +79,7 @@ func newTestBulkOperationRegistry(t *testing.T, client Provider) *bulkOperationR
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    t.TempDir(),
 		stateRoot:    DefaultStateRoot,
-		rstMap:       map[uint32]Provider{1: client},
+		providers:    ProviderMap{1: client},
 		builderJobId: "job-1",
 	}
 }
@@ -151,7 +151,7 @@ func TestBulkOperationRegistry_AddRequestCreatesManagerOnDemandAndReusesIt(t *te
 func TestBulkOperationRegistry_AddRequestSeparatesOperationsAndTargets(t *testing.T) {
 	client := &MockClient{}
 	registry := newTestBulkOperationRegistry(t, client)
-	registry.rstMap[2] = client
+	registry.providers.(ProviderMap)[2] = client
 
 	add := func(rstId uint32, operation string) {
 		request := &beeremote.JobRequest{}
@@ -340,7 +340,7 @@ func TestBulkOperationRegistry_AddRequestFailsOperationThatCannotBeSaved(t *test
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    mountPath,
 		stateRoot:    DefaultStateRoot,
-		rstMap:       map[uint32]Provider{1: client, 2: client},
+		providers:    ProviderMap{1: client, 2: client},
 		builderJobId: "job-1",
 	}
 
@@ -421,7 +421,7 @@ func TestBulkOperationManager_RuntimeFailureSurvivesReload(t *testing.T) {
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    registry.mountPath,
 		stateRoot:    DefaultStateRoot,
-		rstMap:       map[uint32]Provider{1: client},
+		providers:    ProviderMap{1: client},
 		builderJobId: "job-1",
 	}
 	require.NoError(t, reloaded.Init(context.Background()))
@@ -617,7 +617,7 @@ func TestBulkOperationRegistry_InitFinishesInterruptedDestroy(t *testing.T) {
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    mountPath,
 		stateRoot:    DefaultStateRoot,
-		rstMap:       map[uint32]Provider{1: client, 2: client},
+		providers:    ProviderMap{1: client, 2: client},
 		builderJobId: "job-1",
 	}
 	require.NoError(t, registry.Init(context.Background()))
@@ -647,7 +647,7 @@ func TestBulkOperationRegistry_InitClosesAFailedDestroy(t *testing.T) {
 		managers:     make(map[string]*bulkOperationManager),
 		mountPath:    mountPath,
 		stateRoot:    DefaultStateRoot,
-		rstMap:       map[uint32]Provider{1: client},
+		providers:    ProviderMap{1: client},
 		builderJobId: "job-1",
 	}
 	require.ErrorContains(t, registry.Init(context.Background()), "destroy failed")
@@ -660,7 +660,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 			managers:     make(map[string]*bulkOperationManager),
 			mountPath:    mountPath,
 			stateRoot:    DefaultStateRoot,
-			rstMap:       map[uint32]Provider{},
+			providers:    ProviderMap{},
 			builderJobId: "job-1",
 		}
 	}
@@ -701,7 +701,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		client := &MockClient{}
 		client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 		registry := newRegistry(mountPath)
-		registry.rstMap = map[uint32]Provider{1: client}
+		registry.providers = ProviderMap{1: client}
 
 		require.NoError(t, registry.Init(context.Background()))
 
@@ -737,7 +737,7 @@ func TestBulkOperationRegistry_Init(t *testing.T) {
 		client := &MockClient{}
 		client.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&fakeBulkOperation{}, nil)
 		registry := newRegistry(mountPath)
-		registry.rstMap = map[uint32]Provider{1: client}
+		registry.providers = ProviderMap{1: client}
 
 		require.NoError(t, registry.Init(context.Background()))
 
@@ -968,7 +968,7 @@ func TestBulkOperationRegistry_InitFailsInvalidEntries(t *testing.T) {
 				managers:     make(map[string]*bulkOperationManager),
 				mountPath:    mountPath,
 				stateRoot:    DefaultStateRoot,
-				rstMap:       map[uint32]Provider{1: client, 2: client},
+				providers:    ProviderMap{1: client, 2: client},
 				builderJobId: jobId,
 			}
 			require.NoError(t, registry.Init(context.Background()))

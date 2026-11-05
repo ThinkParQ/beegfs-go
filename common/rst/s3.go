@@ -274,47 +274,76 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 	}
 
 	for _, class := range s3Config.StorageClass {
-		name := types.StorageClass(class.GetName())
-		if name == "" {
-			return nil, fmt.Errorf("storage class must specify a valid storage class name")
-		}
-
-		archive := class.GetArchival()
-		if archive == nil {
-			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
-		}
-
-		retrievalTier := types.Tier(archive.GetRetrievalTier())
-		retentionDays := archive.GetRetentionDays()
-		if retentionDays == 0 {
-			retentionDays = 1
-		} else if retentionDays < 1 {
-			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionDays)
-		}
-		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
+		parsed, err := parseS3StorageClass(class)
 		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
-		} else if checkTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1s'", name)
+			return nil, err
 		}
-		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
-		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", name, err)
-		} else if recheckTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
-		}
-
-		s3Client.storageClasses[name] = S3StorageClass{
-			retrievalTier: retrievalTier,
-			archival:      true,
-			retentionDays: retentionDays,
-			checkTime:     checkTime,
-			recheckTime:   recheckTime,
-			autoRestore:   archive.GetAutoRestore(),
-		}
+		s3Client.storageClasses[types.StorageClass(class.GetName())] = parsed
 	}
 
 	return s3Client, nil
+}
+
+// parseS3StorageClass checks one storage class entry on its own and returns it parsed. The provider
+// calls it for every class it is built with. s3StorageClasses.ValidateEntries calls it for a parent's
+// classes, because a parent never builds a provider, and every target below it inherits each class
+// whole. Rules:
+//   - The class needs a name, and must be archival.
+//   - retention-days 0 means 1 day. A negative value is refused.
+//   - check-time and recheck-time are required, and must be at least one second.
+//
+// Errors name each field the way the CLI and its output do, such as check-time, because admins
+// configure targets through the CLI. The TOML file, read once on the first start, spells them in
+// camelCase.
+func parseS3StorageClass(class *flex.RemoteStorageTarget_S3_StorageClass) (S3StorageClass, error) {
+	name := types.StorageClass(class.GetName())
+	if name == "" {
+		return S3StorageClass{}, fmt.Errorf("storage class must specify a valid storage class name")
+	}
+
+	archive := class.GetArchival()
+	if archive == nil {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
+	}
+
+	retentionDays := archive.GetRetentionDays()
+	if retentionDays == 0 {
+		retentionDays = 1
+	} else if retentionDays < 1 {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, has invalid retention-days: %d", name, retentionDays)
+	}
+	checkTime, err := parseArchivalDelay(name, "check-time", archive.GetCheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+	recheckTime, err := parseArchivalDelay(name, "recheck-time", archive.GetRecheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+
+	return S3StorageClass{
+		retrievalTier: types.Tier(archive.GetRetrievalTier()),
+		archival:      true,
+		retentionDays: retentionDays,
+		checkTime:     checkTime,
+		recheckTime:   recheckTime,
+		autoRestore:   archive.GetAutoRestore(),
+	}, nil
+}
+
+// parseArchivalDelay parses the delay called field of the storage class name. It is required, and
+// must be at least one second.
+func parseArchivalDelay(name types.StorageClass, field string, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, fmt.Errorf("storage class, %s, must specify %s", name, field)
+	}
+	delay, err := time.ParseDuration(strings.ToLower(value))
+	if err != nil {
+		return 0, fmt.Errorf("storage class, %s, has invalid %s: %w", name, field, err)
+	} else if delay < time.Second {
+		return 0, fmt.Errorf("storage class, %s, must specify %s >= '1s'", name, field)
+	}
+	return delay, nil
 }
 
 func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {

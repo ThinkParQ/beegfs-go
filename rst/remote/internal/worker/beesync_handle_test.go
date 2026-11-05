@@ -65,7 +65,7 @@ func startHandle(t *testing.T, server *hangingWorkerNodeServer) (*BeeSyncNode, c
 	config, bulk := connectInputs()
 	handleDone := make(chan struct{})
 	go func() {
-		beeSyncNode.Handle(&sync.WaitGroup{}, config, bulk, map[string]*flex.Feature{})
+		beeSyncNode.Handle(&sync.WaitGroup{}, func() (*flex.UpdateConfigRequest, func()) { return config, func() {} }, bulk, map[string]*flex.Feature{})
 		close(handleDone)
 	}()
 	return beeSyncNode, handleDone

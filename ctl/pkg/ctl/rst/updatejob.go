@@ -20,6 +20,9 @@ type UpdateJobCfg struct {
 	Force         bool
 	NewState      beeremote.UpdateJobsRequest_NewState
 	Recurse       bool
+	// Reason is why the jobs are cancelled. Remote appends it to the message of every job the
+	// update cancels. It is ignored for other states.
+	Reason string
 }
 
 type UpdateJobsResponse struct {
@@ -55,6 +58,9 @@ func UpdateJobsByPaths(ctx context.Context, cfg *UpdateJobCfg, respChan chan<- *
 		ForceUpdate: cfg.Force,
 		Path:        pathInMount,
 	}.Build()
+	if cfg.Reason != "" {
+		request.SetReason(cfg.Reason)
+	}
 
 	if cfg.JobID != "" {
 		request.SetJobId(*new(cfg.JobID))
@@ -73,6 +79,13 @@ func UpdateJobsByPaths(ctx context.Context, cfg *UpdateJobCfg, respChan chan<- *
 	beeRemote, err := config.BeeRemoteClient()
 	if err != nil {
 		return err
+	}
+	// An older Remote ignores the reason without an error, so the jobs would be cancelled without
+	// it. The reason came with target management, so a Remote that offers that also keeps it.
+	if cfg.Reason != "" {
+		if _, err := requireRSTManagement(ctx); err != nil {
+			return fmt.Errorf("this Remote does not record a reason with cancelled jobs (hint: upgrade beegfs-remote, or omit --message): %w", err)
+		}
 	}
 
 	// For a single path just use the unary RPC to update jobs. Runs in a separate goroutine so the

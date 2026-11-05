@@ -124,3 +124,31 @@ func (n *MockNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, erro
 		Status:    status,
 	}.Build(), args.Error(1)
 }
+
+// UpdateConfig behaves like BeeSyncNode.UpdateConfig. Most tests never push a configuration, so a
+// node with no expectation for UpdateConfig accepts every push. A test that registers one decides
+// the result, and an error places the node offline as a real node's would.
+func (n *MockNode) UpdateConfig(request *flex.UpdateConfigRequest) error {
+	if _, ok := n.beginRPC(); !ok {
+		return ErrNodeNotConnected
+	}
+	defer n.rpcWG.Done()
+	expected := false
+	for _, call := range n.ExpectedCalls {
+		if call.Method == "UpdateConfig" {
+			expected = true
+			break
+		}
+	}
+	if !expected {
+		return nil
+	}
+	err := n.Called(request).Error(0)
+	if err != nil {
+		select {
+		case n.rpcErr <- err:
+		default:
+		}
+	}
+	return err
+}

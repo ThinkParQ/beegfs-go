@@ -216,14 +216,94 @@ func (s *BeeRemoteServer) GetRSTConfig(ctx context.Context, request *beeremote.G
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	rsts, err := s.jobMgr.GetRSTConfig()
+	rsts, deleted := s.jobMgr.GetRSTConfig(request.GetIncludeDeleted())
+	response := beeremote.GetRSTConfigResponse_builder{
+		Rsts:    rsts,
+		Deleted: deleted,
+	}.Build()
+	if request.GetIncludeDefinitions() {
+		parents, definitions, err := s.jobMgr.GetRSTDefinitions()
+		if err != nil {
+			return nil, err
+		}
+		response.SetParents(parents)
+		response.SetDefinitions(definitions)
+	}
+	return response, nil
+}
+
+func (s *BeeRemoteServer) CreateRST(ctx context.Context, request *beeremote.CreateRSTRequest) (*beeremote.CreateRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasRst() {
+		return nil, status.Error(codes.InvalidArgument, "the request has no remote storage target")
+	}
+	created, effective, apply, reusedUnfinished, err := s.jobMgr.CreateRST(ctx, request.GetRst(), request.GetForce())
 	if err != nil {
 		return nil, err
 	}
+	return beeremote.CreateRSTResponse_builder{Rst: created, Effective: effective, Apply: apply, ReusedUnfinishedJobs: reusedUnfinished}.Build(), nil
+}
 
-	return beeremote.GetRSTConfigResponse_builder{
-		Rsts: rsts,
-	}.Build(), nil
+func (s *BeeRemoteServer) UpdateRST(ctx context.Context, request *beeremote.UpdateRSTRequest) (*beeremote.UpdateRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasRst() || !request.HasExpected() {
+		return nil, status.Error(codes.InvalidArgument, "the request needs the new and the expected remote storage target")
+	}
+	if request.GetRst().GetId() != request.GetExpected().GetId() {
+		return nil, status.Error(codes.InvalidArgument, "the new and the expected remote storage target have different IDs")
+	}
+	effective, apply, err := s.jobMgr.UpdateRST(ctx, request.GetRst(), request.GetExpected(), request.GetForce())
+	if err != nil {
+		return nil, err
+	}
+	return beeremote.UpdateRSTResponse_builder{Apply: apply, Effective: effective}.Build(), nil
+}
+
+func (s *BeeRemoteServer) DeleteRST(ctx context.Context, request *beeremote.DeleteRSTRequest) (*beeremote.DeleteRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	unfinished, apply, err := s.jobMgr.DeleteRST(ctx, request.GetId(), request.GetReason(), request.GetDryRun())
+	if err != nil {
+		return nil, err
+	}
+	return beeremote.DeleteRSTResponse_builder{UnfinishedJobs: unfinished, Apply: apply}.Build(), nil
+}
+
+func (s *BeeRemoteServer) CreateRSTParent(ctx context.Context, request *beeremote.CreateRSTParentRequest) (*beeremote.CreateRSTParentResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasParent() {
+		return nil, status.Error(codes.InvalidArgument, "the request has no remote storage target parent")
+	}
+	created, err := s.jobMgr.CreateRSTParent(ctx, request.GetParent())
+	if err != nil {
+		return nil, err
+	}
+	return beeremote.CreateRSTParentResponse_builder{Parent: created}.Build(), nil
+}
+
+func (s *BeeRemoteServer) UpdateRSTParent(ctx context.Context, request *beeremote.UpdateRSTParentRequest) (*beeremote.UpdateRSTParentResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasParent() || !request.HasExpected() {
+		return nil, status.Error(codes.InvalidArgument, "the request needs the new and the expected remote storage target parent")
+	}
+	apply, affected, err := s.jobMgr.UpdateRSTParent(ctx, request.GetName(), request.GetParent(), request.GetExpected(), request.GetForce())
+	if err != nil {
+		return nil, err
+	}
+	return beeremote.UpdateRSTParentResponse_builder{Apply: apply, AffectedTargets: affected}.Build(), nil
+}
+
+func (s *BeeRemoteServer) DeleteRSTParent(ctx context.Context, request *beeremote.DeleteRSTParentRequest) (*beeremote.DeleteRSTParentResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if err := s.jobMgr.DeleteRSTParent(ctx, request.GetName()); err != nil {
+		return nil, err
+	}
+	return &beeremote.DeleteRSTParentResponse{}, nil
 }
 
 func (s *BeeRemoteServer) UpdateWork(ctx context.Context, request *beeremote.UpdateWorkRequest) (*beeremote.UpdateWorkResponse, error) {

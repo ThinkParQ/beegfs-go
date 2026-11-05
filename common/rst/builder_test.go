@@ -83,7 +83,7 @@ func TestNewBulkOperationRegistryReopensSavedBulkOperations(t *testing.T) {
 	mockRST.On("OpenBulkOperation", mock.Anything, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, testBuilderJobId, "1", "retrieve"), "retrieve").Return(&trackingBulkOperation{}, nil).Once()
 	mockRST.On("OpenBulkOperation", mock.Anything, path.Join(stateLayoutMountPath(DefaultStateRoot), bulkManagerPath, testBuilderJobId, "2", "archive"), "archive").Return(&trackingBulkOperation{}, nil).Once()
 
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
@@ -113,7 +113,7 @@ func TestBulkOperationRegistry_GetFailedOperationErrors(t *testing.T) {
 	mockRST := &MockClient{}
 	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&trackingBulkOperation{}, nil)
 
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: mockRST, 2: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
@@ -133,7 +133,7 @@ func TestBulkOperationRegistry_GetFailedOperationErrorsWhenNoneFailed(t *testing
 	mockRST := &MockClient{}
 	mockRST.On("OpenBulkOperation", mock.Anything, mock.Anything, mock.Anything).Return(&trackingBulkOperation{}, nil)
 
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 
@@ -143,7 +143,7 @@ func TestBulkOperationRegistry_GetFailedOperationErrorsWhenNoneFailed(t *testing
 // TestNewBulkOperationRegistryWithoutSavedStateHasNoOperations asserts a builder job that never started
 // a bulk operation doesn't fail just because it has no state on the mount.
 func TestNewBulkOperationRegistryWithoutSavedStateHasNoOperations(t *testing.T) {
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{}, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{}, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 	registry, err := client.newBulkOperationRegistry(context.Background(), testBuilderJobId)
 	require.NoError(t, err)
 	assert.Empty(t, registry.GetManagersSnapshot())
@@ -152,7 +152,7 @@ func TestNewBulkOperationRegistryWithoutSavedStateHasNoOperations(t *testing.T) 
 func TestCompleteWorkRequestsAbortCancelsAllStartedBulkOperations(t *testing.T) {
 	mountPath := t.TempDir()
 	mockRST := &MockClient{}
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: mockRST}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 
 	job := beeremote.Job_builder{
 		Id: testBuilderJobId,
@@ -207,7 +207,7 @@ func TestCompleteJobBuilderRequestCancelsReservationsByPathInMount(t *testing.T)
 	mountPath := t.TempDir()
 	mockRST := &MockClient{}
 	mountPoint := missingPathMount{stubMountPoint{mountPath: mountPath}}
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: mockRST}, mountPoint, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: mockRST}, mountPoint, DefaultStateRoot)
 
 	// A pull of the prefix data/ into /restore, which walks the remote target.
 	job := beeremote.Job_builder{
@@ -318,7 +318,7 @@ func TestCompleteWorkRequestsFinishesBulkTeardownAfterCancel(t *testing.T) {
 
 	client := NewJobBuilderClient(
 		context.Background(),
-		map[uint32]Provider{1: rstClient},
+		ProviderMap{1: rstClient},
 		stubMountPoint{mountPath: mountPath},
 		DefaultStateRoot,
 	)
@@ -364,7 +364,7 @@ func TestCompleteWorkRequestsFinishesBulkTeardownAfterCancel(t *testing.T) {
 
 func newDownloadPathsFn(t *testing.T, fs filesystem.Provider, cfg *flex.JobRequestCfg) requestPathResolverFn {
 	t.Helper()
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, fs, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: &MockClient{}}, fs, DefaultStateRoot)
 	getPaths, err := client.getPathsFn(cfg)
 	require.NoError(t, err)
 	return getPaths
@@ -443,7 +443,7 @@ func TestGetPathsFnToleratesMissingDestination(t *testing.T) {
 func TestGetPathsFnFailsOnUnreadableDestination(t *testing.T) {
 	rfs := newRecordingFS(t)
 	rfs.lstatErr = os.ErrPermission
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{1: &MockClient{}}, rfs, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{1: &MockClient{}}, rfs, DefaultStateRoot)
 
 	getPaths, err := client.getPathsFn(&flex.JobRequestCfg{
 		Download:   true,
@@ -478,7 +478,7 @@ const testBuilderJobId = "6f1c2b9e-3d4a-4c5b-8e7f-0a1b2c3d4e5f"
 // not a UUID is refused before the mount is touched.
 func TestNewBulkOperationRegistryRefusesNonUUIDJobId(t *testing.T) {
 	mountPath := t.TempDir()
-	client := NewJobBuilderClient(context.Background(), map[uint32]Provider{}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
+	client := NewJobBuilderClient(context.Background(), ProviderMap{}, stubMountPoint{mountPath: mountPath}, DefaultStateRoot)
 
 	for _, jobId := range []string{"", "job-1", "../other", testBuilderJobId + "/../other"} {
 		_, err := client.newBulkOperationRegistry(context.Background(), jobId)
