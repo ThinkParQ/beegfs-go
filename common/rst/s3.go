@@ -193,31 +193,71 @@ func withS3ApiClient(fn func(s3ApiClient) s3ApiClient) s3ProviderOption {
 
 const s3ClientMinMaxIdleConns = 200
 
-// s3ClientMaxIdleConns overrides the AWS SDK's default MaxIdleConns/MaxIdleConnsPerHost. A single
-// RST config only ever talks to one host, so per-host reuse shouldn't be capped well below the
-// total. It scales with GOMAXPROCS, using the same multiplier the request build controller uses for
-// its own concurrency, so it stays proportional to the actual concurrency source instead of
-// drifting out of sync with it as a second, unrelated constant.
-func s3ClientMaxIdleConns() int {
+// s3ClientMaxIdleConnsPerHost overrides the AWS SDK's default MaxIdleConnsPerHost. Every S3 client
+// shares one connection pool (see sharedS3HTTPClient), so this caps the idle connections kept to
+// one endpoint across all RSTs that use it. The concurrency that fills the pool comes from the
+// request build controller and the workers, which are per process, not per RST. So the cap scales
+// with GOMAXPROCS, using the multiplier the request build controller uses for its own concurrency,
+// instead of being a second, unrelated constant. It caps only idle connections: a burst may open
+// more, and the extra ones are closed when they become idle.
+func s3ClientMaxIdleConnsPerHost() int {
 	return max(s3ClientMinMaxIdleConns, 2*int(requestBuildControllerWorkerMultiplier)*runtime.GOMAXPROCS(0))
 }
 
-// newS3AWSClient builds the AWS SDK client for s3Config: its endpoint, region and static keys, on an
-// HTTP client of its own. A provider and a backend verify both build their client here, so a verify
-// tests the same connection a provider would use. s3Config may have no bucket, as a backend has
-// none. options run last, after the client's own settings.
-func newS3AWSClient(ctx context.Context, s3Config *flex.RemoteStorageTarget_S3, options ...func(*s3.Options)) (*s3.Client, error) {
-	maxIdleConns := s3ClientMaxIdleConns()
-	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
-		tr.MaxIdleConns = maxIdleConns
-		tr.MaxIdleConnsPerHost = maxIdleConns
+// sharedS3HTTPClient returns the one HTTP client every S3 client uses, so all RSTs share one
+// connection pool. Without it, every provider has a pool of its own. A change to an RST builds a
+// new provider, so it would drop that RST's warm connections. A change to a backend would drop them
+// for every RST that names it.
+//
+// Sharing is safe for every RST, whatever endpoint or credentials it has:
+//   - http.Transport keys idle connections by scheme, host, port and proxy. RSTs on different
+//     endpoints never share a connection.
+//   - Credentials are not tied to a connection. The SDK signs each request (SigV4).
+//   - Nothing an RST configures changes the transport. Only the environment does (see below).
+//
+// Two facts about the AWS SDK shape how the client is built and handed over:
+//   - The SDK derives transport settings from the environment, not from the RST. AWS_CA_BUNDLE adds
+//     root CAs in config.LoadDefaultConfig. AWS_DEFAULTS_MODE sets connect and TLS handshake
+//     timeouts in s3.New (resolveHTTPClient). So the shared client is built once through those same
+//     two steps, and gets what each RST's client would have got.
+//   - When AWS_DEFAULTS_MODE names a mode other than the default "legacy", s3.New copies an
+//     *awshttp.BuildableClient it is given, because the defaults-mode step calls its With* methods.
+//     Each copy builds its own transport, so passing the shared client through aws.Config would
+//     share nothing in those modes. s3.New runs the caller's option functions after that step, so
+//     newS3AWSClient assigns the shared client in one, where nothing copies it.
+//
+// The environment is read once, on first use, so a change to it needs a restart. One mode differs
+// from what each RST's client would have got. With AWS_DEFAULTS_MODE=auto, the SDK compares the
+// client's region with the region the host runs in. A match gives the "in-region" timeouts (1.1 s).
+// The shared client is built without a region, so it falls back to "standard" (3.1 s) for all RSTs.
+var sharedS3HTTPClient = sync.OnceValues(func() (s3.HTTPClient, error) {
+	maxIdleConnsPerHost := s3ClientMaxIdleConnsPerHost()
+	buildable := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+		// No limit across endpoints. A site with many endpoints keeps the warm connections of each.
+		tr.MaxIdleConns = 0
+		tr.MaxIdleConnsPerHost = maxIdleConnsPerHost
 	})
+	awsCfg, err := awsConfig.LoadDefaultConfig(context.Background(), awsConfig.WithHTTPClient(buildable))
+	if err != nil {
+		return nil, fmt.Errorf("unable to load the AWS SDK configuration for the shared HTTP client: %w", err)
+	}
+	return s3.NewFromConfig(awsCfg).Options().HTTPClient, nil
+})
+
+// newS3AWSClient builds the AWS SDK client for s3Config: its endpoint, region and static keys, on
+// the shared HTTP client (see sharedS3HTTPClient). A provider and a backend verify both build their
+// client here, so a verify tests the same connection a provider would use. s3Config may have no
+// bucket, as a backend has none. options run last, after the client's own settings.
+func newS3AWSClient(ctx context.Context, s3Config *flex.RemoteStorageTarget_S3, options ...func(*s3.Options)) (*s3.Client, error) {
+	httpClient, err := sharedS3HTTPClient()
+	if err != nil {
+		return nil, err
+	}
 
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
 		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
 		awsConfig.WithRegion(s3Config.GetRegion()),
-		awsConfig.WithHTTPClient(httpClient),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
 				s3Config.GetAccessKey(),
@@ -242,6 +282,9 @@ func newS3AWSClient(ctx context.Context, s3Config *flex.RemoteStorageTarget_S3, 
 	bucket := s3Config.GetBucket()
 	usePathStyle := !s3VirtualHosted(endpointUrl.Hostname(), bucket)
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		// Assigned here, after s3.New resolved its own client, so the SDK does not copy it. See
+		// sharedS3HTTPClient.
+		o.HTTPClient = httpClient
 		o.UsePathStyle = usePathStyle
 		for _, optFn := range options {
 			optFn(o)
