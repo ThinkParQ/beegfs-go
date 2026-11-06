@@ -146,12 +146,14 @@ type S3Client struct {
 
 var _ Provider = &S3Client{}
 
-func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mountPoint filesystem.Provider) (Provider, error) {
+// newS3 builds the provider of an S3 target. defaultRegion is the region the client uses when
+// rstConfig sets none (see s3Region).
+func newS3(ctx context.Context, rstConfig *flex.RemoteStorageTarget, defaultRegion string, mountPoint filesystem.Provider) (Provider, error) {
 	if !rstConfig.HasS3() {
 		return nil, ErrConfigRSTTypeIsUnknown
 	}
 
-	s3Client, err := newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), mountPoint)
+	s3Client, err := newS3WithOptions(ctx, rstConfig, rstConfig.GetS3(), defaultRegion, mountPoint)
 	if err != nil {
 		return nil, err
 	}
@@ -202,22 +204,31 @@ func s3ClientMaxIdleConns() int {
 	return max(s3ClientMinMaxIdleConns, 2*int(requestBuildControllerWorkerMultiplier)*runtime.GOMAXPROCS(0))
 }
 
-// newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
-// created, so shared wrapper state can rely on apiClient already being populated. It returns the
-// concrete *S3Client (rather than a Provider) so providers that extend the s3 implementation, such
-// as xtreemstore, can reach shared s3 state like the configured storage classes.
-func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, mountPoint filesystem.Provider, opts ...s3ProviderOption) (*S3Client, error) {
-	if s3Config == nil {
-		return nil, fmt.Errorf("s3 configuration must be specified")
+// s3Region returns the region of s3Config: the region it sets, or defaultRegion when it sets none.
+// defaultRegion is the default of the target's type (see s3TargetType). Every S3 request reads the
+// region from here: the client signs with it, CreateBucket picks the bucket's location from it,
+// and ListBuckets filters on it.
+func s3Region(s3Config *flex.RemoteStorageTarget_S3, defaultRegion string) string {
+	if region := s3Config.GetRegion(); region != "" {
+		return region
 	}
+	return defaultRegion
+}
 
-	buildCfg := defaultS3ProviderBuildCfg()
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&buildCfg)
-		}
+// newS3AWSClient builds the AWS SDK client for s3Config: its endpoint, region and static keys, on an
+// HTTP client of its own. A provider, a backend verify and bucket management all build their client
+// here, so a verify tests the same connection a provider would use. s3Config may have no bucket, as
+// a backend has none. defaultRegion is the region when s3Config sets none (see s3Region). options
+// run last, after the client's own settings.
+//
+// It refuses to build a client without a region. The SDK needs one to sign requests. Given an
+// empty one, the SDK reads AWS_REGION or the shared config file of the host instead. Remote and
+// each sync node could then sign with a different region.
+func newS3AWSClient(ctx context.Context, s3Config *flex.RemoteStorageTarget_S3, defaultRegion string, options ...func(*s3.Options)) (*s3.Client, error) {
+	region := s3Region(s3Config, defaultRegion)
+	if region == "" {
+		return nil, errors.New("the S3 configuration sets no region, and its type has no default region")
 	}
-
 	maxIdleConns := s3ClientMaxIdleConns()
 	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
 		tr.MaxIdleConns = maxIdleConns
@@ -227,7 +238,7 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 	awsCfg, err := awsConfig.LoadDefaultConfig(
 		ctx,
 		awsConfig.WithBaseEndpoint(s3Config.GetEndpointUrl()),
-		awsConfig.WithRegion(s3Config.GetRegion()),
+		awsConfig.WithRegion(region),
 		awsConfig.WithHTTPClient(httpClient),
 		awsConfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
@@ -243,21 +254,52 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 
 	// AWS recommends virtual-hosted style (bucketName.s3.amazonaws.com); path-style (/bucketName/)
 	// was deprecated for new regions in 2020. So, check whether the provided endpoint url starts
-	// with the bucket as part of the hostname. Otherwise, use the path-style.
+	// with the bucket as part of the hostname. Otherwise, use the path-style. With no bucket, as
+	// for a backend, this always picks path-style.
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html
 	endpointUrl, err := url.Parse(s3Config.GetEndpointUrl())
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse s3 end-point: %w", err)
 	}
 	bucket := s3Config.GetBucket()
-	host := endpointUrl.Hostname()
-	usePathStyle := !strings.HasPrefix(host, bucket+".")
-	awsClient := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	usePathStyle := !s3VirtualHosted(endpointUrl.Hostname(), bucket)
+	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = usePathStyle
-		for _, optFn := range buildCfg.s3Options {
+		for _, optFn := range options {
 			optFn(o)
 		}
-	})
+	}), nil
+}
+
+// s3VirtualHosted reports whether newS3AWSClient addresses bucket in virtual-hosted style on host.
+// That is the case when the host starts with the bucket as its own label, as in
+// archive.s3.example.com for bucket archive. With no bucket it is never the case. Host names ignore
+// case, so Archive.S3.example.com matches too. S3 bucket names are lowercase.
+func s3VirtualHosted(host string, bucket string) bool {
+	return bucket != "" && strings.HasPrefix(strings.ToLower(host), bucket+".")
+}
+
+// newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is
+// created, so shared wrapper state can rely on apiClient already being populated. It returns the
+// concrete *S3Client (rather than a Provider) so providers that extend the s3 implementation, such
+// as xtreemstore, can reach shared s3 state like the configured storage classes. defaultRegion is
+// the region the client uses when s3Config sets none (see s3Region).
+func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, s3Config *flex.RemoteStorageTarget_S3, defaultRegion string, mountPoint filesystem.Provider, opts ...s3ProviderOption) (*S3Client, error) {
+	if s3Config == nil {
+		return nil, fmt.Errorf("s3 configuration must be specified")
+	}
+
+	buildCfg := defaultS3ProviderBuildCfg()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&buildCfg)
+		}
+	}
+
+	awsClient, err := newS3AWSClient(ctx, s3Config, defaultRegion, buildCfg.s3Options...)
+	if err != nil {
+		return nil, err
+	}
 
 	apiClient := buildCfg.apiClient(&defaultS3ApiClient{client: awsClient})
 	if apiClient == nil {
@@ -274,47 +316,84 @@ func newS3WithOptions(ctx context.Context, rstConfig *flex.RemoteStorageTarget, 
 	}
 
 	for _, class := range s3Config.StorageClass {
-		name := types.StorageClass(class.GetName())
-		if name == "" {
-			return nil, fmt.Errorf("storage class must specify a valid storage class name")
-		}
-
-		archive := class.GetArchival()
-		if archive == nil {
-			return nil, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
-		}
-
-		retrievalTier := types.Tier(archive.GetRetrievalTier())
-		retentionDays := archive.GetRetentionDays()
-		if retentionDays == 0 {
-			retentionDays = 1
-		} else if retentionDays < 1 {
-			return nil, fmt.Errorf("storage class, %s, has invalid retention days: %d", name, retentionDays)
-		}
-		checkTime, err := time.ParseDuration(strings.ToLower(archive.GetCheckTime()))
+		parsed, err := parseS3StorageClass(class)
 		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid checkTime: %w", name, err)
-		} else if checkTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify checkTime >= '1s'", name)
+			return nil, err
 		}
-		recheckTime, err := time.ParseDuration(strings.ToLower(archive.GetRecheckTime()))
-		if err != nil {
-			return nil, fmt.Errorf("storage class, %s, has invalid recheckTime: %w", name, err)
-		} else if recheckTime < time.Duration(time.Second) {
-			return nil, fmt.Errorf("storage class, %s, must specify recheckTime >= '1s'", name)
-		}
-
-		s3Client.storageClasses[name] = S3StorageClass{
-			retrievalTier: retrievalTier,
-			archival:      true,
-			retentionDays: retentionDays,
-			checkTime:     checkTime,
-			recheckTime:   recheckTime,
-			autoRestore:   archive.GetAutoRestore(),
-		}
+		s3Client.storageClasses[types.StorageClass(class.GetName())] = parsed
 	}
 
 	return s3Client, nil
+}
+
+// parseS3StorageClass checks one storage class entry on its own and returns it parsed. The provider
+// calls it for every class it is built with. s3StorageClasses.ValidateEntries calls it for a
+// backend's classes, because a backend never builds a provider, and every target that names it
+// inherits each class whole. Rules:
+//   - The class needs a name, and must be archival.
+//   - retention-days 0 means 1 day. A negative value is refused.
+//   - check-time and recheck-time are required, and must be at least one second.
+//
+// Errors name each field the way the CLI and its output do, such as check-time, because admins
+// configure targets through the CLI. The TOML file, read once on the first start, spells them in
+// camelCase.
+func parseS3StorageClass(class *flex.RemoteStorageTarget_S3_StorageClass) (S3StorageClass, error) {
+	name := types.StorageClass(class.GetName())
+	if name == "" {
+		return S3StorageClass{}, fmt.Errorf("storage class must specify a valid storage class name")
+	}
+
+	archive := class.GetArchival()
+	if archive == nil {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, is not archival. Currently all storage class definitions must be archival", name)
+	}
+
+	retentionDays := archive.GetRetentionDays()
+	if retentionDays == 0 {
+		retentionDays = 1
+	} else if retentionDays < 1 {
+		return S3StorageClass{}, fmt.Errorf("storage class, %s, has invalid retention-days: %d", name, retentionDays)
+	}
+	checkTime, err := parseArchivalDelay(name, "check-time", archive.GetCheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+	recheckTime, err := parseArchivalDelay(name, "recheck-time", archive.GetRecheckTime())
+	if err != nil {
+		return S3StorageClass{}, err
+	}
+
+	return S3StorageClass{
+		retrievalTier: types.Tier(archive.GetRetrievalTier()),
+		archival:      true,
+		retentionDays: retentionDays,
+		checkTime:     checkTime,
+		recheckTime:   recheckTime,
+		autoRestore:   archive.GetAutoRestore(),
+	}, nil
+}
+
+// parseArchivalDelay parses the delay called field of the storage class name. It is required, and
+// must be at least one second.
+func parseArchivalDelay(name types.StorageClass, field string, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, fmt.Errorf("storage class, %s, must specify %s", name, field)
+	}
+	return parseDelay(fmt.Sprintf("storage class, %s", name), field, value)
+}
+
+// parseDelay parses the delay called field of owner, such as "storage class, GLACIER" or "bulk
+// operation, efficient-retrieve". A delay must be at least one second. Each error starts with
+// owner, so it names the entry the way the CLI does.
+func parseDelay(owner string, field string, value string) (time.Duration, error) {
+	delay, err := time.ParseDuration(strings.ToLower(value))
+	if err != nil {
+		return 0, fmt.Errorf("%s, has invalid %s: %w", owner, field, err)
+	}
+	if delay < time.Second {
+		return 0, fmt.Errorf("%s, must specify %s >= '1s'", owner, field)
+	}
+	return delay, nil
 }
 
 func (s *S3Client) checkStartAfterSupport(ctx context.Context) error {

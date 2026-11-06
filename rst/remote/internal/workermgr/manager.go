@@ -12,6 +12,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/rstdb"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -43,16 +44,23 @@ type Manager struct {
 	// criteria.
 	nodePools map[worker.Type]*Pool
 	config    Config
-	// WorkerManager maintains the list of RSTs because it is responsible for
-	// keeping the configuration on all worker nodes in sync. This is exported
-	// so other components like JobMgr can also reference it as needed.
-	// TODO: https://github.com/ThinkParQ/bee-remote/issues/29
-	// Allow RST configuration to be dynamically updated. This is complicated
-	// because we'll have to add locking and figure out how to handle when there
-	// are existing jobs for a changed/removed RST.
-	RemoteStorageTargets map[uint32]rst.Provider
-	mountPoint           filesystem.Provider
-	requiredFeatures     map[string]*flex.Feature
+	// The manager holds the RST providers because it keeps the configuration on all worker nodes in
+	// step with them. Other components look providers up through GetRST.
+	//
+	// rstStore holds the live RSTs and the job builder. retired holds the providers of deleted
+	// RSTs. A retired provider is never used for new work. Remote keeps it only to undo jobs
+	// that were still running when their RST was deleted, because undoing a download restores the
+	// local file through the provider. rstMu serializes ApplyRSTs, which holds it for writing.
+	// Nodes hold it for reading while they connect (see connectConfig). retiredMu guards retired.
+	rstStore  *rst.ClientStore
+	rstMu     sync.RWMutex
+	retired   map[uint32]retiredRST
+	retiredMu sync.RWMutex
+	// remote is how sync nodes reach this Remote. nodeConfig sends it to every node.
+	remote           *flex.BeeRemoteNode
+	stateRoot        string
+	mountPoint       filesystem.Provider
+	requiredFeatures map[string]*flex.Feature
 	// WorkActive counts entries into non-terminal work states.
 	// Exported so job.Manager can record transitions in UpdateWork.
 	WorkActive metric.Int64Counter
@@ -91,12 +99,16 @@ type JobUpdate struct {
 // operations it accepts a context that can be cancelled if it should stop trying to configure the
 // manager. It does not (nor should it) use this context for anything else, and Stop() must be
 // called to shutdown worker nodes.
+//
+// rstConfigs are the live RSTs. deletedRSTs are the RSTs that were deleted, from which the retired
+// providers are rebuilt (see the rstStore field).
 func NewManager(
 	ctx context.Context,
 	log *logger.Logger,
 	managerConfig Config,
 	workerConfigs []worker.Config,
 	rstConfigs []*flex.RemoteStorageTarget,
+	deletedRSTs map[uint32]rstdb.Deleted,
 	beeRmtConfig *flex.BeeRemoteNode,
 	mountPoint filesystem.Provider,
 	requiredFeatures map[string]*flex.Feature,
@@ -113,26 +125,15 @@ func NewManager(
 		return nil, fmt.Errorf("invalid state root for bulk operations: %w", err)
 	}
 
-	rstMap := make(map[uint32]rst.Provider)
-	for _, config := range rstConfigs {
-		configId := config.GetId()
-		if configId == rst.JobBuilderRstId {
-			return nil, fmt.Errorf("invalid remote storage target Id: %d", configId)
-		}
-		// We could provide a real context here it it ever became necessary, however `NewManager()`
-		// is not expected to be run in a separate goroutine so we shouldn't become blocked if the
-		// user tries to shutdown via Ctrl+C.
-		rst, err := rst.New(ctx, config, mountPoint, stateRoot)
-		if err != nil {
-			return nil, fmt.Errorf("encountered an error setting up remote storage target: %w", err)
-		}
-		if _, ok := rstMap[configId]; ok {
-			return nil, fmt.Errorf("found multiple remote storage targets with the same ID: %d", configId)
-		}
-		rstMap[configId] = rst
+	rstStore := rst.NewClientStore(mountPoint)
+	if err := rstStore.UpdateConfig(ctx, rstConfigs, stateRoot); err != nil {
+		return nil, fmt.Errorf("encountered an error setting up remote storage targets: %w", err)
 	}
 
-	rstMap[rst.JobBuilderRstId] = rst.NewJobBuilderClient(ctx, rstMap, mountPoint, stateRoot)
+	retired := make(map[uint32]retiredRST, len(deletedRSTs))
+	for id, deleted := range deletedRSTs {
+		retired[id] = newRetiredRST(ctx, log, id, deleted, mountPoint, stateRoot)
+	}
 
 	nodePools := make(map[worker.Type]*Pool, 0)
 	nodes, err := worker.NewWorkerNodesFromConfig(log.Logger, workerConfigs)
@@ -148,11 +149,6 @@ func NewManager(
 				nodeMap:  map[string]worker.Worker{},
 				next:     0,
 				mu:       new(sync.Mutex),
-				// TODO: https://github.com/ThinkParQ/bee-remote/issues/29
-				// If/when we allow dynamic configuration this won't work. We would need to
-				// pass a reference to the actual RST clients and provide methods to get their
-				// configuration. The ClientStore will likely make this easy to update.
-				workerConfig: flex.UpdateConfigRequest_builder{Rsts: rstConfigs, BeeRemote: beeRmtConfig, StateRoot: stateRoot}.Build(),
 			}
 		}
 		nodePools[n.GetNodeType()].nodeMap[n.GetID()] = n
@@ -180,15 +176,18 @@ func NewManager(
 	}
 
 	workerManager := &Manager{
-		log:                  log,
-		nodeWG:               new(sync.WaitGroup),
-		nodePools:            nodePools,
-		config:               managerConfig,
-		RemoteStorageTargets: rstMap,
-		mountPoint:           mountPoint,
-		requiredFeatures:     requiredFeatures,
-		WorkActive:           workActive,
-		WorkTerminal:         workTerminal,
+		log:              log,
+		nodeWG:           new(sync.WaitGroup),
+		nodePools:        nodePools,
+		config:           managerConfig,
+		rstStore:         rstStore,
+		retired:          retired,
+		remote:           beeRmtConfig,
+		stateRoot:        stateRoot,
+		mountPoint:       mountPoint,
+		requiredFeatures: requiredFeatures,
+		WorkActive:       workActive,
+		WorkTerminal:     workTerminal,
 	}
 
 	return workerManager, nil
@@ -203,7 +202,7 @@ func (m *Manager) Start() error {
 	}
 	// Bring all node pools online:
 	for _, pool := range m.nodePools {
-		pool.HandleAll(m.nodeWG, m.requiredFeatures)
+		pool.HandleAll(m.nodeWG, m.connectConfig, m.requiredFeatures)
 	}
 	return nil
 }

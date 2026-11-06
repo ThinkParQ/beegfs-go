@@ -1,15 +1,12 @@
 // Package RST (Remote Storage Target) implements wrapper types for working with RSTs internally and
 // clients for interacting with various RSTs that satisfy the Provider interface.
 //
-// Most RST configuration is defined using protocol buffers, however changes to this package are
-// needed when adding new RSTs:
+// Most RST configuration is defined using protocol buffers. Adding a new RST type to this package
+// takes two parts:
 //
-//   - Expand the map of SupportedRSTTypes to include the new RST.
-//   - Add a new type for the RST that implements the Provider interface.
-//   - Add the RST type to the New function().
-//
-// Note once a new RST type is added, changes to its fields largely should not require changes to
-// this package (if everything is setup correctly).
+//   - A type that implements the Provider interface.
+//   - A type that implements the TargetType interface and registers itself (see targettype.go).
+//     New, the beegfs-remote TOML decoder and the beegfs CLI find the RST type through it.
 package rst
 
 import (
@@ -49,30 +46,6 @@ const (
 	// that store IDs in fixed width records can rely on the width.
 	JobIdLen = 36
 )
-
-// SupportedRSTTypes is used with SetRSTTypeHook in the config package to allows configuring with
-// multiple RST types without writing repetitive code. The map contains the all lowercase string
-// identifier of the prefix key of the TOML table used to indicate the configuration options for a
-// particular RST type. For each RST type a function must be returned that can be used to construct
-// the actual structs that will be set to the Type field. The first return value is a new struct
-// that satisfies the isRemoteStorageTarget_Type interface. The second return value is the address
-// of the struct that is a named field of the first return struct and contains the actual message
-// fields for that RST type. Note returning the address is important otherwise you will get an
-// initialized but empty struct of the correct type.
-var SupportedRSTTypes = map[string]func() (any, any){
-	"s3": func() (any, any) {
-		t := new(flex.RemoteStorageTarget_S3_)
-		return t, &t.S3
-	},
-	// XtreemStore is S3-compatible and uses the existing S3 implementation.
-	"xtreemstore": func() (any, any) {
-		t := &flex.RemoteStorageTarget_Xtreemstore{Xtreemstore: &flex.RemoteStorageTarget_XtreemStore{}}
-		return t, &t.Xtreemstore
-	},
-	// Azure is not currently supported, but this is how an Azure type could be added:
-	// "azure": func() (any, any) { t := new(flex.RemoteStorageTarget_Azure_); return t, &t.Azure },
-	// Mock could be included here if it ever made sense to allow configuration using a file.
-}
 
 type Provider interface {
 	// GetJobRequest builds a provider-specific job request.
@@ -415,22 +388,22 @@ func New(ctx context.Context, config *flex.RemoteStorageTarget, mountPoint files
 		config.SetPolicies(&flex.RemoteStorageTarget_Policies{})
 	}
 
-	switch config.Type.(type) {
-	case *flex.RemoteStorageTarget_S3_:
-		return newS3(ctx, config, mountPoint)
-	case *flex.RemoteStorageTarget_Xtreemstore:
-		return newXtreemstore(ctx, config, mountPoint, stateRoot)
-	case *flex.RemoteStorageTarget_Mock:
+	switch config.WhichType() {
+	case flex.RemoteStorageTarget_Mock_case:
 		// This handles setting up a Mock RST for testing from external packages like WorkerMgr. See
-		// the documentation ion `MockClient` in mock.go for how to setup expectations.
+		// the documentation ion `MockClient` in mock.go for how to setup expectations. Mock is not a
+		// TargetType, because admins never configure it.
 		return &MockClient{}, nil
-	case nil:
+	case flex.RemoteStorageTarget_Type_not_set_case:
 		return nil, fmt.Errorf("%s: %w", config, ErrConfigRSTTypeNotSet)
-	default:
-		// This means we got a valid RST type that was unmarshalled from a TOML file base on
-		// SupportedRSTTypes or directly provided in a test, but New() doesn't know about it yet.
-		return nil, fmt.Errorf("(most likely this is a bug): %T: %w", config.Type, ErrConfigRSTTypeIsUnknown)
 	}
+	t, ok := TargetTypeOf(config)
+	if !ok {
+		// The config names an RST type the proto defines but no client registered (see
+		// targettype.go), such as azure.
+		return nil, fmt.Errorf("%s: %w", TypeName(config), ErrConfigRSTTypeIsUnknown)
+	}
+	return t.NewProvider(ctx, config, mountPoint, stateRoot)
 }
 
 // RecreateRequests is used to regenerate the original work requests generated for some job and

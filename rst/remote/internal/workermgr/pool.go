@@ -28,11 +28,12 @@ type Pool struct {
 	next int
 	// The mutex should be locked when interacting with the pool.
 	mu *sync.Mutex
-	// All worker nodes in a particular pool share the same configuration.
-	workerConfig *flex.UpdateConfigRequest
 }
 
-func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.Feature) {
+// HandleAll starts every node in the pool. All nodes share config, which builds a node's
+// configuration on every connect attempt, so a node always receives the RSTs Remote serves at that
+// moment.
+func (p *Pool) HandleAll(wg *sync.WaitGroup, config worker.ConfigFn, requiredFeatures map[string]*flex.Feature) {
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/12
 	// When initially connecting to a node we need to tell it what to do
@@ -44,7 +45,7 @@ func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.F
 	}.Build()
 
 	for _, node := range p.nodes {
-		go node.Handle(wg, p.workerConfig, wrUpdates, requiredFeatures)
+		go node.Handle(wg, config, wrUpdates, requiredFeatures)
 	}
 }
 

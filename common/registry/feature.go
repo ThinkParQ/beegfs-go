@@ -23,4 +23,19 @@ const (
 	//     would count a path it submitted as refused.
 	//   - An older remote does not undo a refused claim, so the claim's changes would stay.
 	FeatureReserveBeforeLock = "reserve-before-lock"
+	// FeatureRSTManagement covers changing remote storage targets and backends while Remote and the
+	// sync nodes run. Remote and every sync node advertise it, and each check guards a different
+	// link:
+	//   - The CLI requires it from Remote before it uses the RPCs that create, update, delete or
+	//     adopt targets, or create, update, delete or verify backends. It also requires it before it
+	//     relies on what came with them: the deleted targets GetRSTConfig returns, and the reason
+	//     UpdateJobs records. An older Remote ignores both requests without an error.
+	//   - Remote requires it from every sync node, and refuses an older node when it connects. Remote
+	//     pushes the target set after every change. A sync node with the feature applies the set
+	//     while it runs, and starts no work request while it holds a set it refused. An older node
+	//     refuses every change, and keeps running its queued work with targets Remote no longer
+	//     serves.
+	// A sync node serves none of the management RPCs. It advertises the feature because the live
+	// push is part of management, and both sides shipped in the same release.
+	FeatureRSTManagement = "rst-management"
 )

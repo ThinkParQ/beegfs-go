@@ -105,7 +105,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 	t.Run("delays default when not specified", func(t *testing.T) {
 		provider, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		require.NoError(t, err)
 
 		cfg := provider.(*xtreemstoreS3Provider).bulkOperationCfgs[efficientRetrieve]
@@ -121,7 +121,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 				RetryDelay: proto.String("2m"),
 				PollDelay:  proto.String("30s"),
 			},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		require.NoError(t, err)
 
 		cfg := provider.(*xtreemstoreS3Provider).bulkOperationCfgs[efficientRetrieve]
@@ -135,7 +135,7 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 	t.Run("an operation that was not specified is rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{RetryDelay: proto.String("2m")},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "must specify a valid operation")
 	})
 
@@ -143,22 +143,22 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("30s")},
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("45s")},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
 		assert.ErrorContains(t, err, "configured more than once")
 	})
 
 	t.Run("delays below the minimum are rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("100ms")},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
-		assert.ErrorContains(t, err, "pollDelay >= '1s'")
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		assert.ErrorContains(t, err, "poll-delay >= '1s'")
 	})
 
 	t.Run("a delay that is not a duration is rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, RetryDelay: proto.String("soon")},
-		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
-		assert.ErrorContains(t, err, "invalid retryDelay")
+		), xtreemstoreDefaultRegion, stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
+		assert.ErrorContains(t, err, "invalid retry-delay")
 	})
 }
 

@@ -1,0 +1,926 @@
+package job
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/thinkparq/beegfs-go/common/rst"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/rstdb"
+	"github.com/thinkparq/protobuf/go/beeremote"
+	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+)
+
+// CreateRST, UpdateRST and DeleteRST change the RSTs this Remote serves. Each one runs the same
+// steps, under rstConfigMu so changes never interleave:
+//  1. Check the request against the stored set. Check the new definition and its effective config
+//     (checkNewDefinition). Validating the effective config builds a provider from it and contacts
+//     nothing.
+//  2. Run the bucket step in the target's store, when the change has one (see rstbucket.go).
+//     Today only create has one: it creates the target's bucket, or with adopt checks that it
+//     exists.
+//  3. Store the changed set in rstDB. The database is the source of truth, so a crash after this
+//     step applies the change at the next start. When storing fails, the bucket step is undone.
+//  4. Apply the stored set to the live providers and push it to every worker node
+//     (workermgr.ApplyRSTs).
+//
+// AdoptRSTBuckets creates many targets with the same steps. Its bucket step only lists the store,
+// so it has nothing to undo.
+//
+// They return gRPC status errors, so the server passes them to the caller as they are.
+//
+// The job manager owns these operations, rather than the worker manager, because two of the checks
+// read the path DB: a modify that moves the target, and a delete dry run, count the target's
+// unfinished jobs (countUnfinishedJobs).
+//
+// A target may name a backend (see common/rst/backend.go). rstDB stores each target's definition,
+// with only the values it sets itself. Every check about what the target does runs on its effective
+// configuration, with the inherited values filled in, because that is what its provider is built
+// from. CreateRSTBackend, UpdateRSTBackend and DeleteRSTBackend change backends with the same
+// steps. A backend modify can change the effective configuration of every target that names the
+// backend, so those targets are checked the way a modify checks one target (effectiveChanges).
+// Creating or deleting a backend changes no target. VerifyRSTBackend contacts the store, so it
+// takes none of these steps and no lock.
+
+// CreateRSTOptions holds the choices of a create beyond the target itself.
+type CreateRSTOptions struct {
+	// Force allows an explicit ID that belonged to a deleted target.
+	Force bool
+	// Adopt keeps the target's objects in a bucket that already exists, instead of creating one.
+	Adopt bool
+	// Bucket sets up a bucket the create makes. It must be empty with Adopt, and may not remove
+	// tags, because a new bucket has none.
+	Bucket rst.BucketChanges
+}
+
+// CreateRSTResult is what CreateRST did.
+type CreateRSTResult struct {
+	// Stored is the target as stored: its definition, with the ID and name Remote assigned.
+	Stored *flex.RemoteStorageTarget
+	// Effective is the target's effective configuration, with what it inherits filled in.
+	Effective *flex.RemoteStorageTarget
+	// Bucket says what happened to the target's bucket. It is nil for a type without buckets.
+	Bucket *beeremote.BucketResult
+	// Apply is how the stored set was applied to worker nodes.
+	Apply *beeremote.ApplyResult
+	// ReusedUnfinishedJobs counts the unfinished jobs of a deleted target whose ID the new target
+	// took over with Force.
+	ReusedUnfinishedJobs int64
+}
+
+// CreateRST adds config as a new RST, and creates or adopts its bucket (createBucketStep). The
+// rules for the ID and name:
+//   - When config has no ID, the next ID that was never used is assigned, counting deleted RSTs,
+//     so a deleted RST's ID is never handed out on its own.
+//   - When config has no name, it is named rst.GenerateTargetName of its ID.
+//   - A backend config names must exist and have the same type.
+//
+// An explicit ID that belonged to a deleted RST is refused unless opts.Force is set. Stubs, file
+// metadata and jobs may still name that ID, and every one of them would then refer to the new RST.
+// With force:
+//   - The new RST replaces the delete record, so the deleted RST no longer shows in the list of
+//     deleted RSTs.
+//   - Its unfinished jobs are no longer cancelled. They continue on the new RST, the same way they
+//     do after a forced modify that moves an RST.
+//
+// To revive a deleted RST in its old bucket, the caller gives its ID, Force and Adopt.
+func (m *Manager) CreateRST(ctx context.Context, config *flex.RemoteStorageTarget, opts CreateRSTOptions) (*CreateRSTResult, error) {
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+
+	// Step 1: check the request against the stored set. Every config writer holds rstConfigMu, so
+	// the set cannot change before step 3, which still checks that the ID is free.
+	config = rst.NormalizeConfig(config)
+	set, err := m.rstDB.Load()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if err := m.checkCreateOptions(config, opts); err != nil {
+		return nil, err
+	}
+	id := config.GetId()
+	var replaced *rstdb.Deleted
+	var reusedUnfinished int64
+	if id == rst.JobBuilderRstId {
+		next, ok := set.NextID()
+		if !ok {
+			return nil, status.Error(codes.ResourceExhausted, "every remote storage target ID is in use or belonged to a deleted target")
+		}
+		id = next
+		config.SetId(id)
+	} else if _, ok := set.Live[id]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "remote storage target ID %d is already in use", id)
+	} else if deleted, ok := set.Deleted[id]; ok {
+		if !opts.Force {
+			return nil, status.Errorf(codes.AlreadyExists, "ID %d belonged to deleted remote storage target %q, and stubs, file metadata and jobs may still name it (hint: use force to reuse the ID anyway, or omit the ID)", id, deleted.Config.GetName())
+		}
+		unfinished, err := m.countUnfinishedJobs(ctx, id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "unable to count the unfinished jobs of the deleted target: %s", err)
+		}
+		replaced = &deleted
+		reusedUnfinished = unfinished
+	}
+	if err := checkNewTargetName(config, ""); err != nil {
+		return nil, err
+	}
+	if config.GetName() == "" {
+		config.SetName(rst.GenerateTargetName(id))
+	}
+	effective, err := m.checkNewDefinition(ctx, config, &set, opts.Adopt, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: the bucket step.
+	bucket, undo, err := m.createBucketStep(ctx, effective, opts.Adopt, opts.Bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 3: store the target, or undo the bucket step.
+	set, err = m.updateRSTs(func(set *rstdb.Set) error {
+		if _, ok := set.Live[id]; ok {
+			return status.Errorf(codes.AlreadyExists, "remote storage target ID %d is already in use", id)
+		}
+		if _, ok := set.Deleted[id]; ok && replaced == nil {
+			return status.Errorf(codes.AlreadyExists, "ID %d belonged to a deleted remote storage target", id)
+		}
+		delete(set.Deleted, id)
+		set.Live[id] = config
+		return nil
+	})
+	if err != nil {
+		return nil, undoBucketStep(ctx, bucket, undo, err)
+	}
+	if replaced != nil {
+		m.log.Warn("created remote storage target with the ID of a deleted one, its unfinished jobs continue on the new target", zap.Uint32("rstID", id), zap.String("name", config.GetName()), zap.String("deletedName", replaced.Config.GetName()), zap.Int64("unfinishedJobs", reusedUnfinished), zap.String("bucket", bucket.GetName()), zap.Stringer("bucketAction", bucket.GetAction()))
+	} else {
+		m.log.Info("created remote storage target", zap.Uint32("rstID", id), zap.String("name", config.GetName()), zap.String("bucket", bucket.GetName()), zap.Stringer("bucketAction", bucket.GetAction()))
+	}
+
+	// Step 4: apply.
+	apply, err := m.applyRSTs(ctx, set)
+	return &CreateRSTResult{Stored: config, Effective: effective, Bucket: bucket, Apply: apply, ReusedUnfinishedJobs: reusedUnfinished}, err
+}
+
+// checkCreateOptions returns InvalidArgument when opts do not fit config's type or each other. It
+// reads only the request, so CreateRST runs it before any other check. The rules:
+//   - Adopt and bucket settings need a type that can manage buckets.
+//   - Adopt uses a bucket as it is, so it takes no bucket settings.
+//   - A new bucket has no tags, so a create cannot remove any.
+//   - Adopt needs the bucket to adopt. Adopting every unused bucket of a backend is a separate
+//     request (AdoptRSTBuckets), because it creates many targets.
+func (m *Manager) checkCreateOptions(config *flex.RemoteStorageTarget, opts CreateRSTOptions) error {
+	_, manages := m.bucketManagerOf(config)
+	if !manages {
+		if opts.Adopt || !opts.Bucket.IsEmpty() {
+			return status.Errorf(codes.InvalidArgument, "remote storage target type %s has no bucket Remote can manage, so adopt and bucket settings do not apply", rst.TypeName(config))
+		}
+		return nil
+	}
+	if opts.Adopt && !opts.Bucket.IsEmpty() {
+		return status.Error(codes.InvalidArgument, "adopt uses an existing bucket as it is, so it takes no bucket settings")
+	}
+	if opts.Bucket.RemovesTags() {
+		return status.Error(codes.InvalidArgument, "a new bucket has no tags, so a create cannot remove any")
+	}
+	setting, _ := bucketSettingOf(config)
+	if opts.Adopt && setting.Get(config) == "" && config.GetBackend() != "" {
+		return status.Errorf(codes.InvalidArgument, "adopt needs the %s to adopt (hint: adopting every unused bucket of a backend is a separate request, AdoptRSTBuckets)", setting.Key)
+	}
+	return nil
+}
+
+// AdoptRSTBuckets creates one target for each unused bucket in the store of template's backend,
+// and returns them with the buckets it skipped. template is a target definition that names a
+// backend, and names no ID, no name and no bucket. Each new target is a copy of template, with:
+//   - the bucket setting holding the bucket's real name
+//   - the next ID that was never used (see CreateRST)
+//   - the name rst.GenerateTargetName of that ID
+//
+// A bucket is unused when no live or deleted target uses it (unusedBuckets). Every new target is
+// validated before any is stored. One that fails validation fails the whole request, and nothing
+// is stored. Nothing changes in the store, so there is nothing to undo. With dryRun the targets are
+// returned but not stored.
+//
+// No unused bucket fails with FailedPrecondition, unless dryRun is set. A dry run then returns an
+// empty list, so a preview of a store that has nothing to adopt is not an error.
+//
+// rstConfigMu is held from the list to the store, so the buckets found unused stay unused until
+// the targets that adopt them are stored.
+func (m *Manager) AdoptRSTBuckets(ctx context.Context, template *flex.RemoteStorageTarget, dryRun bool) (*beeremote.AdoptRSTBucketsResponse, error) {
+	template = rst.NormalizeConfig(template)
+	buckets, manages := m.bucketManagerOf(template)
+	setting, _ := bucketSettingOf(template)
+	switch {
+	case !manages:
+		return nil, status.Errorf(codes.InvalidArgument, "remote storage target type %s has no buckets Remote can adopt", rst.TypeName(template))
+	case template.GetId() != rst.JobBuilderRstId:
+		return nil, status.Error(codes.InvalidArgument, "each adopted bucket gets the next free ID, so the template cannot name one")
+	case template.GetName() != "":
+		return nil, status.Error(codes.InvalidArgument, "each adopted bucket gets a generated name, so the template cannot name one")
+	case setting.Get(template) != "":
+		return nil, status.Errorf(codes.InvalidArgument, "the template names %s %q (hint: create a target with adopt to adopt one bucket)", setting.Key, setting.Get(template))
+	}
+	// Without a backend the owner rules count the bucket as missing, so this also refuses a
+	// template that names no backend.
+	hint := ""
+	if template.GetBackend() == "" {
+		hint = "adopting every unused bucket needs a backend, whose store holds the buckets"
+	}
+	if err := rst.CheckTargetDefinition(template, true); err != nil {
+		return nil, invalidTemplate(err, hint)
+	}
+
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+
+	// Resolve the template, and find the unused buckets of its store.
+	set, err := m.rstDB.Load()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	store, err := rst.Resolve(template, set.Backends)
+	if err != nil {
+		return nil, invalidTemplate(err, "")
+	}
+	listCtx, cancel := context.WithTimeout(ctx, bucketRequestTimeout)
+	defer cancel()
+	unused, skipped, err := unusedBuckets(listCtx, set, buckets, setting, store)
+	if err != nil {
+		return nil, err
+	}
+	response := &beeremote.AdoptRSTBucketsResponse{Skipped: skipped}
+	if len(unused) == 0 {
+		if dryRun {
+			return response, nil
+		}
+		return nil, status.Errorf(codes.FailedPrecondition, "backend %q has no unused bucket to adopt: %s", template.GetBackend(), describeSkipped(skipped))
+	}
+
+	// Build and validate every target before storing any. working tracks the IDs taken so far, so
+	// NextID hands out consecutive IDs.
+	working := rstdb.Set{Live: maps.Clone(set.Live), Backends: set.Backends, Deleted: set.Deleted}
+	for _, name := range unused {
+		config := proto.Clone(template).(*flex.RemoteStorageTarget)
+		if err := setting.Set(config, name); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unable to adopt bucket %q: %s", name, err)
+		}
+		id, ok := working.NextID()
+		if !ok {
+			return nil, status.Error(codes.ResourceExhausted, "every remote storage target ID is in use or belonged to a deleted target")
+		}
+		config.SetId(id)
+		config.SetName(rst.GenerateTargetName(id))
+		effective, err := m.checkNewDefinition(ctx, config, &working, false, "")
+		if err != nil {
+			return nil, err
+		}
+		working.Live[id] = config
+		response.Adopted = append(response.Adopted, &beeremote.AdoptRSTBucketsResponse_Adopted{Rst: config, Effective: effective})
+	}
+	if dryRun {
+		return response, nil
+	}
+
+	// Store every target at once.
+	set, err = m.updateRSTs(func(set *rstdb.Set) error {
+		for _, adopted := range response.Adopted {
+			id := adopted.GetRst().GetId()
+			_, live := set.Live[id]
+			_, deleted := set.Deleted[id]
+			if live || deleted {
+				return status.Errorf(codes.Aborted, "remote storage target ID %d was taken while the buckets were adopted, retry the request", id)
+			}
+			set.Live[id] = adopted.GetRst()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, adopted := range response.Adopted {
+		m.log.Info("created remote storage target for an adopted bucket", zap.Uint32("rstID", adopted.GetRst().GetId()), zap.String("name", adopted.GetRst().GetName()), zap.String("bucket", setting.Get(adopted.GetRst())))
+	}
+
+	// Apply once for every target.
+	response.Apply, err = m.applyRSTs(ctx, set)
+	return response, err
+}
+
+// UpdateRST replaces the definition of the RST config.Id names, and returns its new effective
+// configuration. config and expected are definitions: only the values the RST sets itself. expected
+// is the definition the caller read before it made its change. The update is refused when the
+// stored definition no longer matches it, because someone else changed the RST in between. The type
+// of an RST cannot change. config may name another backend of the same type, or none.
+//
+// A change to where the RST keeps its objects (see rst.IdentityChanged) is refused while unfinished
+// jobs use the RST, unless force is set. Those jobs may refer to remote paths the change moves. The
+// old and new effective configurations are compared, so a change of backend counts too.
+func (m *Manager) UpdateRST(ctx context.Context, config *flex.RemoteStorageTarget, expected *flex.RemoteStorageTarget, force bool) (*flex.RemoteStorageTarget, *beeremote.ApplyResult, error) {
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+
+	config = rst.NormalizeConfig(config)
+	id := config.GetId()
+	var effective *flex.RemoteStorageTarget
+	set, err := m.updateRSTs(func(set *rstdb.Set) error {
+		stored, ok := set.Live[id]
+		if !ok {
+			return rstNotFound(set, id)
+		}
+		stored = rst.NormalizeConfig(stored)
+		// Definitions are compared normalized. A definition imported from the TOML file may be
+		// stored without the empty policies NormalizeConfig fills in.
+		if !proto.Equal(stored, rst.NormalizeConfig(expected)) {
+			return status.Errorf(codes.Aborted, "remote storage target %d was changed by someone else, read it again and retry", id)
+		}
+		if stored.WhichType() != config.WhichType() {
+			return status.Errorf(codes.InvalidArgument, "the type of remote storage target %d cannot change (hint: delete it and create a new one)", id)
+		}
+		if err := checkNewTargetName(config, stored.GetName()); err != nil {
+			return err
+		}
+		before, err := set.Effective(id)
+		if err != nil {
+			return status.Error(codes.Internal, err.Error())
+		}
+		// Removing the backend keeps what the RST inherited, as its own values. Remote fills them
+		// in here, from the old backend's definition it holds under its lock, rather than trusting
+		// values the caller read earlier. A backend changed in between would otherwise leave the
+		// RST with the backend's old values, and no compare-and-swap covers backends.
+		//
+		// The values come from the backend, not from before. before also holds the RST's own old
+		// values, so it would refill any value the same change clears. A cleared value falls back
+		// to the backend's, as it would have with the backend kept.
+		if stored.GetBackend() != "" && config.GetBackend() == "" {
+			withOldBackend := proto.Clone(config).(*flex.RemoteStorageTarget)
+			withOldBackend.SetBackend(stored.GetBackend())
+			if config, err = rst.Resolve(withOldBackend, set.Backends); err != nil {
+				return status.Errorf(codes.InvalidArgument, "unable to keep the inherited values of remote storage target %d: %s", id, err)
+			}
+			config = rst.NormalizeConfig(config)
+		}
+		hint := ""
+		if config.GetBackend() != "" && stored.GetBackend() != config.GetBackend() {
+			hint = "a target that gets a backend must clear its own connection settings in the same change"
+		}
+		if t, ok := rst.TargetTypeOf(config); ok && rst.BucketChanged(t, stored, config) {
+			setting, _ := rst.BucketSettingOf(t)
+			return status.Errorf(codes.InvalidArgument, "the %s of remote storage target %d cannot change, because create made or checked it (hint: delete the target, then create it again with its ID, force, adopt and the new %s)", setting.Key, id, setting.Key)
+		}
+		if effective, err = m.checkNewDefinition(ctx, config, set, false, hint); err != nil {
+			return err
+		}
+		var moved []uint32
+		if rst.IdentityChanged(before, effective) {
+			moved = []uint32{id}
+		}
+		if err := m.refuseStrandingMove(ctx, moved, force); err != nil {
+			return err
+		}
+		set.Live[id] = config
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	m.log.Info("updated remote storage target", zap.Uint32("rstID", id), zap.String("name", config.GetName()))
+	apply, err := m.applyRSTs(ctx, set)
+	return effective, apply, err
+}
+
+// DeleteRST deletes the RST id and returns how many unfinished jobs use it. With dryRun it only
+// counts them.
+//
+// The jobs are not cancelled here. Each one is cancelled the next time Remote looks the RST up
+// for it, and is undone through the RST's retired provider (see rstlookup.go). reason is recorded
+// with the RST, and every such job and every refused new request reports it.
+//
+// The delete record keeps the RST's effective configuration, which names no backend. The retired
+// provider is built from it, so a later change to a backend cannot change how a job is undone.
+func (m *Manager) DeleteRST(ctx context.Context, id uint32, reason string, dryRun bool) (int64, *beeremote.ApplyResult, error) {
+	if err := rst.CheckText("reason", reason, rst.MaxReasonLength); err != nil {
+		return 0, nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// The count reads every path entry, which can take seconds. It only informs the caller, and
+	// decides nothing, so it runs before rstConfigMu is taken, and other changes need not wait for
+	// it. A dry run never takes the lock. The count may miss a job that starts or ends meanwhile.
+	current, err := m.rstDB.Load()
+	if err != nil {
+		return 0, nil, status.Error(codes.Internal, err.Error())
+	}
+	if _, ok := current.Live[id]; !ok {
+		return 0, nil, rstNotFound(&current, id)
+	}
+	unfinished, err := m.countUnfinishedJobs(ctx, id)
+	if err != nil {
+		return 0, nil, status.Errorf(codes.Internal, "unable to count unfinished jobs: %s", err)
+	}
+	if dryRun {
+		return unfinished, nil, nil
+	}
+
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+	set, err := m.updateRSTs(func(set *rstdb.Set) error {
+		if _, ok := set.Live[id]; !ok {
+			return rstNotFound(set, id)
+		}
+		effective, err := set.Effective(id)
+		if err != nil {
+			return status.Error(codes.Internal, err.Error())
+		}
+		delete(set.Live, id)
+		set.Deleted[id] = rstdb.Deleted{Config: effective, Reason: reason, DeletedAt: time.Now()}
+		return nil
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	m.log.Info("deleted remote storage target", zap.Uint32("rstID", id), zap.String("reason", reason), zap.Int64("unfinishedJobs", unfinished))
+	apply, err := m.applyRSTs(ctx, set)
+	return unfinished, apply, err
+}
+
+// CreateRSTBackend adds backend as a new backend. It is refused when another backend has its name,
+// or when it is not a valid backend on its own (checkBackendConfig). Nothing is applied, because no
+// target names a new backend yet.
+//
+// A backend is checked against what its type requires and forbids of a backend, such as an S3
+// endpoint and keys, and no bucket. It is not checked for the settings every target needs, such as
+// the bucket. Each target is checked for those when it names the backend.
+//
+// With verify, the backend must also reach its store from this host before it is stored
+// (verifyOnRemote). It returns the note of that check, or "".
+func (m *Manager) CreateRSTBackend(ctx context.Context, backend *flex.RemoteStorageTarget, verify bool) (*flex.RemoteStorageTarget, string, error) {
+	backend = rst.NormalizeConfig(backend)
+	if err := checkBackendConfig(backend); err != nil {
+		return nil, "", err
+	}
+	note, err := verifyOnRemote(ctx, backend, verify)
+	if err != nil {
+		return nil, "", err
+	}
+
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+	name := backend.GetName()
+	_, err = m.updateRSTs(func(set *rstdb.Set) error {
+		if _, ok := set.Backends[name]; ok {
+			return status.Errorf(codes.AlreadyExists, "remote storage backend %q already exists", name)
+		}
+		set.Backends[name] = backend
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	m.log.Info("created remote storage backend", zap.String("name", name))
+	return backend, note, nil
+}
+
+// UpdateRSTBackend replaces the backend called name with backend. expected is the backend the
+// caller read. The update is refused when the stored backend no longer matches it. It returns the
+// IDs of the targets whose effective configuration changed.
+//
+// Rules:
+//   - The type cannot change.
+//   - A new name renames the backend. Every target that names it is changed to name the new one, in
+//     the same update. The new name must be free.
+//   - It is a valid backend on its own (checkBackendConfig). So an update that clears a setting its
+//     type requires of a backend, such as the access key, is refused.
+//   - Every target that names the backend must stay valid (effectiveChanges).
+//   - A change that moves where a target that names the backend keeps its objects is refused while
+//     that target has unfinished jobs, unless force is set, as UpdateRST refuses it.
+//   - With verify, the new configuration must reach its store from this host (verifyOnRemote).
+//     The check runs on the configuration the caller sent, before the stored one is compared with
+//     expected. So a backend changed in between is still refused as stale.
+func (m *Manager) UpdateRSTBackend(ctx context.Context, name string, backend *flex.RemoteStorageTarget, expected *flex.RemoteStorageTarget, force bool, verify bool) (*beeremote.ApplyResult, []uint32, string, error) {
+	backend = rst.NormalizeConfig(backend)
+	if err := checkBackendConfig(backend); err != nil {
+		return nil, nil, "", err
+	}
+	note, err := verifyOnRemote(ctx, backend, verify)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+	newName := backend.GetName()
+	var affected []uint32
+	set, err := m.updateRSTs(func(set *rstdb.Set) error {
+		stored, ok := set.Backends[name]
+		if !ok {
+			return status.Errorf(codes.NotFound, "remote storage backend %q does not exist", name)
+		}
+		if !proto.Equal(rst.NormalizeConfig(stored), rst.NormalizeConfig(expected)) {
+			return status.Errorf(codes.Aborted, "remote storage backend %q was changed by someone else, read it again and retry", name)
+		}
+		if stored.WhichType() != backend.WhichType() {
+			return status.Errorf(codes.InvalidArgument, "the type of remote storage backend %q cannot change (hint: create a new backend and point its targets at it)", name)
+		}
+		before, err := effectiveOf(set, set.TargetsUsing(name))
+		if err != nil {
+			return err
+		}
+
+		delete(set.Backends, name)
+		if newName != name {
+			if _, taken := set.Backends[newName]; taken {
+				return status.Errorf(codes.AlreadyExists, "remote storage backend %q already exists", newName)
+			}
+			relinkTargets(set, name, newName)
+		}
+		set.Backends[newName] = backend
+		var moved []uint32
+		if affected, moved, err = m.effectiveChanges(ctx, set, before); err != nil {
+			return err
+		}
+		return m.refuseStrandingMove(ctx, moved, force)
+	})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	m.log.Info("updated remote storage backend", zap.String("name", name), zap.String("newName", newName), zap.Uint32s("affectedRSTs", affected))
+	apply, err := m.applyRSTs(ctx, set)
+	return apply, affected, note, err
+}
+
+// DeleteRSTBackend removes the backend called name. It is refused while any target names the
+// backend, and the error lists those targets. An admin first gives each one another backend, or
+// removes its backend, which keeps the values it inherited (see UpdateRST). So a delete never
+// changes a target's effective configuration, and there is nothing to check or apply.
+//
+// Unlike a target, a backend keeps no delete record, because nothing outside rstDB names it.
+func (m *Manager) DeleteRSTBackend(ctx context.Context, name string) error {
+	m.rstConfigMu.Lock()
+	defer m.rstConfigMu.Unlock()
+
+	_, err := m.updateRSTs(func(set *rstdb.Set) error {
+		if _, ok := set.Backends[name]; !ok {
+			return status.Errorf(codes.NotFound, "remote storage backend %q does not exist", name)
+		}
+		if users := set.TargetsUsing(name); len(users) > 0 {
+			return status.Errorf(codes.FailedPrecondition, "remote storage backend %q is used by remote storage targets %s (hint: give each one another backend, or run 'beegfs remote target modify <id> --backend=', which keeps the values it inherits)", name, joinIDs(users))
+		}
+		delete(set.Backends, name)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	m.log.Info("deleted remote storage backend", zap.String("name", name))
+	return nil
+}
+
+const (
+	// defaultVerifyTimeout is how long each host may take to verify a backend when the caller sets
+	// no timeout. A store that answers at all answers within seconds. The rest covers the SDK's
+	// connect timeout to an endpoint that drops packets.
+	defaultVerifyTimeout = 30 * time.Second
+	// maxVerifyTimeout bounds what a caller may ask for, so a verify cannot hold a server
+	// goroutine and a connection to every node for an unbounded time.
+	maxVerifyTimeout = 5 * time.Minute
+)
+
+// VerifyRSTBackend checks that the stored backend called name reaches its store, from this
+// Remote and from every worker node (see workermgr.VerifyBackend). timeout bounds each host. 0
+// means defaultVerifyTimeout.
+//
+// The backend is read without rstConfigMu. Verify contacts the store and every node, so it must not
+// hold up a change. A change made while it runs does not affect the result, which is for the
+// definition read at the start.
+func (m *Manager) VerifyRSTBackend(ctx context.Context, name string, timeout time.Duration) ([]*beeremote.VerifyRSTBackendResponse_HostResult, error) {
+	switch {
+	case timeout == 0:
+		timeout = defaultVerifyTimeout
+	case timeout > maxVerifyTimeout:
+		return nil, status.Errorf(codes.InvalidArgument, "the verify timeout can be at most %s", maxVerifyTimeout)
+	}
+	set, err := m.rstDB.Load()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	backend, ok := set.Backends[name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "remote storage backend %q does not exist", name)
+	}
+	return m.workerManager.VerifyBackend(ctx, backend, timeout), nil
+}
+
+// verifyOnRemote runs the verify a create or update of a backend asked for, on backend, which is
+// not stored yet. It checks from this host only. Worker nodes are checked with VerifyRSTBackend
+// once the backend is stored. It returns the check's note, or "", and does nothing without verify.
+//
+// The callers run it before they take rstConfigMu. It contacts the store, for up to
+// defaultVerifyTimeout, and must not hold up other changes meanwhile. A failure is
+// FailedPrecondition, and nothing is stored.
+func verifyOnRemote(ctx context.Context, backend *flex.RemoteStorageTarget, verify bool) (string, error) {
+	if !verify {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, defaultVerifyTimeout)
+	defer cancel()
+	note, err := rst.VerifyBackend(ctx, backend)
+	if err != nil {
+		return "", status.Errorf(codes.FailedPrecondition, "remote storage backend %q does not reach its store from Remote, so nothing was stored: %s", backend.GetName(), err)
+	}
+	return note, nil
+}
+
+// checkBackendConfig checks what a backend must be on its own, before it is compared with the
+// stored set: it has a name and no ID, and passes rst.ValidateBackend. That covers its type, the
+// owner rules of a backend (rst.CheckDefinitionSettings), and its list entries.
+func checkBackendConfig(backend *flex.RemoteStorageTarget) error {
+	if err := rst.CheckName("remote storage backend", backend.GetName()); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if backend.GetId() != 0 {
+		return status.Error(codes.InvalidArgument, "a remote storage backend has no ID")
+	}
+	if err := rst.ValidateBackend(backend); err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid remote storage backend %q: %s", backend.GetName(), err)
+	}
+	return nil
+}
+
+// relinkTargets makes every target in set that names the backend called from name the backend to
+// instead. A rename uses it.
+func relinkTargets(set *rstdb.Set, from string, to string) {
+	for _, config := range set.Live {
+		if config.GetBackend() == from {
+			config.SetBackend(to)
+		}
+	}
+}
+
+// effectiveOf returns the effective configuration of each target in ids.
+func effectiveOf(set *rstdb.Set, ids []uint32) (map[uint32]*flex.RemoteStorageTarget, error) {
+	effective := make(map[uint32]*flex.RemoteStorageTarget, len(ids))
+	for _, id := range ids {
+		config, err := set.Effective(id)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		effective[id] = config
+	}
+	return effective, nil
+}
+
+// effectiveChanges runs after a backend change was made to set, and before set is stored. before
+// holds the effective configuration of every target that names the backend, read before the change.
+// It returns, each sorted:
+//   - affected: the targets whose effective configuration changed.
+//   - moved: the affected targets that now keep their objects somewhere else (rst.IdentityChanged).
+//
+// It returns an error when an affected target's new effective configuration does not resolve or is
+// not valid, as UpdateRST does for one target. The caller passes moved to refuseStrandingMove.
+func (m *Manager) effectiveChanges(ctx context.Context, set *rstdb.Set, before map[uint32]*flex.RemoteStorageTarget) (affected []uint32, moved []uint32, err error) {
+	affected = []uint32{}
+	moved = []uint32{}
+	for _, id := range slices.Sorted(maps.Keys(before)) {
+		after, err := resolveTarget(set.Live[id], set)
+		if err != nil {
+			return nil, nil, err
+		}
+		if proto.Equal(rst.NormalizeConfig(before[id]), rst.NormalizeConfig(after)) {
+			continue
+		}
+		affected = append(affected, id)
+		if err := m.validateEffective(ctx, after); err != nil {
+			return nil, nil, err
+		}
+		if rst.IdentityChanged(before[id], after) {
+			moved = append(moved, id)
+		}
+	}
+	return affected, moved, nil
+}
+
+// refuseStrandingMove refuses a change that moves where the targets in moved keep their objects
+// (rst.IdentityChanged), while any of them has unfinished jobs. Those jobs may refer to remote
+// paths the change moves. Its inputs:
+//   - moved: UpdateRST passes the one target it changes. UpdateRSTBackend passes every target whose
+//     effective configuration moves.
+//   - force: allows the change without reading the path DB.
+//
+// It counts the jobs of every target in one read of the path DB. The FailedPrecondition error names
+// each target that has some.
+func (m *Manager) refuseStrandingMove(ctx context.Context, moved []uint32, force bool) error {
+	if force || len(moved) == 0 {
+		return nil
+	}
+	counts, err := m.countUnfinishedJobsOf(ctx, moved)
+	if err != nil {
+		return status.Errorf(codes.Internal, "unable to check for unfinished jobs: %s", err)
+	}
+	inUse := []string{}
+	for _, id := range moved {
+		if counts[id] > 0 {
+			inUse = append(inUse, fmt.Sprintf("target %d has %d", id, counts[id]))
+		}
+	}
+	if len(inUse) == 0 {
+		return nil
+	}
+	return status.Errorf(codes.FailedPrecondition, "the change may strand unfinished jobs, because it moves where their remote storage targets keep objects: %s (hint: use force to change it anyway)", strings.Join(inUse, ", "))
+}
+
+func joinIDs(ids []uint32) string {
+	text := make([]string, 0, len(ids))
+	for _, id := range ids {
+		text = append(text, strconv.FormatUint(uint64(id), 10))
+	}
+	return strings.Join(text, ", ")
+}
+
+// updateRSTs stores a change to the set through rstDB.Update, which every change in this file uses.
+// change returns gRPC status errors for the request's mistakes. Any other error comes from rstDB
+// itself, such as a failed read or write, and is returned as Internal. Without that, gRPC would
+// report it as Unknown.
+func (m *Manager) updateRSTs(change func(*rstdb.Set) error) (rstdb.Set, error) {
+	set, err := m.rstDB.Update(change)
+	if err != nil {
+		if _, ok := status.FromError(err); !ok {
+			return rstdb.Set{}, status.Error(codes.Internal, err.Error())
+		}
+	}
+	return set, err
+}
+
+// invalidTemplate returns the InvalidArgument error for a template AdoptRSTBuckets refuses. A
+// template has no ID and no name, so unlike the errors of checkTargetDefinition and resolveTarget it
+// names neither. hint, when not "", is added to the error.
+func invalidTemplate(err error, hint string) error {
+	if hint != "" {
+		return status.Errorf(codes.InvalidArgument, "invalid adopt template: %s (hint: %s)", err, hint)
+	}
+	return status.Errorf(codes.InvalidArgument, "invalid adopt template: %s", err)
+}
+
+// checkNewDefinition runs the checks every target definition passes before create, adopt or
+// update stores it, and returns the effective configuration:
+//   - The owner rules, on the definition itself (checkTargetDefinition). adopt and hint are passed
+//     to it.
+//   - Resolving the definition with the backends in set (resolveTarget).
+//   - Validating the effective configuration (validateEffective).
+func (m *Manager) checkNewDefinition(ctx context.Context, config *flex.RemoteStorageTarget, set *rstdb.Set, adopt bool, hint string) (*flex.RemoteStorageTarget, error) {
+	if err := checkTargetDefinition(config, adopt, hint); err != nil {
+		return nil, err
+	}
+	effective, err := resolveTarget(config, set)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.validateEffective(ctx, effective); err != nil {
+		return nil, err
+	}
+	return effective, nil
+}
+
+// resolveTarget returns the effective configuration of the target definition config, with the
+// backends in set. A backend that is missing, or has another type than the target
+// (rst.CheckBackendType), is the caller's mistake, so it is reported as an invalid argument. Create
+// and update both resolve through here, so both refuse a backend of another type.
+func resolveTarget(config *flex.RemoteStorageTarget, set *rstdb.Set) (*flex.RemoteStorageTarget, error) {
+	effective, err := rst.Resolve(config, set.Backends)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "remote storage target %d (%s): %s", config.GetId(), config.GetName(), err)
+	}
+	return effective, nil
+}
+
+// checkNewTargetName applies the naming rule (rst.CheckName) to the name of config, when it is set
+// and differs from before. before is the name the target had, or "" on create. A stored or imported
+// name that predates the rule is kept, so a change that leaves it alone still works. An empty name
+// is not checked here: create generates one, and ValidateTarget allows a target without one.
+func checkNewTargetName(config *flex.RemoteStorageTarget, before string) error {
+	name := config.GetName()
+	if name == "" || name == before {
+		return nil
+	}
+	if err := rst.CheckName("remote storage target", name); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	return nil
+}
+
+// checkTargetDefinition applies the owner rules (rst.CheckDefinitionSettings) to config, a target's
+// own definition, before it is stored. It checks the definition rather than the effective
+// configuration, because the rules are about who sets each value. adopt is whether the request
+// adopts existing buckets. hint, when not "", is added to the error, which is InvalidArgument.
+func checkTargetDefinition(config *flex.RemoteStorageTarget, adopt bool, hint string) error {
+	err := rst.CheckTargetDefinition(config, adopt)
+	if err == nil {
+		return nil
+	}
+	if hint != "" {
+		return status.Errorf(codes.InvalidArgument, "invalid remote storage target %d (%s): %s (hint: %s)", config.GetId(), config.GetName(), err, hint)
+	}
+	return status.Errorf(codes.InvalidArgument, "invalid remote storage target %d (%s): %s", config.GetId(), config.GetName(), err)
+}
+
+// validateEffective checks the effective configuration of a target before it is stored, with
+// rst.ValidateTarget. The TOML import uses the same function, so every target meets the same rules.
+func (m *Manager) validateEffective(ctx context.Context, effective *flex.RemoteStorageTarget) error {
+	if err := m.workerManager.ValidateRST(ctx, effective); err != nil {
+		return status.Errorf(codes.InvalidArgument, "remote storage target %d (%s): %s", effective.GetId(), effective.GetName(), err)
+	}
+	return nil
+}
+
+// GetRSTDefinitions returns every backend, sorted by name, and every live target as stored, sorted
+// by ID. A stored target has only the values it sets itself.
+func (m *Manager) GetRSTDefinitions() ([]*flex.RemoteStorageTarget, []*flex.RemoteStorageTarget, error) {
+	set, err := m.rstDB.Load()
+	if err != nil {
+		return nil, nil, status.Error(codes.Internal, err.Error())
+	}
+	backends := make([]*flex.RemoteStorageTarget, 0, len(set.Backends))
+	for _, name := range slices.Sorted(maps.Keys(set.Backends)) {
+		backends = append(backends, set.Backends[name])
+	}
+	definitions := make([]*flex.RemoteStorageTarget, 0, len(set.Live))
+	for _, id := range slices.Sorted(maps.Keys(set.Live)) {
+		definitions = append(definitions, set.Live[id])
+	}
+	return backends, definitions, nil
+}
+
+// applyRSTs applies a set just stored in rstDB. The set is already the source of truth, so a
+// failure here is reported to the caller and logged, and the next start applies the set. Worker
+// nodes and providers only ever get effective configurations.
+func (m *Manager) applyRSTs(ctx context.Context, set rstdb.Set) (*beeremote.ApplyResult, error) {
+	live, err := set.EffectiveLive()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	apply, err := m.workerManager.ApplyRSTs(ctx, live, set.Deleted)
+	if err != nil {
+		m.log.Error("the remote storage target change was stored but could not be applied, it applies when Remote restarts", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "the change was stored but could not be applied, it applies when Remote restarts: %s", err)
+	}
+	return apply, nil
+}
+
+func rstNotFound(set *rstdb.Set, id uint32) error {
+	if deleted, ok := set.Deleted[id]; ok {
+		return status.Errorf(codes.NotFound, "remote storage target %d (%s) was deleted", id, deleted.Config.GetName())
+	}
+	return status.Errorf(codes.NotFound, "remote storage target %d does not exist", id)
+}
+
+// countUnfinishedJobs counts the jobs of RST id that have not ended: every job that is not
+// COMPLETED, OFFLOADED or CANCELLED. FAILED, UNKNOWN and RESERVED jobs count, because they may
+// still hold a file's lock or need to be undone.
+//
+// Remote keeps no index of jobs by RST, so this reads every path entry. It runs only for rare
+// admin operations, but it may take seconds on a large path DB.
+func (m *Manager) countUnfinishedJobs(ctx context.Context, id uint32) (int64, error) {
+	counts, err := m.countUnfinishedJobsOf(ctx, []uint32{id})
+	if err != nil {
+		return 0, err
+	}
+	return counts[id], nil
+}
+
+// countUnfinishedJobsOf counts the unfinished jobs of every RST in ids, in one read of the path DB.
+// See countUnfinishedJobs for what counts.
+func (m *Manager) countUnfinishedJobsOf(ctx context.Context, ids []uint32) (map[uint32]int64, error) {
+	nextEntry, cleanup, err := m.pathStore.GetEntries()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	counts := make(map[uint32]int64, len(ids))
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entry, err := nextEntry()
+		if err != nil {
+			return nil, fmt.Errorf("unable to read the path database: %w", err)
+		}
+		if entry == nil {
+			return counts, nil
+		}
+		for _, job := range entry.Entry.Value {
+			id := job.Request.GetRemoteStorageTarget()
+			if slices.Contains(ids, id) && !job.InTerminalState() {
+				counts[id]++
+			}
+		}
+	}
+}
