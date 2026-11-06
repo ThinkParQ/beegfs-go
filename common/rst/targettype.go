@@ -75,6 +75,9 @@ type TargetType interface {
 	// change in the store. note is a detail about a check that passed, or "". It is the only method
 	// that contacts the store, so only an explicit verify calls it.
 	VerifyBackend(ctx context.Context, backend *flex.RemoteStorageTarget) (note string, err error)
+	// Buckets returns how this type manages the buckets in the store of a backend (see bucket.go),
+	// or nil when it cannot.
+	Buckets() BucketManager
 }
 
 // BackendRole says what a backend does with a setting. See the top of this file.

@@ -240,14 +240,21 @@ func newS3AWSClient(ctx context.Context, s3Config *flex.RemoteStorageTarget_S3, 
 		return nil, fmt.Errorf("unable to parse s3 end-point: %w", err)
 	}
 	bucket := s3Config.GetBucket()
-	host := endpointUrl.Hostname()
-	usePathStyle := bucket == "" || !strings.HasPrefix(host, bucket+".")
+	usePathStyle := !s3VirtualHosted(endpointUrl.Hostname(), bucket)
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = usePathStyle
 		for _, optFn := range options {
 			optFn(o)
 		}
 	}), nil
+}
+
+// s3VirtualHosted reports whether newS3AWSClient addresses bucket in virtual-hosted style on host.
+// That is the case when the host starts with the bucket as its own label, as in
+// archive.s3.example.com for bucket archive. With no bucket it is never the case. Host names ignore
+// case, so Archive.S3.example.com matches too. S3 bucket names are lowercase.
+func s3VirtualHosted(host string, bucket string) bool {
+	return bucket != "" && strings.HasPrefix(strings.ToLower(host), bucket+".")
 }
 
 // newS3WithOptions constructs an S3Client. withS3ApiClient is applied before the client is

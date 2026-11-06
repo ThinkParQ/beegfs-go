@@ -144,6 +144,9 @@ outside an app's core business logic, it probably belongs here.
   definition from Remote before storing it. `backend verify` checks a stored backend from Remote
   and every sync node. `rstdb` stores only what each target sets.
   `[[remote-storage-target]]` sections in the TOML file are imported once, into an empty database.
+  `beegfs remote bucket` (alias `container`) manages the buckets of a backend's store through
+  Remote (`rst/remote/internal/job/rstbucket.go`, each type's `rst.BucketManager`). Delete refuses
+  a bucket a live target uses, and a populated bucket without `--force`.
 - `rst/sync/` (`beegfs-sync`) — worker processes that perform the actual transfers to/from
   S3-compatible object storage (stubbing, offloading, rehydration).
 - Service definitions live in `protobuf/proto/beeremote.proto` and `flex.proto`.

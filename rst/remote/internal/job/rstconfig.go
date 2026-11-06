@@ -567,11 +567,13 @@ func resolveTarget(config *flex.RemoteStorageTarget, set *rstdb.Set) (*flex.Remo
 
 // validateEffective checks the effective configuration of a target before it is stored, with
 // rst.ValidateTarget. The TOML import uses the same function, so every target meets the same rules.
+// It also refuses a target that would use a bucket being deleted (checkNotBeingDeleted). Every
+// caller holds rstConfigMu, which that check needs.
 func (m *Manager) validateEffective(ctx context.Context, effective *flex.RemoteStorageTarget) error {
 	if err := m.workerManager.ValidateRST(ctx, effective); err != nil {
 		return status.Errorf(codes.InvalidArgument, "remote storage target %d (%s): %s", effective.GetId(), effective.GetName(), err)
 	}
-	return nil
+	return m.checkNotBeingDeleted(effective)
 }
 
 // GetRSTDefinitions returns every backend, sorted by name, and every live target as stored, sorted
