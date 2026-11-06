@@ -131,42 +131,59 @@ func newXtreemstore(ctx context.Context, rstConfig *flex.RemoteStorageTarget, mo
 	wrapper.Provider = s3Client
 	wrapper.bulkOperationCfgs = make(map[flex.RemoteStorageTarget_XtreemStore_BulkOperation_Operation]*BulkOperation)
 	for _, operation := range xtreemstore.BulkOperations {
-		name := operation.GetOperation().String()
-		if operation.GetOperation() == flex.RemoteStorageTarget_XtreemStore_BulkOperation_UNKNOWN {
-			return nil, fmt.Errorf("bulk operation must specify a valid operation")
+		cfg, err := parseBulkOperationConfig(operation)
+		if err != nil {
+			return nil, err
 		}
 		if _, exists := wrapper.bulkOperationCfgs[operation.GetOperation()]; exists {
-			return nil, fmt.Errorf("bulk operation, %s, is configured more than once", name)
+			return nil, fmt.Errorf("bulk operation, %s, is configured more than once", bulkOperationFlagName(operation.GetOperation()))
 		}
-
-		cfg := &BulkOperation{
-			RetryDelay: DefaultRetryDelay,
-			PollDelay:  DefaultPollDelay,
-		}
-
-		if operation.RetryDelay != nil {
-			retryDelay, err := time.ParseDuration(strings.ToLower(operation.GetRetryDelay()))
-			if err != nil {
-				return nil, fmt.Errorf("bulk operation, %s, has invalid retryDelay: %w", name, err)
-			} else if retryDelay < time.Duration(time.Second) {
-				return nil, fmt.Errorf("bulk operation, %s, must specify retryDelay >= '1s'", name)
-			}
-			cfg.RetryDelay = retryDelay
-		}
-
-		if operation.PollDelay != nil {
-			pollDelay, err := time.ParseDuration(strings.ToLower(operation.GetPollDelay()))
-			if err != nil {
-				return nil, fmt.Errorf("bulk operation, %s, has invalid pollDelay: %w", name, err)
-			} else if pollDelay < time.Duration(time.Second) {
-				return nil, fmt.Errorf("bulk operation, %s, must specify pollDelay >= '1s'", name)
-			}
-			cfg.PollDelay = pollDelay
-		}
-
 		wrapper.bulkOperationCfgs[operation.GetOperation()] = cfg
 	}
 	return wrapper, nil
+}
+
+// parseBulkOperationConfig checks one bulk operation entry on its own and returns its settings. The
+// provider calls it for every operation it is built with. xtreemstoreBulkOperations.ValidateEntries
+// calls it for a backend's operations, because a backend never builds a provider, and every target
+// that names it inherits each operation whole. Rules:
+//   - The operation must be named. An unnamed one decodes to UNKNOWN, and would silently enable
+//     nothing.
+//   - retry-delay and poll-delay are optional, and default to DefaultRetryDelay and
+//     DefaultPollDelay. A given delay must be at least one second.
+//
+// An operation configured twice is the provider's check, because it needs every entry.
+//
+// Errors name the operation and each field the way the CLI and its output do, such as
+// efficient-retrieve and poll-delay (see parseS3StorageClass).
+func parseBulkOperationConfig(operation *flex.RemoteStorageTarget_XtreemStore_BulkOperation) (*BulkOperation, error) {
+	name := bulkOperationFlagName(operation.GetOperation())
+	if operation.GetOperation() == flex.RemoteStorageTarget_XtreemStore_BulkOperation_UNKNOWN {
+		return nil, fmt.Errorf("bulk operation must specify a valid operation")
+	}
+	cfg := &BulkOperation{
+		RetryDelay: DefaultRetryDelay,
+		PollDelay:  DefaultPollDelay,
+	}
+	if operation.RetryDelay != nil {
+		retryDelay, err := time.ParseDuration(strings.ToLower(operation.GetRetryDelay()))
+		if err != nil {
+			return nil, fmt.Errorf("bulk operation, %s, has invalid retry-delay: %w", name, err)
+		} else if retryDelay < time.Second {
+			return nil, fmt.Errorf("bulk operation, %s, must specify retry-delay >= '1s'", name)
+		}
+		cfg.RetryDelay = retryDelay
+	}
+	if operation.PollDelay != nil {
+		pollDelay, err := time.ParseDuration(strings.ToLower(operation.GetPollDelay()))
+		if err != nil {
+			return nil, fmt.Errorf("bulk operation, %s, has invalid poll-delay: %w", name, err)
+		} else if pollDelay < time.Second {
+			return nil, fmt.Errorf("bulk operation, %s, must specify poll-delay >= '1s'", name)
+		}
+		cfg.PollDelay = pollDelay
+	}
+	return cfg, nil
 }
 
 func (x *xtreemstoreS3Provider) HeadObject(ctx context.Context, in *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {

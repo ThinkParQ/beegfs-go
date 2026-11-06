@@ -13,6 +13,7 @@ import (
 
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -149,6 +150,29 @@ func (s *WorkerNodeServer) UpdateConfig(ctx context.Context, request *flex.Updat
 		Message: "successfully applied updated configuration",
 	}.Build(), nil
 
+}
+
+// verifyReplyMargin is how much of the caller's deadline the node keeps for its answer. Without it,
+// a store that never answers would use up the whole deadline, and BeeRemote would see only that
+// the RPC timed out, not why.
+const verifyReplyMargin = time.Second
+
+// VerifyBackend checks that this node reaches the store of the backend in the request, and that the
+// store accepts its credentials (see rst.VerifyBackend). It reads and changes no state of the node,
+// so it also runs while the node is paused after rejecting a configuration. A failed check is an
+// answer, not an RPC error, so BeeRemote can tell it from a node it could not reach.
+func (s *WorkerNodeServer) VerifyBackend(ctx context.Context, request *flex.VerifyBackendRequest) (*flex.VerifyBackendResponse, error) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 2*verifyReplyMargin {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-verifyReplyMargin))
+		defer cancel()
+	}
+	note, err := rst.VerifyBackend(ctx, request.GetBackend())
+	if err != nil {
+		s.log.Warn("unable to verify a remote storage backend", zap.String("backend", request.GetBackend().GetName()), zap.Error(err))
+		return &flex.VerifyBackendResponse{Ok: false, Message: err.Error()}, nil
+	}
+	return &flex.VerifyBackendResponse{Ok: true, Message: note}, nil
 }
 
 func (s *WorkerNodeServer) BulkUpdateWork(ctx context.Context, request *flex.BulkUpdateWorkRequest) (*flex.BulkUpdateWorkResponse, error) {

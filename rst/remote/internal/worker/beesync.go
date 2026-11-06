@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
@@ -23,6 +25,11 @@ type BeeSyncNode struct {
 	*baseNode
 	conn   *grpc.ClientConn
 	client flex.WorkerNodeClient
+	// beeRemote is the BeeRemote address the last successful connect sent to the node. connect
+	// resolves an unspecified listen address (such as 0.0.0.0) to the address the node can reach,
+	// and UpdateConfig must send that same address, so the node keeps its connection to BeeRemote.
+	// connect writes it from the Handle goroutine while UpdateConfig reads it from others.
+	beeRemote atomic.Pointer[flex.BeeRemoteNode]
 }
 
 var _ Worker = &BeeSyncNode{}
@@ -122,7 +129,68 @@ func (n *BeeSyncNode) connect(ctx context.Context, config *flex.UpdateConfigRequ
 		return fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
 	}
 
+	n.beeRemote.Store(config.GetBeeRemote())
 	return nil
+}
+
+func (n *BeeSyncNode) UpdateConfig(request *flex.UpdateConfigRequest) error {
+	if _, ok := n.beginRPC(); !ok {
+		return ErrNodeNotConnected
+	}
+	defer n.rpcWG.Done()
+
+	request = proto.Clone(request).(*flex.UpdateConfigRequest)
+	request.SetNodeId(n.GetID())
+	if beeRemote := n.beeRemote.Load(); beeRemote != nil {
+		request.SetBeeRemote(beeRemote)
+	}
+
+	// BeeRemote waits for every node before it answers the admin who made the change, so one node
+	// that never answers must not hold that answer forever.
+	ctx, cancel := context.WithTimeout(n.rpcCtx, connectTimeout)
+	defer cancel()
+	resp, err := n.client.UpdateConfig(ctx, request)
+	if err == nil && resp.GetResult() != flex.UpdateConfigResponse_SUCCESS {
+		err = fmt.Errorf("%w: %s: %s", ErrConfigRejected, resp.GetResult(), resp.GetMessage())
+	}
+	if err != nil {
+		// The node may now hold a configuration BeeRemote no longer serves. Placing it offline
+		// stops new work from reaching it, and the reconnect sends the current configuration.
+		n.reportError(err)
+		return err
+	}
+	return nil
+}
+
+// VerifyBackend sends backend to the node, which contacts the backend's store. The deadline comes
+// from ctx, which BeeRemote sets per node. It is also cancelled when the node disconnects.
+func (n *BeeSyncNode) VerifyBackend(ctx context.Context, backend *flex.RemoteStorageTarget) (string, error) {
+	if _, ok := n.beginRPC(); !ok {
+		return "", ErrNodeNotConnected
+	}
+	defer n.rpcWG.Done()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(n.rpcCtx, cancel)
+	defer stop()
+	resp, err := n.client.VerifyBackend(ctx, &flex.VerifyBackendRequest{Backend: backend})
+	switch status.Code(err) {
+	case codes.Unimplemented:
+		return "", ErrVerifyUnsupported
+	case codes.Unavailable:
+		// The node is gone, such as a sync process that just stopped, but Remote has not noticed
+		// yet and still counts it as connected. That says nothing about the backend, so it is
+		// reported like any node that is not connected, not as a failed check.
+		return "", fmt.Errorf("%w: %s", ErrNodeNotConnected, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("the request to the node failed: %w", err)
+	}
+	if !resp.GetOk() {
+		return "", errors.New(resp.GetMessage())
+	}
+	return resp.GetMessage(), nil
 }
 
 func (n *BeeSyncNode) heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
