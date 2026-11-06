@@ -108,3 +108,5 @@ require (
 	honnef.co/go/tools v0.8.2 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
+
+replace github.com/thinkparq/protobuf => ../protobuf-rst-targets-v2

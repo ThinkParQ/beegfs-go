@@ -40,6 +40,12 @@ func plainS3Part(config *flex.RemoteStorageTarget, create bool) *flex.RemoteStor
 	return config.GetS3()
 }
 
+// s3Part returns the S3 part of config, or nil when it has none. A type that extends s3TargetType
+// inherits it with its own part function, which is how s3PartOf finds the S3 part of any such type.
+func (t s3TargetType) s3Part(config *flex.RemoteStorageTarget) *flex.RemoteStorageTarget_S3 {
+	return t.part(config, false)
+}
+
 func (s3TargetType) Name() string { return "s3" }
 
 func (s3TargetType) NewConfig() *flex.RemoteStorageTarget {
@@ -98,6 +104,10 @@ func (t s3TargetType) IdentityChanged(old, new *flex.RemoteStorageTarget) bool {
 func (t s3TargetType) VerifyBackend(ctx context.Context, backend *flex.RemoteStorageTarget) (string, error) {
 	return verifyS3Backend(ctx, t.part(backend, false))
 }
+
+// Buckets returns the S3 bucket manager, on the type's own S3 part. So an extending type such as
+// xtreemstore manages its buckets through the same S3 requests.
+func (t s3TargetType) Buckets() BucketManager { return newS3Buckets(t.part) }
 
 // s3StorageClasses is the storage-class list of an S3 part, keyed by the class name. The other
 // fields are the class's archival settings. A class with no archival settings shows them as unset.

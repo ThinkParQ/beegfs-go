@@ -155,6 +155,12 @@ type Manager struct {
 	// RSTs cannot be changed. rstConfigMu serializes every change to them, see rstconfig.go.
 	rstDB       *rstdb.Store
 	rstConfigMu sync.Mutex
+	// bucketDeletes holds the buckets a DeleteRSTBucket is emptying or deleting, so no target can be
+	// pointed at one meanwhile. Guarded by rstConfigMu. See rstbucket.go.
+	bucketDeletes map[bucketKey]*flex.RemoteStorageTarget
+	// bucketsOf returns the bucket manager of a backend. It is rst.BucketsOf when nil. Tests replace
+	// it, because the real one contacts the store.
+	bucketsOf func(backend *flex.RemoteStorageTarget) (rst.BucketManager, bool)
 }
 
 type managerOptConfig struct {

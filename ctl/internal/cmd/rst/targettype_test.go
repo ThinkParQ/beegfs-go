@@ -45,7 +45,8 @@ func (fakeAzureType) Settings() []cRst.Setting {
 func (fakeAzureType) VerifyBackend(context.Context, *flex.RemoteStorageTarget) (string, error) {
 	return "", nil
 }
-func (fakeAzureType) Lists() []cRst.KeyedList { return nil }
+func (fakeAzureType) Buckets() cRst.BucketManager { return nil }
+func (fakeAzureType) Lists() []cRst.KeyedList     { return nil }
 func (fakeAzureType) Example() string {
 	return "  beegfs remote target create azure --name=blob --account=acme"
 }

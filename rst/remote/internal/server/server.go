@@ -13,6 +13,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -318,6 +319,62 @@ func (s *BeeRemoteServer) VerifyRSTBackend(ctx context.Context, request *beeremo
 		return nil, err
 	}
 	return &beeremote.VerifyRSTBackendResponse{Hosts: hosts}, nil
+}
+
+func (s *BeeRemoteServer) ListRSTBuckets(ctx context.Context, request *beeremote.ListRSTBucketsRequest) (*beeremote.ListRSTBucketsResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	backends, err := s.jobMgr.ListRSTBuckets(ctx, request.GetBackend(), request.GetDetails())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.ListRSTBucketsResponse{Backends: backends}, nil
+}
+
+func (s *BeeRemoteServer) CreateRSTBucket(ctx context.Context, request *beeremote.CreateRSTBucketRequest) (*beeremote.CreateRSTBucketResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if request.GetBackend() == "" || request.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "the request needs a remote storage backend and a bucket name")
+	}
+	changes := rst.BucketChanges{Versioning: request.GetVersioning(), SetTags: request.GetTags()}
+	bucket, err := s.jobMgr.CreateRSTBucket(ctx, request.GetBackend(), request.GetName(), changes)
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.CreateRSTBucketResponse{Bucket: bucket}, nil
+}
+
+func (s *BeeRemoteServer) UpdateRSTBucket(ctx context.Context, request *beeremote.UpdateRSTBucketRequest) (*beeremote.UpdateRSTBucketResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if request.GetBackend() == "" || request.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "the request needs a remote storage backend and a bucket name")
+	}
+	changes := rst.BucketChanges{
+		Versioning: request.GetVersioning(),
+		SetTags:    request.GetSetTags(),
+		RemoveTags: request.GetRemoveTags(),
+		ClearTags:  request.GetClearTags(),
+	}
+	bucket, err := s.jobMgr.UpdateRSTBucket(ctx, request.GetBackend(), request.GetName(), changes)
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.UpdateRSTBucketResponse{Bucket: bucket}, nil
+}
+
+func (s *BeeRemoteServer) DeleteRSTBucket(ctx context.Context, request *beeremote.DeleteRSTBucketRequest) (*beeremote.DeleteRSTBucketResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if request.GetBackend() == "" || request.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "the request needs a remote storage backend and a bucket name")
+	}
+	objects, uploads, err := s.jobMgr.DeleteRSTBucket(ctx, request.GetBackend(), request.GetName(), request.GetForce())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.DeleteRSTBucketResponse{DeletedObjects: objects, AbortedUploads: uploads}, nil
 }
 
 func (s *BeeRemoteServer) UpdateWork(ctx context.Context, request *beeremote.UpdateWorkRequest) (*beeremote.UpdateWorkResponse, error) {
