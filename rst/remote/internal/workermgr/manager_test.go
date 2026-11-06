@@ -37,7 +37,7 @@ func newWorkTestManager(t *testing.T, workerConfigs []worker.Config) (*Manager, 
 	}
 
 	mgr, err := NewManager(
-		context.Background(), log, Config{}, workerConfigs, rstConfigs,
+		context.Background(), log, Config{}, workerConfigs, rstConfigs, nil,
 		&flex.BeeRemoteNode{}, filesystem.NewMockFS(), map[string]*flex.Feature{}, rst.DefaultStateRoot,
 	)
 	require.NoError(t, err)

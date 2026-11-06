@@ -22,6 +22,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/entry"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/rstdb"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/protobuf/go/beeremote"
@@ -116,6 +117,8 @@ func init() {
 
 type Config struct {
 	PathDBPath string `mapstructure:"path-db"`
+	// RSTDBPath is where the RSTs are stored, see the rstdb package.
+	RSTDBPath string `mapstructure:"rst-db"`
 	// StateRoot is the directory, relative to the BeeGFS mount point, where bulk operations persist
 	// the state a builder job needs to resume after a reschedule, crash or restart.
 	StateRoot string `mapstructure:"state-root"`
@@ -148,12 +151,24 @@ type Manager struct {
 	// pendingSyncGaugeReg is the registration for the remote.dispatch.pending_sync observable gauge
 	// callback; it is unregistered on Stop().
 	pendingSyncGaugeReg metric.Registration
+	// rstDB stores the RSTs. It is nil when the manager was built without WithRSTDB, and then the
+	// RSTs cannot be changed. rstConfigMu serializes every change to them, see rstconfig.go.
+	rstDB       *rstdb.Store
+	rstConfigMu sync.Mutex
 }
 
 type managerOptConfig struct {
 	releaseUnusedFileLockFn releaseUnusedFileLockFn
+	rstDB                   *rstdb.Store
 }
 type managerOpt func(*managerOptConfig)
+
+// WithRSTDB gives the manager the database the RSTs are stored in, which lets it change them.
+func WithRSTDB(db *rstdb.Store) managerOpt {
+	return func(cfg *managerOptConfig) {
+		cfg.rstDB = db
+	}
+}
 
 // Should only be used for testing.
 func withIgnoreReleaseUnusedFileLockFn() managerOpt {
@@ -219,6 +234,7 @@ func NewManager(log *logger.Logger, config Config, workerManager *workermgr.Mana
 		config:                  config,
 		workerManager:           workerManager,
 		releaseUnusedFileLockFn: cfg.releaseUnusedFileLockFn,
+		rstDB:                   cfg.rstDB,
 		metrics: managerMetrics{
 			jobRequests:     jobRequests,
 			jobTerminal:     jobTerminal,
@@ -840,15 +856,21 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 	var jobSubmission workermgr.JobSubmission
 	if jr.HasGenerationStatus() {
 		status := jr.GetGenerationStatus()
-		var ok bool
-		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
+		var deleted *rstdb.Deleted
+		var lookupErr error
+		if rstClient, deleted, lookupErr = m.rstForNewWork(job.Request.GetRemoteStorageTarget()); lookupErr != nil {
 			// A FAILED_PRECONDITION with an unknown rstId means the builder encountered a file
 			// whose RST config references an rstId that no longer exists (or never did). Treat it
-			// as ErrJobFailedPrecondition so the job gets the error rather than rejected.
+			// as ErrJobFailedPrecondition so the job gets the error rather than rejected. For a
+			// deleted RST the job gets the delete reason, which says more than the builder could.
 			if status.GetState() == beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION {
-				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, status.Message)
+				detail := status.Message
+				if deleted != nil {
+					detail = deletedRSTMessage(job.Request.GetRemoteStorageTarget(), deleted)
+				}
+				err = fmt.Errorf("%w: %s", rst.ErrJobFailedPrecondition, detail)
 			} else {
-				err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+				err = lookupErr
 				if isClaimedReservation {
 					m.cancelClaimedReservation(job, err)
 					return &beeremote.JobResult{Job: job.Get()}, err
@@ -873,9 +895,7 @@ func (m *Manager) SubmitJobRequest(jr *beeremote.JobRequest, originNodeID string
 			}
 		}
 	} else {
-		var ok bool
-		if rstClient, ok = m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]; !ok {
-			err = fmt.Errorf("rejecting job because the requested RST does not exist: %d", job.Request.GetRemoteStorageTarget())
+		if rstClient, _, err = m.rstForNewWork(job.Request.GetRemoteStorageTarget()); err != nil {
 			if isClaimedReservation {
 				m.cancelClaimedReservation(job, err)
 				return &beeremote.JobResult{Job: job.Get()}, err
@@ -1114,6 +1134,10 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	if jobUpdate.GetNewState() == beeremote.UpdateJobsRequest_UNSPECIFIED {
 		return nil, fmt.Errorf("no new job state specified (probably this indicates a bug in the caller)")
 	}
+	// The reason is added to the message of every job, which other users see.
+	if err := rst.CheckText("reason", jobUpdate.GetReason(), rst.MaxReasonLength); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	pathEntry, releasePath, err := m.pathStore.GetAndLockEntry(jobUpdate.GetPath())
 	if err != nil {
@@ -1166,7 +1190,13 @@ func (m *Manager) UpdateJobs(jobUpdate *beeremote.UpdateJobsRequest) (*beeremote
 	// potentially be made into a standalone function if it ever needs to be reused elsewhere.
 	applyUpdate := func(job *Job) {
 		// Attempt to apply the requested update.
+		stateBefore := job.GetStatus().GetState()
 		success, safeToDelete, newMessage := m.updateJobState(job, jobUpdate.GetNewState(), jobUpdate.GetForceUpdate(), false)
+		// The reason is recorded only on a job this update cancelled, so a job that was already
+		// cancelled keeps the reason it ended with.
+		if jobUpdate.HasReason() && stateBefore != beeremote.Job_CANCELLED && job.GetStatus().GetState() == beeremote.Job_CANCELLED {
+			job.GetStatus().SetMessage(appendMessage(job.GetStatus().GetMessage(), "reason: "+jobUpdate.GetReason()))
+		}
 		// If anything goes wrong the overall response should be !ok. If the response is already !ok
 		// from some other job, don't overwrite it:
 		response.SetOk(success && response.GetOk())
@@ -1385,7 +1415,8 @@ func (m *Manager) updateJobState(job *Job, newState beeremote.UpdateJobsRequest_
 			status.SetMessage("reservation cancelled before it was claimed")
 		}
 
-		rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+		// A job of a deleted RST is undone through its retired provider, see rstForUndo.
+		rstClient, _, ok := m.rstForUndo(job.Request.GetRemoteStorageTarget())
 		if !ok {
 			if forceUpdate {
 				status.SetState(beeremote.Job_CANCELLED)
@@ -1537,13 +1568,28 @@ func (m *Manager) UpdateWork(workResult *flex.Work) error {
 		}
 	}()
 
-	rst, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+	rst, deleted, ok := m.rstForUndo(job.Request.GetRemoteStorageTarget())
 	if !ok {
 		// We shouldn't return an error here. The caller (a worker node) can't do anything about
 		// this. Most likely a user updated the configuration and removed the RST so there is
 		// nothing we can do unless they were to add it back.
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage(fmt.Sprintf("unable to complete job because the RST no longer exists: %d (add it back or manually cleanup any artifacts from this job)", job.Request.GetRemoteStorageTarget()))
+		return nil
+	}
+
+	// The job's RST was deleted while it ran. Every work request has ended, so the job is undone
+	// through the retired provider instead of being completed, whatever the requests reported. A
+	// completed upload is aborted too, because its RST no longer exists for BeeRemote.
+	if deleted != nil {
+		if err := m.completeJob(job, rst, true); err != nil {
+			status.SetState(beeremote.Job_FAILED)
+			status.SetMessage(fmt.Sprintf("%s, and undoing this job failed (cancel the job to try again, or force the cancel to leave the file as it is): %s", deletedRSTMessage(job.Request.GetRemoteStorageTarget(), deleted), err))
+		} else {
+			status.SetState(beeremote.Job_CANCELLED)
+			status.SetMessage("cancelled because " + deletedRSTMessage(job.Request.GetRemoteStorageTarget(), deleted))
+			attemptToClearLock = true
+		}
 		return nil
 	}
 
@@ -1701,7 +1747,7 @@ func (m *Manager) cancelClaimedReservation(job *Job, reason error) {
 		return
 	}
 
-	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+	rstClient, _, ok := m.rstForUndo(job.Request.GetRemoteStorageTarget())
 	if !ok {
 		// Remote pushes its RST map to every sync node, and a builder turns an RST missing from that
 		// map into FAILED_PRECONDITION. So this RST was removed after the request was built.
@@ -1729,7 +1775,7 @@ func (m *Manager) abortCancelledReservation(job *Job) {
 	if status.GetState() != beeremote.Job_CANCELLED {
 		return
 	}
-	rstClient, ok := m.workerManager.RemoteStorageTargets[job.Request.GetRemoteStorageTarget()]
+	rstClient, _, ok := m.rstForUndo(job.Request.GetRemoteStorageTarget())
 	if !ok {
 		status.SetState(beeremote.Job_FAILED)
 		status.SetMessage(appendMessage(status.GetMessage(), "a claim arrived after the reservation was cancelled, and its changes could not be undone because the RST no longer exists (add it back and cancel the job, or force the cancel to leave the file as it is)"))
@@ -1966,12 +2012,25 @@ func getDefaultReleaseUnusedFileLock(ctx context.Context) releaseUnusedFileLockF
 	}
 }
 
-func (m *Manager) GetRSTConfig() ([]*flex.RemoteStorageTarget, error) {
-	rstConfigs := []*flex.RemoteStorageTarget{}
-	for _, client := range m.workerManager.RemoteStorageTargets {
-		rstConfigs = append(rstConfigs, client.GetConfig())
+// GetRSTConfig returns the live RSTs, sorted by ID. With includeDeleted it also returns the delete
+// record of every deleted RST, without its configuration.
+func (m *Manager) GetRSTConfig(includeDeleted bool) ([]*flex.RemoteStorageTarget, []*beeremote.DeletedRST) {
+	live := m.workerManager.LiveRSTs()
+	if !includeDeleted {
+		return live, nil
 	}
-	return rstConfigs, nil
+	deleted := []*beeremote.DeletedRST{}
+	for id, d := range m.workerManager.DeletedRSTs() {
+		deleted = append(deleted, &beeremote.DeletedRST{
+			Id:        id,
+			Name:      d.Config.GetName(),
+			Type:      rst.TypeName(d.Config),
+			Reason:    d.Reason,
+			DeletedAt: timestamppb.New(d.DeletedAt),
+		})
+	}
+	sort.Slice(deleted, func(i, j int) bool { return deleted[i].GetId() < deleted[j].GetId() })
+	return live, deleted
 }
 
 func (m *Manager) GetStubContents(path string) (uint32, string, error) {

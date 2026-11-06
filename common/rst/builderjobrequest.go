@@ -63,7 +63,7 @@ func clearContentLock(ctx context.Context, path string, pathState PathState) err
 type jobRequestBuilder struct {
 	log        *zap.Logger
 	mountPoint filesystem.Provider
-	RstMap     map[uint32]Provider
+	Providers  ProviderLookup
 	// submitRequest, reserveRequest and cancelReservation are the builder's calls to remote, as
 	// RemoteJobCalls describes. The builder clears a content lock itself only in
 	// lockAndCheckUnchanged, and only for a lock it just set for a request that writes the file.
@@ -468,7 +468,7 @@ func (w *jobRequestBuilder) processRequest(
 
 func (w *jobRequestBuilder) buildRequest(ctx context.Context, cfg *flex.JobRequestCfg, failedPrecondition error) *beeremote.JobRequest {
 	rstId := cfg.GetRemoteStorageTarget()
-	client, ok := w.RstMap[rstId]
+	client, ok := w.Providers.Get(rstId)
 	if !ok {
 		// The rstId is from the file's RST config but has no matching client. This means it was
 		// either removed after the file was configured, or was set incorrectly. Return a
@@ -520,7 +520,7 @@ func (w *jobRequestBuilder) reserveAndLock(
 ) (done bool, outcome submitOutcome, err error) {
 	done = true
 	rstId := request.GetRemoteStorageTarget()
-	client, ok := w.RstMap[rstId]
+	client, ok := w.Providers.Get(rstId)
 	if !ok {
 		err = fmt.Errorf("%w: rstId %d", ErrConfigRSTTypeIsUnknown, rstId)
 		return
@@ -799,6 +799,16 @@ func (w *jobRequestBuilder) prepareJobRequest(
 	applyPlan applyPlanFn,
 ) {
 	lockedInfo := cfg.GetLockedInfo()
+	// Verify the provider still exists before proceeding to make changes to the file since it's
+	// possible for it to have been deleted before the job reservation was taken.
+	client, ok := w.Providers.Get(request.GetRemoteStorageTarget())
+	if !ok {
+		request.SetGenerationStatus(&beeremote.JobRequest_GenerationStatus{
+			State:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
+			Message: fmt.Sprintf("%s: remote storage target %d no longer exists, it may have been deleted", ErrConfigRSTTypeIsUnknown, request.GetRemoteStorageTarget()),
+		})
+		return
+	}
 
 	checkpoint(checkpointGrace)
 	_, applyUndo, applyErr := applyPlan(ctx, &pathState)
@@ -831,8 +841,6 @@ func (w *jobRequestBuilder) prepareJobRequest(
 		}
 		return
 	}
-
-	client := w.RstMap[request.GetRemoteStorageTarget()]
 
 	checkpoint(checkpointGrace)
 	externalId, externalErr := client.GenerateExternalId(ctx, cfg)

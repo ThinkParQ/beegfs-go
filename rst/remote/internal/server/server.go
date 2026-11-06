@@ -216,14 +216,108 @@ func (s *BeeRemoteServer) GetRSTConfig(ctx context.Context, request *beeremote.G
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	rsts, err := s.jobMgr.GetRSTConfig()
+	rsts, deleted := s.jobMgr.GetRSTConfig(request.GetIncludeDeleted())
+	response := &beeremote.GetRSTConfigResponse{
+		Rsts:    rsts,
+		Deleted: deleted,
+	}
+	if request.GetIncludeDefinitions() {
+		backends, definitions, err := s.jobMgr.GetRSTDefinitions()
+		if err != nil {
+			return nil, err
+		}
+		response.SetBackends(backends)
+		response.SetDefinitions(definitions)
+	}
+	return response, nil
+}
+
+func (s *BeeRemoteServer) CreateRST(ctx context.Context, request *beeremote.CreateRSTRequest) (*beeremote.CreateRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasRst() {
+		return nil, status.Error(codes.InvalidArgument, "the request has no remote storage target")
+	}
+	created, effective, apply, reusedUnfinished, err := s.jobMgr.CreateRST(ctx, request.GetRst(), request.GetForce())
 	if err != nil {
 		return nil, err
 	}
+	return &beeremote.CreateRSTResponse{Rst: created, Effective: effective, Apply: apply, ReusedUnfinishedJobs: reusedUnfinished}, nil
+}
 
-	return beeremote.GetRSTConfigResponse_builder{
-		Rsts: rsts,
-	}.Build(), nil
+func (s *BeeRemoteServer) UpdateRST(ctx context.Context, request *beeremote.UpdateRSTRequest) (*beeremote.UpdateRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasRst() || !request.HasExpected() {
+		return nil, status.Error(codes.InvalidArgument, "the request needs the new and the expected remote storage target")
+	}
+	if request.GetRst().GetId() != request.GetExpected().GetId() {
+		return nil, status.Error(codes.InvalidArgument, "the new and the expected remote storage target have different IDs")
+	}
+	effective, apply, err := s.jobMgr.UpdateRST(ctx, request.GetRst(), request.GetExpected(), request.GetForce())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.UpdateRSTResponse{Apply: apply, Effective: effective}, nil
+}
+
+func (s *BeeRemoteServer) DeleteRST(ctx context.Context, request *beeremote.DeleteRSTRequest) (*beeremote.DeleteRSTResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	unfinished, apply, err := s.jobMgr.DeleteRST(ctx, request.GetId(), request.GetReason(), request.GetDryRun())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.DeleteRSTResponse{UnfinishedJobs: unfinished, Apply: apply}, nil
+}
+
+func (s *BeeRemoteServer) CreateRSTBackend(ctx context.Context, request *beeremote.CreateRSTBackendRequest) (*beeremote.CreateRSTBackendResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasBackend() {
+		return nil, status.Error(codes.InvalidArgument, "the request has no remote storage backend")
+	}
+	created, note, err := s.jobMgr.CreateRSTBackend(ctx, request.GetBackend(), request.GetVerify())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.CreateRSTBackendResponse{Backend: created, VerifyNote: note}, nil
+}
+
+func (s *BeeRemoteServer) UpdateRSTBackend(ctx context.Context, request *beeremote.UpdateRSTBackendRequest) (*beeremote.UpdateRSTBackendResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if !request.HasBackend() || !request.HasExpected() {
+		return nil, status.Error(codes.InvalidArgument, "the request needs the new and the expected remote storage backend")
+	}
+	apply, affected, note, err := s.jobMgr.UpdateRSTBackend(ctx, request.GetName(), request.GetBackend(), request.GetExpected(), request.GetForce(), request.GetVerify())
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.UpdateRSTBackendResponse{Apply: apply, AffectedTargets: affected, VerifyNote: note}, nil
+}
+
+func (s *BeeRemoteServer) DeleteRSTBackend(ctx context.Context, request *beeremote.DeleteRSTBackendRequest) (*beeremote.DeleteRSTBackendResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if err := s.jobMgr.DeleteRSTBackend(ctx, request.GetName()); err != nil {
+		return nil, err
+	}
+	return &beeremote.DeleteRSTBackendResponse{}, nil
+}
+
+func (s *BeeRemoteServer) VerifyRSTBackend(ctx context.Context, request *beeremote.VerifyRSTBackendRequest) (*beeremote.VerifyRSTBackendResponse, error) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	if request.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "the request names no remote storage backend")
+	}
+	timeout := time.Duration(request.GetTimeoutMs()) * time.Millisecond
+	hosts, err := s.jobMgr.VerifyRSTBackend(ctx, request.GetName(), timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &beeremote.VerifyRSTBackendResponse{Hosts: hosts}, nil
 }
 
 func (s *BeeRemoteServer) UpdateWork(ctx context.Context, request *beeremote.UpdateWorkRequest) (*beeremote.UpdateWorkResponse, error) {

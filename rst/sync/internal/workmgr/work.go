@@ -160,9 +160,11 @@ type worker struct {
 	workJournal          *kvstore.MapStore[*workEntry]
 	jobStore             *kvstore.MapStore[map[string]string]
 	beeRemoteClient      *beeremote.Client
-	rescheduleWork       scheduler.AddRescheduleWorkTokenFn
-	workerSaturation     []func() float64
-	metrics              managerMetrics
+	// isReady reports whether the node holds a configuration Remote accepted (Manager.IsReady).
+	isReady          func() bool
+	rescheduleWork   scheduler.AddRescheduleWorkTokenFn
+	workerSaturation []func() float64
+	metrics          managerMetrics
 }
 
 func (w *worker) run(ctx context.Context) {
@@ -315,6 +317,21 @@ func (w *worker) process(shutdownCtx context.Context, work workAssignment) {
 		if w.sendWorkResult(shutdownCtx, work, result.Work).settled() {
 			cleanupEntries = true
 		}
+		return
+	}
+
+	// The manage loop pulls no work while the node is not ready, but a request it pulled before the
+	// node refused Remote's configuration may still be queued. Starting it would use RSTs Remote may
+	// no longer serve (see Manager.UpdateConfig), so it waits like a request that is not ready yet.
+	if !w.isReady() {
+		entry.ExecuteAfter = time.Now().Add(workDelayMinimum)
+		status.SetState(flex.Work_RESCHEDULED)
+		status.SetMessage("waiting for this node to accept the remote storage targets from remote")
+		if w.sendWorkResult(shutdownCtx, work, result.Work) == sendDiscarded {
+			cleanupEntries = true
+			return
+		}
+		w.rescheduleWork(work.submissionID, entry.ExecuteAfter)
 		return
 	}
 
