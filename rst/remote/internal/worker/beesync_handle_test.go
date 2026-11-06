@@ -29,11 +29,11 @@ func (s *hangingWorkerNodeServer) UpdateConfig(ctx context.Context, request *fle
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	return flex.UpdateConfigResponse_builder{Result: flex.UpdateConfigResponse_SUCCESS}.Build(), nil
+	return &flex.UpdateConfigResponse{Result: flex.UpdateConfigResponse_SUCCESS}, nil
 }
 
 func (s *hangingWorkerNodeServer) BulkUpdateWork(ctx context.Context, request *flex.BulkUpdateWorkRequest) (*flex.BulkUpdateWorkResponse, error) {
-	return flex.BulkUpdateWorkResponse_builder{Success: true}.Build(), nil
+	return &flex.BulkUpdateWorkResponse{Success: true}, nil
 }
 
 func (s *hangingWorkerNodeServer) Heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
@@ -42,7 +42,7 @@ func (s *hangingWorkerNodeServer) Heartbeat(ctx context.Context, request *flex.H
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	return flex.HeartbeatResponse_builder{State: flex.HeartbeatResponse_READY}.Build(), nil
+	return &flex.HeartbeatResponse{State: flex.HeartbeatResponse_READY}, nil
 }
 
 // startHandle runs Handle for a BeeSync node pointed at server, with a one second heartbeat
@@ -65,7 +65,7 @@ func startHandle(t *testing.T, server *hangingWorkerNodeServer) (*BeeSyncNode, c
 	config, bulk := connectInputs()
 	handleDone := make(chan struct{})
 	go func() {
-		beeSyncNode.Handle(&sync.WaitGroup{}, config, bulk, map[string]*flex.Feature{})
+		beeSyncNode.Handle(&sync.WaitGroup{}, func() (*flex.UpdateConfigRequest, func()) { return config, func() {} }, bulk, map[string]*flex.Feature{})
 		close(handleDone)
 	}()
 	return beeSyncNode, handleDone

@@ -83,11 +83,21 @@ func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode, nodeId string) error {
 	if newCfg == nil {
 		return ErrNilConfiguration
 	}
+	// Remote sends its configuration again after every change to its remote storage targets.
+	// Rebuilding the provider then would wait for every outstanding request and drop the connection
+	// to Remote for nothing, so an unchanged configuration keeps the provider it has.
+	if c.Provider != nil && c.config.nodeId == nodeId && proto.Equal(c.config.dynamic, newCfg) {
+		return nil
+	}
 	c.config.nodeId = nodeId
 
-	// Cleanup the old provider before swapping it out.
+	// Cleanup the old provider before swapping it out. It is cleared once disconnected, so a failure
+	// below leaves no provider rather than a closed one. The early return above needs a provider,
+	// so a retry with the same configuration then builds a new one instead of keeping the closed
+	// one. Every method treats a missing provider as not ready.
 	if c.Provider != nil {
 		c.disconnect()
+		c.Provider = nil
 	}
 
 	c.config.dynamic = newCfg

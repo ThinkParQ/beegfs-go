@@ -77,6 +77,28 @@ state-root = ".beegfs-rst"
 #
 # --- Section 1.3: [Remote Storage Target Settings] ---
 #
+# Remote Storage Targets are managed with 'beegfs remote target' and stored in job.rst-db. Targets
+# defined here are only imported the first time Remote starts with an empty job.rst-db. After that
+# this section is ignored, and Remote logs a warning while it is still present.
+#
+# Upgrading to a version with job.rst-db: every S3 target must set endpoint-url. Earlier versions
+# accepted an empty endpoint-url. The S3 library then chose the endpoint on each node on its own,
+# from that node's environment variables or shared config file, or from the region. So Remote and
+# every sync node had to be set up to agree by hand. A target without endpoint-url now stops Remote
+# at the first start, with an error that names the target, and nothing is imported. Set endpoint-url
+# to the endpoint the target used, then restart.
+#
+# Rolling back to a version of Remote without job.rst-db: that version reads targets only from this
+# file. Before downgrading:
+#   1. Run 'beegfs remote target list --verbose' and add a [[remote-storage-target]] section here
+#      for every target, with every value it shows. Older versions have no backends, so include
+#      the inherited values too.
+#   2. Remove any job.rst-db setting. Older versions refuse settings they do not know, and do not
+#      start.
+# A target missing from this file is unknown to the older version. Files and stubs that name it
+# cannot be pushed or pulled until the target is added back. After upgrading again, Remote uses
+# job.rst-db and ignores this file. Changes made here while rolled back are not imported unless
+# job.rst-db is removed first.
 
 # [[remote-storage-target]]
 # id = "1"
@@ -282,6 +304,12 @@ rate-limit-event-types = ["*"]
 # stored internally by Remote.
 
 # path-db: Path where the database tracking jobs for each path will be created/maintained.
+
+# rst-db: Path where the database storing the Remote Storage Targets will be created/maintained.
+# Targets are managed with 'beegfs remote target' and changes apply without a restart. It defaults
+# to rst.badger in the same directory as path-db, so it lives wherever path-db does. Keep it on
+# storage that survives a restart: if it is lost, Remote imports this file's targets again, and
+# every change and delete record made with the CLI is gone.
 
 # state-root: Directory where persistent state information may be stored and is available to and
 # shared among all sync workers. The directory's path must be relative inside the BeeGFS mount. It
@@ -513,7 +541,8 @@ rate-limit-event-types = ["*"]
 
 # Configuration for each Remote Storage Target (RST) should be specified under
 # [[remote-storage-target]] and includes all configuration that should apply to a particular RST.
-# Multiple RSTs can be specified by adding additional [[remote-storage-target]] sections.
+# Multiple RSTs can be specified by adding additional [[remote-storage-target]] sections. These
+# sections are only imported once, see Section 1.3. The same fields apply to 'beegfs remote target'.
 
 # id: A unique identifier for the RST. This is the ID that is set on entries in BeeGFS to indicate
 # they should be synchronized with this target. It is also how to indicate a specific RST when

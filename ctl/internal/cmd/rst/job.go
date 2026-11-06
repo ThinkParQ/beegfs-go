@@ -74,6 +74,7 @@ Because jobs can exist for paths that no longer exist in BeeGFS, recursive updat
 	cmd.Flags().UintSliceVar(&cfg.RemoteTargets, "remote-targets", nil, "Only update jobs for the specified remote targets. By default jobs for all remote targets are updated.")
 	cmd.Flags().BoolVar(&cfg.Recurse, "recurse", false, "Treat the provided path as a prefix and update all matching paths.")
 	cmd.Flags().Bool("yes", false, "Use to acknowledge when running this command may update a large number of entries.")
+	cmd.Flags().StringVar(&cfg.Reason, "message", "", "Why the jobs are cancelled. It is added to the message of every job this command cancels.")
 
 	return cmd
 }

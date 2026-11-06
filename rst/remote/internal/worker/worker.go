@@ -29,7 +29,7 @@ type Worker interface {
 	GetState() State
 	GetNodeType() Type
 	GetNumWorkers() int
-	Handle(*sync.WaitGroup, *flex.UpdateConfigRequest, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature)
+	Handle(*sync.WaitGroup, ConfigFn, *flex.BulkUpdateWorkRequest, map[string]*flex.Feature)
 	Stop()
 	// Implemented by specific node types:
 	//
@@ -38,10 +38,37 @@ type Worker interface {
 	// means the request could not be sent to the node or created due to an internal node error.
 	SubmitWork(*flex.WorkRequest) (*flex.Work, error)
 	UpdateWork(*flex.UpdateWorkRequest) (*flex.Work, error)
-	// TODO: https://github.com/ThinkParQ/bee-remote/issues/55
-	// Require UpdateConfig() once dynamic configuration updates are supported.
-	//   UpdateConfig(*flex.WorkerNodeConfigRequest) (*flex.WorkerNodeConfigResponse, error)
+	// UpdateConfig pushes a new configuration to a connected node. BeeRemote calls it after every
+	// change to its remote storage targets. It returns:
+	//   - ErrNodeNotConnected when the node is not connected. The node gets the current
+	//     configuration from its ConfigFn when it connects.
+	//   - An error wrapping ErrConfigRejected when the node refused the configuration.
+	//   - Any other error when the RPC failed.
+	// After a rejection or a failed RPC the node is placed offline and reconnects, which sends the
+	// current configuration again. So a node never keeps working with a configuration BeeRemote no
+	// longer serves.
+	UpdateConfig(*flex.UpdateConfigRequest) error
+	// VerifyBackend asks a connected node whether it reaches the store of backend, and whether the
+	// store accepts the backend's credentials (see rst.VerifyBackend). It returns:
+	//   - The node's note and nil when the check passed.
+	//   - ErrNodeNotConnected when the node is not connected, or cannot be reached although Remote
+	//     still counts it as connected.
+	//   - ErrVerifyUnsupported when the node is too old to verify a backend.
+	//   - Any other error when the check failed on the node, or the RPC failed.
+	// A failed verify changes nothing on the node or in BeeRemote. So unlike UpdateConfig, it never
+	// places the node offline.
+	VerifyBackend(ctx context.Context, backend *flex.RemoteStorageTarget) (note string, err error)
 }
+
+// ConfigFn returns the configuration to send to a node, and a release function. A node calls it on
+// every connect attempt, so an attempt always sends the configuration BeeRemote serves at that
+// moment. The node calls release once the attempt ends, after it marked itself ONLINE or failed.
+//
+// Until release, BeeRemote holds back any change to the configuration. That closes a gap: a change
+// pushed while the node is still connecting finds it not connected, and is skipped, while the
+// attempt already sent the previous configuration. Held back, the change waits until the node is
+// ONLINE, and then its push reaches the node.
+type ConfigFn func() (config *flex.UpdateConfigRequest, release func())
 
 // grpcClientHandler defines the interface for managing gRPC connections in worker nodes.
 // Implementers of this interface are responsible for establishing and terminating gRPC connections
@@ -267,7 +294,7 @@ func (n *baseNode) GetID() string {
 // time to complete before forcibly disconnecting them. To allow this to happen
 // it also requires a wait group that should be used to ensure nodes are
 // disconnected cleanly when the application is shutting down.
-func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) {
+func (n *baseNode) Handle(wg *sync.WaitGroup, config ConfigFn, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) {
 
 	wg.Add(1)
 	defer wg.Done()
@@ -298,7 +325,7 @@ func (n *baseNode) Handle(wg *sync.WaitGroup, config *flex.UpdateConfigRequest, 
 // waitUntilConnected attempts to connect to a worker node until either a connection succeeds or the
 // node context is cancelled. For any error, an exponential backoff delay will be observed before
 // retrying.
-func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
+func (n *baseNode) waitUntilConnected(config ConfigFn, wrUpdates *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var reconnectBackOff float64 = 1
 	var retryDelay time.Duration
 	// A rejected config repeats on every retry until an operator fixes it or the node is stopped.
@@ -319,9 +346,11 @@ func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdate
 				return err
 			}
 			connectCtx, cancel := context.WithTimeout(n.nodeCtx, connectTimeout)
-			err := n.connect(connectCtx, config, wrUpdates, requiredFeatures)
+			sent, release := config()
+			err := n.connect(connectCtx, sent, wrUpdates, requiredFeatures)
 			cancel()
 			if err != nil {
+				release()
 				// Leave UNKNOWN after the first failed attempt. The pool briefly waits for UNKNOWN
 				// nodes to finish starting, but the next attempt only comes after a backoff.
 				n.setState(OFFLINE)
@@ -346,6 +375,7 @@ func (n *baseNode) waitUntilConnected(config *flex.UpdateConfigRequest, wrUpdate
 				}
 			} else {
 				n.setState(ONLINE)
+				release()
 				n.log.Info("connected to node")
 				return nil
 			}

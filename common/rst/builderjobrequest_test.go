@@ -274,7 +274,7 @@ func TestJobRequestBuilder_BuildJobRequestCfgs(t *testing.T) {
 
 func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 	t.Run("unknown rstId returns failed precondition without a client", func(t *testing.T) {
-		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{}})
+		w := withReserveFakes(&jobRequestBuilder{Providers: ProviderMap{}})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 7}
 
 		request := w.buildRequest(context.Background(), cfg, nil)
@@ -288,7 +288,7 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 
 	t.Run("failedPrecondition produces a failed precondition request", func(t *testing.T) {
 		client := &MockClient{}
-		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{1: client}})
+		w := withReserveFakes(&jobRequestBuilder{Providers: ProviderMap{1: client}})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1}
 
 		request := w.buildRequest(context.Background(), cfg, errors.New("precondition failed"))
@@ -300,7 +300,7 @@ func TestJobRequestBuilder_BuildJobRequest(t *testing.T) {
 
 	t.Run("no failedPrecondition builds a normal request", func(t *testing.T) {
 		client := &MockClient{}
-		w := withReserveFakes(&jobRequestBuilder{RstMap: map[uint32]Provider{1: client}})
+		w := withReserveFakes(&jobRequestBuilder{Providers: ProviderMap{1: client}})
 		cfg := &flex.JobRequestCfg{
 			Path:                "/foo",
 			RemoteStorageTarget: 1,
@@ -319,7 +319,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{},
+			Providers:     ProviderMap{},
 			submitRequest: submissions.submit,
 		})
 		cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 99} // no matching client -> FAILED_PRECONDITION
@@ -341,7 +341,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		remote := &testRemoteCalls{}
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			reserveRequest:   remote.reserve,
 			addToBulkRequest: requireNoBulkRequest(t),
@@ -370,7 +370,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		var offeredOperation string
 		w := withReserveFakes(&jobRequestBuilder{
 			log:            zap.NewNop(),
-			RstMap:         map[uint32]Provider{1: client},
+			Providers:      ProviderMap{1: client},
 			submitRequest:  submissions.submit,
 			reserveRequest: reserveVia(submissions.submit),
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
@@ -421,7 +421,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -456,7 +456,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{1: client},
+			Providers:     ProviderMap{1: client},
 			submitRequest: submissions.submit,
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
 				return errors.New("bulk add failed")
@@ -498,7 +498,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{},
+			Providers:        ProviderMap{},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -523,8 +523,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
 		reserveErr := errors.New("remote is unreachable")
 		w := withReserveFakes(&jobRequestBuilder{
-			log:    zap.NewNop(),
-			RstMap: map[uint32]Provider{1: client},
+			log:       zap.NewNop(),
+			Providers: ProviderMap{1: client},
 			submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
 				return reserveErr
 			},
@@ -572,7 +572,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 				var reportedStates []BulkRequestState
 				w := withReserveFakes(&jobRequestBuilder{
 					log:            zap.NewNop(),
-					RstMap:         map[uint32]Provider{1: client},
+					Providers:      ProviderMap{1: client},
 					submitRequest:  submissions.submit,
 					reserveRequest: reserveVia(submissions.submit),
 					addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
@@ -621,7 +621,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		markErr := errors.New("status file is not writable")
 		w := withReserveFakes(&jobRequestBuilder{
 			log:            zap.NewNop(),
-			RstMap:         map[uint32]Provider{1: client},
+			Providers:      ProviderMap{1: client},
 			submitRequest:  submissions.submit,
 			reserveRequest: reserveVia(submissions.submit),
 			addToBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, operation string) error {
@@ -652,7 +652,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -694,7 +694,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		t.Cleanup(cancel)
 		w := withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{1: client},
+			Providers:         ProviderMap{1: client},
 			submitRequest:     submitAlwaysFails,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -719,7 +719,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -767,7 +767,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("", errors.New("no external id"))
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submitAlwaysFails,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -798,7 +798,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		t.Cleanup(cancel)
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -828,7 +828,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		remote := &testRemoteCalls{}
 		w := withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{1: client},
+			Providers:         ProviderMap{1: client},
 			submitRequest:     submitAlwaysFails,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -863,7 +863,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("upload-id", nil)
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submitAlwaysFails,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -887,7 +887,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:              zap.NewNop(),
-			RstMap:           map[uint32]Provider{1: client},
+			Providers:        ProviderMap{1: client},
 			submitRequest:    submissions.submit,
 			addToBulkRequest: requireNoBulkRequest(t),
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -922,8 +922,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		t.Run("an already offloaded request is kept when "+tc.name, func(t *testing.T) {
 			undoCalls := 0
 			w := withReserveFakes(&jobRequestBuilder{
-				log:    zap.NewNop(),
-				RstMap: map[uint32]Provider{1: &MockClient{}},
+				log:       zap.NewNop(),
+				Providers: ProviderMap{1: &MockClient{}},
 				submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
 					return tc.submitErr
 				},
@@ -955,8 +955,8 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 	t.Run("an already complete request is kept when it cannot be submitted", func(t *testing.T) {
 		undoCalls := 0
 		w := withReserveFakes(&jobRequestBuilder{
-			log:    zap.NewNop(),
-			RstMap: map[uint32]Provider{1: &MockClient{}},
+			log:       zap.NewNop(),
+			Providers: ProviderMap{1: &MockClient{}},
 			submitRequest: func(ctx context.Context, request *beeremote.JobRequest) error {
 				return ErrJobAlreadyComplete
 			},
@@ -987,7 +987,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		submissions := newTestSubmitter()
 		w := withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{},
+			Providers:     ProviderMap{},
 			submitRequest: submissions.submit,
 			planFileState: func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
 				t.Fatal("planFileState must not be called for a request that already has a GenerationStatus")
@@ -1017,7 +1017,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 		undoCalls := new(int)
 		w := withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{1: client},
+			Providers:         ProviderMap{1: client},
 			submitRequest:     submit,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -1058,7 +1058,7 @@ func TestJobRequestBuilder_ProcessJobRequestCfg(t *testing.T) {
 			return fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
 		}
 		w, cfg, remote, undoCalls := newUndoBuilder(t, submissions.submit)
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		request := w.buildRequest(context.Background(), cfg, nil)
 
 		outcome, submitted, err := w.processRequest(context.Background(), noopCheckpoint, cfg, PathState{EntryInfo: &entry.GetEntryCombinedInfo{}}, request, false)
@@ -1079,7 +1079,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		remote = &testRemoteCalls{}
 		return withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{},
+			Providers:         ProviderMap{},
 			submitRequest:     submissions.submit,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -1245,7 +1245,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		client := &MockClient{}
 		w := newBuilder()
 		w.builderCfg = &flex.JobRequestCfg{Download: true, Overwrite: true}
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.addToBulkRequest = requireNoBulkRequest(t)
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -1279,7 +1279,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
 		w.builderCfg = &flex.JobRequestCfg{Download: true, Overwrite: true}
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.addToBulkRequest = requireNoBulkRequest(t)
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -1302,7 +1302,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.addToBulkRequest = requireNoBulkRequest(t)
 		w.planFileState = func(mountPoint filesystem.Provider, cfg *flex.JobRequestCfg) (applyPlanFn, bool, error) {
@@ -1326,7 +1326,7 @@ func TestJobRequestBuilder_ProcessFromSource(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
-		w.RstMap = map[uint32]Provider{1: client, 2: client}
+		w.Providers = ProviderMap{1: client, 2: client}
 		w.setDirRstConfig = func(ctx context.Context, inMountPath string) error { return nil }
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
@@ -1383,7 +1383,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		reportedStates = nil
 		return withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{},
+			Providers:         ProviderMap{},
 			submitRequest:     submissions.submit,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -1418,7 +1418,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		// the builder does not trust, so the request is submitted carrying the error instead.
 		client := &MockClient{}
 		w := newBuilder()
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			// GetPathState always populates LockedInfo, even on its error paths, so mirror that here
 			// rather than returning a bare PathState -- the lock bookkeeping dereferences it.
@@ -1469,7 +1469,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
 		submissions.result = func(*beeremote.JobRequest) error { return ErrJobNotAllowed }
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
 				// A replay finds the lock the reservation pass took, so GetPathState reports it as
@@ -1502,7 +1502,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
 		submissions.result = func(*beeremote.JobRequest) error { return ErrReservationMissing }
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
 				// A replay finds the lock the reservation pass took, so GetPathState reports it as
@@ -1539,7 +1539,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		submissions.result = func(*beeremote.JobRequest) error {
 			return fmt.Errorf("%w: %w", ErrRequestNotDelivered, context.Canceled)
 		}
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
 				// A replay finds the lock the reservation pass took, so GetPathState reports it as
@@ -1567,7 +1567,7 @@ func TestJobRequestBuilder_ProcessFromBulkOperation(t *testing.T) {
 		client := &MockClient{}
 		client.On("GenerateExternalId", mock.Anything, mock.Anything).Return("external-id", nil)
 		w := newBuilder()
-		w.RstMap = map[uint32]Provider{1: client}
+		w.Providers = ProviderMap{1: client}
 		w.getPathState = func(ctx context.Context, mountPoint filesystem.Provider, inMountPath string, mode PathStateMode) (PathState, error) {
 			return PathState{
 				LockedInfo: &flex.JobLockedInfo{Mtime: timestamppb.Now()},
@@ -1620,7 +1620,7 @@ func TestJobRequestBuilder_UpdateBulkRequest(t *testing.T) {
 		updateBulkErr = nil
 		return withReserveFakes(&jobRequestBuilder{
 			log:           zap.NewNop(),
-			RstMap:        map[uint32]Provider{},
+			Providers:     ProviderMap{},
 			submitRequest: submissions.submit,
 			builderCfg:    &flex.JobRequestCfg{},
 			updateBulkRequest: func(ctx context.Context, request *beeremote.JobRequest, state BulkRequestState) error {
@@ -1763,7 +1763,7 @@ func TestJobRequestBuilder_ReserveAndLock(t *testing.T) {
 		applied := 0
 		w := withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{1: client},
+			Providers:         ProviderMap{1: client},
 			submitRequest:     submissions.submit,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -2141,7 +2141,7 @@ func TestJobRequestBuilderPlaceholder(t *testing.T) {
 		client.On("IncludeRequestInBulkOperation", mock.Anything, mock.Anything).Return(true, "retrieve")
 		return withReserveFakes(&jobRequestBuilder{
 			log:               zap.NewNop(),
-			RstMap:            map[uint32]Provider{1: client},
+			Providers:         ProviderMap{1: client},
 			submitRequest:     newTestSubmitter().submit,
 			reserveRequest:    remote.reserve,
 			cancelReservation: remote.cancel,
@@ -2286,7 +2286,7 @@ func TestJobRequestBuilderPlaceholder(t *testing.T) {
 			setup: func(w *jobRequestBuilder) {
 				client := &MockClient{}
 				client.On("GetRemotePathInfo", mock.Anything, mock.Anything).Return(int64(0), time.Time{}, false, false, errors.New("head failed"))
-				w.RstMap[1] = client
+				w.Providers.(ProviderMap)[1] = client
 			},
 			wantState:   beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION,
 			wantRemoved: true,
@@ -2351,7 +2351,7 @@ func TestJobRequestBuilderPlaceholder(t *testing.T) {
 // itself back is reported as ERROR, even when the failure was a precondition. Remote aborts an
 // ERROR claim and trusts FAILED_PRECONDITION to mean nothing was changed.
 func TestPrepareJobRequestReportsFailedRollback(t *testing.T) {
-	w := withReserveFakes(&jobRequestBuilder{log: zap.NewNop(), RstMap: map[uint32]Provider{1: &MockClient{}}})
+	w := withReserveFakes(&jobRequestBuilder{log: zap.NewNop(), Providers: ProviderMap{1: &MockClient{}}})
 	cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 1, LockedInfo: &flex.JobLockedInfo{}}
 	request := w.buildRequest(context.Background(), cfg, nil)
 	applyPlan := func(context.Context, *PathState) (bool, undoFn, error) {
@@ -2362,4 +2362,27 @@ func TestPrepareJobRequestReportsFailedRollback(t *testing.T) {
 	w.prepareJobRequest(context.Background(), noopCheckpoint, cfg, PathState{}, request, applyPlan)
 
 	assert.Equal(t, beeremote.JobRequest_GenerationStatus_ERROR, request.GetGenerationStatus().GetState())
+}
+
+// TestPrepareJobRequestWithDeletedTarget checks a target deleted after the path was reserved and
+// locked, and before the request is prepared. Remote deletes targets on sync nodes while they run,
+// so the provider found earlier may be gone. The request must end as a failed precondition, before
+// the plan changes the file, instead of calling a method on a nil provider and crashing sync.
+func TestPrepareJobRequestWithDeletedTarget(t *testing.T) {
+	w := withReserveFakes(&jobRequestBuilder{Providers: ProviderMap{}})
+	cfg := &flex.JobRequestCfg{Path: "/foo", RemoteStorageTarget: 5, LockedInfo: &flex.JobLockedInfo{}}
+	request := &beeremote.JobRequest{Path: "/foo", RemoteStorageTarget: 5}
+	planRan := false
+	applyPlan := func(ctx context.Context, pathState *PathState) (bool, undoFn, error) {
+		planRan = true
+		return true, nil, nil
+	}
+
+	require.NotPanics(t, func() {
+		w.prepareJobRequest(context.Background(), func(time.Duration) {}, cfg, PathState{}, request, applyPlan)
+	})
+	require.True(t, request.HasGenerationStatus())
+	assert.Equal(t, beeremote.JobRequest_GenerationStatus_FAILED_PRECONDITION, request.GetGenerationStatus().GetState())
+	assert.Contains(t, request.GetGenerationStatus().GetMessage(), "remote storage target 5 no longer exists")
+	assert.False(t, planRan, "nothing is changed for a target that is gone")
 }
