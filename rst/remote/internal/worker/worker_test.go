@@ -36,7 +36,7 @@ func TestHandleStopsWhileConnecting(t *testing.T) {
 
 	handleDone := make(chan struct{})
 	go func() {
-		mockNode.Handle(&sync.WaitGroup{}, nil, nil, nil)
+		mockNode.Handle(&sync.WaitGroup{}, func() (*flex.UpdateConfigRequest, func()) { return nil, func() {} }, nil, nil)
 		close(handleDone)
 	}()
 
@@ -86,7 +86,7 @@ func TestHandleLogsConfigRejectedOnce(t *testing.T) {
 
 	handleDone := make(chan struct{})
 	go func() {
-		mockNode.Handle(&sync.WaitGroup{}, nil, nil, nil)
+		mockNode.Handle(&sync.WaitGroup{}, func() (*flex.UpdateConfigRequest, func()) { return nil, func() {} }, nil, nil)
 		close(handleDone)
 	}()
 
@@ -129,9 +129,9 @@ func TestRPCsOnOfflineNodeDoNotRaceWithWait(t *testing.T) {
 	for range 8 {
 		callers.Go(func() {
 			for !stop.Load() {
-				_, err := mockNode.SubmitWork(flex.WorkRequest_builder{}.Build())
+				_, err := mockNode.SubmitWork(&flex.WorkRequest{})
 				assert.Error(t, err)
-				_, err = mockNode.UpdateWork(flex.UpdateWorkRequest_builder{}.Build())
+				_, err = mockNode.UpdateWork(&flex.UpdateWorkRequest{})
 				assert.Error(t, err)
 			}
 		})
@@ -144,4 +144,53 @@ func TestRPCsOnOfflineNodeDoNotRaceWithWait(t *testing.T) {
 	}
 	stop.Store(true)
 	callers.Wait()
+}
+
+// TestHandleReleasesConfigAfterEachAttempt checks the contract of ConfigFn: every connect attempt
+// releases what it took, and a successful attempt releases only once the node is ONLINE. A release
+// that never comes would block every later RST change. An early release would let a change land
+// while the node is still connecting, and be skipped.
+func TestHandleReleasesConfigAfterEachAttempt(t *testing.T) {
+	node, err := newWorkerNodeFromConfig(zap.NewNop(), Config{ID: "0", Name: "test-node-0", Type: Mock, MaxReconnectBackOff: 1})
+	require.NoError(t, err)
+	mockNode, ok := node.(*MockNode)
+	require.True(t, ok)
+	mockNode.On("connect").Return(errors.New("simulated connect failure")).Once()
+	mockNode.On("connect").Return(nil)
+	mockNode.On("disconnect").Return(nil)
+
+	var mu sync.Mutex
+	taken, released := 0, 0
+	var stateAtLastRelease State
+	config := func() (*flex.UpdateConfigRequest, func()) {
+		mu.Lock()
+		taken++
+		mu.Unlock()
+		return nil, func() {
+			mu.Lock()
+			released++
+			stateAtLastRelease = mockNode.GetState()
+			mu.Unlock()
+		}
+	}
+
+	handleDone := make(chan struct{})
+	go func() {
+		mockNode.Handle(&sync.WaitGroup{}, config, nil, nil)
+		close(handleDone)
+	}()
+	require.Eventually(t, func() bool { return mockNode.GetState() == ONLINE }, 10*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	assert.Equal(t, 2, taken, "a failed and a successful attempt")
+	assert.Equal(t, taken, released, "every attempt releases")
+	assert.Equal(t, ONLINE, stateAtLastRelease, "the successful attempt releases after the node is ONLINE")
+	mu.Unlock()
+
+	mockNode.Stop()
+	select {
+	case <-handleDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handle did not return after the node was stopped")
+	}
 }

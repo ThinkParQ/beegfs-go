@@ -57,7 +57,7 @@ func (s *drainingWorkerNodeServer) SubmitWork(ctx context.Context, request *flex
 	if s.onSubmit != nil {
 		s.onSubmit()
 	}
-	return flex.SubmitWorkResponse_builder{Status: flex.SubmitWorkResponse_DRAINING}.Build(), nil
+	return &flex.SubmitWorkResponse{Status: flex.SubmitWorkResponse_DRAINING}, nil
 }
 
 // TestBeeSyncNodeSubmitWorkDraining checks how a draining response changes the node's state. An
@@ -86,7 +86,7 @@ func TestBeeSyncNodeSubmitWorkDraining(t *testing.T) {
 			node.setState(ONLINE)
 			server.onSubmit = func() { node.setState(tt.stateDuring) }
 
-			request := flex.WorkRequest_builder{JobId: "job-1", RequestId: "0", Path: "/f"}.Build()
+			request := &flex.WorkRequest{JobId: "job-1", RequestId: "0", Path: "/f"}
 			_, err = node.SubmitWork(request)
 			assert.ErrorIs(t, err, ErrNodeDraining)
 			assert.Equal(t, tt.expectedState, node.GetState())

@@ -47,6 +47,7 @@ var capabilities = map[string]*flex.Feature{
 	registry.FeatureSyncDrain:                nil,
 	registry.FeatureRemoteLockRelease:        nil,
 	registry.FeatureReserveBeforeLock:        nil,
+	registry.FeatureRSTLiveUpdate:            nil,
 }
 
 func main() {
