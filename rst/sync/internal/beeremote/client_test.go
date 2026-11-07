@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -132,4 +133,22 @@ func TestRequireFeaturesErrors(t *testing.T) {
 			assert.Equal(t, tc.wantIncompatible, errors.Is(err, ErrIncompatibleRemote), "ErrIncompatibleRemote")
 		})
 	}
+}
+
+// TestUpdateConfigRetriesAfterAFailedInit checks a provider that fails to initialize. The old
+// provider is already closed by then. A retry with the same configuration must build a new one,
+// rather than return early and keep the closed one, which would leave the node unable to report
+// any result to Remote.
+func TestUpdateConfigRetriesAfterAFailedInit(t *testing.T) {
+	c := newTestClient()
+	c.config.TlsDisable = false
+	c.config.TlsCertFile = filepath.Join(t.TempDir(), "missing.pem")
+	require.NoError(t, c.UpdateConfig(&flex.BeeRemoteNode{Id: "0", Address: "mock:0"}, "node"))
+	require.NotNil(t, c.Provider)
+
+	failing := &flex.BeeRemoteNode{Id: "0", Address: "127.0.0.1:1"}
+	require.Error(t, c.UpdateConfig(failing, "node"), "the certificate file cannot be read")
+	assert.Nil(t, c.Provider, "no closed provider is kept")
+
+	require.Error(t, c.UpdateConfig(failing, "node"), "the same configuration is tried again, not skipped")
 }

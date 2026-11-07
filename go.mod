@@ -28,7 +28,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thinkparq/protobuf v0.8.5-0.20261028175822-1fe1e05bd956
+	github.com/thinkparq/protobuf v0.8.5-0.20261106144042-e5223df52231
 	go.opentelemetry.io/contrib/bridges/otelzap v0.20.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.21.0
@@ -108,3 +108,5 @@ require (
 	honnef.co/go/tools v0.8.2 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
+
+replace github.com/thinkparq/protobuf => ../protobuf-rst-targets-v2

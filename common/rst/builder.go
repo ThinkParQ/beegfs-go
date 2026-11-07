@@ -21,17 +21,17 @@ const checkpointGrace = 30 * time.Second
 // provided via flex.JobRequestCfg.
 type JobBuilderClient struct {
 	ctx        context.Context
-	rstMap     map[uint32]Provider
+	providers  ProviderLookup
 	mountPoint filesystem.Provider
 	stateRoot  string
 }
 
 var _ Provider = &JobBuilderClient{}
 
-func NewJobBuilderClient(ctx context.Context, rstMap map[uint32]Provider, mountPoint filesystem.Provider, stateRoot string) *JobBuilderClient {
+func NewJobBuilderClient(ctx context.Context, providers ProviderLookup, mountPoint filesystem.Provider, stateRoot string) *JobBuilderClient {
 	return &JobBuilderClient{
 		ctx:        ctx,
-		rstMap:     rstMap,
+		providers:  providers,
 		mountPoint: mountPoint,
 		stateRoot:  stateRoot,
 	}
@@ -197,7 +197,7 @@ func (c *JobBuilderClient) getWalk(ctx context.Context, workRequest *flex.WorkRe
 			// files with no rstIds and fail files with multiple rstIds due to ambiguity.
 			return walkPaths(ctx, c.mountPoint, workRequest.GetPath(), resumeToken, chanSize, nil)
 		} else {
-			client, ok := c.rstMap[cfg.RemoteStorageTarget]
+			client, ok := c.providers.Get(cfg.RemoteStorageTarget)
 			if !ok {
 				err = fmt.Errorf("failed to determine rst client")
 				return
@@ -387,7 +387,7 @@ func (c *JobBuilderClient) newBulkOperationRegistry(ctx context.Context, builder
 		managersMu:   sync.Mutex{},
 		mountPath:    c.mountPoint.GetMountPath(),
 		stateRoot:    c.stateRoot,
-		rstMap:       c.rstMap,
+		providers:    c.providers,
 		builderJobId: builderJobId,
 	}
 	if err := registry.Init(ctx); err != nil {
@@ -440,7 +440,7 @@ func (c *JobBuilderClient) newJobRequestBuilder(
 	requestBuilder := &jobRequestBuilder{
 		log:               log,
 		mountPoint:        c.mountPoint,
-		RstMap:            c.rstMap,
+		Providers:         c.providers,
 		submitRequest:     remote.Submit,
 		reserveRequest:    remote.Reserve,
 		cancelReservation: remote.Cancel,

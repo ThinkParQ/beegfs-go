@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -86,7 +87,17 @@ func (c *AppConfig) ValidateConfig() error {
 
 	var multiErr types.MultiError
 	if c.Job.PathDBPath == "" {
-		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db-path must be set to a valid path (provided path: '%s')", c.Job.PathDBPath))
+		multiErr.Errors = append(multiErr.Errors, fmt.Errorf("job.path-db must be set to a valid path (provided path: '%s')", c.Job.PathDBPath))
+	}
+	// rst-db defaults to rst.badger next to path-db, not to a fixed path. A site that keeps path-db
+	// on storage that survives a restart, while the default directory does not, then keeps its
+	// targets too. Losing them would re-import the TOML file into an empty database: every change
+	// and delete record made with the CLI would be gone, and a deleted target's ID could be handed
+	// out again while stubs still name it.
+	// The path is cleaned first, because filepath.Dir of "/x/path.badger/" is "/x/path.badger".
+	// rst.badger would then land inside path-db, and wiping path-db would wipe it too.
+	if c.Job.RSTDBPath == "" && c.Job.PathDBPath != "" {
+		c.Job.RSTDBPath = filepath.Join(filepath.Dir(filepath.Clean(c.Job.PathDBPath)), "rst.badger")
 	}
 
 	// The cleaned state root is written back so everything downstream, including the value sent to
@@ -142,9 +153,9 @@ func (c *AppConfig) ValidateConfig() error {
 // The methodology adopted here draws inspiration from:
 // https://sagikazarmark.hu/blog/decoding-custom-formats-with-viper/.
 //
-// IMPORTANT: When a new RST type is added to `beegfs.proto` it must also be
-// added to rst.SupportedRSTTypes before configuration for the new RST type will
-// be unmarshalled from the AppConfig.
+// IMPORTANT: When a new RST type is added to `flex.proto` it must also
+// implement and register an rst.TargetType before configuration for the new RST
+// type will be unmarshalled from the AppConfig.
 func SetRSTTypeHook() mapstructure.DecodeHookFuncType {
 
 	return func(
@@ -159,8 +170,7 @@ func SetRSTTypeHook() mapstructure.DecodeHookFuncType {
 			case reflect.Map:
 				if tmpData, ok := data.(map[string]any); ok {
 					for key, config := range tmpData {
-						if constructor, exists := rst.SupportedRSTTypes[key]; exists {
-							newType, newTypeField := constructor()
+						if newType, newTypeField, exists := rst.TOMLDecodeTarget(key); exists {
 							if _, alreadyExists := tmpData["Type"]; alreadyExists {
 								return nil, fmt.Errorf("cannot mix configuration for different types of remote storage targets on the same target")
 							}

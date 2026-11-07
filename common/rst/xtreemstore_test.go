@@ -151,14 +151,14 @@ func TestNewXtreemstoreBulkOperationConfig(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, PollDelay: proto.String("100ms")},
 		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
-		assert.ErrorContains(t, err, "pollDelay >= '1s'")
+		assert.ErrorContains(t, err, "poll-delay >= '1s'")
 	})
 
 	t.Run("a delay that is not a duration is rejected", func(t *testing.T) {
 		_, err := newXtreemstore(context.Background(), newRST(
 			&flex.RemoteStorageTarget_XtreemStore_BulkOperation{Operation: efficientRetrieve, RetryDelay: proto.String("soon")},
 		), stubMountPoint{mountPath: t.TempDir()}, DefaultStateRoot)
-		assert.ErrorContains(t, err, "invalid retryDelay")
+		assert.ErrorContains(t, err, "invalid retry-delay")
 	})
 }
 
