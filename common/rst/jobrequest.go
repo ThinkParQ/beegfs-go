@@ -196,6 +196,9 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	if IsValidRstId(cfg.RemoteStorageTarget) {
 		client, ok := rstMap[cfg.RemoteStorageTarget]
 		if !ok {
+			if deleted := deletedRSTDetail(mappings, cfg.RemoteStorageTarget); deleted != "" {
+				return nil, fmt.Errorf("%s (check --%s before retrying)", deleted, RemoteTargetFlag)
+			}
 			return nil, fmt.Errorf("remote storage target does not exist! Check --%s or BeeGFS Remote configuration before retrying", RemoteTargetFlag)
 		}
 		request := client.GetJobRequest(cfg)
@@ -219,6 +222,9 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 			cfg.SetRemoteStorageTarget(*resp.RstId)
 			client, ok := rstMap[cfg.RemoteStorageTarget]
 			if !ok {
+				if deleted := deletedRSTDetail(mappings, cfg.RemoteStorageTarget); deleted != "" {
+					return nil, fmt.Errorf("the stub file names %s: %w", deleted, ErrFileHasNoRSTs)
+				}
 				return nil, fmt.Errorf("remote storage target ID %d from stub file does not exist in the configuration: %w", cfg.RemoteStorageTarget, ErrFileHasNoRSTs)
 			}
 			request := client.GetJobRequest(cfg)
@@ -237,6 +243,9 @@ func prepareJobRequests(ctx context.Context, remote beeremote.BeeRemoteClient, c
 	for _, rstId := range e.Details.Remote.RSTIDs {
 		client, ok := rstMap[rstId]
 		if !ok {
+			if deleted := deletedRSTDetail(mappings, rstId); deleted != "" {
+				return nil, fmt.Errorf("the file metadata names %s: %w", deleted, ErrFileHasNoRSTs)
+			}
 			return nil, fmt.Errorf("remote storage target ID %d from file metadata does not exist in the configuration: %w", rstId, ErrFileHasNoRSTs)
 		}
 		cfg.SetRemoteStorageTarget(rstId)
@@ -278,4 +287,19 @@ func getMountPathInfo(mountPoint filesystem.Provider, path string) (mountPathInf
 		return result, fmt.Errorf("unable to retrieve stat information: unsupported platform")
 	}
 	return result, nil
+}
+
+// deletedRSTDetail describes RST id when it was deleted, such as "remote target 10 (tape), which
+// was deleted: retired". It returns "" for an ID that was never configured, and with a Remote that
+// does not report deleted RSTs.
+func deletedRSTDetail(mappings *util.Mappings, id uint32) string {
+	deleted, ok := mappings.RstIdToDeleted[id]
+	if !ok {
+		return ""
+	}
+	detail := fmt.Sprintf("remote target %d (%s), which was deleted", id, deleted.GetName())
+	if deleted.GetReason() != "" {
+		detail += ": " + deleted.GetReason()
+	}
+	return detail
 }

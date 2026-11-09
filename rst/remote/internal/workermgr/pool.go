@@ -28,8 +28,9 @@ type Pool struct {
 	next int
 	// The mutex should be locked when interacting with the pool.
 	mu *sync.Mutex
-	// All worker nodes in a particular pool share the same configuration.
-	workerConfig *flex.UpdateConfigRequest
+	// All worker nodes in a particular pool share the same configuration. It is built on every
+	// connect attempt, so a node always receives the RSTs BeeRemote serves at that moment.
+	workerConfig worker.ConfigFn
 }
 
 func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.Feature) {

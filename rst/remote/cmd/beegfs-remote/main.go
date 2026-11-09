@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	_ "net/http/pprof"
@@ -24,6 +25,7 @@ import (
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/rstdb"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
@@ -52,12 +54,28 @@ var (
 	buildTime  = "unknown"
 )
 
-var capabilities = map[string]*flex.Feature{
+// syncFeatures are the features Remote advertises and also requires from every sync node, because
+// they change how the two cooperate.
+var syncFeatures = map[string]*flex.Feature{
 	registry.FeatureFilterFiles:              nil,
 	registry.FeatureRestorePolicyAndCooldown: nil,
 	registry.FeatureSyncDrain:                nil,
 	registry.FeatureRemoteLockRelease:        nil,
 	registry.FeatureReserveBeforeLock:        nil,
+	registry.FeatureRSTLiveUpdate:            nil,
+}
+
+// capabilities are the features Remote advertises. Besides syncFeatures they include features only
+// Remote's own clients use, such as the CLI. A sync node never advertises those, so requiring them
+// from it would refuse every sync node.
+var capabilities = withFeatures(syncFeatures, registry.FeatureRSTManagement)
+
+func withFeatures(base map[string]*flex.Feature, names ...string) map[string]*flex.Feature {
+	features := maps.Clone(base)
+	for _, name := range names {
+		features[name] = nil
+	}
+	return features
 }
 
 func main() {
@@ -67,7 +85,7 @@ func main() {
 	// Notably remote storage target defaults are handled as part of
 	// initializing a particular RST type.
 	pflag.Bool("version", false, "Print the version then exit.")
-	pflag.String("cfg-file", "", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). When Remote Storage Targets are configured using a file, they can be updated without restarting the application.")
+	pflag.String("cfg-file", "", "The path to the a configuration file (can be omitted to set all configuration using flags and/or environment variables). Remote Storage Targets in this file are only imported the first time Remote starts with an empty job.rst-db, after that they are managed with 'beegfs remote target'.")
 	pflag.String("mount-point", "", "The path where BeeGFS is mounted.")
 	pflag.String("service-name", "beegfs-remote", "Service name used in telemetry resource attributes.")
 	pflag.String("log.type", "stderr", "Where log messages should be sent ('stderr', 'stdout', 'syslog', 'logfile').")
@@ -106,6 +124,7 @@ func main() {
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
 	pflag.Bool("server.tls-disable", false, "Disable TLS entirely for gRPC communication to this Remote node's gRPC server.")
 	pflag.String("job.path-db", "/var/lib/beegfs/remote/path.badger", "Path where the database tracking jobs for each path will be created/maintained.")
+	pflag.String("job.rst-db", "", "Path where the database storing the Remote Storage Targets will be created/maintained. Defaults to rst.badger in the directory of job.path-db.")
 	pflag.String("job.state-root", rst.DefaultStateRoot, "Directory relative to the BeeGFS mount point where bulk operations persist state that must survive a builder job reschedule. Propagated to all Sync nodes. Changing it can orphan inflight bulk operations.")
 	pflag.Int("job.min-job-entries-per-rst", 2, "This many jobs for each RST configured for a particular path is guaranteed to be retained. At minimum this should be set to 1 so we always know the last sync result for an RST.")
 	pflag.Int("job.max-job-entries-per-rst", 4, "Once this threshold is exceeded, older jobs will be deleted (oldest-to-newest) until the number of jobs equals the min-job-entries-per-rst.")
@@ -133,16 +152,13 @@ func main() {
 Further info:
 	Except for Remote Storage Targets and workers, configuration may be set using a mix of flags, environment variables, and values from a TOML configuration file. 
 	Configuration will be merged using the following precedence order (highest->lowest): (1) flags (2) environment variables (3) configuration file (4) defaults.
-	Remote Storage Targets and workers can only be configured using a TOML config file.
+	Workers can only be configured using a TOML config file.
+	Remote Storage Targets are managed with 'beegfs remote target' and stored in job.rst-db. Targets in the TOML config file are imported once, the first time Remote starts with an empty database, and ignored after that.
 Using environment variables:
 	To specify configuration using environment variables specify %sKEY=VALUE where KEY is the flag name you want to specify in all capitals replacing dots (.) with a double underscore (__) and hyphens (-) with an underscore (_).
 	Examples: 
 	export %sLOG__DEBUG=true
 `
-		// TODO (https://github.com/ThinkParQ/bee-remote/issues/29): Consider if RSTs should ever be
-		// configurable using flags and environment variables. If we want to allow them to be
-		// configured using CTL this may never make sense, and better to just store them in a
-		// DB/similar and not even allow them to be configured using a config file.
 		fmt.Fprintf(os.Stderr, helpText, envVarPrefix, envVarPrefix)
 		os.Exit(0)
 	}
@@ -340,7 +356,33 @@ Using environment variables:
 		AuthDisable:                 initialCfg.Management.AuthDisable,
 	}.Build()
 
-	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities, initialCfg.Job.StateRoot)
+	rstDB, closeRSTDB, err := rstdb.Open(initialCfg.Job.RSTDBPath, logger.Logger)
+	if err != nil {
+		logger.Fatal("unable to open the remote storage target database", zap.Error(err))
+	}
+	defer func() {
+		if err := closeRSTDB(); err != nil {
+			logger.Error("unable to close the remote storage target database", zap.Error(err))
+		}
+	}()
+	// The import checks each TOML target the way Remote checks every target it stores, with the
+	// mount point and state root the providers will use. ValidateConfig already cleaned the state
+	// root, so it is used as it is, as the worker manager below uses it.
+	validateImport := func(effective *flex.RemoteStorageTarget) error {
+		return rst.ValidateTarget(ctx, effective, mountPoint, initialCfg.Job.StateRoot)
+	}
+	rsts, err := rstDB.LoadOrImport(initialCfg.RemoteStorageTargets, validateImport, logger.Logger)
+	if err != nil {
+		logger.Fatal("unable to load the remote storage targets", zap.Error(err))
+	}
+	// Providers and worker nodes get each target's effective configuration, with the values it
+	// inherits from its backend filled in.
+	effectiveRSTs, err := rsts.EffectiveLive()
+	if err != nil {
+		logger.Fatal("unable to resolve the backends of the remote storage targets", zap.Error(err))
+	}
+
+	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, effectiveRSTs, rsts.Deleted, beeRemoteNode, mountPoint, syncFeatures, initialCfg.Job.StateRoot)
 	if err != nil {
 		logger.Fatal("unable to initialize worker manager", zap.Error(err))
 	}
@@ -350,7 +392,7 @@ Using environment variables:
 		logger.Fatal("unable to start worker manager", zap.Error(err))
 	}
 
-	jobManager := job.NewManager(logger, initialCfg.Job, workerManager)
+	jobManager := job.NewManager(logger, initialCfg.Job, workerManager, job.WithRSTDB(rstDB))
 	err = jobManager.Start()
 	if err != nil {
 		logger.Fatal("unable to start job manager", zap.Error(err))
