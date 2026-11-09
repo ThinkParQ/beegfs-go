@@ -89,6 +89,7 @@ require (
 	github.com/spf13/cast v1.9.2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/thinkparq/beegfs-crypto/go v0.0.0
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/log v0.21.0 // indirect
@@ -108,3 +109,7 @@ require (
 	honnef.co/go/tools v0.8.2 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 )
+
+replace github.com/thinkparq/beegfs-crypto/go => ../beegfs-crypto/go
+
+replace github.com/thinkparq/protobuf => ../protobuf

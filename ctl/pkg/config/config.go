@@ -56,6 +56,11 @@ const (
 	// Remote client also use the mgmtd client to automatically determine the correct auth secret.
 	// Note if the auth path is automatically determined the path will be updated in Viper.
 	AuthFileKey = "auth-file"
+
+	ConnProtocolKey    = "conn-protocol"
+	ConnKeyFileKey     = "conn-key-file"
+	ConnKeyGenerateKey = "conn-key-generate"
+	ConnMgmtdIdKey     = "conn-mgmtd-id"
 	// Disable TLS transport security for gRPC communication.
 	TlsDisableKey = "tls-disable"
 	// Disable TLS server verification for gRPC communication.
@@ -100,6 +105,7 @@ const (
 	BeeGFSMountPointNone  = "none"
 	BeeGFSMgmtdAddrAuto   = "auto"
 	BeeGFSAuthDefaultPath = "/etc/beegfs/conn.auth"
+	ConnProtocolLegacy    = "legacy"
 )
 
 // OutputType is used to control what type of structured output should be printed.
@@ -176,6 +182,10 @@ type GlobalConfig struct {
 	MgmtdUseProxy               bool
 	AuthFile                    string
 	AuthDisable                 bool
+	ConnProtocol                string
+	ConnKeyFile                 string
+	ConnKeyGenerate             bool
+	ConnMgmtdId                 string
 	RemoteAddress               string
 	NumWorkers                  int
 	ConnTimeoutMs               int
@@ -223,6 +233,10 @@ func InitViperFromExternal(cfg GlobalConfig) error {
 	globalFlagSet.Bool(UseProxyKey, cfg.MgmtdUseProxy, "")
 	globalFlagSet.String(AuthFileKey, cfg.AuthFile, "")
 	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
+	globalFlagSet.String(ConnProtocolKey, cfg.ConnProtocol, "")
+	globalFlagSet.String(ConnKeyFileKey, cfg.ConnKeyFile, "")
+	globalFlagSet.Bool(ConnKeyGenerateKey, cfg.ConnKeyGenerate, "")
+	globalFlagSet.String(ConnMgmtdIdKey, cfg.ConnMgmtdId, "")
 	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
 	globalFlagSet.Int(NumWorkersKey, cfg.NumWorkers, "")
 	globalFlagSet.Duration(ConnTimeoutKey, time.Duration(cfg.ConnTimeoutMs)*time.Millisecond, "")
@@ -281,11 +295,23 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 		return mgmtClient, nil
 	}
 
+	return managementClient(true)
+}
+
+func UncheckedManagementClient() (*beegrpc.Mgmtd, error) {
+	return managementClient(false)
+}
+
+func managementClient(checkFsUUID bool) (*beegrpc.Mgmtd, error) {
 	log, _ := GetLogger()
 
+	crypto, _, err := ConnCrypto()
+	if err != nil {
+		return nil, err
+	}
+
 	var cert []byte
-	var err error
-	if !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
+	if crypto == nil && !viper.GetBool(TlsDisableKey) && viper.GetString(TlsCertFile) != "" {
 		cert, err = os.ReadFile(viper.GetString(TlsCertFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading certificate file failed: %w (hint: run 'beegfs --help' and review the options to configure TLS)", err)
@@ -395,7 +421,7 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 	}
 
 	var authSecret []byte
-	if !viper.GetBool(AuthDisableKey) {
+	if crypto == nil && !viper.GetBool(AuthDisableKey) {
 		authFilePath := viper.GetString(AuthFileKey)
 		if authSecret, err = os.ReadFile(authFilePath); err != nil {
 			if authFilePath != BeeGFSAuthDefaultPath {
@@ -415,6 +441,10 @@ func ManagementClient() (*beegrpc.Mgmtd, error) {
 			}
 			viper.Set(AuthFileKey, autoAuthFile)
 		}
+	}
+
+	if !checkFsUUID {
+		return newMgmtdClient(mgmtdAddr, cert, authSecret)
 	}
 
 	if wantFsUUID == "" {
@@ -694,9 +724,17 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 		return nil, err
 	}
 
+	crypto, mgmtdID, err := ConnCrypto()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create a node store using the current settings. These are copied, so later changes to
 	// globalConfig don't affect them!
 	nodeStore = beemsg.NewNodeStore(viper.GetDuration(ConnTimeoutKey), mgmtd.GetAuthSecret())
+	if crypto != nil {
+		nodeStore.SetConnCrypto(crypto, mgmtdID)
+	}
 
 	// Fetch the node list from management
 	nodes, err := mgmtd.GetNodes(ctx, &pm.GetNodesRequest{
@@ -743,6 +781,14 @@ func NodeStore(ctx context.Context) (*beemsg.NodeStore, error) {
 			Alias: beegfs.Alias(*n.Id.Alias),
 			Nics:  nics,
 		})
+	}
+
+	if crypto != nil {
+		peerIDs, err := downloadPeerIDs(ctx, mgmtd)
+		if err != nil {
+			return nil, err
+		}
+		nodeStore.SetPeerIDs(peerIDs)
 	}
 
 	if metaRoot := nodes.GetMetaRootNode(); metaRoot != nil {

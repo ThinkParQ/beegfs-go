@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/auth"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/benchmark"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/buddygroup"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmd/copy"
@@ -109,6 +110,7 @@ func Execute() int {
 	// Add subcommands
 	cmd.AddCommand(versionCmd)
 	cmd.AddCommand(license.NewCmd())
+	cmd.AddCommand(auth.NewCmd())
 	cmd.AddCommand(node.NewCmd())
 	cmd.AddCommand(target.NewCmd())
 	cmd.AddCommand(pool.NewCmd())

@@ -307,6 +307,18 @@ func describeMounts(clients []procfs.Client, log *logger.Logger) string {
 // newMgmtdClient creates a management client for addr with the TLS settings from viper. Creating
 // the client does not connect. The connection is made by the first RPC.
 func newMgmtdClient(addr string, cert []byte, authSecret []byte) (*beegrpc.Mgmtd, error) {
+	crypto, mgmtdID, err := ConnCrypto()
+	if err != nil {
+		return nil, err
+	}
+	if crypto != nil {
+		return beegrpc.NewMgmtd(
+			addr,
+			beegrpc.WithKeyPair(crypto.KeyPair, mgmtdID),
+			beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
+		)
+	}
+
 	return beegrpc.NewMgmtd(
 		addr,
 		beegrpc.WithTLSDisable(viper.GetBool(TlsDisableKey)),

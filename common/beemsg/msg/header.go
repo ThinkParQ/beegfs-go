@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	HeaderLen = 40
-	// Fixed value for identifying BeeMsges. In theory, this has some kind of version modifier (thus
-	// the + 0), but it is unused
-	MsgPrefix = (0x42474653 << 32) + 0
+	HeaderLen       = 28
+	LegacyHeaderLen = 40
+	// Fixed value for identifying legacy BeeMsges. In theory, this has some kind of version
+	// modifier (thus the + 0), but it is unused
+	LegacyMsgPrefix = (0x42474653 << 32) + 0
 )
 
 // The BeeMsg header
@@ -26,7 +27,7 @@ type Header struct {
 	MsgCompatFeatureFlags uint8
 	// Mainly mirroring related use
 	MsgFlags uint8
-	// Fixed value that identifies BeeMsges (see const MsgPrefix)
+	// Fixed value that identifies legacy BeeMsges (see const LegacyMsgPrefix)
 	MsgPrefix uint64
 	// The unique ID of the BeeMsg as defined in NetMessageTypes.h
 	MsgID uint16
@@ -48,12 +49,34 @@ func NewHeader(msgID uint16) Header {
 		// has been serialized using the functions below.
 		MsgLen:          0xFFFFFFFF,
 		MsgFeatureFlags: 0xFFFF,
-		MsgPrefix:       MsgPrefix,
+		MsgPrefix:       LegacyMsgPrefix,
 		MsgID:           msgID,
 	}
 }
 
 func (t *Header) Serialize(s *beeserde.Serializer) {
+	beeserde.SerializeInt(s, t.MsgID)
+	beeserde.SerializeInt(s, t.MsgFeatureFlags)
+	beeserde.SerializeInt(s, t.MsgCompatFeatureFlags)
+	beeserde.SerializeInt(s, t.MsgFlags)
+	beeserde.SerializeInt(s, t.MsgTargetID)
+	beeserde.SerializeInt(s, t.MsgUserID)
+	beeserde.SerializeInt(s, t.MsgSeq)
+	beeserde.SerializeInt(s, t.MsgSeqDone)
+}
+
+func (t *Header) Deserialize(d *beeserde.Deserializer) {
+	beeserde.DeserializeInt(d, &t.MsgID)
+	beeserde.DeserializeInt(d, &t.MsgFeatureFlags)
+	beeserde.DeserializeInt(d, &t.MsgCompatFeatureFlags)
+	beeserde.DeserializeInt(d, &t.MsgFlags)
+	beeserde.DeserializeInt(d, &t.MsgTargetID)
+	beeserde.DeserializeInt(d, &t.MsgUserID)
+	beeserde.DeserializeInt(d, &t.MsgSeq)
+	beeserde.DeserializeInt(d, &t.MsgSeqDone)
+}
+
+func (t *Header) SerializeLegacy(s *beeserde.Serializer) {
 	beeserde.SerializeInt(s, t.MsgLen)
 	beeserde.SerializeInt(s, t.MsgFeatureFlags)
 	beeserde.SerializeInt(s, t.MsgCompatFeatureFlags)
@@ -66,7 +89,7 @@ func (t *Header) Serialize(s *beeserde.Serializer) {
 	beeserde.SerializeInt(s, t.MsgSeqDone)
 }
 
-func (t *Header) Deserialize(d *beeserde.Deserializer) {
+func (t *Header) DeserializeLegacy(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &t.MsgLen)
 	beeserde.DeserializeInt(d, &t.MsgFeatureFlags)
 	beeserde.DeserializeInt(d, &t.MsgCompatFeatureFlags)
@@ -79,15 +102,16 @@ func (t *Header) Deserialize(d *beeserde.Deserializer) {
 	beeserde.DeserializeInt(d, &t.MsgSeqDone)
 }
 
-// Checks the given slice for being a serialized BeeMsg header
-func IsSerializedHeader(serHeader []byte) bool {
-	return len(serHeader) == HeaderLen && binary.LittleEndian.Uint64(serHeader[8:16]) == MsgPrefix
+// Checks the given slice for being a serialized legacy BeeMsg header
+func IsSerializedLegacyHeader(serHeader []byte) bool {
+	return len(serHeader) == LegacyHeaderLen &&
+		binary.LittleEndian.Uint64(serHeader[8:16]) == LegacyMsgPrefix
 }
 
-// Retrieves the MsgLen field from a serialized header. Returns an error if the byte slice
-// is not a valid BeeMsg header.
-func ExtractMsgLen(serHeader []byte) (uint32, error) {
-	if !IsSerializedHeader(serHeader) {
+// Retrieves the MsgLen field from a serialized legacy header. Returns an error if the byte slice
+// is not a valid legacy BeeMsg header.
+func ExtractLegacyMsgLen(serHeader []byte) (uint32, error) {
+	if !IsSerializedLegacyHeader(serHeader) {
 		return 0, fmt.Errorf("invalid header")
 	}
 
@@ -96,9 +120,9 @@ func ExtractMsgLen(serHeader []byte) (uint32, error) {
 
 // Sets the MsgLen fields value in the serialized header. Necessary because the actual size of the
 // body is only known after it has been serialized - but the header has to go into the buffer first.
-// Returns an error if the byte slice is not a valid BeeMsg header.
-func OverwriteMsgLen(serHeader []byte, msgLen uint32) error {
-	if !IsSerializedHeader(serHeader) {
+// Returns an error if the byte slice is not a valid legacy BeeMsg header.
+func OverwriteLegacyMsgLen(serHeader []byte, msgLen uint32) error {
+	if !IsSerializedLegacyHeader(serHeader) {
 		return fmt.Errorf("invalid header")
 	}
 
@@ -107,15 +131,28 @@ func OverwriteMsgLen(serHeader []byte, msgLen uint32) error {
 	return nil
 }
 
-// Sets the MsgFeatureFlags fields value in the serialized header. Necessary because the actual
-// value of the field is only known after the body has been serialized - but the header has to go
-// into the buffer first. Returns an error if the byte slice is not a valid BeeMsg header.
-func OverwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
-	if !IsSerializedHeader(serHeader) {
+// Sets the MsgFeatureFlags fields value in the serialized legacy header. Necessary because the
+// actual value of the field is only known after the body has been serialized - but the header has
+// to go into the buffer first. Returns an error if the byte slice is not a valid legacy BeeMsg
+// header.
+func OverwriteLegacyMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
+	if !IsSerializedLegacyHeader(serHeader) {
 		return fmt.Errorf("invalid header")
 	}
 
 	binary.LittleEndian.PutUint16(serHeader[4:6], msgFeatureFlags)
+
+	return nil
+}
+
+// Sets the MsgFeatureFlags fields value in the serialized header. Returns an error if the byte
+// slice does not have the header length.
+func OverwriteMsgFeatureFlags(serHeader []byte, msgFeatureFlags uint16) error {
+	if len(serHeader) != HeaderLen {
+		return fmt.Errorf("invalid header")
+	}
+
+	binary.LittleEndian.PutUint16(serHeader[2:4], msgFeatureFlags)
 
 	return nil
 }

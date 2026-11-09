@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/thinkparq/beegfs-crypto/go/beecrypt"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/types"
 )
@@ -27,7 +28,7 @@ func RequestUDP(ctx context.Context, addrs []string,
 	defer conn.Close()
 
 	// Serialize message into buffer for multiple sends
-	reqBytes, err := AssembleBeeMsg(req)
+	reqBytes, err := AssembleLegacyBeeMsg(req)
 	if err != nil {
 		return err
 	}
@@ -70,12 +71,12 @@ func RequestUDP(ctx context.Context, addrs []string,
 			return fmt.Errorf("reading UDP response failed: %w", err)
 		}
 
-		msgLen, err := msg.ExtractMsgLen(respBuf[0:msg.HeaderLen])
+		msgLen, err := msg.ExtractLegacyMsgLen(respBuf[0:msg.LegacyHeaderLen])
 		if err != nil {
 			return err
 		}
 
-		err = DisassembleBeeMsg(respBuf[0:msg.HeaderLen], respBuf[msg.HeaderLen:msgLen], resp)
+		err = DisassembleLegacyBeeMsg(respBuf[0:msg.LegacyHeaderLen], respBuf[msg.LegacyHeaderLen:msgLen], resp)
 		if err != nil {
 			return err
 		}
@@ -95,16 +96,26 @@ func recvResponse(conn *net.UDPConn, buf []byte) <-chan error {
 	return ch
 }
 
+type ConnCrypto struct {
+	KeyPair *beecrypt.KeyPair
+	Mode    beecrypt.Mode
+}
+
+type ConnAuth struct {
+	Secret uint64
+	Crypto *ConnCrypto
+	PeerID beecrypt.KeyPairID
+}
+
 type connResult struct {
 	conn net.Conn
 	err  error
 }
 
 // Connects to a one of the given node addresses by TCP, trying the provided addresses in order.
-// Setting authSecret to 0 disables authentication.
 // Note that timeout controls the timeout per connection attempt while the context controls the
 // global timeout. Thus, timeout should be significantly shorter than the global timeout.
-func ConnectTCP(ctx context.Context, addrs []string, authSecret uint64, timeout time.Duration) (net.Conn, error) {
+func ConnectTCP(ctx context.Context, addrs []string, auth ConnAuth, timeout time.Duration) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
 	}
@@ -132,8 +143,19 @@ func ConnectTCP(ctx context.Context, addrs []string, authSecret uint64, timeout 
 	}
 
 	// Authenticate the connection if requested
-	if authSecret != 0 {
-		if err := WriteTo(ctx, conn, &msg.AuthenticateChannel{AuthSecret: authSecret}); err != nil {
+	if auth.Crypto != nil {
+		peerID := auth.PeerID
+		transport, _, err := beecrypt.Handshake(ctx, conn, beecrypt.RoleInitiator, auth.Crypto.Mode,
+			auth.Crypto.KeyPair, &peerID)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("handshake failed: %w", err)
+		}
+		return NewFramedConn(conn, transport, peerID), nil
+	}
+
+	if auth.Secret != 0 {
+		if err := WriteTo(ctx, conn, &msg.AuthenticateChannel{AuthSecret: auth.Secret}); err != nil {
 			return nil, fmt.Errorf("authentication failed: %w", err)
 		}
 	}

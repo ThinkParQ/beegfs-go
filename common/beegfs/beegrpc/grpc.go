@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/thinkparq/beegfs-crypto/go/beecrypt"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"google.golang.org/grpc"
@@ -25,6 +26,8 @@ type connOpts struct {
 	// AuthSecret is the contents of an auth file or nil if authentication should be disabled.
 	AuthSecret []byte
 	NodeID     *beegfs.LegacyId
+	KeyPair    *beecrypt.KeyPair
+	MgmtdID    beecrypt.KeyPairID
 	// extraDialOpts are appended verbatim to the grpc.DialOption slice passed to grpc.NewClient.
 	extraDialOpts []grpc.DialOption
 }
@@ -69,6 +72,13 @@ func WithTLSCaCert(cert []byte) connOpt {
 func WithAuthSecret(secret []byte) connOpt {
 	return func(co *connOpts) {
 		co.AuthSecret = secret
+	}
+}
+
+func WithKeyPair(keyPair *beecrypt.KeyPair, mgmtdID beecrypt.KeyPairID) connOpt {
+	return func(co *connOpts) {
+		co.KeyPair = keyPair
+		co.MgmtdID = mgmtdID
 	}
 }
 
@@ -145,7 +155,10 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	// If the user explicitly disabled TLS that should take precedence. Note a mismatch between the
 	// client and server TLS configuration will likely return a vague `error reading server preface:
 	// EOF`. It is up to the caller to intercept this error and display a meaningful error/hint.
-	if config.TLSDisable {
+	if config.KeyPair != nil {
+		creds := credentials.NewTLS(config.KeyPair.GRPCClientTLSConfig(config.MgmtdID))
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else if config.TLSDisable {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
 		certPool, err := x509.SystemCertPool()

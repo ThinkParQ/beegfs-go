@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-crypto/go/beecrypt"
 	"github.com/thinkparq/beegfs-go/common/beegfs"
 	"github.com/thinkparq/beegfs-go/common/beemsg/msg"
 	"github.com/thinkparq/beegfs-go/common/beemsg/util"
@@ -32,6 +33,9 @@ type NodeStore struct {
 	// Settings
 	connTimeout time.Duration
 	authSecret  uint64
+	crypto      *util.ConnCrypto
+	mgmtdID     beecrypt.KeyPairID
+	peerIDs     map[beegfs.LegacyId]beecrypt.KeyPairID
 
 	// Locks the store. Must be taken before accessing any of the maps.
 	mutex sync.RWMutex
@@ -52,6 +56,21 @@ func NewNodeStore(connTimeout time.Duration, authSecret uint64) *NodeStore {
 		connTimeout: connTimeout,
 		authSecret:  authSecret,
 	}
+}
+
+func (store *NodeStore) SetConnCrypto(crypto *util.ConnCrypto, mgmtdID beecrypt.KeyPairID) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	store.crypto = crypto
+	store.mgmtdID = mgmtdID
+}
+
+func (store *NodeStore) SetPeerIDs(peerIDs map[beegfs.LegacyId]beecrypt.KeyPairID) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	store.peerIDs = peerIDs
 }
 
 // Frees resources (e.g. connections). Should be called when the NodeStore is no longer needed.
@@ -194,23 +213,39 @@ func (store *NodeStore) GetNodes() []beegfs.Node {
 // expected.
 func (store *NodeStore) RequestTCP(ctx context.Context, id beegfs.EntityId, req msg.SerializableMsg, resp msg.DeserializableMsg) error {
 	// Access the store
-	node, conns, err := func() (*beegfs.Node, *util.NodeConns, error) {
+	node, conns, auth, err := func() (*beegfs.Node, *util.NodeConns, util.ConnAuth, error) {
 		store.mutex.RLock()
 		defer store.mutex.RUnlock()
 
+		auth := util.ConnAuth{Secret: store.authSecret}
+
 		uid, err := store.resolveEntityId(id)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, auth, err
 		}
 
-		return store.getNodeAndConns(uid)
+		node, conns, err := store.getNodeAndConns(uid)
+		if err != nil || store.crypto == nil {
+			return node, conns, auth, err
+		}
+
+		auth = util.ConnAuth{Crypto: store.crypto, PeerID: store.mgmtdID}
+		if node.Id.NodeType != beegfs.Management {
+			peerID, ok := store.peerIDs[node.Id]
+			if !ok {
+				return nil, nil, auth, fmt.Errorf("no key pair ID known for node %s", node)
+			}
+			auth.PeerID = peerID
+		}
+
+		return node, conns, auth, nil
 	}()
 
 	if err != nil {
 		return err
 	}
 
-	err = conns.RequestTCP(ctx, node.Addrs(), store.authSecret, store.connTimeout, req, resp)
+	err = conns.RequestTCP(ctx, node.Addrs(), auth, store.connTimeout, req, resp)
 	if err != nil {
 		return fmt.Errorf("TCP request to %s failed: %w", node, err)
 	}

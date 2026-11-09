@@ -48,18 +48,18 @@ func TestConnect(t *testing.T) {
 		}()
 
 		// Connect without authentication and first addr being invalid
-		_, err = ConnectTCP(ctx, []string{"thishostdoesntexist111", addr}, 0, 200*time.Millisecond)
+		_, err = ConnectTCP(ctx, []string{"thishostdoesntexist111", addr}, ConnAuth{}, 200*time.Millisecond)
 		assert.NoError(t, err)
 
 		// Connect with authentication
-		_, err = ConnectTCP(ctx, []string{addr}, 1234, 100*time.Millisecond)
+		_, err = ConnectTCP(ctx, []string{addr}, ConnAuth{Secret: 1234}, 100*time.Millisecond)
 		assert.NoError(t, err)
 
 		// Wait until the accepting / reading goroutine is done and the listener is closed
 		<-sync
 
 		// Check that connecting fails now
-		_, err = ConnectTCP(ctx, []string{addr}, 0, 100*time.Millisecond)
+		_, err = ConnectTCP(ctx, []string{addr}, ConnAuth{}, 100*time.Millisecond)
 		assert.Error(t, err)
 
 		close(done)
@@ -110,14 +110,14 @@ func TestRequestTCP(t *testing.T) {
 		conns := NewNodeConns()
 
 		// Make the request
-		err = conns.RequestTCP(ctx, addrs, 0, 100*time.Millisecond, req, resp)
+		err = conns.RequestTCP(ctx, addrs, ConnAuth{}, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 
 		req.fieldA = 2345
 
 		// Make another request. The connection should have been stored and should be reused
-		err = conns.RequestTCP(ctx, addrs, 0, 100*time.Millisecond, req, resp)
+		err = conns.RequestTCP(ctx, addrs, ConnAuth{}, 100*time.Millisecond, req, resp)
 		assert.NoError(t, err)
 		assert.Equal(t, req.fieldA, resp.fieldA)
 
@@ -145,7 +145,7 @@ func TestRequestTCPCancel(t *testing.T) {
 	resCh := make(chan error, 1)
 	go func() {
 		cancel()
-		err := conns.RequestTCP(ctx, []string{addr}, 0, 12*time.Hour, &testMsg{}, &testMsg{})
+		err := conns.RequestTCP(ctx, []string{addr}, ConnAuth{}, 12*time.Hour, &testMsg{}, &testMsg{})
 		resCh <- err
 	}()
 

@@ -59,6 +59,11 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	If the default file path does not exist, and the %s is set to %q then the %s path will be auto determined from the client configuration.
 	To allow use by non-root users, ensure the file is owned by the "beegfs" group and has group read permissions.`, config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, config.AuthFileKey))
 
+	cmd.PersistentFlags().String(config.ConnProtocolKey, config.ConnProtocolLegacy, fmt.Sprintf(`The connection protocol for BeeMsg and gRPC: legacy, plain or encrypted.
+	Must match the configuration of the BeeGFS services. With plain or encrypted, --%s and --%s are required and --%s, --%s and the TLS options are ignored.`, config.ConnKeyFileKey, config.ConnMgmtdIdKey, config.AuthFileKey, config.AuthDisableKey))
+	cmd.PersistentFlags().String(config.ConnKeyFileKey, "", "The PKCS#8 PEM private key file identifying this client.")
+	cmd.PersistentFlags().Bool(config.ConnKeyGenerateKey, false, fmt.Sprintf("Generate a new key file at --%s if it does not exist.", config.ConnKeyFileKey))
+	cmd.PersistentFlags().String(config.ConnMgmtdIdKey, "", "The key pair ID of the management (sha256:<64 hex digits>).")
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time to attempt establishing non-gRPC connections.")
 
 	cmd.PersistentFlags().Int8(config.LogLevelKey, 0, fmt.Sprintf(`By default all logging is disabled example for fatal errors. 
