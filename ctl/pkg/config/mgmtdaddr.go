@@ -46,6 +46,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/grpc"
 	"net"
 	"os"
 	"path/filepath"
@@ -311,11 +312,17 @@ func newMgmtdClient(addr string, cert []byte, authSecret []byte) (*beegrpc.Mgmtd
 	if err != nil {
 		return nil, err
 	}
+	hints := beegrpc.WithDialOptions(
+		grpc.WithChainUnaryInterceptor(connHintUnaryInterceptor(crypto != nil)),
+		grpc.WithChainStreamInterceptor(connHintStreamInterceptor(crypto != nil)),
+	)
+
 	if crypto != nil {
 		return beegrpc.NewMgmtd(
 			addr,
-			beegrpc.WithKeyPair(crypto.KeyPair, mgmtdID),
+			beegrpc.WithKeyPair(crypto.KeyPair, crypto.Mode, mgmtdID),
 			beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
+			hints,
 		)
 	}
 
@@ -326,6 +333,7 @@ func newMgmtdClient(addr string, cert []byte, authSecret []byte) (*beegrpc.Mgmtd
 		beegrpc.WithTLSCaCert(cert),
 		beegrpc.WithAuthSecret(authSecret),
 		beegrpc.WithProxy(viper.GetBool(UseProxyKey)),
+		hints,
 	)
 }
 

@@ -27,6 +27,7 @@ type connOpts struct {
 	AuthSecret []byte
 	NodeID     *beegfs.LegacyId
 	KeyPair    *beecrypt.KeyPair
+	Mode       beecrypt.Mode
 	MgmtdID    beecrypt.KeyPairID
 	// extraDialOpts are appended verbatim to the grpc.DialOption slice passed to grpc.NewClient.
 	extraDialOpts []grpc.DialOption
@@ -75,9 +76,10 @@ func WithAuthSecret(secret []byte) connOpt {
 	}
 }
 
-func WithKeyPair(keyPair *beecrypt.KeyPair, mgmtdID beecrypt.KeyPairID) connOpt {
+func WithKeyPair(keyPair *beecrypt.KeyPair, mode beecrypt.Mode, mgmtdID beecrypt.KeyPairID) connOpt {
 	return func(co *connOpts) {
 		co.KeyPair = keyPair
+		co.Mode = mode
 		co.MgmtdID = mgmtdID
 	}
 }
@@ -156,7 +158,7 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	// client and server TLS configuration will likely return a vague `error reading server preface:
 	// EOF`. It is up to the caller to intercept this error and display a meaningful error/hint.
 	if config.KeyPair != nil {
-		creds := credentials.NewTLS(config.KeyPair.GRPCClientTLSConfig(config.MgmtdID))
+		creds := credentials.NewTLS(config.KeyPair.GRPCClientTLSConfig(config.Mode, config.MgmtdID))
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	} else if config.TLSDisable {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))

@@ -44,6 +44,10 @@ func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 		return nil, beecrypt.KeyPairID{}, fmt.Errorf("invalid --%s %q (valid: legacy, plain, encrypted)", ConnProtocolKey, protocol)
 	}
 
+	if viper.GetBool(TlsDisableKey) {
+		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s cannot be used with --%s %s, gRPC always uses TLS there", TlsDisableKey, ConnProtocolKey, viper.GetString(ConnProtocolKey))
+	}
+
 	mgmtdID, err := beecrypt.ParseKeyPairID(viper.GetString(ConnMgmtdIdKey))
 	if err != nil {
 		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s must be set to the management's key pair ID (sha256:<64 hex digits>): %w", ConnMgmtdIdKey, err)

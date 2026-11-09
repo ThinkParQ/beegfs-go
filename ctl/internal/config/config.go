@@ -60,7 +60,7 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	To allow use by non-root users, ensure the file is owned by the "beegfs" group and has group read permissions.`, config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, config.AuthFileKey))
 
 	cmd.PersistentFlags().String(config.ConnProtocolKey, config.ConnProtocolLegacy, fmt.Sprintf(`The connection protocol for BeeMsg and gRPC: legacy, plain or encrypted.
-	Must match the configuration of the BeeGFS services. With plain or encrypted, --%s and --%s are required and --%s, --%s and the TLS options are ignored.`, config.ConnKeyFileKey, config.ConnMgmtdIdKey, config.AuthFileKey, config.AuthDisableKey))
+	Must match the configuration of the BeeGFS services. With plain or encrypted, --%s and --%s are required, --%s is not allowed and --%s, --%s and the other TLS options are ignored.`, config.ConnKeyFileKey, config.ConnMgmtdIdKey, config.TlsDisableKey, config.AuthFileKey, config.AuthDisableKey))
 	cmd.PersistentFlags().String(config.ConnKeyFileKey, "", "The PKCS#8 PEM private key file identifying this client.")
 	cmd.PersistentFlags().Bool(config.ConnKeyGenerateKey, false, fmt.Sprintf("Generate a new key file at --%s if it does not exist.", config.ConnKeyFileKey))
 	cmd.PersistentFlags().String(config.ConnMgmtdIdKey, "", "The key pair ID of the management (sha256:<64 hex digits>).")
