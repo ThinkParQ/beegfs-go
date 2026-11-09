@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -33,13 +34,13 @@ func newBeeSyncNode(baseNode *baseNode) Worker {
 	return beeSyncNode
 }
 
-func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) (bool, error) {
+func (n *BeeSyncNode) connect(ctx context.Context, config *flex.UpdateConfigRequest, bulkUpdate *flex.BulkUpdateWorkRequest, requiredFeatures map[string]*flex.Feature) error {
 	var cert []byte
 	var err error
 	if !n.config.TlsDisable && n.config.TlsCertFile != "" {
 		cert, err = os.ReadFile(n.config.TlsCertFile)
 		if err != nil {
-			return false, fmt.Errorf("reading certificate file failed: %w", err)
+			return fmt.Errorf("reading certificate file failed: %w", err)
 		}
 	}
 	n.conn, err = beegrpc.NewClientConn(
@@ -50,7 +51,7 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 		beegrpc.WithProxy(n.config.UseProxy),
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	n.client = flex.NewWorkerNodeClient(n.conn)
@@ -61,23 +62,23 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	// a heartbeat rpc call to determine a valid address for the sync node to reach remote.
 	host, port, err := net.SplitHostPort(config.BeeRemote.Address)
 	if err != nil {
-		return false, err
+		return err
 	}
 	ip := net.ParseIP(host)
 	if ip != nil && ip.IsUnspecified() {
 		var pr peer.Peer
-		_, err := n.client.Heartbeat(n.nodeCtx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
+		_, err := n.client.Heartbeat(ctx, &flex.HeartbeatRequest{}, grpc.Peer(&pr))
 		if err != nil {
-			return true, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+			return fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
 
 		if pr.LocalAddr == nil {
-			return false, fmt.Errorf("failed to determine remote address for sync node")
+			return fmt.Errorf("failed to determine remote address for sync node")
 		}
 
 		host, _, err = net.SplitHostPort(pr.LocalAddr.String())
 		if err != nil {
-			return false, fmt.Errorf("failed to determine remote address for sync node: %w", err)
+			return fmt.Errorf("failed to determine remote address for sync node: %w", err)
 		}
 		remoteAddr := net.JoinHostPort(host, port)
 		n.log.Info("automatically determined address for sync node to communicate with remote", zap.String("remoteAddr", remoteAddr))
@@ -85,69 +86,68 @@ func (n *BeeSyncNode) connect(config *flex.UpdateConfigRequest, bulkUpdate *flex
 	}
 
 	// Verify the sync node capabilities support remote.
-	if clientRegistry, _, err := registry.GetComponentRegistry(n.rpcCtx, n.client); err != nil {
-		return true, fmt.Errorf("failed to determine sync node capabilities: %w", err)
+	if clientRegistry, _, err := registry.GetComponentRegistry(ctx, n.client); err != nil {
+		return fmt.Errorf("failed to determine sync node capabilities: %w", err)
 	} else if err = clientRegistry.RequireFeatures(requiredFeatures); err != nil {
-		return true, fmt.Errorf("incompatible sync node: %w", err)
+		return fmt.Errorf("incompatible sync node: %w", err)
 	}
 
-	configureResp, err := n.client.UpdateConfig(n.rpcCtx, config)
+	configureResp, err := n.client.UpdateConfig(ctx, config)
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			// TLS misconfiguration can cause a confusing error message so we handle it explicitly.
-			// Note this is just a hint to the user, other error conditions may have the same
-			// message so we don't adjust behavior (i.e., treat it as fatal).
+			// Note this is just a hint to the user. Other error conditions may have the same
+			// message.
 			if strings.Contains(st.Message(), "error reading server preface: EOF") {
-				return true, fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
+				return fmt.Errorf("%w (hint: check TLS is configured correctly on the client and server)", err)
 			}
 		}
-		return true, err
+		return err
 	}
 
-	// If we could send the message but the node didn't update the configuration
-	// correctly probably we can't recover with a simple retry so consider fatal.
+	// The node received the config but rejected it. This usually needs an operator to fix the
+	// configuration, but the caller still retries with backoff in case the node recovers.
 	if configureResp.GetResult() != flex.UpdateConfigResponse_SUCCESS {
-		return false, fmt.Errorf("%s: node rejected config update: %s", configureResp.GetResult(), configureResp.GetMessage())
+		return fmt.Errorf("%w: %s: %s", ErrConfigRejected, configureResp.GetResult(), configureResp.GetMessage())
 	}
 
-	updateWRResp, err := n.client.BulkUpdateWork(n.rpcCtx, bulkUpdate)
+	updateWRResp, err := n.client.BulkUpdateWork(ctx, bulkUpdate)
 	if err != nil {
-		return true, err
+		return err
 	}
 
-	// If we could send the message but the node couldn't update the WRs,
-	// probably we can't recover with a simply retry so consider fatal.
+	// The node received the work requests but could not apply them. The caller retries with
+	// backoff like any other connect error.
 	if !updateWRResp.GetSuccess() {
-		return false, fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
-	}
-
-	return false, nil
-}
-
-func (n *BeeSyncNode) heartbeat(request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
-	return n.client.Heartbeat(n.rpcCtx, request)
-}
-
-func (n *BeeSyncNode) disconnect() error {
-
-	if n.conn != nil {
-		if err := n.conn.Close(); err != nil {
-			return err
-		}
+		return fmt.Errorf("bulk update of work requests on node failed with message %s", updateWRResp.GetMessage())
 	}
 
 	return nil
 }
 
-func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
+func (n *BeeSyncNode) heartbeat(ctx context.Context, request *flex.HeartbeatRequest) (*flex.HeartbeatResponse, error) {
+	return n.client.Heartbeat(ctx, request)
+}
 
+func (n *BeeSyncNode) disconnect() error {
+	if n.conn == nil {
+		return nil
+	}
+
+	// Clear the connection even if Close fails. gRPC returns an error when closing a connection
+	// that is already closed, so keeping it would make every later disconnect fail the same way.
+	err := n.conn.Close()
+	n.conn = nil
+	return err
+}
+
+func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) {
 	// Draining nodes are offered work as a last resort, so only an unreachable node is refused
 	// outright here. A draining node may still decline, which is handled from its response below.
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	if _, ok := n.beginRPC(); !ok {
 		return nil, fmt.Errorf("unable to submit work request to an offline node")
 	}
+	defer n.rpcWG.Done()
 
 	var resp *flex.SubmitWorkResponse
 	var err error
@@ -197,9 +197,11 @@ func (n *BeeSyncNode) SubmitWork(request *flex.WorkRequest) (*flex.Work, error) 
 	// predating support for accepting while draining decline every request. Either way nothing was
 	// created there, so the request is unassigned and may be offered elsewhere.
 	if resp.GetStatus() == flex.SubmitWorkResponse_DRAINING {
-		if n.GetState() != DRAINING {
+		// Only an ONLINE node moves to DRAINING here. Handle may have placed the node offline
+		// while this RPC ran, and OFFLINE must stand so the node is not offered work while it
+		// reconnects.
+		if n.compareAndSetState(ONLINE, DRAINING) {
 			n.log.Info("node declined a work request because it is draining, further requests will only be assigned to it as a last resort")
-			n.setState(DRAINING)
 		}
 		return nil, ErrNodeDraining
 	}
@@ -223,12 +225,11 @@ func (n *BeeSyncNode) reportError(err error) {
 }
 
 func (n *BeeSyncNode) UpdateWork(request *flex.UpdateWorkRequest) (*flex.Work, error) {
-	n.rpcWG.Add(1)
-	defer n.rpcWG.Done()
-
-	if state := n.GetState(); state != ONLINE && state != DRAINING {
+	state, ok := n.beginRPC()
+	if !ok {
 		return nil, fmt.Errorf("unable to update work request on a node that is %s", state)
 	}
+	defer n.rpcWG.Done()
 
 	var resp *flex.UpdateWorkResponse
 	var err error
