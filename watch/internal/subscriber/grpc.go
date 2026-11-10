@@ -24,6 +24,9 @@ import (
 // Otherwise duplicate events may be retransmitted to avoid dropped events.
 type GRPCSubscriber struct {
 	GrpcConfig
+	// authSecret is sent to the subscriber with every call. It is nil unless the subscriber sets
+	// grpc-send-auth-secret.
+	authSecret []byte
 	conn       *grpc.ClientConn
 	client     pb.SubscriberClient
 	stream     pb.Subscriber_ReceiveEventsClient
@@ -36,7 +39,8 @@ type GRPCSubscriber struct {
 
 var _ Interface = &GRPCSubscriber{} // Verify type satisfies interface.
 
-func newGRPCSubscriber(config GrpcConfig) *GRPCSubscriber {
+// newGRPCSubscriber keeps authSecret only when config opts in with SendAuthSecret.
+func newGRPCSubscriber(config GrpcConfig, authSecret []byte) *GRPCSubscriber {
 	var mutex sync.Mutex
 
 	// Time we'll wait after closing our end of the connection for the subscriber to disconnect.
@@ -44,8 +48,13 @@ func newGRPCSubscriber(config GrpcConfig) *GRPCSubscriber {
 		config.DisconnectTimeout = 30
 	}
 
+	if !config.SendAuthSecret {
+		authSecret = nil
+	}
+
 	return &GRPCSubscriber{
 		GrpcConfig:         config,
+		authSecret:         authSecret,
 		recvStreamActive:   false,
 		recvStreamActiveMu: &mutex,
 	}
@@ -72,6 +81,7 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 		beegrpc.WithTLSDisableVerification(s.TLSDisableVerification),
 		beegrpc.WithTLSDisable(s.TlsDisable),
 		beegrpc.WithProxy(s.UseProxy),
+		beegrpc.WithAuthSecret(s.authSecret),
 		beegrpc.WithNode(&beegfs.LegacyId{
 			NodeType: beegfs.Meta,
 			// This will be zero if node ID detection is skipped. That is an invalid NumId which

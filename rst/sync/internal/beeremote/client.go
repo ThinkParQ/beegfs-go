@@ -21,11 +21,24 @@ type Config struct {
 	// pushes. It is reported with each job request this node submits so BeeRemote can tell the
 	// request originated here. Empty when talking to a BeeRemote that does not report it, in which
 	// case submissions carry no origin and BeeRemote assigns them as it always has.
-	nodeId                 string
+	nodeId string
+	// authSecret is the content of the auth file of this node's BeeGFS client, or nil when the
+	// client does not use connection authentication. authFile is the path it was read from. The
+	// node sends a hash of the secret to Remote and, through CTL, to the BeeGFS services. Set with
+	// SetAuth.
+	authSecret             []byte
+	authFile               string
 	TlsCertFile            string `mapstructure:"tls-cert-file"`
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TlsDisable             bool   `mapstructure:"tls-disable"`
 	UseProxy               bool   `mapstructure:"use-http-proxy"`
+}
+
+// SetAuth records the auth secret of this node's BeeGFS client and the file it was read from. Call
+// it before New. A nil secret means the client does not use connection authentication.
+func (c *Config) SetAuth(secret []byte, path string) {
+	c.authSecret = secret
+	c.authFile = path
 }
 
 // Client is setup so the provider can be swapped out after the client is initialized.
@@ -123,7 +136,9 @@ func (c *Client) UpdateConfig(newCfg *flex.BeeRemoteNode, nodeId string) error {
 //   - an error wrapping ErrUnavailable when the remote could not be reached. Remote connects to
 //     its sync nodes before its own server listens, so this is expected while remote starts, and
 //     the caller should let remote retry.
-//   - any other error as is.
+//   - any other error as is. That includes codes.Unauthenticated when the remote requires an auth
+//     secret this node does not hold. The node then refuses the configuration, so Remote stops
+//     using a node that could never report back to it.
 func (c *Client) RequireFeatures(ctx context.Context, newCfg *flex.BeeRemoteNode, required ...string) error {
 	if newCfg == nil {
 		return ErrNilConfiguration

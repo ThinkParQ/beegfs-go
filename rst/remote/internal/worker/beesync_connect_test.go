@@ -7,10 +7,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/flex"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -31,12 +34,12 @@ type unimplementedCapabilitiesServer struct {
 	flex.UnimplementedWorkerNodeServer
 }
 
-func startWorkerNodeServer(t *testing.T, server flex.WorkerNodeServer) (string, func()) {
+func startWorkerNodeServer(t *testing.T, server flex.WorkerNodeServer, opts ...grpc.ServerOption) (string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(opts...)
 	flex.RegisterWorkerNodeServer(grpcServer, server)
 	go func() {
 		_ = grpcServer.Serve(listener)
@@ -119,4 +122,46 @@ func TestBeeSyncNodeConnectHandlesUnimplementedCapabilities(t *testing.T) {
 
 	assert.True(t, retry)
 	assert.ErrorIs(t, err, registry.ErrCapabilitiesNotSupported)
+}
+
+// TestBeeSyncNodeConnectSendsAuthSecret checks that Remote authenticates to a Sync node with the
+// secret set on the worker config. The server requires an extra feature, so a call that passes
+// authentication fails the feature check instead.
+func TestBeeSyncNodeConnectSendsAuthSecret(t *testing.T) {
+	secret := []byte("secret")
+	testCases := []struct {
+		name         string
+		remoteSecret []byte
+		wantAuthErr  bool
+	}{
+		{"secretMissing", nil, true},
+		{"secretWrong", []byte("other"), true},
+		{"secretRight", secret, false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, cleanup := startWorkerNodeServer(t, &testWorkerNodeServer{
+				capabilities: map[string]*flex.Feature{registry.FeatureFilterFiles: nil},
+			}, beegrpc.AuthServerOptions(secret)...)
+			defer cleanup()
+
+			node := newTestBeeSyncNode(t, addr)
+			t.Cleanup(func() { _ = node.disconnect() })
+
+			node.config.SetAuthSecret(tc.remoteSecret)
+			config, bulk := connectInputs()
+			required := map[string]*flex.Feature{
+				registry.FeatureFilterFiles: nil,
+				"extra-feature":             nil,
+			}
+			_, err := node.connect(config, bulk, required)
+			require.Error(t, err)
+			if tc.wantAuthErr {
+				assert.ErrorContains(t, err, codes.Unauthenticated.String())
+			} else {
+				assert.ErrorIs(t, err, registry.ErrUnsupportedFeature)
+				assert.NotEqual(t, codes.Unauthenticated, status.Code(err))
+			}
+		})
+	}
 }
