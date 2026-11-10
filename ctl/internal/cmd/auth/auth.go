@@ -67,6 +67,15 @@ empty if the management accepts new clients without a token.`,
 				return nil
 			}
 
+			if res.AlreadyRegistered {
+				msg := fmt.Sprintf("Key pair %s is already registered as identity %d.", res.KeyPairID, res.IdentityID)
+				if token != "" {
+					msg += " The identity token was not used."
+				}
+				cmdfmt.Printf("%s\n", msg)
+				return nil
+			}
+
 			cmdfmt.Printf("Registered key pair %s as identity %d\n", res.KeyPairID, res.IdentityID)
 			return nil
 		},

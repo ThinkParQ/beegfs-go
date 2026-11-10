@@ -18,10 +18,11 @@ const (
 )
 
 type RegisterResult struct {
-	KeyPairID  string
-	IdentityID int64
-	Status     RegisterStatus
-	Message    string
+	KeyPairID         string
+	IdentityID        int64
+	Status            RegisterStatus
+	Message           string
+	AlreadyRegistered bool
 }
 
 func Register(ctx context.Context, name string, token string) (RegisterResult, error) {
@@ -53,9 +54,10 @@ func Register(ctx context.Context, name string, token string) (RegisterResult, e
 	}
 
 	res := RegisterResult{
-		KeyPairID:  crypto.KeyPair.ID().String(),
-		IdentityID: resp.GetIdentityId(),
-		Message:    resp.GetMessage(),
+		KeyPairID:         crypto.KeyPair.ID().String(),
+		IdentityID:        resp.GetIdentityId(),
+		Message:           resp.GetMessage(),
+		AlreadyRegistered: resp.GetAlreadyRegistered(),
 	}
 
 	switch resp.GetStatus() {
