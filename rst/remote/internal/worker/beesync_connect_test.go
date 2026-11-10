@@ -142,7 +142,7 @@ func TestBeeSyncNodeConnectSendsAuthSecret(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, cleanup := startWorkerNodeServer(t, &testWorkerNodeServer{
 				capabilities: map[string]*flex.Feature{registry.FeatureFilterFiles: nil},
-			}, beegrpc.AuthServerOptions(secret)...)
+			}, beegrpc.AuthServerOptions(secret, zap.NewNop())...)
 			defer cleanup()
 
 			node := newTestBeeSyncNode(t, addr)
