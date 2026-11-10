@@ -29,17 +29,24 @@ type GrpcConfig struct {
 	TlsDisable             bool   `mapstructure:"grpc-tls-disable"`
 	UseProxy               bool   `mapstructure:"grpc-use-http-proxy"`
 	DisconnectTimeout      int    `mapstructure:"grpc-disconnect-timeout"`
+	// SendAuthSecret makes watch send the BeeGFS connection authentication secret to this
+	// subscriber. It is off by default so the cluster's credential only reaches subscribers that
+	// are trusted with it, such as BeeGFS Remote.
+	SendAuthSecret bool `mapstructure:"grpc-send-auth-secret"`
 }
 
 // NewSubscribersFromConfig is the standard way for initializing one or more subscribers.
 // It takes a slice of Config defining the configuration for one or more subscribers.
 // It attempts to initialize each subscriber and returns a slice of all the subscribers.
 // It returns an error if there are any invalid subscribers (or configuration/fields).
-func NewSubscribersFromConfig(configs []Config) ([]*Subscriber, error) {
+//
+// authSecret is the content of watch's auth file, or nil when watch has none. Only subscribers that
+// set grpc-send-auth-secret receive it.
+func NewSubscribersFromConfig(configs []Config, authSecret []byte) ([]*Subscriber, error) {
 
 	var newSubscribers []*Subscriber
 	for _, config := range configs {
-		s, err := newSubscriberFromConfig(config)
+		s, err := newSubscriberFromConfig(config, authSecret)
 
 		if err != nil {
 			return nil, err
@@ -54,7 +61,7 @@ func NewSubscribersFromConfig(configs []Config) ([]*Subscriber, error) {
 // newSubscriberFromConfig takes a subscriber Config and returns an initialized
 // struct for the indicated subscriber type. It will return an error if the
 // requested subscriber type is unknown.
-func newSubscriberFromConfig(config Config) (*Subscriber, error) {
+func newSubscriberFromConfig(config Config, authSecret []byte) (*Subscriber, error) {
 
 	subscriber := &Subscriber{
 		Config: config,
@@ -70,7 +77,10 @@ func newSubscriberFromConfig(config Config) (*Subscriber, error) {
 		// Subscriber is actually holding a GRPCSubscriber value. If we don't do
 		// this we'll get a panic because BaseSubscriber doesn't actually
 		// implement these methods.
-		subscriber.Interface = newGRPCSubscriber(subscriber.GrpcConfig)
+		if subscriber.SendAuthSecret && authSecret == nil {
+			return nil, fmt.Errorf("subscriber %d (%s) sets grpc-send-auth-secret but watch has no auth secret (hint: unset management.auth-disable)", config.ID, config.Name)
+		}
+		subscriber.Interface = newGRPCSubscriber(subscriber.GrpcConfig, authSecret)
 		return subscriber, nil
 	default:
 		return nil, fmt.Errorf("unknown subscriber type: %s", config.Type)

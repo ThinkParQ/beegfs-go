@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
@@ -46,8 +47,10 @@ type BeeRemoteServer struct {
 }
 
 // New() creates a new BeeRemoteServer that can be used with ListenAndServe().
-// It requires a channel where it can send job requests to JobMgr.
-func New(log *logger.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*BeeRemoteServer, error) {
+// It requires a channel where it can send job requests to JobMgr. When authSecret is not nil every
+// call to the server must carry it, including calls to services attached later through
+// GetGRPCServer().
+func New(log *logger.Logger, config Config, jobMgr *job.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature, authSecret []byte) (*BeeRemoteServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[BeeRemoteServer]().PkgPath())))
 
@@ -70,6 +73,7 @@ func New(log *logger.Logger, config Config, jobMgr *job.Manager, buildInfo *flex
 	} else {
 		s.log.Warn("not using TLS because it was explicitly disabled or a certificate and/or key were not specified")
 	}
+	grpcServerOpts = append(grpcServerOpts, beegrpc.AuthServerOptions(authSecret)...)
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	beeremote.RegisterBeeRemoteServer(s.grpcServer, &s)
 
