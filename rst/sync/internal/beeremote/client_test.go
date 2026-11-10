@@ -13,6 +13,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -140,7 +141,7 @@ func TestRequireFeaturesErrors(t *testing.T) {
 func TestRequireFeaturesAuth(t *testing.T) {
 	feature := registry.FeatureRemoteLockRelease
 	secret := []byte("secret")
-	addr := startRemote(t, &capabilitiesServer{features: map[string]*flex.Feature{feature: nil}}, beegrpc.AuthServerOptions(secret)...)
+	addr := startRemote(t, &capabilitiesServer{features: map[string]*flex.Feature{feature: nil}}, beegrpc.AuthServerOptions(secret, zap.NewNop())...)
 
 	testCases := []struct {
 		name     string
