@@ -102,7 +102,7 @@ func readToken() (string, error) {
 
 func newGenerateTokenCmd() *cobra.Command {
 	var scope string
-	var permanent bool
+	var reusable bool
 	var comment string
 
 	cmd := &cobra.Command{
@@ -110,7 +110,7 @@ func newGenerateTokenCmd() *cobra.Command {
 		Short: "Generate an identity token (requires an admin identity)",
 		Long: `Generate an identity token (requires an admin identity).
 
-The token is printed to stdout and is not shown again. It can be used once unless --permanent is
+The token is printed to stdout and is not shown again. It can be used once unless --reusable is
 given. A client token registers client nodes, ctl and fsck. An admin token registers an admin
 identity.`,
 		Args: cobra.NoArgs,
@@ -125,7 +125,7 @@ identity.`,
 				return fmt.Errorf("invalid --scope %q, must be client or admin", scope)
 			}
 
-			token, err := auth.GenerateToken(cmd.Context(), s, permanent, comment)
+			token, err := auth.GenerateToken(cmd.Context(), s, reusable, comment)
 			if err != nil {
 				return err
 			}
@@ -136,7 +136,7 @@ identity.`,
 	}
 
 	cmd.Flags().StringVar(&scope, "scope", "client", "What the token registers: client or admin.")
-	cmd.Flags().BoolVar(&permanent, "permanent", false, "Allow the token to register any number of identities.")
+	cmd.Flags().BoolVar(&reusable, "reusable", false, "Allow the token to register any number of identities.")
 	cmd.Flags().StringVar(&comment, "comment", "", "A comment stored with the token.")
 	return cmd
 }

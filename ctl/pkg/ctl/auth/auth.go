@@ -81,13 +81,13 @@ const (
 	AdminScope
 )
 
-func GenerateToken(ctx context.Context, scope TokenScope, permanent bool, comment string) (string, error) {
+func GenerateToken(ctx context.Context, scope TokenScope, reusable bool, comment string) (string, error) {
 	mgmtd, err := config.ManagementClient()
 	if err != nil {
 		return "", err
 	}
 
-	req := &pm.GenerateIdentityTokenRequest{Permanent: &permanent}
+	req := &pm.GenerateIdentityTokenRequest{Reusable: &reusable}
 	switch scope {
 	case ClientScope:
 		req.Scope = pm.GenerateIdentityTokenRequest_SCOPE_CLIENT.Enum()
