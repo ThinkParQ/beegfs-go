@@ -20,17 +20,17 @@ func connHint(err error, nonLegacy bool) error {
 	var hint string
 	switch {
 	case strings.Contains(msg, "no application protocol") && nonLegacy:
-		hint = fmt.Sprintf("the management uses a different connection protocol, check --%s", ConnProtocolKey)
+		hint = fmt.Sprintf("the management uses a different connection protocol, check --%s", ProtocolKey)
 	case strings.Contains(msg, "no application protocol"):
-		hint = fmt.Sprintf("the management uses the plain or encrypted connection protocol, set --%s and --%s", ConnProtocolKey, ConnMgmtdIdKey)
+		hint = fmt.Sprintf("the management uses the plain or encrypted connection protocol, set --%s and --%s", ProtocolKey, MgmtdIdKey)
 	case nonLegacy && strings.Contains(msg, "key pair ID doesn't match"):
-		hint = fmt.Sprintf("the key pair ID of the management differs from --%s, or the management uses the legacy connection protocol", ConnMgmtdIdKey)
+		hint = fmt.Sprintf("the key pair ID of the management differs from --%s, or the management uses the legacy connection protocol", MgmtdIdKey)
 	case nonLegacy && strings.Contains(msg, "does not look like a TLS handshake"):
-		hint = fmt.Sprintf("the management does not use TLS, it probably uses the legacy connection protocol with TLS disabled, check --%s", ConnProtocolKey)
+		hint = fmt.Sprintf("the management does not use TLS, it probably uses the legacy connection protocol with TLS disabled, check --%s", ProtocolKey)
 	case strings.Contains(msg, "does not look like a TLS handshake"):
 		hint = fmt.Sprintf("the management does not use TLS, check --%s", TlsDisableKey)
 	case !nonLegacy && strings.Contains(msg, "server preface"):
-		hint = fmt.Sprintf("the TLS configuration or the connection protocol may not match the management, check --%s and --%s", TlsDisableKey, ConnProtocolKey)
+		hint = fmt.Sprintf("the TLS configuration or the connection protocol may not match the management, check --%s and --%s", TlsDisableKey, ProtocolKey)
 	default:
 		return err
 	}

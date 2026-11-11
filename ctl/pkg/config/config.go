@@ -57,9 +57,9 @@ const (
 	// Note if the auth path is automatically determined the path will be updated in Viper.
 	AuthFileKey = "auth-file"
 
-	ConnProtocolKey = "conn-protocol"
-	ConnKeyFileKey  = "conn-key-file"
-	ConnMgmtdIdKey  = "conn-mgmtd-id"
+	ProtocolKey = "protocol"
+	KeyFileKey  = "key-file"
+	MgmtdIdKey  = "mgmtd-id"
 	// Disable TLS transport security for gRPC communication.
 	TlsDisableKey = "tls-disable"
 	// Disable TLS server verification for gRPC communication.
@@ -104,7 +104,7 @@ const (
 	BeeGFSMountPointNone  = "none"
 	BeeGFSMgmtdAddrAuto   = "auto"
 	BeeGFSAuthDefaultPath = "/etc/beegfs/conn.auth"
-	ConnProtocolLegacy    = "legacy"
+	ProtocolLegacy        = "legacy"
 )
 
 // OutputType is used to control what type of structured output should be printed.
@@ -181,9 +181,9 @@ type GlobalConfig struct {
 	MgmtdUseProxy               bool
 	AuthFile                    string
 	AuthDisable                 bool
-	ConnProtocol                string
-	ConnKeyFile                 string
-	ConnMgmtdId                 string
+	Protocol                    string
+	KeyFile                     string
+	MgmtdId                     string
 	RemoteAddress               string
 	NumWorkers                  int
 	ConnTimeoutMs               int
@@ -231,9 +231,9 @@ func InitViperFromExternal(cfg GlobalConfig) error {
 	globalFlagSet.Bool(UseProxyKey, cfg.MgmtdUseProxy, "")
 	globalFlagSet.String(AuthFileKey, cfg.AuthFile, "")
 	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
-	globalFlagSet.String(ConnProtocolKey, cfg.ConnProtocol, "")
-	globalFlagSet.String(ConnKeyFileKey, cfg.ConnKeyFile, "")
-	globalFlagSet.String(ConnMgmtdIdKey, cfg.ConnMgmtdId, "")
+	globalFlagSet.String(ProtocolKey, cfg.Protocol, "")
+	globalFlagSet.String(KeyFileKey, cfg.KeyFile, "")
+	globalFlagSet.String(MgmtdIdKey, cfg.MgmtdId, "")
 	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
 	globalFlagSet.Int(NumWorkersKey, cfg.NumWorkers, "")
 	globalFlagSet.Duration(ConnTimeoutKey, time.Duration(cfg.ConnTimeoutMs)*time.Millisecond, "")

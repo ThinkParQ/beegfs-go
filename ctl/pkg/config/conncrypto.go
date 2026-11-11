@@ -34,24 +34,24 @@ func ConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 
 func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 	var mode beecrypt.Mode
-	switch protocol := strings.ToLower(viper.GetString(ConnProtocolKey)); protocol {
-	case "", ConnProtocolLegacy:
+	switch protocol := strings.ToLower(viper.GetString(ProtocolKey)); protocol {
+	case "", ProtocolLegacy:
 		return nil, beecrypt.KeyPairID{}, nil
 	case "plain":
 		mode = beecrypt.ModePlain
 	case "encrypted":
 		mode = beecrypt.ModeEncrypted
 	default:
-		return nil, beecrypt.KeyPairID{}, fmt.Errorf("invalid --%s %q (valid: legacy, plain, encrypted)", ConnProtocolKey, protocol)
+		return nil, beecrypt.KeyPairID{}, fmt.Errorf("invalid --%s %q (valid: legacy, plain, encrypted)", ProtocolKey, protocol)
 	}
 
 	if viper.GetBool(TlsDisableKey) {
-		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s cannot be used with --%s %s, gRPC always uses TLS there", TlsDisableKey, ConnProtocolKey, viper.GetString(ConnProtocolKey))
+		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s cannot be used with --%s %s, gRPC always uses TLS there", TlsDisableKey, ProtocolKey, viper.GetString(ProtocolKey))
 	}
 
-	mgmtdID, err := beecrypt.ParseKeyPairID(viper.GetString(ConnMgmtdIdKey))
+	mgmtdID, err := beecrypt.ParseKeyPairID(viper.GetString(MgmtdIdKey))
 	if err != nil {
-		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s must be set to the management's key pair ID (sha256:<64 hex digits>): %w", ConnMgmtdIdKey, err)
+		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s must be set to the management's key pair ID (sha256:<64 hex digits>): %w", MgmtdIdKey, err)
 	}
 
 	path, err := FindKeyFile()
@@ -74,9 +74,9 @@ func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 
 const SystemKeyFile = "/etc/beegfs/key.pem"
 
-func ConnProtocolIsLegacy() bool {
-	protocol := strings.ToLower(viper.GetString(ConnProtocolKey))
-	return protocol == "" || protocol == ConnProtocolLegacy
+func ProtocolIsLegacy() bool {
+	protocol := strings.ToLower(viper.GetString(ProtocolKey))
+	return protocol == "" || protocol == ProtocolLegacy
 }
 
 func UserKeyFile() (string, error) {
@@ -93,7 +93,7 @@ func fileExists(path string) bool {
 }
 
 func FindKeyFile() (string, error) {
-	if path := viper.GetString(ConnKeyFileKey); path != "" {
+	if path := viper.GetString(KeyFileKey); path != "" {
 		if !fileExists(path) {
 			return "", fmt.Errorf("key file %q does not exist, create it with \"beegfs auth generate-key %s\"", path, path)
 		}
@@ -108,12 +108,12 @@ func FindKeyFile() (string, error) {
 		return SystemKeyFile, nil
 	}
 
-	return "", fmt.Errorf("no key file found at %s or %s, create one with \"beegfs auth generate-key\" or set --%s", userPath, SystemKeyFile, ConnKeyFileKey)
+	return "", fmt.Errorf("no key file found at %s or %s, create one with \"beegfs auth generate-key\" or set --%s", userPath, SystemKeyFile, KeyFileKey)
 }
 
 func GenerateKeyFile(path string) (string, beecrypt.KeyPairID, error) {
 	if path == "" {
-		path = viper.GetString(ConnKeyFileKey)
+		path = viper.GetString(KeyFileKey)
 	}
 	if path == "" {
 		var err error

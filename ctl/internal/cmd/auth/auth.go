@@ -90,7 +90,7 @@ func newGenerateKeyCmd() *cobra.Command {
 		Long: `Generate a new key pair file.
 
 Runs locally without contacting the management. The file is written to the given path, to
---conn-key-file or to ~/.config/beegfs/key.pem, in this order. An existing file is never
+--key-file or to ~/.config/beegfs/key.pem, in this order. An existing file is never
 overwritten.`,
 		Args: cobra.MaximumNArgs(1),
 		Annotations: map[string]string{

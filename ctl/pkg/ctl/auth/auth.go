@@ -38,8 +38,8 @@ func GenerateKey(path string) (string, string, error) {
 }
 
 func Register(ctx context.Context, name string, token string) (RegisterResult, error) {
-	if config.ConnProtocolIsLegacy() {
-		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ConnProtocolKey)
+	if config.ProtocolIsLegacy() {
+		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ProtocolKey)
 	}
 
 	keyFile, generated, err := config.EnsureKeyFile()
@@ -52,7 +52,7 @@ func Register(ctx context.Context, name string, token string) (RegisterResult, e
 		return RegisterResult{}, err
 	}
 	if crypto == nil {
-		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ConnProtocolKey)
+		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ProtocolKey)
 	}
 
 	mgmtd, err := config.UncheckedManagementClient()
