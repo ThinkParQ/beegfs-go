@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -53,17 +54,9 @@ func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s must be set to the management's key pair ID (sha256:<64 hex digits>): %w", ConnMgmtdIdKey, err)
 	}
 
-	path := viper.GetString(ConnKeyFileKey)
-	if path == "" {
-		return nil, beecrypt.KeyPairID{}, fmt.Errorf("--%s is required with --%s %s", ConnKeyFileKey, ConnProtocolKey, viper.GetString(ConnProtocolKey))
-	}
-
-	if viper.GetBool(ConnKeyGenerateKey) {
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-			if err := writeNewKeyFile(path); err != nil {
-				return nil, beecrypt.KeyPairID{}, err
-			}
-		}
+	path, err := FindKeyFile()
+	if err != nil {
+		return nil, beecrypt.KeyPairID{}, err
 	}
 
 	pem, err := os.ReadFile(path)
@@ -79,22 +72,96 @@ func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 	return &util.ConnCrypto{KeyPair: keyPair, Mode: mode}, mgmtdID, nil
 }
 
-func writeNewKeyFile(path string) error {
+const SystemKeyFile = "/etc/beegfs/key.pem"
+
+func ConnProtocolIsLegacy() bool {
+	protocol := strings.ToLower(viper.GetString(ConnProtocolKey))
+	return protocol == "" || protocol == ConnProtocolLegacy
+}
+
+func UserKeyFile() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determining the home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "beegfs", "key.pem"), nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func FindKeyFile() (string, error) {
+	if path := viper.GetString(ConnKeyFileKey); path != "" {
+		if !fileExists(path) {
+			return "", fmt.Errorf("key file %q does not exist, create it with \"beegfs auth generate-key %s\"", path, path)
+		}
+		return path, nil
+	}
+
+	userPath, err := UserKeyFile()
+	if err == nil && fileExists(userPath) {
+		return userPath, nil
+	}
+	if fileExists(SystemKeyFile) {
+		return SystemKeyFile, nil
+	}
+
+	return "", fmt.Errorf("no key file found at %s or %s, create one with \"beegfs auth generate-key\" or set --%s", userPath, SystemKeyFile, ConnKeyFileKey)
+}
+
+func GenerateKeyFile(path string) (string, beecrypt.KeyPairID, error) {
+	if path == "" {
+		path = viper.GetString(ConnKeyFileKey)
+	}
+	if path == "" {
+		var err error
+		if path, err = UserKeyFile(); err != nil {
+			return "", beecrypt.KeyPairID{}, err
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("creating directory for key file %q: %w", path, err)
+	}
+
 	pem, err := beecrypt.GenerateKeyPair()
 	if err != nil {
-		return fmt.Errorf("generating key pair: %w", err)
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("generating key pair: %w", err)
 	}
 	defer clear(pem)
 
+	keyPair, err := beecrypt.LoadKeyPair(pem)
+	if err != nil {
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("loading generated key pair: %w", err)
+	}
+
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return fmt.Errorf("creating key file %q: %w", path, err)
+		if errors.Is(err, os.ErrExist) {
+			return "", beecrypt.KeyPairID{}, fmt.Errorf("key file %q already exists", path)
+		}
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("creating key file %q: %w", path, err)
 	}
 	if _, err := f.Write(pem); err != nil {
 		f.Close()
-		return fmt.Errorf("writing key file %q: %w", path, err)
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("writing key file %q: %w", path, err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return "", beecrypt.KeyPairID{}, fmt.Errorf("writing key file %q: %w", path, err)
+	}
+
+	return path, keyPair.ID(), nil
+}
+
+func EnsureKeyFile() (path string, generated bool, err error) {
+	if path, err := FindKeyFile(); err == nil {
+		return path, false, nil
+	}
+
+	path, _, err = GenerateKeyFile("")
+	return path, err == nil, err
 }
 
 func downloadPeerIDs(ctx context.Context, mgmtd *beegrpc.Mgmtd) (map[beegfs.LegacyId]beecrypt.KeyPairID, error) {

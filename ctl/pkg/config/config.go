@@ -57,10 +57,9 @@ const (
 	// Note if the auth path is automatically determined the path will be updated in Viper.
 	AuthFileKey = "auth-file"
 
-	ConnProtocolKey    = "conn-protocol"
-	ConnKeyFileKey     = "conn-key-file"
-	ConnKeyGenerateKey = "conn-key-generate"
-	ConnMgmtdIdKey     = "conn-mgmtd-id"
+	ConnProtocolKey = "conn-protocol"
+	ConnKeyFileKey  = "conn-key-file"
+	ConnMgmtdIdKey  = "conn-mgmtd-id"
 	// Disable TLS transport security for gRPC communication.
 	TlsDisableKey = "tls-disable"
 	// Disable TLS server verification for gRPC communication.
@@ -184,7 +183,6 @@ type GlobalConfig struct {
 	AuthDisable                 bool
 	ConnProtocol                string
 	ConnKeyFile                 string
-	ConnKeyGenerate             bool
 	ConnMgmtdId                 string
 	RemoteAddress               string
 	NumWorkers                  int
@@ -235,7 +233,6 @@ func InitViperFromExternal(cfg GlobalConfig) error {
 	globalFlagSet.Bool(AuthDisableKey, cfg.AuthDisable, "")
 	globalFlagSet.String(ConnProtocolKey, cfg.ConnProtocol, "")
 	globalFlagSet.String(ConnKeyFileKey, cfg.ConnKeyFile, "")
-	globalFlagSet.Bool(ConnKeyGenerateKey, cfg.ConnKeyGenerate, "")
 	globalFlagSet.String(ConnMgmtdIdKey, cfg.ConnMgmtdId, "")
 	globalFlagSet.String(BeeRemoteAddrKey, cfg.RemoteAddress, "")
 	globalFlagSet.Int(NumWorkersKey, cfg.NumWorkers, "")

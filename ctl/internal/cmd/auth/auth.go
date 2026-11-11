@@ -20,6 +20,7 @@ func NewCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(
+		newGenerateKeyCmd(),
 		newRegisterCmd(),
 		newIdCmd(),
 		newTokenCmd(),
@@ -34,7 +35,9 @@ func newRegisterCmd() *cobra.Command {
 		Long: `Register the key pair of this client with the management.
 
 An identity token is read from stdin. On a terminal, it is prompted for without echo. Leave it
-empty if the management accepts new clients without a token.`,
+empty if the management accepts new clients without a token.
+
+If no key file exists yet, one is generated first, like "beegfs auth generate-key" does.`,
 		Args: cobra.MaximumNArgs(1),
 		Annotations: map[string]string{
 			"authorization.AllowAllUsers": "",
@@ -52,6 +55,9 @@ empty if the management accepts new clients without a token.`,
 			}
 
 			res, err := auth.Register(cmd.Context(), name, token)
+			if res.GeneratedKey {
+				cmdfmt.Printf("Generated key file %s\n", res.KeyFile)
+			}
 			if err != nil {
 				return err
 			}
@@ -72,6 +78,37 @@ empty if the management accepts new clients without a token.`,
 			}
 
 			cmdfmt.Printf("Registered key pair %s as identity %d\n", res.KeyPairID, res.IdentityID)
+			return nil
+		},
+	}
+}
+
+func newGenerateKeyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "generate-key [<path>]",
+		Short: "Generate a new key pair file.",
+		Long: `Generate a new key pair file.
+
+Runs locally without contacting the management. The file is written to the given path, to
+--conn-key-file or to ~/.config/beegfs/key.pem, in this order. An existing file is never
+overwritten.`,
+		Args: cobra.MaximumNArgs(1),
+		Annotations: map[string]string{
+			"authorization.AllowAllUsers": "",
+			"health.SkipAlerts":           "",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := ""
+			if len(args) > 0 {
+				path = args[0]
+			}
+
+			path, id, err := auth.GenerateKey(path)
+			if err != nil {
+				return err
+			}
+
+			cmdfmt.Printf("Generated key pair %s at %s\n", id, path)
 			return nil
 		},
 	}

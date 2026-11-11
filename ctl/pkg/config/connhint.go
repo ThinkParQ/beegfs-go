@@ -22,7 +22,7 @@ func connHint(err error, nonLegacy bool) error {
 	case strings.Contains(msg, "no application protocol") && nonLegacy:
 		hint = fmt.Sprintf("the management uses a different connection protocol, check --%s", ConnProtocolKey)
 	case strings.Contains(msg, "no application protocol"):
-		hint = fmt.Sprintf("the management uses the plain or encrypted connection protocol, set --%s, --%s and --%s", ConnProtocolKey, ConnKeyFileKey, ConnMgmtdIdKey)
+		hint = fmt.Sprintf("the management uses the plain or encrypted connection protocol, set --%s and --%s", ConnProtocolKey, ConnMgmtdIdKey)
 	case nonLegacy && strings.Contains(msg, "key pair ID doesn't match"):
 		hint = fmt.Sprintf("the key pair ID of the management differs from --%s, or the management uses the legacy connection protocol", ConnMgmtdIdKey)
 	case nonLegacy && strings.Contains(msg, "does not look like a TLS handshake"):

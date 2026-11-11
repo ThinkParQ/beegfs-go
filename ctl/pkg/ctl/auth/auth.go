@@ -20,6 +20,8 @@ const (
 )
 
 type RegisterResult struct {
+	KeyFile           string
+	GeneratedKey      bool
 	KeyPairID         string
 	IdentityID        int64
 	Status            RegisterStatus
@@ -27,7 +29,24 @@ type RegisterResult struct {
 	AlreadyRegistered bool
 }
 
+func GenerateKey(path string) (string, string, error) {
+	path, id, err := config.GenerateKeyFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	return path, id.String(), nil
+}
+
 func Register(ctx context.Context, name string, token string) (RegisterResult, error) {
+	if config.ConnProtocolIsLegacy() {
+		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ConnProtocolKey)
+	}
+
+	keyFile, generated, err := config.EnsureKeyFile()
+	if err != nil {
+		return RegisterResult{}, err
+	}
+
 	crypto, _, err := config.ConnCrypto()
 	if err != nil {
 		return RegisterResult{}, err
@@ -56,6 +75,8 @@ func Register(ctx context.Context, name string, token string) (RegisterResult, e
 	}
 
 	res := RegisterResult{
+		KeyFile:           keyFile,
+		GeneratedKey:      generated,
 		KeyPairID:         crypto.KeyPair.ID().String(),
 		IdentityID:        resp.GetIdentityId(),
 		Message:           resp.GetMessage(),

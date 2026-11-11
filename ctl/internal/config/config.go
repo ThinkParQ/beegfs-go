@@ -60,9 +60,9 @@ func InitGlobalFlags(cmd *cobra.Command) {
 	To allow use by non-root users, ensure the file is owned by the "beegfs" group and has group read permissions.`, config.ManagementAddrKey, config.BeeGFSMgmtdAddrAuto, config.AuthFileKey))
 
 	cmd.PersistentFlags().String(config.ConnProtocolKey, config.ConnProtocolLegacy, fmt.Sprintf(`The connection protocol for BeeMsg and gRPC: legacy, plain or encrypted.
-	Must match the configuration of the BeeGFS services. With plain or encrypted, --%s and --%s are required, --%s is not allowed and --%s, --%s and the other TLS options are ignored.`, config.ConnKeyFileKey, config.ConnMgmtdIdKey, config.TlsDisableKey, config.AuthFileKey, config.AuthDisableKey))
-	cmd.PersistentFlags().String(config.ConnKeyFileKey, "", "The PKCS#8 PEM private key file identifying this client.")
-	cmd.PersistentFlags().Bool(config.ConnKeyGenerateKey, false, fmt.Sprintf("Generate a new key file at --%s if it does not exist.", config.ConnKeyFileKey))
+	Must match the configuration of the BeeGFS services. With plain or encrypted, --%s is required, a key file is needed (see --%s), --%s is not allowed and --%s, --%s and the other TLS options are ignored.`, config.ConnMgmtdIdKey, config.ConnKeyFileKey, config.TlsDisableKey, config.AuthFileKey, config.AuthDisableKey))
+	cmd.PersistentFlags().String(config.ConnKeyFileKey, "", fmt.Sprintf(`The PKCS#8 PEM private key file identifying this client.
+	If not set, ~/.config/beegfs/key.pem is used, or %s if the first does not exist. Create a key file with "beegfs auth generate-key".`, config.SystemKeyFile))
 	cmd.PersistentFlags().String(config.ConnMgmtdIdKey, "", "The key pair ID of the management (sha256:<64 hex digits>).")
 	cmd.PersistentFlags().Duration(config.ConnTimeoutKey, time.Millisecond*500, "Maximum time to attempt establishing non-gRPC connections.")
 
