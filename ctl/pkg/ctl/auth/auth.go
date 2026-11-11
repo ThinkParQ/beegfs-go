@@ -37,14 +37,18 @@ func GenerateKey(path string) (string, string, error) {
 	return path, id.String(), nil
 }
 
-func Register(ctx context.Context, name string, token string) (RegisterResult, error) {
+func Register(ctx context.Context, keyFile string, name string, token string) (RegisterResult, error) {
 	if config.ProtocolIsLegacy() {
 		return RegisterResult{}, fmt.Errorf("registering an identity requires --%s plain or encrypted", config.ProtocolKey)
 	}
 
+	if keyFile != "" {
+		config.SetKeyFile(keyFile)
+	}
+
 	keyFile, generated, err := config.EnsureKeyFile()
 	if err != nil {
-		return RegisterResult{}, err
+		return RegisterResult{KeyFile: keyFile, GeneratedKey: generated}, err
 	}
 
 	crypto, _, err := config.ConnCrypto()

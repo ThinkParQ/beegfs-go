@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thinkparq/beegfs-go/ctl/internal/cmdfmt"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/auth"
 	"golang.org/x/term"
 )
@@ -29,24 +30,27 @@ func NewCmd() *cobra.Command {
 }
 
 func newRegisterCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "register [<name>]",
+	var name string
+
+	cmd := &cobra.Command{
+		Use:   "register [<key-file>]",
 		Short: "Register the key pair of this client with the management",
-		Long: `Register the key pair of this client with the management.
+		Long: fmt.Sprintf(`Register the key pair of this client with the management.
+
+The key file is the given path, --key-file, ~/.config/beegfs/key.pem or %s, in this order.
+If it does not exist yet, it is generated first, like "beegfs auth generate-key" does.
 
 An identity token is read from stdin. On a terminal, it is prompted for without echo. Leave it
-empty if the management accepts new clients without a token.
-
-If no key file exists yet, one is generated first, like "beegfs auth generate-key" does.`,
+empty if the management accepts new clients without a token.`, config.SystemKeyFile),
 		Args: cobra.MaximumNArgs(1),
 		Annotations: map[string]string{
 			"authorization.AllowAllUsers": "",
 			"health.SkipAlerts":           "",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := ""
+			keyFile := ""
 			if len(args) > 0 {
-				name = args[0]
+				keyFile = args[0]
 			}
 
 			token, err := readToken()
@@ -54,7 +58,7 @@ If no key file exists yet, one is generated first, like "beegfs auth generate-ke
 				return err
 			}
 
-			res, err := auth.Register(cmd.Context(), name, token)
+			res, err := auth.Register(cmd.Context(), keyFile, name, token)
 			if res.GeneratedKey {
 				cmdfmt.Printf("Generated key file %s\n", res.KeyFile)
 			}
@@ -81,6 +85,9 @@ If no key file exists yet, one is generated first, like "beegfs auth generate-ke
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&name, "name", "", "An optional name for the identity.")
+	return cmd
 }
 
 func newGenerateKeyCmd() *cobra.Command {

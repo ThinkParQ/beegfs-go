@@ -72,7 +72,11 @@ func loadConnCrypto() (*util.ConnCrypto, beecrypt.KeyPairID, error) {
 	return &util.ConnCrypto{KeyPair: keyPair, Mode: mode}, mgmtdID, nil
 }
 
-const SystemKeyFile = "/etc/beegfs/key.pem"
+const SystemKeyFile = "/etc/beegfs/client-key.pem"
+
+func SetKeyFile(path string) {
+	viper.Set(KeyFileKey, path)
+}
 
 func ProtocolIsLegacy() bool {
 	protocol := strings.ToLower(viper.GetString(ProtocolKey))
