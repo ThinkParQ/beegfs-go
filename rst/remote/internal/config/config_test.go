@@ -252,3 +252,78 @@ func TestStringToProtoEnumHookOptionalEnum(t *testing.T) {
 	require.NotNil(t, target.Operation)
 	assert.Equal(t, flex.RemoteStorageTarget_XtreemStore_BulkOperation_EFFICIENT_RETRIEVE, *target.Operation)
 }
+
+// The [auth] settings have no defaults, so connauth can tell an absent key from false. This only
+// holds while nothing registers a flag for them, because a flag always supplies a default.
+func TestAuthSettingsDecodeUnsetAsNil(t *testing.T) {
+	const baseCfg = `
+[job]
+path-db = "/var/lib/beegfs/remote/path.badger"
+min-job-entries-per-rst = 2
+max-job-entries-per-rst = 4
+`
+	loadCfg := func(t *testing.T, body string) *AppConfig {
+		t.Helper()
+		cfgFile := filepath.Join(t.TempDir(), "beegfs-remote.toml")
+		require.NoError(t, os.WriteFile(cfgFile, []byte(body), 0644))
+		flags := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+		flags.String(configmgr.FlagConfigFile, cfgFile, "")
+		cfgMgr, err := configmgr.New(flags, "BEEREMOTE_", &AppConfig{}, SetRSTTypeHook())
+		require.NoError(t, err)
+		cfg, ok := cfgMgr.Get().(*AppConfig)
+		require.True(t, ok)
+		return cfg
+	}
+
+	t.Run("absent keys decode to nil", func(t *testing.T) {
+		cfg := loadCfg(t, baseCfg)
+		assert.Nil(t, cfg.Auth.AuthFile)
+		assert.Nil(t, cfg.Auth.AuthDisable)
+	})
+
+	t.Run("keys in the config file decode to set values", func(t *testing.T) {
+		cfg := loadCfg(t, baseCfg+"[auth]\nauth-file = \"/run/secrets/conn.auth\"\nauth-disable = false\n")
+		require.NotNil(t, cfg.Auth.AuthFile)
+		assert.Equal(t, "/run/secrets/conn.auth", *cfg.Auth.AuthFile)
+		require.NotNil(t, cfg.Auth.AuthDisable)
+		assert.False(t, *cfg.Auth.AuthDisable)
+	})
+
+	t.Run("environment variables decode to set values", func(t *testing.T) {
+		t.Setenv("BEEREMOTE_AUTH__AUTH_DISABLE", "true")
+		cfg := loadCfg(t, baseCfg)
+		require.NotNil(t, cfg.Auth.AuthDisable)
+		assert.True(t, *cfg.Auth.AuthDisable)
+		assert.Nil(t, cfg.Auth.AuthFile)
+	})
+}
+
+// TestDeprecatedMgmtdAuthStillParses checks that a configuration file written for an earlier version
+// still loads. Earlier versions read management.auth-file and management.auth-disable. Both are now
+// ignored, but a file that sets them must not stop Remote from starting.
+func TestDeprecatedMgmtdAuthStillParses(t *testing.T) {
+	const body = `
+[management]
+auth-file = "/etc/beegfs/old.auth"
+auth-disable = true
+
+[job]
+path-db = "/var/lib/beegfs/remote/path.badger"
+min-job-entries-per-rst = 2
+max-job-entries-per-rst = 4
+`
+	cfgFile := filepath.Join(t.TempDir(), "beegfs-remote.toml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(body), 0644))
+	flags := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	flags.String(configmgr.FlagConfigFile, cfgFile, "")
+	cfgMgr, err := configmgr.New(flags, "BEEREMOTE_", &AppConfig{}, SetRSTTypeHook())
+	require.NoError(t, err)
+	cfg, ok := cfgMgr.Get().(*AppConfig)
+	require.True(t, ok)
+
+	authFile, authDisable := cfg.Management.AuthFile, cfg.Management.AuthDisable
+	assert.Equal(t, "/etc/beegfs/old.auth", authFile)
+	assert.True(t, authDisable)
+	assert.Nil(t, cfg.Auth.AuthFile, "the deprecated settings must not fill in [auth]")
+	assert.Nil(t, cfg.Auth.AuthDisable, "the deprecated settings must not fill in [auth]")
+}

@@ -20,6 +20,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
+	"github.com/thinkparq/beegfs-go/rst/internal/connauth"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
@@ -225,6 +226,17 @@ Using environment variables:
 		}
 	}
 
+	// Connection authentication follows this node's BeeGFS client, with [auth] only as a fallback.
+	// Remote never decides it (see package connauth).
+	authState, err := connauth.FromMount(ctx, initialCfg.MountPoint, initialCfg.Auth, logger)
+	if err != nil {
+		logger.Fatal("unable to determine BeeGFS connection authentication", zap.Error(err))
+	}
+	if err := beeremote.RemoveLegacyAuthFile(); err != nil {
+		logger.Warn("unable to remove the copy of the auth secret written by an earlier version", zap.Error(err))
+	}
+	initialCfg.BeeRemote.SetAuth(authState.Secret, authState.AuthFile)
+
 	beeRemoteClient, err := beeremote.New(initialCfg.BeeRemote)
 	if err != nil {
 		logger.Fatal("failed to initialize Remote gRPC client", zap.Error(err))
@@ -236,7 +248,7 @@ Using environment variables:
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	jobServer, err := server.New(logger, initialCfg.Server, workMgr, buildInfo, capabilities)
+	jobServer, err := server.New(logger, initialCfg.Server, workMgr, buildInfo, capabilities, authState.Secret)
 	if err != nil {
 		logger.Fatal("failed to initialize Sync gRPC server", zap.Error(err))
 	}

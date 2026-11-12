@@ -26,12 +26,15 @@ type Manager struct {
 	handlers        []*Handler
 	metaEventBuffer *types.MultiCursorRingBuffer
 	wg              *sync.WaitGroup
+	// authSecret is the content of watch's auth file, or nil when watch has none. It is handed to
+	// subscribers that set grpc-send-auth-secret.
+	authSecret []byte
 }
 
 // Verify all interfaces that depend on Manager are satisfied:
 var _ configmgr.Listener = &Manager{}
 
-func New(log *logger.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup) *Manager {
+func New(log *logger.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *sync.WaitGroup, authSecret []byte) *Manager {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
 	return &Manager{
@@ -39,6 +42,7 @@ func New(log *logger.Logger, metaEventBuffer *types.MultiCursorRingBuffer, wg *s
 		handlers:        make([]*Handler, 0),
 		metaEventBuffer: metaEventBuffer,
 		wg:              wg,
+		authSecret:      authSecret,
 	}
 }
 
@@ -65,7 +69,7 @@ func (sm *Manager) UpdateConfiguration(newConfig any) error {
 	newHandlerConfig, newSubscribersConfig := configurer.GetSMConfig()
 
 	// Make sure the new subscriber configuration is valid before we start making changes.
-	newSubscribers, err := subscriber.NewSubscribersFromConfig(newSubscribersConfig)
+	newSubscribers, err := subscriber.NewSubscribersFromConfig(newSubscribersConfig, sm.authSecret)
 	if err != nil {
 		return err
 	}

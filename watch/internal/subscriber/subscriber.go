@@ -26,6 +26,9 @@ type Interface interface {
 	// Receive starts a goroutine that listens responses from the subscriber and posts them to the returned channel.
 	// It is idempotent in that multiple calls are expected to return the same channel and not start a new goroutine.
 	Receive() chan *pb.Response
+	// ReceiveErr returns the error that ended the most recent receive goroutine, or nil if the subscriber closed the stream cleanly.
+	// It is only meaningful after the channel returned by Receive() is closed.
+	ReceiveErr() error
 	// Disconnect must be idempotent and not return an error even if called against an already disconnected subscriber.
 	Disconnect() (err error)
 }

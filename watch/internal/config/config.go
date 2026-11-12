@@ -120,6 +120,15 @@ func (c *AppConfig) ValidateConfig() error {
 		}
 	}
 
+	// With auth-disable set, watch never reads the auth file, so it has no secret to send.
+	if c.Management.AuthDisable {
+		for _, sub := range c.Subscribers {
+			if sub.SendAuthSecret {
+				multiErr.Errors = append(multiErr.Errors, fmt.Errorf("subscriber %d (%s) sets grpc-send-auth-secret but management.auth-disable is set, so there is no secret to send", sub.ID, sub.Name))
+			}
+		}
+	}
+
 	if len(multiErr.Errors) > 0 {
 		return &multiErr
 	}

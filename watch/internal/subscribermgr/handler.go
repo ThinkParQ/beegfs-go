@@ -365,8 +365,13 @@ waitForInitialAck:
 				return
 			case response, ok := <-recvStream:
 				if !ok {
-					// Note an error or a legitimate remote disconnect could result in a REMOTE_DISCONNECT.
-					h.log.Info("stopping receiving responses because the remote subscriber disconnected")
+					// The subscriber either closed the stream or the stream failed. A stream that
+					// failed carries the reason, such as a rejected secret.
+					if err := h.ReceiveErr(); err != nil {
+						h.log.Warn("stopping receiving responses because the event stream to the remote subscriber failed", zap.Error(err))
+					} else {
+						h.log.Info("stopping receiving responses because the remote subscriber disconnected")
+					}
 					return
 				}
 				//h.log.Debug("received response from subscriber", zap.Any("response", response))

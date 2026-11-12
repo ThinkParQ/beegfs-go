@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -22,9 +23,11 @@ import (
 	"github.com/thinkparq/beegfs-go/common/telemetry"
 	ctl "github.com/thinkparq/beegfs-go/ctl/pkg/config"
 	"github.com/thinkparq/beegfs-go/ctl/pkg/ctl/procfs"
+	"github.com/thinkparq/beegfs-go/rst/internal/connauth"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
@@ -42,6 +45,8 @@ const (
 	// The setting no longer does anything; the default is retained so a value that differs from it
 	// can be recognized as one the user deliberately set.
 	deprecatedRequestQueueDepth = 1024
+	// deprecatedMgmtdAuthFile is the default of the deprecated management.auth-file setting.
+	deprecatedMgmtdAuthFile = "/etc/beegfs/conn.auth"
 )
 
 // Set by the build process using ldflags.
@@ -99,8 +104,6 @@ func main() {
 	pflag.String("management.tls-cert-file", "/etc/beegfs/cert.pem", "Use the specified certificate to verify and encrypt gRPC traffic to the Management node. Leave empty to only use the system's default certificate pool.")
 	pflag.Bool("management.tls-disable-verification", false, "Disable TLS verification for gRPC communication to the Management node.")
 	pflag.Bool("management.tls-disable", false, "Disable TLS entirely for gRPC communication to the Management node.")
-	pflag.String("management.auth-file", "/etc/beegfs/conn.auth", "The file containing the shared secret for BeeGFS connection authentication.")
-	pflag.Bool("management.auth-disable", false, "Disable BeeGFS connection authentication (not recommended).")
 	pflag.String("server.address", "0.0.0.0:9010", "The hostname:port where this Remote node should listen for job requests from the BeeGFS CTL tool.")
 	pflag.String("server.tls-cert-file", "/etc/beegfs/cert.pem", "Path to a certificate file that provides the identify of this Remote node's gRPC server.")
 	pflag.String("server.tls-key-file", "/etc/beegfs/key.pem", "Path to the key file belonging to the certificate for this Remote node's gRPC server.")
@@ -124,6 +127,10 @@ func main() {
 	// and prints a warning if it is set on the command line.
 	pflag.Int("job.request-queue-depth", deprecatedRequestQueueDepth, "Deprecated: no longer used.")
 	pflag.CommandLine.MarkDeprecated("job.request-queue-depth", "it is no longer used and will be removed in a future release")
+	pflag.String("management.auth-file", deprecatedMgmtdAuthFile, "Deprecated: connection authentication follows the BeeGFS client of mount-point.")
+	pflag.CommandLine.MarkDeprecated("management.auth-file", "connection authentication now follows the BeeGFS client of mount-point")
+	pflag.Bool("management.auth-disable", false, "Deprecated: connection authentication follows the BeeGFS client of mount-point.")
+	pflag.CommandLine.MarkDeprecated("management.auth-disable", "connection authentication now follows the BeeGFS client of mount-point")
 
 	pflag.CommandLine.SortFlags = false
 	pflag.Usage = func() {
@@ -220,6 +227,16 @@ Using environment variables:
 
 	cfgMgr.AddListener(logger)
 
+	// CTL is configured once, so the connection authentication state must be known before that.
+	// It follows the BeeGFS client of mount-point, with [auth] only as a fallback (see package
+	// connauth).
+	authState, err := connauth.FromMount(context.Background(), initialCfg.MountPoint, initialCfg.Auth, logger)
+	if err != nil {
+		logger.Fatal("unable to determine BeeGFS connection authentication", zap.Error(err))
+	}
+	warnDeprecatedMgmtdAuth(logger, initialCfg.Management, authState)
+	ctlAuthFile, ctlAuthDisable := ctlAuth(authState)
+
 	err = ctl.InitViperFromExternal(
 		ctl.GlobalConfig{
 			MgmtdAddress:                initialCfg.Management.Address,
@@ -227,8 +244,8 @@ Using environment variables:
 			MgmtdTLSDisableVerification: initialCfg.Management.TLSDisableVerification,
 			MgmtdTLSDisable:             initialCfg.Management.TLSDisable,
 			MgmtdUseProxy:               initialCfg.Management.UseProxy,
-			AuthFile:                    initialCfg.Management.AuthFile,
-			AuthDisable:                 initialCfg.Management.AuthDisable,
+			AuthFile:                    ctlAuthFile,
+			AuthDisable:                 ctlAuthDisable,
 			RemoteAddress:               initialCfg.Server.Address,
 			NumWorkers:                  runtime.GOMAXPROCS(0),
 			ConnTimeoutMs:               500,
@@ -290,13 +307,7 @@ Using environment variables:
 			logger.Fatal("unable to read management TLS certificate", zap.Error(err))
 		}
 	}
-	var authSecret []byte
-	if !initialCfg.Management.AuthDisable {
-		authSecret, err = os.ReadFile(initialCfg.Management.AuthFile)
-		if err != nil {
-			logger.Fatal("unable to read management secret from auth file", zap.Error(err))
-		}
-	}
+	setWorkerAuth(initialCfg.Workers, authState)
 	// The only thing currently requiring a mgmtd client is license verification. Immediately
 	// disconnect client after determining the license status to discourage reuse without first
 	// evaluating if a more robust strategy to manage long-term connections to the mgmtd is required
@@ -306,7 +317,7 @@ Using environment variables:
 		beegrpc.WithTLSDisable(initialCfg.Management.TLSDisable),
 		beegrpc.WithTLSDisableVerification(initialCfg.Management.TLSDisableVerification),
 		beegrpc.WithTLSCaCert(cert),
-		beegrpc.WithAuthSecret(authSecret),
+		beegrpc.WithAuthSecret(authState.Secret),
 		beegrpc.WithProxy(initialCfg.Management.UseProxy),
 	); err != nil {
 		// If the mgmtd is actually offline, usually we'll never get to this point. Startup will
@@ -328,17 +339,7 @@ Using environment variables:
 		}
 	}
 
-	beeRemoteNode := flex.BeeRemoteNode_builder{
-		Id:                          nodeID,
-		Address:                     initialCfg.Server.Address,
-		MgmtdAddress:                initialCfg.Management.Address,
-		MgmtdTlsCert:                cert,
-		MgmtdTlsDisableVerification: initialCfg.Management.TLSDisableVerification,
-		MgmtdTlsDisable:             initialCfg.Management.TLSDisable,
-		MgmtdUseProxy:               initialCfg.Management.UseProxy,
-		AuthSecret:                  authSecret,
-		AuthDisable:                 initialCfg.Management.AuthDisable,
-	}.Build()
+	beeRemoteNode := newBeeRemoteNode(nodeID, initialCfg, cert)
 
 	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities, initialCfg.Job.StateRoot)
 	if err != nil {
@@ -357,7 +358,7 @@ Using environment variables:
 	}
 
 	buildInfo := &flex.BuildInfo{BinaryName: binaryName, Version: version, Commit: commit, BuildTime: buildTime}
-	remoteServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities)
+	remoteServer, err := server.New(logger, initialCfg.Server, jobManager, buildInfo, capabilities, authState.Secret)
 	if err != nil {
 		logger.Fatal("unable to initialize Remote gRPC server", zap.Error(err))
 	}
@@ -402,4 +403,72 @@ Using environment variables:
 	workerManager.Stop()
 
 	logger.Info("shutdown all components, exiting")
+}
+
+// ctlAuth runs once at startup and returns the auth settings Remote hands to the CTL library. CTL
+// then authenticates to the BeeGFS services with the same secret as Remote's own gRPC server. The
+// state comes from connauth.FromMount:
+//   - ConnAuth on: CTL reads the same file, and authentication stays on.
+//   - ConnAuth off: CTL gets no file, and authentication is off.
+func ctlAuth(state connauth.State) (authFile string, authDisable bool) {
+	return state.AuthFile, !state.Enabled()
+}
+
+// setWorkerAuth runs once at startup and gives every Sync worker the secret Remote sends on its own
+// calls to that node. The state comes from connauth.FromMount, and a nil secret sends none. The
+// secret is never pushed to Sync nodes. Each Sync node reads it from its own client mount, and
+// proves it holds the secret when it calls back to this server before accepting the configuration.
+func setWorkerAuth(workers []worker.Config, state connauth.State) {
+	for i := range workers {
+		workers[i].SetAuthSecret(state.Secret)
+	}
+}
+
+// newBeeRemoteNode runs once at startup and builds the description of this Remote node that is
+// pushed to every Sync node. nodeID names this Remote. cfg is Remote's configuration, and cert is
+// the content of the management TLS certificate, or nil. It never sets AuthSecret or AuthDisable.
+// Sync nodes take their connection authentication from their own BeeGFS client, so the secret must
+// never travel in this message.
+func newBeeRemoteNode(nodeID string, cfg *config.AppConfig, cert []byte) *flex.BeeRemoteNode {
+	return flex.BeeRemoteNode_builder{
+		Id:                          nodeID,
+		Address:                     cfg.Server.Address,
+		MgmtdAddress:                cfg.Management.Address,
+		MgmtdTlsCert:                cert,
+		MgmtdTlsDisableVerification: cfg.Management.TLSDisableVerification,
+		MgmtdTlsDisable:             cfg.Management.TLSDisable,
+		MgmtdUseProxy:               cfg.Management.UseProxy,
+	}.Build()
+}
+
+// warnDeprecatedMgmtdAuth runs once at startup. Remote's own management.auth-file and
+// management.auth-disable settings no longer have any effect, because connection authentication
+// follows the BeeGFS client of mount-point. It warns when those settings would have given Remote a
+// different secret than the client's, so an operator can see the setting is ignored.
+//
+// The settings default to auth-file = /etc/beegfs/conn.auth and auth-disable = false. It cannot
+// tell a default from an explicit value, so it compares what the settings would have produced:
+//   - auth-disable set: the old secret was none.
+//   - otherwise: the old secret was the content of auth-file, or unknown if that cannot be read.
+//
+// It only warns. A contradiction can be harmless, for example a leftover conn.auth on a file
+// system that does not use connection authentication, and refusing to start would block an
+// upgrade that would otherwise work.
+func warnDeprecatedMgmtdAuth(log *logger.Logger, cfg config.MgmtdConfig, state connauth.State) {
+	//lint:ignore SA1019 reading the deprecated settings is how a contradiction is detected.
+	authFile, authDisable := cfg.AuthFile, cfg.AuthDisable
+
+	var deprecatedSecret []byte
+	if !authDisable {
+		var err error
+		if deprecatedSecret, err = os.ReadFile(authFile); err != nil {
+			deprecatedSecret = nil
+		}
+	}
+	if bytes.Equal(deprecatedSecret, state.Secret) {
+		return
+	}
+	log.Warn("ignoring the deprecated management.auth-file and management.auth-disable settings: they disagree with the BeeGFS client mount, whose connection authentication settings are used instead",
+		zap.String("management.auth-file", authFile), zap.Bool("management.auth-disable", authDisable),
+		zap.Bool("clientUsesConnAuth", state.Enabled()), zap.String("clientAuthFile", state.AuthFile))
 }

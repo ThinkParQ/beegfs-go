@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
@@ -47,8 +48,9 @@ type WorkerNodeServer struct {
 	draining atomic.Bool
 }
 
-// New() creates a new WorkerNodeServer that can be used with ListenAndServe().
-func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
+// New() creates a new WorkerNodeServer that can be used with ListenAndServe(). When authSecret is
+// not nil every call to the server must carry it. Rejected calls are logged, at most once a minute.
+func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature, authSecret []byte) (*WorkerNodeServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[WorkerNodeServer]().PkgPath())))
 
@@ -71,6 +73,7 @@ func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo 
 	} else {
 		s.log.Warn("not using TLS because it was explicitly disabled or a certificate and/or key were not specified")
 	}
+	grpcServerOpts = append(grpcServerOpts, beegrpc.AuthServerOptions(authSecret, s.log.Logger)...)
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	flex.RegisterWorkerNodeServer(s.grpcServer, &s)
 

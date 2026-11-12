@@ -17,6 +17,9 @@
 mount-point = "/mnt/beegfs"
 service-name = "beegfs-sync"
 
+# [auth]
+# auth-file = "/etc/beegfs/conn.auth"
+
 [log]
 level = 3
 type = "syslog"
@@ -79,6 +82,35 @@ tls-disable = false
 #
 
 # mount-point: The path where BeeGFS is mounted.
+#
+# Connection authentication follows the BeeGFS client of this mount. Sync reads the client's
+# connDisableAuthentication and connAuthFile from /proc/fs/beegfs:
+#   - If the client uses connection authentication, every caller must send the hash of the secret
+#     in connAuthFile. Sync sends the same hash on its own calls to Remote and the BeeGFS services.
+#     The secret itself never leaves the host.
+#   - If the client does not use connection authentication, Sync neither requires nor sends one.
+#   - If Sync cannot read the client's settings, it refuses to start unless [auth] says what to do
+#     (see below).
+# No setting can turn checks off while the client can be read, because an unchecked Sync node would
+# let anyone who can reach it read or overwrite any file in BeeGFS. The client of Remote must use
+# the same secret. A Sync
+# node whose secret Remote refuses rejects Remote's configuration, and Remote stops using it.
+
+# [auth]: Optional. Only for environments where Sync cannot read the client's settings or its
+# auth file, such as a container. Both settings are unset by default and can be set in this file
+# or with environment variables, but not on the command line.
+#   - auth-file: Read the secret from this path instead of the client's connAuthFile. When the
+#     client's settings cannot be read, this also turns connection authentication on.
+#   - auth-disable: Set to true to run without connection authentication when the client's
+#     settings cannot be read.
+# The client stays the authority when its settings can be read. Sync refuses to start when a
+# setting contradicts it: auth-disable = true while the client uses connection authentication, or
+# auth-file while it does not. Setting both is also an error.
+#
+# Running Sync in a container: the container must be able to read /proc/fs/beegfs, and the auth
+# file at the path the client reports. Mounting the client inside the container meets both. A
+# client mounted on the host and bind-mounted in needs the host's auth file mounted at the same
+# path, or auth-file set.
 
 # service-name: Identifies this service in exported metrics and logs. Appears as the
 # service.name resource attribute in all telemetry data. Useful in case multiple services

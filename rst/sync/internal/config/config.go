@@ -6,6 +6,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/configmgr"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
+	"github.com/thinkparq/beegfs-go/rst/internal/connauth"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
@@ -18,13 +19,14 @@ var _ telemetry.Configurer = &AppConfig{}
 var _ logger.Configurer = &AppConfig{}
 
 type AppConfig struct {
-	MountPoint  string           `mapstructure:"mount-point"`
-	ServiceName string           `mapstructure:"service-name"`
-	WorkMgr     workmgr.Config   `mapstructure:"manager"`
-	BeeRemote   beeremote.Config `mapstructure:"remote"`
-	Server      server.Config    `mapstructure:"server"`
-	Log         logger.Config    `mapstructure:"log"`
-	Telemetry   telemetry.Config `mapstructure:"telemetry"`
+	MountPoint  string            `mapstructure:"mount-point"`
+	ServiceName string            `mapstructure:"service-name"`
+	WorkMgr     workmgr.Config    `mapstructure:"manager"`
+	BeeRemote   beeremote.Config  `mapstructure:"remote"`
+	Server      server.Config     `mapstructure:"server"`
+	Auth        connauth.Settings `mapstructure:"auth"`
+	Log         logger.Config     `mapstructure:"log"`
+	Telemetry   telemetry.Config  `mapstructure:"telemetry"`
 	Developer   struct {
 		PerfProfilingPort    int  `mapstructure:"perf-profiling-port"`
 		BlockProfileRate     int  `mapstructure:"block-profile-rate"`
