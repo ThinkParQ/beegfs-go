@@ -48,8 +48,8 @@ Layout](https://github.com/golang-standards/project-layout):
 
 ## Commands
 
-Toolchain versions are pinned in `go.mod` (currently Go 1.26.4). Dev tools (`staticcheck`,
-`govulncheck`, `go-licenses`) are declared in the `go.mod` `tool` block and run via `go tool <name>`.
+Toolchain versions are pinned in `go.mod`. Dev tools (`staticcheck`, `govulncheck`, `go-licenses`)
+are declared in the `go.mod` `tool` block and run via `go tool <name>`.
 
 ### Build and run
 ```bash
