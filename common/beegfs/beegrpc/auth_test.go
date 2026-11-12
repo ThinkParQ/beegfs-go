@@ -2,10 +2,15 @@ package beegrpc_test
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/beemsg/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -97,9 +102,70 @@ func TestAuthServerOptionsLogsRejections(t *testing.T) {
 	if got := fields["caller"]; got == "" || got == "unknown" {
 		t.Errorf("caller = %v, want the client's address", got)
 	}
-	for key, value := range fields {
-		if s, ok := value.(string); ok && (s == "other" || s == "secret") {
-			t.Errorf("field %s logs a secret: %q", key, s)
+	// Print every field, whatever its type, so a secret or hash inside a list is found too.
+	for _, raw := range []string{"other", "secret"} {
+		hash := strconv.FormatUint(util.GenerateAuthSecret([]byte(raw)), 10)
+		for key, value := range fields {
+			if printed := fmt.Sprint(value); strings.Contains(printed, hash) || printed == raw {
+				t.Errorf("field %s logs the secret %q or its hash: %q", key, raw, printed)
+			}
 		}
+	}
+}
+
+// countingHealth is a health server that counts the calls that reach it.
+type countingHealth struct {
+	healthpb.UnimplementedHealthServer
+	calls atomic.Int32
+}
+
+func (c *countingHealth) Check(context.Context, *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
+	c.calls.Add(1)
+	return &healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}, nil
+}
+
+func (c *countingHealth) Watch(_ *healthpb.HealthCheckRequest, stream healthpb.Health_WatchServer) error {
+	c.calls.Add(1)
+	return stream.Send(&healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING})
+}
+
+// TestAuthServerOptionsStopsBeforeHandler checks that a rejected call never reaches the handler, on
+// unary and streaming calls alike. A handler that ran first could act on an unauthenticated call
+// even though the caller sees Unauthenticated.
+func TestAuthServerOptionsStopsBeforeHandler(t *testing.T) {
+	secret := []byte("secret")
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer(beegrpc.AuthServerOptions(secret, zap.NewNop())...)
+	handler := &countingHealth{}
+	healthpb.RegisterHealthServer(server, handler)
+	go server.Serve(lis)
+	t.Cleanup(server.Stop)
+
+	for _, clientSecret := range [][]byte{nil, []byte("other")} {
+		conn, err := beegrpc.NewClientConn(lis.Addr().String(), beegrpc.WithTLSDisable(true), beegrpc.WithAuthSecret(clientSecret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		client := healthpb.NewHealthClient(conn)
+		ctx := context.Background()
+
+		_, err = client.Check(ctx, &healthpb.HealthCheckRequest{})
+		if got := status.Code(err); got != codes.Unauthenticated {
+			t.Errorf("unary with secret %q: code = %s, want %s", clientSecret, got, codes.Unauthenticated)
+		}
+		stream, err := client.Watch(ctx, &healthpb.HealthCheckRequest{})
+		if err == nil {
+			_, err = stream.Recv()
+		}
+		if got := status.Code(err); got != codes.Unauthenticated {
+			t.Errorf("stream with secret %q: code = %s, want %s", clientSecret, got, codes.Unauthenticated)
+		}
+	}
+	if got := handler.calls.Load(); got != 0 {
+		t.Errorf("handler ran %d times for rejected calls, want 0", got)
 	}
 }

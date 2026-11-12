@@ -154,8 +154,11 @@ func TestBeeSyncNodeConnectSendsAuthSecret(t *testing.T) {
 				registry.FeatureFilterFiles: nil,
 				"extra-feature":             nil,
 			}
-			_, err := node.connect(config, bulk, required)
+			retry, err := node.connect(config, bulk, required)
 			require.Error(t, err)
+			// Both failures are retried. A Sync node that rejects Remote's secret may be fixed by
+			// an operator without restarting Remote.
+			assert.True(t, retry)
 			if tc.wantAuthErr {
 				assert.ErrorContains(t, err, codes.Unauthenticated.String())
 			} else {
@@ -164,4 +167,47 @@ func TestBeeSyncNodeConnectSendsAuthSecret(t *testing.T) {
 			}
 		})
 	}
+}
+
+// rejectingWorkerNodeServer is a Sync node that passes the feature check but refuses every
+// configuration, the way a real Sync node does when Remote rejects the secret it calls back with.
+// It records the requests it gets.
+type rejectingWorkerNodeServer struct {
+	testWorkerNodeServer
+	message string
+	got     []*flex.UpdateConfigRequest
+}
+
+func (s *rejectingWorkerNodeServer) UpdateConfig(_ context.Context, req *flex.UpdateConfigRequest) (*flex.UpdateConfigResponse, error) {
+	s.got = append(s.got, req)
+	return &flex.UpdateConfigResponse{Result: flex.UpdateConfigResponse_FAILURE, Message: s.message}, nil
+}
+
+// TestBeeSyncNodeConnectConfigRejected checks how Remote reacts when a Sync node accepts Remote's
+// secret but refuses the configuration because Remote rejected the secret the node called back
+// with. The call fails without a retry, and the error carries the node's reason. The worker loop
+// then marks the node offline and connects again from the start.
+func TestBeeSyncNodeConnectConfigRejected(t *testing.T) {
+	secret := []byte("secret")
+	reason := "rpc error: code = Unauthenticated desc = request requires authentication but provided secret doesn't match (hint: the BeeGFS clients of Remote and this Sync node must use the same connAuthFile)"
+	fake := &rejectingWorkerNodeServer{
+		testWorkerNodeServer: testWorkerNodeServer{capabilities: map[string]*flex.Feature{registry.FeatureFilterFiles: nil}},
+		message:              reason,
+	}
+	addr, cleanup := startWorkerNodeServer(t, fake, beegrpc.AuthServerOptions(secret, zap.NewNop())...)
+	defer cleanup()
+
+	node := newTestBeeSyncNode(t, addr)
+	t.Cleanup(func() { _ = node.disconnect() })
+	node.config.SetAuthSecret(secret)
+
+	config, bulk := connectInputs()
+	retry, err := node.connect(config, bulk, map[string]*flex.Feature{registry.FeatureFilterFiles: nil})
+	assert.False(t, retry)
+	assert.ErrorContains(t, err, "node rejected config update")
+	assert.ErrorContains(t, err, "connAuthFile", "the node's hint reaches Remote's log")
+
+	require.Len(t, fake.got, 1)
+	assert.Empty(t, fake.got[0].GetBeeRemote().GetAuthSecret(), "Remote must never push its secret to a Sync node")
+	assert.False(t, fake.got[0].GetBeeRemote().GetAuthDisable())
 }

@@ -57,6 +57,10 @@ const (
 	authFileKey    = "connAuthFile"
 )
 
+// getClients reads the BeeGFS clients from /proc/fs/beegfs. FromMount calls it through this
+// variable, so tests can return fixed clients without a real mount.
+var getClients = procfs.GetBeeGFSClients
+
 // Settings are the optional [auth] settings of Remote and Sync. A nil field was not set. They are
 // read from the configuration file or environment only. A command line flag always has a default,
 // so an unset key could not be told apart.
@@ -107,7 +111,7 @@ func FromMount(ctx context.Context, mountPath string, settings Settings, log *lo
 	if mountPath == "" {
 		return State{}, errors.New("mount-point must be set so connection authentication can be read from the BeeGFS client")
 	}
-	clients, err := procfs.GetBeeGFSClients(ctx, procfs.GetBeeGFSClientsConfig{FilterByMounts: []string{mountPath}}, log)
+	clients, err := getClients(ctx, procfs.GetBeeGFSClientsConfig{FilterByMounts: []string{mountPath}}, log)
 	if err != nil {
 		return State{}, fmt.Errorf("reading the BeeGFS client configuration from /proc/fs/beegfs: %w", err)
 	}

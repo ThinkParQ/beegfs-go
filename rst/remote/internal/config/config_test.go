@@ -297,3 +297,33 @@ max-job-entries-per-rst = 4
 		assert.Nil(t, cfg.Auth.AuthFile)
 	})
 }
+
+// TestDeprecatedMgmtdAuthStillParses checks that a configuration file written for an earlier version
+// still loads. Earlier versions read management.auth-file and management.auth-disable. Both are now
+// ignored, but a file that sets them must not stop Remote from starting.
+func TestDeprecatedMgmtdAuthStillParses(t *testing.T) {
+	const body = `
+[management]
+auth-file = "/etc/beegfs/old.auth"
+auth-disable = true
+
+[job]
+path-db = "/var/lib/beegfs/remote/path.badger"
+min-job-entries-per-rst = 2
+max-job-entries-per-rst = 4
+`
+	cfgFile := filepath.Join(t.TempDir(), "beegfs-remote.toml")
+	require.NoError(t, os.WriteFile(cfgFile, []byte(body), 0644))
+	flags := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	flags.String(configmgr.FlagConfigFile, cfgFile, "")
+	cfgMgr, err := configmgr.New(flags, "BEEREMOTE_", &AppConfig{}, SetRSTTypeHook())
+	require.NoError(t, err)
+	cfg, ok := cfgMgr.Get().(*AppConfig)
+	require.True(t, ok)
+
+	authFile, authDisable := cfg.Management.AuthFile, cfg.Management.AuthDisable
+	assert.Equal(t, "/etc/beegfs/old.auth", authFile)
+	assert.True(t, authDisable)
+	assert.Nil(t, cfg.Auth.AuthFile, "the deprecated settings must not fill in [auth]")
+	assert.Nil(t, cfg.Auth.AuthDisable, "the deprecated settings must not fill in [auth]")
+}

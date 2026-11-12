@@ -29,10 +29,12 @@ var _ Provider = &grpcProvider{}
 
 const (
 	syncMgmtdTLSCertFile = "/etc/beegfs/.beegfs-sync-mgmtd-tls-cert"
-	// legacySyncAuthFile is where earlier versions wrote the raw auth secret Remote pushed to them.
-	// Remote no longer pushes it, so RemoveLegacyAuthFile deletes any copy left behind.
-	legacySyncAuthFile = "/etc/beegfs/.beegfs-sync-auth-file"
 )
+
+// legacySyncAuthFile is where earlier versions wrote the raw auth secret Remote pushed to them.
+// Remote no longer pushes it, so RemoveLegacyAuthFile deletes any copy left behind. It is a
+// variable only so tests can point it at a temporary directory.
+var legacySyncAuthFile = "/etc/beegfs/.beegfs-sync-auth-file"
 
 // RemoveLegacyAuthFile deletes the copy of the auth secret earlier versions wrote, if any. A file
 // that does not exist is not an error.
