@@ -1,6 +1,6 @@
 module github.com/thinkparq/beegfs-go
 
-go 1.27.3
+go 1.27.4
 
 tool (
 	github.com/google/go-licenses/v2
