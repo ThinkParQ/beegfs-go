@@ -27,6 +27,7 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/config"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
+	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/workermgr"
 	"github.com/thinkparq/beegfs-go/watch/pkg/dispatch"
 	"github.com/thinkparq/beegfs-go/watch/pkg/subscriber"
@@ -234,6 +235,7 @@ Using environment variables:
 		logger.Fatal("unable to determine BeeGFS connection authentication", zap.Error(err))
 	}
 	warnDeprecatedMgmtdAuth(logger, initialCfg.Management, authState)
+	ctlAuthFile, ctlAuthDisable := ctlAuth(authState)
 
 	err = ctl.InitViperFromExternal(
 		ctl.GlobalConfig{
@@ -242,8 +244,8 @@ Using environment variables:
 			MgmtdTLSDisableVerification: initialCfg.Management.TLSDisableVerification,
 			MgmtdTLSDisable:             initialCfg.Management.TLSDisable,
 			MgmtdUseProxy:               initialCfg.Management.UseProxy,
-			AuthFile:                    authState.AuthFile,
-			AuthDisable:                 !authState.Enabled(),
+			AuthFile:                    ctlAuthFile,
+			AuthDisable:                 ctlAuthDisable,
 			RemoteAddress:               initialCfg.Server.Address,
 			NumWorkers:                  runtime.GOMAXPROCS(0),
 			ConnTimeoutMs:               500,
@@ -305,12 +307,7 @@ Using environment variables:
 			logger.Fatal("unable to read management TLS certificate", zap.Error(err))
 		}
 	}
-	// Remote authenticates to Sync nodes with the same secret. The secret is never pushed to Sync
-	// nodes. Each Sync node reads it from its own client mount, and proves it holds the secret
-	// when it calls back to this server before accepting the configuration.
-	for i := range initialCfg.Workers {
-		initialCfg.Workers[i].SetAuthSecret(authState.Secret)
-	}
+	setWorkerAuth(initialCfg.Workers, authState)
 	// The only thing currently requiring a mgmtd client is license verification. Immediately
 	// disconnect client after determining the license status to discourage reuse without first
 	// evaluating if a more robust strategy to manage long-term connections to the mgmtd is required
@@ -342,15 +339,7 @@ Using environment variables:
 		}
 	}
 
-	beeRemoteNode := flex.BeeRemoteNode_builder{
-		Id:                          nodeID,
-		Address:                     initialCfg.Server.Address,
-		MgmtdAddress:                initialCfg.Management.Address,
-		MgmtdTlsCert:                cert,
-		MgmtdTlsDisableVerification: initialCfg.Management.TLSDisableVerification,
-		MgmtdTlsDisable:             initialCfg.Management.TLSDisable,
-		MgmtdUseProxy:               initialCfg.Management.UseProxy,
-	}.Build()
+	beeRemoteNode := newBeeRemoteNode(nodeID, initialCfg, cert)
 
 	workerManager, err := workermgr.NewManager(ctx, logger, initialCfg.WorkerMgr, initialCfg.Workers, initialCfg.RemoteStorageTargets, beeRemoteNode, mountPoint, capabilities, initialCfg.Job.StateRoot)
 	if err != nil {
@@ -414,6 +403,42 @@ Using environment variables:
 	workerManager.Stop()
 
 	logger.Info("shutdown all components, exiting")
+}
+
+// ctlAuth runs once at startup and returns the auth settings Remote hands to the CTL library. CTL
+// then authenticates to the BeeGFS services with the same secret as Remote's own gRPC server. The
+// state comes from connauth.FromMount:
+//   - ConnAuth on: CTL reads the same file, and authentication stays on.
+//   - ConnAuth off: CTL gets no file, and authentication is off.
+func ctlAuth(state connauth.State) (authFile string, authDisable bool) {
+	return state.AuthFile, !state.Enabled()
+}
+
+// setWorkerAuth runs once at startup and gives every Sync worker the secret Remote sends on its own
+// calls to that node. The state comes from connauth.FromMount, and a nil secret sends none. The
+// secret is never pushed to Sync nodes. Each Sync node reads it from its own client mount, and
+// proves it holds the secret when it calls back to this server before accepting the configuration.
+func setWorkerAuth(workers []worker.Config, state connauth.State) {
+	for i := range workers {
+		workers[i].SetAuthSecret(state.Secret)
+	}
+}
+
+// newBeeRemoteNode runs once at startup and builds the description of this Remote node that is
+// pushed to every Sync node. nodeID names this Remote. cfg is Remote's configuration, and cert is
+// the content of the management TLS certificate, or nil. It never sets AuthSecret or AuthDisable.
+// Sync nodes take their connection authentication from their own BeeGFS client, so the secret must
+// never travel in this message.
+func newBeeRemoteNode(nodeID string, cfg *config.AppConfig, cert []byte) *flex.BeeRemoteNode {
+	return flex.BeeRemoteNode_builder{
+		Id:                          nodeID,
+		Address:                     cfg.Server.Address,
+		MgmtdAddress:                cfg.Management.Address,
+		MgmtdTlsCert:                cert,
+		MgmtdTlsDisableVerification: cfg.Management.TLSDisableVerification,
+		MgmtdTlsDisable:             cfg.Management.TLSDisable,
+		MgmtdUseProxy:               cfg.Management.UseProxy,
+	}.Build()
 }
 
 // warnDeprecatedMgmtdAuth runs once at startup. Remote's own management.auth-file and
