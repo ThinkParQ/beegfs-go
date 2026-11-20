@@ -1,5 +1,19 @@
 # This is a config file for BeeGFS Remote.
 # http://www.beegfs.com
+#
+# Upgrading: stop Remote, upgrade every Sync node and Watch, then upgrade and start Remote.
+# Remote refuses Sync nodes too old to take target changes while running. A newer Sync node must
+# not run under an older Remote either: it would sign requests for a target without a region with
+# us-east-1 (see Section 1.3). When connection authentication is on, older versions also cannot
+# reach newer ones in either direction (see mount-point in Section 3).
+#
+# Before the upgraded Remote first starts, check every [[remote-storage-target]] in this file:
+#   - It must set endpoint-url, access-key, secret-key and bucket. Remote checks every target at
+#     that start. If one fails, Remote logs the target and the missing settings, imports nothing
+#     and exits. It reports only the first failing target, so check them all beforehand.
+#   - Without region it uses us-east-1, not the region in the host's environment. Set region if
+#     the store is in another one.
+# Section 1.3 explains both.
 
 
 # --- [Table of Contents] ---
@@ -31,9 +45,11 @@
 mount-point = "/mnt/beegfs"
 service-name = "beegfs-remote"
 
+# [auth]
+# auth-file = "/etc/beegfs/conn.auth"
+
 [management]
 address = "127.0.0.1:8010"
-auth-file = "/etc/beegfs/conn.auth"
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-disable-verification = false
 tls-disable = false
@@ -77,6 +93,38 @@ state-root = ".beegfs-rst"
 #
 # --- Section 1.3: [Remote Storage Target Settings] ---
 #
+# Remote Storage Targets are managed with 'beegfs remote target' and stored in job.rst-db. Targets
+# defined here are only imported the first time Remote starts with an empty job.rst-db. After that
+# this section is ignored, and Remote logs a warning while it is still present.
+#
+# Upgrading to a version with job.rst-db: every S3 target must set endpoint-url. Earlier versions
+# accepted an empty endpoint-url. The S3 library then chose the endpoint on each node on its own,
+# from that node's environment variables or shared config file, or from the region. So Remote and
+# every sync node had to be set up to agree by hand. A target without endpoint-url now stops Remote
+# at the first start, with an error that names the target, and nothing is imported. Set endpoint-url
+# to the endpoint the target used, then restart.
+#
+# The same holds for access-key and secret-key. A target in this file has no backend, so it sets its
+# whole connection to the store itself, and the S3 library cannot sign a request without keys. Set
+# the values the target used, then restart.
+#
+# A target without region is imported, and uses us-east-1. Earlier versions took a missing region
+# from each node's environment, such as AWS_REGION. Remote does not read the environment, so it
+# cannot warn about this. If a target relied on the environment for another region, set region to
+# that value before the first start. Otherwise its requests are signed for us-east-1, and a store
+# in another region refuses them.
+#
+# Rolling back to a version of Remote without job.rst-db: that version reads targets only from this
+# file. Before downgrading:
+#   1. Run 'beegfs remote target list --verbose' and add a [[remote-storage-target]] section here
+#      for every target, with every value it shows. Older versions have no backends, so include
+#      the inherited values too.
+#   2. Remove any job.rst-db setting. Older versions refuse settings they do not know, and do not
+#      start.
+# A target missing from this file is unknown to the older version. Files and stubs that name it
+# cannot be pushed or pulled until the target is added back. After upgrading again, Remote uses
+# job.rst-db and ignores this file. Changes made here while rolled back are not imported unless
+# job.rst-db is removed first.
 
 # [[remote-storage-target]]
 # id = "1"
@@ -194,6 +242,36 @@ rate-limit-event-types = ["*"]
 #
 
 # mount-point: The path where BeeGFS is mounted.
+#
+# Connection authentication follows the BeeGFS client of this mount. Remote reads the client's
+# connDisableAuthentication and connAuthFile from /proc/fs/beegfs:
+#   - If the client uses connection authentication, every caller must send the hash of the secret
+#     in connAuthFile: CTL, Sync nodes, and Watch delivering file system events. Remote sends the
+#     same hash on its own calls to the BeeGFS services and to Sync nodes. The secret itself never
+#     leaves the host.
+#   - If the client does not use connection authentication, Remote neither requires nor sends one.
+#   - If Remote cannot read the client's settings, it refuses to start unless [auth] says what to
+#     do (see below).
+# Sync nodes follow the same rule with their own client, so the clients of Remote and of every Sync
+# node must use the same secret. Every Watch subscriber entry for Remote must set
+# grpc-send-auth-secret = true. Older Sync and Watch versions do not send the hash, and an older
+# Remote does not send it to Sync nodes. The upgrade order is at the top of this file.
+
+# [auth]: Optional. Only for environments where Remote cannot read the client's settings or its
+# auth file, such as a container. Both settings are unset by default and can be set in this file
+# or with environment variables, but not on the command line.
+#   - auth-file: Read the secret from this path instead of the client's connAuthFile. When the
+#     client's settings cannot be read, this also turns connection authentication on.
+#   - auth-disable: Set to true to run without connection authentication when the client's
+#     settings cannot be read.
+# The client stays the authority when its settings can be read. Remote refuses to start when a
+# setting contradicts it: auth-disable = true while the client uses connection authentication, or
+# auth-file while it does not. Setting both is also an error.
+#
+# Running Remote in a container: the container must be able to read /proc/fs/beegfs, and the auth
+# file at the path the client reports. Mounting the client inside the container meets both. A
+# client mounted on the host and bind-mounted in needs the host's auth file mounted at the same
+# path, or auth-file set.
 
 # service-name: Identifies this service in exported metrics and logs. Appears as the
 # service.name resource attribute in all telemetry data. Useful in case multiple services
@@ -224,9 +302,9 @@ rate-limit-event-types = ["*"]
 # use-http-proxy: Set to automatically use any proxy configured globally or via environment
 # variables for gRPC communication to the Management node. Will be propagated to Sync nodes.
 
-# auth-file: The file containing the shared secret for BeeGFS connection authentication.
-
-# auth-disable: Disable BeeGFS connection authentication (not recommended).
+# auth-file, auth-disable: Deprecated and ignored. Connection authentication follows the BeeGFS
+# client of mount-point (see mount-point). Remote logs a warning when these settings disagree with
+# the client.
 
 
 #
@@ -282,6 +360,12 @@ rate-limit-event-types = ["*"]
 # stored internally by Remote.
 
 # path-db: Path where the database tracking jobs for each path will be created/maintained.
+
+# rst-db: Path where the database storing the Remote Storage Targets will be created/maintained.
+# Targets are managed with 'beegfs remote target' and changes apply without a restart. It defaults
+# to rst.badger in the same directory as path-db, so it lives wherever path-db does. Keep it on
+# storage that survives a restart: if it is lost, Remote imports this file's targets again, and
+# every change and delete record made with the CLI is gone.
 
 # state-root: Directory where persistent state information may be stored and is available to and
 # shared among all sync workers. The directory's path must be relative inside the BeeGFS mount. It
@@ -513,7 +597,8 @@ rate-limit-event-types = ["*"]
 
 # Configuration for each Remote Storage Target (RST) should be specified under
 # [[remote-storage-target]] and includes all configuration that should apply to a particular RST.
-# Multiple RSTs can be specified by adding additional [[remote-storage-target]] sections.
+# Multiple RSTs can be specified by adding additional [[remote-storage-target]] sections. These
+# sections are only imported once, see Section 1.3. The same fields apply to 'beegfs remote target'.
 
 # id: A unique identifier for the RST. This is the ID that is set on entries in BeeGFS to indicate
 # they should be synchronized with this target. It is also how to indicate a specific RST when
@@ -558,8 +643,9 @@ rate-limit-event-types = ["*"]
 # * Amazon Web Services: https://<BUCKET_NAME>.s3.<REGION>.amazonaws.com
 # * Oracle Cloud (OCI): https://<ENDPOINT>.compat.objectstorage.<REGION>.oraclecloud.com
 
-# s3.region: The region where the S3 bucket is located. Valid options depend on the particular S3
-# provider. For example:
+# s3.region: The region where the S3 bucket is located. It is optional. Without it, the target uses
+# us-east-1, and creating a bucket sends no location, so the store picks its own default. Valid
+# options depend on the particular S3 provider. For example:
 #
 # * Minio: minio
 # * Amazon Web Services: us-east-1  

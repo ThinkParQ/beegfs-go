@@ -37,6 +37,7 @@ func newTestS3ClientWithConfig(t *testing.T, mountPoint filesystem.Provider, s3C
 		context.Background(),
 		&flex.RemoteStorageTarget{Policies: &flex.RemoteStorageTarget_Policies{}},
 		s3Config,
+		s3DefaultRegion,
 		mountPoint,
 		opts...,
 	)
@@ -873,4 +874,25 @@ func TestIsWorkRequestReadyFailsWhenOnlyTheWorkIsCancelled(t *testing.T) {
 	require.Error(t, err, "a cancellation that is not a shutdown must remain a failure")
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, ready)
+}
+
+// TestS3AWSClientRegion covers where the client's region comes from. The host's environment names
+// another region, so the test also shows the client never falls back to it.
+func TestS3AWSClientRegion(t *testing.T) {
+	t.Setenv("AWS_REGION", "from-env")
+	ctx := context.Background()
+	s3Config := &flex.RemoteStorageTarget_S3{EndpointUrl: "https://s3.example.com", AccessKey: "k", SecretKey: "s"}
+
+	client, err := newS3AWSClient(ctx, s3Config, "default-1")
+	require.NoError(t, err)
+	assert.Equal(t, "default-1", client.Options().Region, "a config without a region uses the type's default")
+
+	s3Config.SetRegion("eu-1")
+	client, err = newS3AWSClient(ctx, s3Config, "default-1")
+	require.NoError(t, err)
+	assert.Equal(t, "eu-1", client.Options().Region, "a region the config sets wins")
+
+	s3Config.SetRegion("")
+	_, err = newS3AWSClient(ctx, s3Config, "")
+	require.ErrorContains(t, err, "no default region", "without any region the SDK would read the environment")
 }

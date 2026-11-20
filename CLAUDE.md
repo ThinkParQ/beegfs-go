@@ -48,8 +48,8 @@ Layout](https://github.com/golang-standards/project-layout):
 
 ## Commands
 
-Toolchain versions are pinned in `go.mod` (currently Go 1.26.4). Dev tools (`staticcheck`,
-`govulncheck`, `go-licenses`) are declared in the `go.mod` `tool` block and run via `go tool <name>`.
+Toolchain versions are pinned in `go.mod`. Dev tools (`staticcheck`, `govulncheck`, `go-licenses`)
+are declared in the `go.mod` `tool` block and run via `go tool <name>`.
 
 ### Build and run
 ```bash
@@ -125,7 +125,7 @@ outside an app's core business logic, it probably belongs here.
 | `beemsg/` | BeeMsg binary wire protocol — message assembly/parsing + `nodestore` |
 | `ioctl/` | BeeGFS-specific kernel client ioctls (create-file, stat, etc.) |
 | `filesystem/` | Filesystem abstractions and path filtering (afero-based) |
-| `rst/` | Remote Storage Target abstraction shared by remote & sync — S3 client, job requests, builders |
+| `rst/` | Remote Storage Target abstraction shared by remote & sync — S3 client, job requests, builders. Each RST type implements and registers a `TargetType` (`targettype.go`), which the CLI and remote use to configure it |
 | `registry/` | Service discovery and capability/feature management |
 | `kvstore/` | Thread-safe data structures backed by BadgerDB (`MapStore`); used by the RST services |
 | `logger/` | Structured logging (zap), with OpenTelemetry (`otelzap`) and Badger log bridges |
@@ -134,7 +134,23 @@ outside an app's core business logic, it probably belongs here.
 ### `rst/` — Remote Storage Targets (HSM / data movement)
 
 - `rst/remote/` (`beegfs-remote`) — coordinator. `internal/`: `config`, `job` (manager +
-  `pendingsync`), `server` (gRPC), `worker`, `workermgr`.
+  `pendingsync`, and RST create/update/delete in `rstconfig.go`), `rstdb` (BadgerDB of RST
+  definitions), `server` (gRPC), `worker`, `workermgr`.
+- RST definitions are managed with `beegfs remote target create|modify|delete|list` and stored in
+  `rstdb` (`job.rst-db`). Remote applies each change live, to itself and to every sync node.
+  `beegfs remote backend` manages backends: the connection to one remote store, which targets of
+  the same type inherit from (`common/rst/backend.go`). Each setting of a `TargetType` declares an
+  `rst.SettingKind`, which decides who sets it and whether it is required: a required or optional
+  connection setting (set by the backend, or by a target without one), the bucket (set by each
+  target, fixed after create), or shared. `rst.CheckDefinitionSettings` holds these rules.
+  `--verify` on `backend create|modify` checks the new definition from Remote before storing it.
+  `backend verify` checks a stored backend from Remote and every sync node. `rstdb` stores only
+  what each target sets.
+  `[[remote-storage-target]]` sections in the TOML file are imported once, into an empty database.
+  For a type with buckets, `target create` also creates the target's bucket through Remote, or
+  with `--adopt` uses an existing one. `--backend --adopt` without `--bucket` makes one target per
+  unused bucket of the backend's store (`rst/remote/internal/job/rstbucket.go`, each type's
+  `rst.BucketManager`). `target delete` keeps the bucket.
 - `rst/sync/` (`beegfs-sync`) — worker processes that perform the actual transfers to/from
   S3-compatible object storage (stubbing, offloading, rehydration).
 - Service definitions live in `protobuf/proto/beeremote.proto` and `flex.proto`.

@@ -46,8 +46,18 @@ type Config struct {
 	MockConfig                             // Allow mocking worker node behavior from other packages. We could add a map structure tag here if we wanted to be able to setup expectations using a TOML file.
 }
 
+// SetAuthSecret sets the BeeGFS connection authentication secret Remote sends with every call to
+// this node, as a hash in the call metadata. The secret is the content of the auth file of Remote's
+// BeeGFS client, or nil when the client does not use connection authentication. It is never sent
+// inside a message.
+func (c *Config) SetAuthSecret(secret []byte) {
+	c.authSecret = secret
+}
+
 // Configuration specific to BeeSync nodes.
 type BeeSyncConfig struct {
+	// authSecret is set with Config.SetAuthSecret, never from the configuration file.
+	authSecret []byte
 }
 
 // Mock worker nodes represent simulated worker nodes. They are configured just

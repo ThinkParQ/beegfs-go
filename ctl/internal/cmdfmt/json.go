@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/spf13/viper"
+	"github.com/thinkparq/beegfs-go/ctl/pkg/config"
 )
 
 type jsonPrinter struct {
@@ -80,4 +82,21 @@ func printJSON(data any) string {
 		panic("unable to marshal json (this is likely a bug): " + err.Error())
 	}
 	return string(json)
+}
+
+// PrintJSON prints v to stdout as one JSON document, in the --output mode: indented for
+// json-pretty, and on one line for json and ndjson. It is for commands whose result is one object
+// rather than rows, so ndjson and json print the same line. It returns an error for an output mode
+// that is not JSON, because the caller should have printed text instead.
+func PrintJSON(v any) error {
+	outputType := config.OutputType(viper.GetString(config.OutputKey))
+	switch outputType {
+	case config.OutputJSONPretty:
+		fmt.Println(printPrettyJSON(v))
+	case config.OutputJSON, config.OutputNDJSON:
+		fmt.Println(printJSON(v))
+	default:
+		return fmt.Errorf("output type %q is not JSON (this is likely a bug)", outputType)
+	}
+	return nil
 }

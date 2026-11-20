@@ -32,6 +32,10 @@ import (
 // remoteCheckTimeout bounds the capability check UpdateConfig makes against the remote it is given.
 const remoteCheckTimeout = 10 * time.Second
 
+// notReadyRecheck is how often the manage loop checks whether a node that is not ready became ready,
+// so it can pull work again.
+const notReadyRecheck = 50 * time.Millisecond
+
 // requiredRemoteFeatures are the remote features this node can't run without. UpdateConfig refuses
 // a remote that lacks any of them. Remote checks this node's features the same way when it
 // connects, so a mismatch is refused from both sides.
@@ -283,18 +287,56 @@ func (m *Manager) IsReady() bool {
 // will check if the current configuration can be updated to the proposed configuration, and return
 // an error if the configuration update is invalid/not allowed.
 //
-// IMPORTANT: Currently once the initial RST config is set, it cannot be dynamically updated without
-// first restarting BeeSync. The same is true of stateRoot, which is where bulk operations persist
-// the state a builder job needs to resume.
+// Remote calls it on connect and again after every change to its remote storage targets. The RSTs
+// are applied as rst.ClientStore.UpdateConfig describes: unchanged providers are kept, and work
+// already running keeps the provider it holds. stateRoot cannot change while BeeSync runs, because
+// it is where bulk operations persist the state a builder job needs to resume.
 //
 // Before it changes anything, it checks that the remote beeRemoteConfig names supports every feature
-// in requiredRemoteFeatures. A remote that lacks one is refused, the previous configuration is
-// kept, and the node stays not ready. An error wrapping beeremote.ErrUnavailable means the remote
-// could not be reached to check, which is expected while remote starts.
+// in requiredRemoteFeatures. A remote that lacks one is refused, and the previous configuration is
+// kept. An error wrapping beeremote.ErrUnavailable means the remote could not be reached to check,
+// which is expected while remote starts.
 //
-// TODO: https://github.com/ThinkParQ/bee-remote/issues/29
-// Allow RST configuration to be updated dynamically.
+// A refused configuration makes the node not ready until a later call succeeds. The node may then
+// hold RSTs that Remote no longer serves: Remote has already stored and applied the set this node
+// refused. While not ready, the node starts no work request, because starting one would use those
+// RSTs. Work already running is not stopped, the same as when a change is accepted. Remote places
+// a node that refused offline, and sends it the current set on every reconnect, so the node
+// becomes ready again once it accepts one.
+//
+// An ErrUnavailable error means the remote could not be reached to check its features, so nothing
+// was applied. It makes the node not ready only when the RSTs or state root it was sent differ from
+// what it holds:
+//   - When they are the same, the node already works with what Remote serves. This is the case
+//     every time Remote restarts and reconnects, and pausing work then would gain nothing.
+//   - When they differ, Remote has changed its RSTs, and the node would go on with ones Remote no
+//     longer serves.
 func (m *Manager) UpdateConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
+	err := m.applyConfig(ctx, rstConfigs, beeRemoteConfig, nodeID, stateRoot)
+	unchanged := m.remoteStorageTargets.Holds(rstConfigs, effectiveStateRoot(stateRoot))
+	if err != nil && (!errors.Is(err, beeremote.ErrUnavailable) || !unchanged) {
+		m.readyMu.Lock()
+		wasReady := m.ready
+		m.ready = false
+		m.readyMu.Unlock()
+		if wasReady {
+			m.log.Warn("refused the configuration from remote, no work request starts until this node accepts one", zap.Error(err))
+		}
+	}
+	return err
+}
+
+// effectiveStateRoot returns the state root applyConfig uses for stateRoot: the default when Remote
+// sent none. An invalid one is returned as it is, so it never matches what the store holds.
+func effectiveStateRoot(stateRoot string) string {
+	root, err := rst.ValidateStateRoot(stateRoot)
+	if err != nil {
+		return stateRoot
+	}
+	return root
+}
+
+func (m *Manager) applyConfig(ctx context.Context, rstConfigs []*flex.RemoteStorageTarget, beeRemoteConfig *flex.BeeRemoteNode, nodeID string, stateRoot string) error {
 	checkCtx, cancel := context.WithTimeout(ctx, remoteCheckTimeout)
 	defer cancel()
 	if err := m.beeRemoteClient.RequireFeatures(checkCtx, beeRemoteConfig, requiredRemoteFeatures...); err != nil {
@@ -379,6 +421,7 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 			workJournal:          m.workJournal,
 			jobStore:             m.jobStore,
 			beeRemoteClient:      m.beeRemoteClient,
+			isReady:              m.IsReady,
 			rescheduleWork:       m.scheduler.AddRescheduleWorkToken,
 			workerSaturation:     workerSaturation,
 			metrics:              m.metrics,
@@ -401,10 +444,20 @@ func (m *Manager) manage(deferredFuncs []func() error) {
 
 	nextPriorityTokensChan := m.scheduler.GetNextPriorityTokenChan()
 	for m.mgrCtx.Err() == nil {
+		// A node that is not ready pulls no work, because it may hold RSTs Remote no longer serves
+		// (see UpdateConfig). Leaving the token channel unread is safe: the scheduler keeps
+		// accumulating tokens while its channel is full, and releases them once work is pulled again.
+		tokensChan := nextPriorityTokensChan
+		var recheck <-chan time.Time
+		if !m.IsReady() {
+			tokensChan = nil
+			recheck = time.After(notReadyRecheck)
+		}
 		select {
 		case <-m.mgrCtx.Done():
 			return
-		case priorityTokens := <-nextPriorityTokensChan:
+		case <-recheck:
+		case priorityTokens := <-tokensChan:
 			for _, priorityToken := range priorityTokens {
 				priority := priorityToken.Priority
 				tokens := &priorityToken.Tokens
