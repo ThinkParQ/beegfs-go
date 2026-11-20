@@ -110,6 +110,59 @@ func TestServerRequiresAuth(t *testing.T) {
 	}
 }
 
+// TestServerRequiresAuthForRSTConfig checks that the RPCs that manage targets, backends and
+// buckets reject a call without the secret. The check is installed on the whole server rather than
+// per RPC, so this guards against a later change that serves these RPCs some other way.
+func TestServerRequiresAuthForRSTConfig(t *testing.T) {
+	addr, _ := startRemoteServer(t, []byte("secret"))
+	client := beeremote.NewBeeRemoteClient(dial(t, addr, nil))
+	ctx := context.Background()
+
+	// Every handler below uses the nil job manager. A call that gets past the check crashes the
+	// test binary, which fails the test as surely as a wrong code.
+	calls := map[string]func() error{
+		"GetRSTConfig": func() error {
+			_, err := client.GetRSTConfig(ctx, &beeremote.GetRSTConfigRequest{})
+			return err
+		},
+		"CreateRST": func() error {
+			_, err := client.CreateRST(ctx, &beeremote.CreateRSTRequest{})
+			return err
+		},
+		"UpdateRST": func() error {
+			_, err := client.UpdateRST(ctx, &beeremote.UpdateRSTRequest{})
+			return err
+		},
+		"DeleteRST": func() error {
+			_, err := client.DeleteRST(ctx, &beeremote.DeleteRSTRequest{})
+			return err
+		},
+		"AdoptRSTBuckets": func() error {
+			_, err := client.AdoptRSTBuckets(ctx, &beeremote.AdoptRSTBucketsRequest{})
+			return err
+		},
+		"CreateRSTBackend": func() error {
+			_, err := client.CreateRSTBackend(ctx, &beeremote.CreateRSTBackendRequest{})
+			return err
+		},
+		"UpdateRSTBackend": func() error {
+			_, err := client.UpdateRSTBackend(ctx, &beeremote.UpdateRSTBackendRequest{})
+			return err
+		},
+		"DeleteRSTBackend": func() error {
+			_, err := client.DeleteRSTBackend(ctx, &beeremote.DeleteRSTBackendRequest{})
+			return err
+		},
+		"VerifyRSTBackend": func() error {
+			_, err := client.VerifyRSTBackend(ctx, &beeremote.VerifyRSTBackendRequest{})
+			return err
+		},
+	}
+	for name, call := range calls {
+		assert.Equal(t, codes.Unauthenticated, status.Code(call()), name)
+	}
+}
+
 // TestServerWithoutAuth checks that a nil secret leaves Remote's server open. That is the state
 // when the BeeGFS client of Remote's mount does not use connection authentication.
 func TestServerWithoutAuth(t *testing.T) {

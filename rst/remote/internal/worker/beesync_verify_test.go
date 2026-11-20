@@ -7,8 +7,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
+	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -55,4 +59,39 @@ func TestBeeSyncNodeVerifyBackend(t *testing.T) {
 	listener.Close()
 	_, err = onlineNode(t, gone).VerifyBackend(ctx, &flex.RemoteStorageTarget{})
 	require.ErrorIs(t, err, ErrNodeNotConnected)
+}
+
+// verifyingConfigServer is a Sync node that accepts every connect and passes every verify.
+type verifyingConfigServer struct {
+	configServer
+}
+
+func (s *verifyingConfigServer) VerifyBackend(ctx context.Context, request *flex.VerifyBackendRequest) (*flex.VerifyBackendResponse, error) {
+	return &flex.VerifyBackendResponse{Ok: true, Message: "reached the store"}, nil
+}
+
+// TestBeeSyncNodeVerifyBackendSendsAuthSecret checks that a verify goes over the connection that
+// connect opened, which carries Remote's secret. The Sync node requires the secret on every call.
+// A client that does not send it is rejected, which shows the node really checks VerifyBackend.
+func TestBeeSyncNodeVerifyBackendSendsAuthSecret(t *testing.T) {
+	ctx := context.Background()
+	secret := []byte("secret")
+	fake := &verifyingConfigServer{configServer{testWorkerNodeServer: testWorkerNodeServer{
+		capabilities: map[string]*flex.Feature{registry.FeatureFilterFiles: nil},
+	}}}
+	addr, cleanup := startWorkerNodeServer(t, fake, beegrpc.AuthServerOptions(secret, zap.NewNop())...)
+	defer cleanup()
+
+	node := newTestBeeSyncNode(t, addr)
+	t.Cleanup(func() { _ = node.disconnect() })
+	node.config.SetAuthSecret(secret)
+	config, bulk := connectInputs()
+	require.NoError(t, node.connect(ctx, config, bulk, map[string]*flex.Feature{registry.FeatureFilterFiles: nil}))
+	node.setState(ONLINE)
+	msg, err := node.VerifyBackend(ctx, &flex.RemoteStorageTarget{})
+	require.NoError(t, err)
+	assert.Equal(t, "reached the store", msg)
+
+	_, err = onlineNode(t, addr).VerifyBackend(ctx, &flex.RemoteStorageTarget{})
+	assert.ErrorContains(t, err, codes.Unauthenticated.String())
 }
