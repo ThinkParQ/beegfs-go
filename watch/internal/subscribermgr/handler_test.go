@@ -107,6 +107,10 @@ func (f *fakeSubscriberConn) Receive() chan *bw.Response {
 	return f.recv
 }
 
+func (f *fakeSubscriberConn) ReceiveErr() error {
+	return nil
+}
+
 func (f *fakeSubscriberConn) Disconnect() error {
 	return nil
 }

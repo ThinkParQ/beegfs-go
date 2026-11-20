@@ -9,9 +9,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/registry"
 	"github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -37,11 +39,11 @@ func (s *capabilitiesServer) GetCapabilities(ctx context.Context, request *flex.
 }
 
 // startRemote serves srv on a local port without TLS and returns its address.
-func startRemote(t *testing.T, srv beeremote.BeeRemoteServer) string {
+func startRemote(t *testing.T, srv beeremote.BeeRemoteServer, opts ...grpc.ServerOption) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	server := grpc.NewServer()
+	server := grpc.NewServer(opts...)
 	beeremote.RegisterBeeRemoteServer(server, srv)
 	go server.Serve(listener)
 	t.Cleanup(server.Stop)
@@ -130,6 +132,41 @@ func TestRequireFeaturesErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.Equal(t, tc.wantUnavailable, errors.Is(err, ErrUnavailable), "ErrUnavailable")
 			assert.Equal(t, tc.wantIncompatible, errors.Is(err, ErrIncompatibleRemote), "ErrIncompatibleRemote")
+		})
+	}
+}
+
+// TestRequireFeaturesAuth checks that the node authenticates to a Remote that requires a secret
+// with the secret of its own BeeGFS client, and never with a secret Remote pushed.
+func TestRequireFeaturesAuth(t *testing.T) {
+	feature := registry.FeatureRemoteLockRelease
+	secret := []byte("secret")
+	addr := startRemote(t, &capabilitiesServer{features: map[string]*flex.Feature{feature: nil}}, beegrpc.AuthServerOptions(secret, zap.NewNop())...)
+
+	testCases := []struct {
+		name     string
+		node     []byte
+		pushed   []byte
+		wantCode codes.Code
+	}{
+		{"noSecret", nil, nil, codes.Unauthenticated},
+		{"pushedSecretIsIgnored", nil, secret, codes.Unauthenticated},
+		{"wrongSecret", []byte("other"), nil, codes.Unauthenticated},
+		{"rightSecret", secret, nil, codes.OK},
+		{"rightSecretDespiteWrongPush", secret, []byte("other"), codes.OK},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient()
+			client.config.SetAuth(tc.node, "/unused")
+			cfg := flex.BeeRemoteNode_builder{Address: addr, AuthSecret: tc.pushed}.Build()
+			err := client.RequireFeatures(context.Background(), cfg, feature)
+			if tc.wantCode == codes.OK {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tc.wantCode.String())
+			assert.ErrorContains(t, err, "connAuthFile", "the error carries the hint")
 		})
 	}
 }

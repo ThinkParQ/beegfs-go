@@ -31,9 +31,11 @@
 mount-point = "/mnt/beegfs"
 service-name = "beegfs-remote"
 
+# [auth]
+# auth-file = "/etc/beegfs/conn.auth"
+
 [management]
 address = "127.0.0.1:8010"
-auth-file = "/etc/beegfs/conn.auth"
 tls-cert-file = "/etc/beegfs/cert.pem"
 tls-disable-verification = false
 tls-disable = false
@@ -194,6 +196,36 @@ rate-limit-event-types = ["*"]
 #
 
 # mount-point: The path where BeeGFS is mounted.
+#
+# Connection authentication follows the BeeGFS client of this mount. Remote reads the client's
+# connDisableAuthentication and connAuthFile from /proc/fs/beegfs:
+#   - If the client uses connection authentication, every caller must send the hash of the secret
+#     in connAuthFile: CTL, Sync nodes, and Watch delivering file system events. Remote sends the
+#     same hash on its own calls to the BeeGFS services and to Sync nodes. The secret itself never
+#     leaves the host.
+#   - If the client does not use connection authentication, Remote neither requires nor sends one.
+#   - If Remote cannot read the client's settings, it refuses to start unless [auth] says what to
+#     do (see below).
+# Sync nodes follow the same rule with their own client, so the clients of Remote and of every Sync
+# node must use the same secret. Every Watch subscriber
+# entry for Remote must set grpc-send-auth-secret = true. Sync and Watch versions that do not send
+# the hash cannot reach a Remote that requires it, so upgrade them together with Remote.
+
+# [auth]: Optional. Only for environments where Remote cannot read the client's settings or its
+# auth file, such as a container. Both settings are unset by default and can be set in this file
+# or with environment variables, but not on the command line.
+#   - auth-file: Read the secret from this path instead of the client's connAuthFile. When the
+#     client's settings cannot be read, this also turns connection authentication on.
+#   - auth-disable: Set to true to run without connection authentication when the client's
+#     settings cannot be read.
+# The client stays the authority when its settings can be read. Remote refuses to start when a
+# setting contradicts it: auth-disable = true while the client uses connection authentication, or
+# auth-file while it does not. Setting both is also an error.
+#
+# Running Remote in a container: the container must be able to read /proc/fs/beegfs, and the auth
+# file at the path the client reports. Mounting the client inside the container meets both. A
+# client mounted on the host and bind-mounted in needs the host's auth file mounted at the same
+# path, or auth-file set.
 
 # service-name: Identifies this service in exported metrics and logs. Appears as the
 # service.name resource attribute in all telemetry data. Useful in case multiple services
@@ -224,9 +256,9 @@ rate-limit-event-types = ["*"]
 # use-http-proxy: Set to automatically use any proxy configured globally or via environment
 # variables for gRPC communication to the Management node. Will be propagated to Sync nodes.
 
-# auth-file: The file containing the shared secret for BeeGFS connection authentication.
-
-# auth-disable: Disable BeeGFS connection authentication (not recommended).
+# auth-file, auth-disable: Deprecated and ignored. Connection authentication follows the BeeGFS
+# client of mount-point (see mount-point). Remote logs a warning when these settings disagree with
+# the client.
 
 
 #

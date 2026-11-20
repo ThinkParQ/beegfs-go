@@ -49,6 +49,9 @@ func (n *BeeSyncNode) connect(ctx context.Context, config *flex.UpdateConfigRequ
 		beegrpc.WithTLSDisableVerification(n.config.TLSDisableVerification),
 		beegrpc.WithTLSDisable(n.config.TlsDisable),
 		beegrpc.WithProxy(n.config.UseProxy),
+		// Sync nodes that require authentication check every call against this secret. Sending it
+		// to a Sync node that does not check it is harmless.
+		beegrpc.WithAuthSecret(n.config.authSecret),
 	)
 	if err != nil {
 		return err

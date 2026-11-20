@@ -239,6 +239,16 @@ func (s *Service) ReceiveEvents(stream bw.Subscriber_ReceiveEventsServer) error 
 	}
 	// Downcast is safe because NewEntityIdParser already validated this is a 32-bit integer.
 	metaId := uint32(legacyID.NumId)
+
+	// Send headers now, not with the first ack, so Watch learns at once that this subscriber
+	// accepted the stream. After Watch opens a stream it waits a short time for headers. A stream
+	// that ends without them is a rejection, and Watch reports its status. A stream with no headers
+	// and no end is treated as accepted only after that wait.
+	if err := stream.SendHeader(nil); err != nil {
+		err = fmt.Errorf("unable to accept the event stream from watch: %w", err)
+		s.log.Error(err.Error(), zap.Uint32("metaId", metaId))
+		return err
+	}
 	s.log.Info("watching for events from metadata node", zap.Any("metaID", metaId))
 
 	// Automatically init the lastAck for this meta the first time we see it. types.SeekToEndSeqID tells

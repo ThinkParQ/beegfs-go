@@ -236,6 +236,12 @@ poll-frequency = 1
 
 # grpc-address: The IP address or hostname and port of the subscriber. No default.
 
+# grpc-send-auth-secret: Set to true to send this subscriber the hash of the BeeGFS connection
+# authentication secret in management.auth-file. Required when the subscriber is a BeeGFS Remote
+# whose BeeGFS client uses connection authentication. Leave it false for any other subscriber,
+# because the hash is the credential for the whole file system. Watch refuses this setting when
+# management.auth-disable is set. Default: false.
+
 # grpc-disconnect-timeout: When a local disconnect is requested, how long to wait (in seconds) for
 # the remote subscriber to also shutdown their end of the connection before just closing the
 # connection. If this value is to short then we may not receive acknowledgement of events the
