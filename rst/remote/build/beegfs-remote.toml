@@ -6,6 +6,14 @@
 # not run under an older Remote either: it would sign requests for a target without a region with
 # us-east-1 (see Section 1.3). When connection authentication is on, older versions also cannot
 # reach newer ones in either direction (see mount-point in Section 3).
+#
+# Before the upgraded Remote first starts, check every [[remote-storage-target]] in this file:
+#   - It must set endpoint-url, access-key, secret-key and bucket. Remote checks every target at
+#     that start. If one fails, Remote logs the target and the missing settings, imports nothing
+#     and exits. It reports only the first failing target, so check them all beforehand.
+#   - Without region it uses us-east-1, not the region in the host's environment. Set region if
+#     the store is in another one.
+# Section 1.3 explains both.
 
 
 # --- [Table of Contents] ---
