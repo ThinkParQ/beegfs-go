@@ -1,10 +1,11 @@
 # This is a config file for BeeGFS Remote.
 # http://www.beegfs.com
 #
-# Upgrading: upgrade every Sync node and Watch first, then Remote, in one maintenance window.
-# Remote refuses Sync nodes too old to take target changes while running. When connection
-# authentication is on, older versions also cannot reach newer ones in either direction (see
-# mount-point in Section 3).
+# Upgrading: stop Remote, upgrade every Sync node and Watch, then upgrade and start Remote.
+# Remote refuses Sync nodes too old to take target changes while running. A newer Sync node must
+# not run under an older Remote either: it would sign requests for a target without a region with
+# us-east-1 (see Section 1.3). When connection authentication is on, older versions also cannot
+# reach newer ones in either direction (see mount-point in Section 3).
 
 
 # --- [Table of Contents] ---
