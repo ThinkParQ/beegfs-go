@@ -29,7 +29,7 @@ func TestNewHandler(t *testing.T) {
 	t.Run("verify handler is initialized correctly", func(t *testing.T) {
 		subscriber := &subscriber.Subscriber{}
 		metaEventBuffer := types.NewMultiCursorRingBuffer(1024, 128)
-		handler := newHandler(logger, subscriber, metaEventBuffer, handlerConfig)
+		handler := newHandler(t.Context(), logger, subscriber, metaEventBuffer, handlerConfig)
 		assert.Equal(t, 3, handlerConfig.PollFrequency)
 		assert.NotNil(t, handler.metaEventBuffer)
 		assert.NotNil(t, handler.log)
@@ -118,7 +118,7 @@ func TestSendLoopFilteredEventAutoAck(t *testing.T) {
 		Interface: fake,
 	}
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+	handler := newHandler(t.Context(), zap.NewNop(), sub, buffer, HandlerConfig{
 		MaxReconnectBackOff:            1,
 		MaxWaitForResponseAfterConnect: 1,
 		// Poll continuously so the test does not depend on multi-second poll ticks.
@@ -216,7 +216,7 @@ func TestSendLoopSeqIdZeroAutoAck(t *testing.T) {
 		Interface: fake,
 	}
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+	handler := newHandler(t.Context(), zap.NewNop(), sub, buffer, HandlerConfig{
 		MaxReconnectBackOff:            1,
 		MaxWaitForResponseAfterConnect: 1,
 		PollFrequency:                  0,
@@ -266,7 +266,7 @@ func TestSeekToEndEmptyBufferDeliversSeqIdZero(t *testing.T) {
 	}
 	// The buffer is intentionally empty: the subscriber seeks before any event has been buffered.
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+	handler := newHandler(t.Context(), zap.NewNop(), sub, buffer, HandlerConfig{
 		MaxReconnectBackOff:            1,
 		MaxWaitForResponseAfterConnect: 1,
 		PollFrequency:                  0,
@@ -326,9 +326,9 @@ func TestConnectLoopWaitsBetweenFailedAttempts(t *testing.T) {
 		Interface: fake,
 	}
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	// connectLoop waits until the buffer knows its meta ID, so set one to reach the connect attempts.
+	// connectLoop sends the buffer's ring ID as the meta ID. The metadata manager always sets it.
 	buffer.SetRingID(1)
-	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{MaxReconnectBackOff: 1})
+	handler := newHandler(t.Context(), zap.NewNop(), sub, buffer, HandlerConfig{MaxReconnectBackOff: 1})
 
 	done := make(chan bool, 1)
 	go func() { done <- handler.connectLoop() }()
@@ -374,7 +374,7 @@ func TestReceiveLoopLateInitialResponse(t *testing.T) {
 		Interface: fake,
 	}
 	buffer := types.NewMultiCursorRingBuffer(64, 8)
-	handler := newHandler(zap.NewNop(), sub, buffer, HandlerConfig{
+	handler := newHandler(t.Context(), zap.NewNop(), sub, buffer, HandlerConfig{
 		MaxReconnectBackOff: 1,
 		// A finite wait: the initial-response window closes after one second, after which any
 		// response from the subscriber is consumed by the ongoing ack loop instead.

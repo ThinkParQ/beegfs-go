@@ -13,10 +13,25 @@ import (
 // Sends and receives FileEvent messages to the metadata service.
 type fileEventConnHandler struct {
 	conn net.Conn
-	mu   *sync.Mutex
+	mu   sync.Mutex
 	ser  Serializer
 	des  Deserializer
 	log  *zap.Logger
+}
+
+func (c *fileEventConnHandler) addMetaIDToLogs(metaID uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.log = c.log.With(zap.Uint32("metaID", metaID))
+}
+
+func (c *fileEventConnHandler) closeAtShutdown() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.log.Info("attempting to close metadata connection because the app is shutting down")
+	if err := c.conn.Close(); err != nil {
+		c.log.Error("unable to close metadata connection", zap.Error(err))
+	}
 }
 
 // Attempts to send the requested message.
@@ -39,6 +54,14 @@ func (c *fileEventConnHandler) send(message Serializable) bool {
 
 // Attempts to receive the selected message.
 func (c *fileEventConnHandler) recv(message Deserializable) bool {
+	return c.recvBefore(message, time.Time{})
+}
+
+func (c *fileEventConnHandler) recvReply(message Deserializable, timeout time.Duration) bool {
+	return c.recvBefore(message, time.Now().Add(timeout))
+}
+
+func (c *fileEventConnHandler) recvBefore(message Deserializable, replyDeadline time.Time) bool {
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -56,8 +79,12 @@ func (c *fileEventConnHandler) recv(message Deserializable) bool {
 		// intended to prevent dropped events when gracefully shutting down the app. Based on
 		// testing resetting the read deadline and relocking the mutex between reading each event
 		// has a negligible performance impact on events per second.
+		readDeadline := time.Now().Add(1 * time.Second)
+		if !replyDeadline.IsZero() && replyDeadline.Before(readDeadline) {
+			readDeadline = replyDeadline
+		}
 		c.mu.Lock()
-		c.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		c.conn.SetReadDeadline(readDeadline)
 		bytesRead, err := c.conn.Read(c.des.Load())
 		c.mu.Unlock()
 		if err != nil {
@@ -71,7 +98,10 @@ func (c *fileEventConnHandler) recv(message Deserializable) bool {
 					c.log.Error("reading from the metadata server exceeded the read deadline but still returned a partial message (this is probably a bug)", zap.Any("message", message.MsgID()), zap.Any("bytesRead", bytesRead))
 					return false
 				}
-				// Keep trying to read.
+				if !replyDeadline.IsZero() && !time.Now().Before(replyDeadline) {
+					c.log.Warn("closing the metadata connection because the metadata service did not reply in time", zap.Any("message", message.MsgID()))
+					return false
+				}
 				continue
 			}
 			// Handle if we're gracefully shutting down and the socket was closed.
@@ -86,7 +116,7 @@ func (c *fileEventConnHandler) recv(message Deserializable) bool {
 			c.log.Error("unexpected error deserializing message", zap.Any("message", message.MsgID()), zap.Error(err))
 			return false
 		}
-		c.log.Debug("received message", zap.Any("message", message.MsgID()), zap.Any("message", message))
+		c.log.Debug("received message", zap.Any("type", message.MsgID()), zap.Any("message", message))
 		return true
 	}
 }

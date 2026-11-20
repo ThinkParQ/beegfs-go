@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -27,23 +29,28 @@ const (
 	eventProtocolMinor uint16 = 0
 )
 
-// The metadata.Manager manages a Unix socket where the BeeGFS metadata service
-// can send events. It handles deserializing the events and writing them to a
-// shared EventBuffer that other components can read from.
+const (
+	defaultReplyTimeout   = 30 * time.Second
+	defaultConnCloseDelay = 2 * time.Second
+	rejectLogInterval     = time.Minute
+)
+
 type Manager struct {
-	// Shared EventBuffer where events are sent once they are deserialized.
-	// Only the metadata manager should write to to the EventBuffer.
-	// It is expected other components in the application may read from this
-	// buffer by registering their own subscriber cursors.
-	EventBuffer *types.MultiCursorRingBuffer
-	ctx         context.Context
-	log         *logger.Logger
-	// This is the path where a socket will be created where the metadata server can send events.
-	socketPath string
-	socket     net.Listener
-	// lastSeqID is the seqID of the last event pushed to the EventBuffer. It is used to prevent
-	// pushing duplicate or out of sequence events into the buffer.
-	lastSeqID uint64
+	ctx               context.Context
+	log               *logger.Logger
+	socketPath        string
+	socket            net.Listener
+	closeSocket       func() error
+	bufferSize        int
+	bufferGCFrequency int
+	replyTimeout      time.Duration
+	connCloseDelay    time.Duration
+
+	addSourceToSubscribers func(*types.MultiCursorRingBuffer)
+
+	mu             sync.Mutex
+	sources        map[uint32]*eventSource
+	rejectLoggedAt map[uint32]time.Time
 }
 
 // Config defines the configuration for a metadata.Manager.
@@ -56,8 +63,6 @@ type Config struct {
 	EventBufferGCFrequency int    `mapstructure:"event-buffer-gc-frequency"`
 }
 
-// New creates a new Metadata manager that handles reading events from the
-// specified EventLogTarget and publishing them to an EventBuffer.
 // If the socket's directory is missing, New creates it with mode 0700 and
 // creates any missing parents with mode 0755.
 // New then takes an exclusive flock on <EventLogTarget>.lock and holds it until
@@ -66,10 +71,6 @@ type Config struct {
 // and listen.
 // It is the callers responsibility to call the returned cleanup function to
 // avoid leaking resources (typically using a defer statement).
-// This allows us to initialize the metadata socket and buffer which are then
-// used to initialize other components before we actually start receiving
-// events from the metadata service. This helps avoid dropped events in case
-// some other component was misconfigured.
 func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manager, func(), error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
@@ -135,9 +136,10 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 		return nil, nil, fmt.Errorf("error listening for unix packets using socket %s: %w", config.EventLogTarget, err)
 	}
 
+	closeSocket := sync.OnceValue(socket.Close)
 	cleanup := func() {
 		// This also handles deleting the file.
-		err := socket.Close()
+		err := closeSocket()
 		if err != nil {
 			log.Error("unable to close metadata socket", zap.Error(err))
 		}
@@ -147,137 +149,135 @@ func New(ctx context.Context, log *logger.Logger, metaConfigs []Config) (*Manage
 	}
 
 	return &Manager{
-		ctx:         ctx,
-		socket:      socket,
-		log:         log,
-		socketPath:  config.EventLogTarget,
-		EventBuffer: types.NewMultiCursorRingBuffer(config.EventBufferSize, config.EventBufferGCFrequency),
-		lastSeqID:   types.NoSeqId,
+		ctx:               ctx,
+		socket:            socket,
+		closeSocket:       closeSocket,
+		log:               log,
+		socketPath:        config.EventLogTarget,
+		bufferSize:        config.EventBufferSize,
+		bufferGCFrequency: config.EventBufferGCFrequency,
+		replyTimeout:      defaultReplyTimeout,
+		connCloseDelay:    defaultConnCloseDelay,
+		sources:           make(map[uint32]*eventSource),
+		rejectLoggedAt:    make(map[uint32]time.Time),
 	}, cleanup, nil
 }
 
-// Manage starts listening for events from a metadata service and publishing them to the EventBuffer.
-// It requires a WaitGroup that will be marked done when it exits.
-//
-// When it starts it will wait until it receives a connection.
-// Once a connection is accepted it will read any bytes send over the connection and
-// attempt to deserialize BeeGFS packets before sending them to any subscribers.
-//
-// If there is a problem accepting a connection it will continue trying to accept new connections.
-// If there is an error reading from a connection it will close the connection and wait for a new one.
-// An event that cannot be deserialized is handled the same way, so the stream restarts at that event.
-//
-// When Managers context is cancelled, Manage will attempt to shutdown cleanly.
-// If it is currently reading/serializing a packet, the packet will be saved before the connection is closed.
-// IMPORTANT: The caller must use the cleanup() function returned by New() to ensure resources are cleaned up.
-// Manage handles shutting down the connection, but not cleaning up the socket.
-func (m *Manager) Manage(wg *sync.WaitGroup) {
-
-	// Defers are executed in LIFO order.
-	// We want to ensure we get a chance to cleanup BEFORE we mark the wg as done.
+func (m *Manager) Serve(wg *sync.WaitGroup, addSourceToSubscribers func(*types.MultiCursorRingBuffer)) {
 	defer wg.Done()
+	m.addSourceToSubscribers = addSourceToSubscribers
 
-	connections := make(chan net.Conn)
+	var conns sync.WaitGroup
+	acceptLoopDone := make(chan struct{})
+	go func() {
+		defer close(acceptLoopDone)
+		m.acceptLoop(&conns)
+	}()
 
+	<-m.ctx.Done()
+	m.log.Info("no longer accepting new metadata connections because the app is shutting down")
+	m.closeSocket()
+	<-acceptLoopDone
+	conns.Wait()
+}
+
+func (m *Manager) acceptLoop(conns *sync.WaitGroup) {
 	for {
-		go m.acceptConnection(connections)
-		select {
-		case <-m.ctx.Done():
-			m.log.Info("no longer accepting new metadata connections because the app is shutting down")
-			return
-		case conn := <-connections:
-
-			if conn == nil {
-				// Right now we don't do any complex error handling if we couldn't accept a connection.
-				// The error has already been logged so just keep trying to accept connections.
-				continue
-			}
-
-			// Start a separate goroutine that reads from the connection.
-			// It can cancel the context to request the connection be closed if anything goes wrong.
-			connCtx, cancelConn := context.WithCancel(context.Background())
-			// connMutex coordinates reading and closing the connection. This is because we use one
-			// goroutine to wait for app shutdown and close the connection, and another to actually
-			// read from the connection. This ensures we don't block shutdown when no events are
-			// ready. It also ensures we are able to finish reading the last event and publish it to
-			// the buffer before disconnecting.
-			var connMutex sync.Mutex
-			go m.handleV2Connection(conn, &connMutex, cancelConn)
-
-			select {
-			case <-m.ctx.Done():
-				m.log.Info("attempting to close active metadata connection because the app is shutting down")
-				connMutex.Lock()
-				err := conn.Close()
-				connMutex.Unlock()
-				if err != nil {
-					m.log.Error("unable to close metadata connection", zap.Error(err))
-				}
-				return
-			case <-connCtx.Done():
-				// Something went wrong reading the packet. Possibly the connection is broken.
-				// Lets try to close it and reconnect.
-				m.log.Info("attempting to close active metadata connection and reconnect")
-				err := conn.Close()
-				if err != nil {
-					m.log.Error("unable to close metadata connection", zap.Error(err))
-				}
-				time.Sleep(time.Second * 2)
-			}
-		}
-	}
-
-}
-
-// acceptConnection will block until it receives a connection.
-// When it establishes a connection it will be returned on the provided channel.
-// If there is an error accepting a connection it will return a nil connection for upstream handling.
-func (m *Manager) acceptConnection(connections chan<- net.Conn) {
-
-	m.log.Info("waiting for metadata connection")
-	c, err := m.socket.Accept()
-
-	if err != nil {
-		// Handle if we're gracefully shutting down and the socket was closed.
-		if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+		conn, err := m.socket.Accept()
+		if errors.Is(err, net.ErrClosed) {
 			return
 		}
-		m.log.Error("failed to accept metadata connection", zap.Error(err))
-		connections <- nil
-		return
+		if err != nil {
+			m.log.Error("failed to accept metadata connection", zap.Error(err))
+			continue
+		}
+		m.log.Debug("accepted metadata connection")
+		conns.Go(func() { m.serveConnection(conn) })
 	}
-	m.log.Info("established metadata connection")
-	connections <- c
 }
 
-// handleV2Connection manages a connection using the BeeGFS v2 "file event" protocol introduced in
-// BeeGFS 8. This function establishes the connection, performs a handshake, synchronizes event
-// state, and starts streaming metadata events. It follows a linear packet handling workflow where
-// any error results in the connection being reset and restarted.
-//
-// The connection process consists of the following steps:
-//  1. Perform a handshake to negotiate protocol compatibility.
-//  2. Request the available event sequence range from the metadata service.
-//  3. Determine the starting sequence number based on the last received event.
-//  4. Request the start of the event stream from the determined sequence number.
-//  5. Continuously receive and buffer events, ensuring no duplicates.
-//  6. If the connection is lost or an error occurs, the process is restarted.
-//
-// Since frequent allocation of buffers and serializers negatively impacts performance, this
-// function reuses preallocated objects for efficiency.
-func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cancelConn context.CancelFunc) {
-
-	// Allocating new buffers and serializers for every event has an immense impact on performance.
-	// Allocate up front and reuse them instead.
-	handler := fileEventConnHandler{
+func (m *Manager) serveConnection(conn net.Conn) {
+	handler := &fileEventConnHandler{
 		conn: conn,
-		mu:   connMutex,
 		ser:  NewSerializer(),
 		des:  NewDeserializer(),
 		log:  m.log.With(zap.Any("subComponent", "eventConnHandler")).Logger,
 	}
 
-	defer cancelConn()
+	handlerReturned := make(chan struct{})
+	go func() {
+		defer close(handlerReturned)
+		m.handleV2Connection(handler)
+	}()
+
+	// waits for watch to shut down or the handler to stop on its own
+	select {
+	case <-m.ctx.Done():
+		handler.closeAtShutdown()
+		<-handlerReturned
+		return
+	case <-handlerReturned:
+	}
+
+	// keep finished connection open for connCloseDelay so meta's doesn't reconnect in tight loop
+	select {
+	case <-m.ctx.Done():
+	case <-time.After(m.connCloseDelay):
+	}
+	if err := conn.Close(); err != nil {
+		handler.log.Error("unable to close metadata connection", zap.Error(err))
+	}
+}
+
+// checks if the meta was already seen before, if not creates a eventsource for that meta and marks it as attached
+func (m *Manager) attach(metaID uint32, log *zap.Logger) (source *eventSource, created bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.ctx.Err() != nil {
+		log.Debug("not attaching a metadata connection because the app is shutting down")
+		return nil, false
+	}
+	if metaID == 0 {
+		if m.rejectLogDue(metaID) {
+			log.Error("rejecting connection from a metadata node that sent node ID 0 in its handshake (BeeGFS never assigns node ID 0, so the metadata service is most likely misconfigured or broken)")
+		}
+		return nil, false
+	}
+
+	source, found := m.sources[metaID]
+	if found && source.attached {
+		if m.rejectLogDue(metaID) {
+			log.Warn(fmt.Sprintf("rejecting connection from metadata node %d because it is already connected to this watch (a restarted meta reconnects within a second; otherwise check that no two metadata services share node ID %d)", metaID, metaID))
+		} else {
+			log.Debug("rejecting another connection from an attached metadata node")
+		}
+		return nil, false
+	}
+	if !found {
+		source = newEventSource(metaID, m.bufferSize, m.bufferGCFrequency)
+		m.sources[metaID] = source
+	}
+	source.attached = true
+	return source, !found
+}
+
+// rate limiter for log lines
+func (m *Manager) rejectLogDue(metaID uint32) bool {
+	if loggedAt, ok := m.rejectLoggedAt[metaID]; ok && time.Since(loggedAt) < rejectLogInterval {
+		return false
+	}
+	m.rejectLoggedAt[metaID] = time.Now()
+	return true
+}
+
+func (m *Manager) detach(source *eventSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	source.attached = false
+}
+
+func (m *Manager) handleV2Connection(handler *fileEventConnHandler) {
 
 	if !handler.send(&HandshakeRequest{
 		Major: eventProtocolMajor,
@@ -287,33 +287,42 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	}
 
 	handshakeResp := &HandshakeResponse{}
-	if !handler.recv(handshakeResp) {
+	if !handler.recvReply(handshakeResp, m.replyTimeout) {
 		return
 	} else if handshakeResp.Major != eventProtocolMajor {
-		m.log.Error("unsupported metadata event protocol detected",
+		handler.log.Error("unsupported metadata event protocol detected",
 			zap.String("metaProtocolVersion", fmt.Sprintf("%d.%d", handshakeResp.Major, handshakeResp.Minor)),
 			zap.String("watchProtocolVersion", fmt.Sprintf("%d.%d", eventProtocolMajor, eventProtocolMinor)))
 		return
 	}
+	handler.addMetaIDToLogs(handshakeResp.MetaID)
 
-	if currRingID := m.EventBuffer.GetRingID(); currRingID == 0 || currRingID == uint64(handshakeResp.MetaID) {
-		m.EventBuffer.SetRingID(uint64(handshakeResp.MetaID))
-	} else {
-		m.log.Error("metadata node ID changed unexpectedly, verify multiple meta nodes aren't trying to write to the same socket (restart Watch if this is intentional)", zap.Any("currMetaID", currRingID), zap.Any("newMetaID", handshakeResp.MetaID))
+	source, created := m.attach(handshakeResp.MetaID, handler.log)
+	if source == nil {
 		return
 	}
+	defer m.detach(source)
+	handler.log.Info("connection established", zap.Any("handshakeResp", handshakeResp))
+	if created {
+		m.addSourceToSubscribers(source.buffer)
+	}
 
-	m.log.Info("connection established", zap.Any("handshakeResp", handshakeResp))
+	m.streamEvents(handler, source, handshakeResp.MetaMirrorID)
+	handler.log.Info("metadata connection stopped")
+}
+
+func (m *Manager) streamEvents(handler *fileEventConnHandler, source *eventSource, mirrorID uint16) {
+	log := handler.log
 	if !handler.send(&RequestMessageRange{}) {
 		return
 	}
 
 	msgRange := &SendMessageRange{}
-	if !handler.recv(msgRange) {
+	if !handler.recvReply(msgRange, m.replyTimeout) {
 		return
 	}
 
-	m.log.Info("available metadata event range", zap.Any("oldestMSN", msgRange.OldestMSN), zap.Any("nextMSN", msgRange.NextMSN))
+	log.Info("available metadata event range", zap.Any("oldestMSN", msgRange.OldestMSN), zap.Any("nextMSN", msgRange.NextMSN))
 	// The oldest MSN is determined by the Metadata PMQ's pmq_reader_find_old_msn function which
 	// already attempts to handle if the oldest MSN is constantly being overwritten. This is why
 	// we don't currently do any additional handling around this in Watch. If for some reason an
@@ -321,25 +330,11 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 	// would simply get an error and restart the connection process over again. If this happens
 	// frequently we could optimize this process, for example adding an exponential backoff here
 	// as well. But for now it seems redundant to have both Meta and Watch worry about this.
-	var startSeqNum uint64
-	if m.lastSeqID == types.NoSeqId {
-		// This would be the state after we initially start up or if we've never received any
-		// events. Just take everything in the Meta buffer and move it into the Watch buffer.
-		startSeqNum = msgRange.OldestMSN
-	} else if m.lastSeqID >= msgRange.OldestMSN {
-		// If the Meta restarted or the Unix socket reconnected for some reason, try to pickup
-		// where we left off if the last sequence we received still exists in the Meta buffer.
-		startSeqNum = m.lastSeqID + 1
-	} else {
-		// Otherwise just pick back up with the oldest event that is available.
-		startSeqNum = msgRange.OldestMSN
-	}
-
-	msgReqStreamStart := &RequestMessageStreamStart{SeqNum: startSeqNum}
+	msgReqStreamStart := &RequestMessageStreamStart{SeqNum: nextSeqFromMeta(source.lastSeqID.Load(), msgRange.OldestMSN)}
 	if !handler.send(msgReqStreamStart) {
 		return
 	}
-	m.log.Info("beginning to stream metadata events", zap.Any("fromSeqNum", msgReqStreamStart.SeqNum))
+	log.Info("beginning to stream metadata events", zap.Any("fromSeqNum", msgReqStreamStart.SeqNum))
 	var droppedSeqID *uint64
 	var loggedDroppedEvent bool
 	for {
@@ -354,20 +349,20 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 		// Ensure we never push duplicate events into the buffer. types.NoSeqId means no events have been
 		// received yet — zero is not usable as a sentinel because the first event from the metadata
 		// PMQ can legitimately have SeqId 0.
-		if m.lastSeqID == types.NoSeqId || sendMsg.Event.SeqId > m.lastSeqID {
+		if lastSeqID := source.lastSeqID.Load(); lastSeqID == types.NoSeqId || sendMsg.Event.SeqId > lastSeqID {
 			// Set event fields only provided in the handshake.
-			sendMsg.Event.MetaId = handshakeResp.MetaID
+			sendMsg.Event.MetaId = source.metaID
 			if sendMsg.Event.EventFlags&1 != 0 {
-				sendMsg.Event.SetMetaMirror(uint32(handshakeResp.MetaMirrorID))
+				sendMsg.Event.SetMetaMirror(uint32(mirrorID))
 			}
 			var pushErr error
-			droppedSeqID, pushErr = m.EventBuffer.Push(sendMsg.Event)
+			droppedSeqID, pushErr = source.buffer.Push(sendMsg.Event)
 			if pushErr != nil {
-				m.log.Error("skipping event", zap.Error(pushErr), zap.Any("seqId", sendMsg.Event.SeqId))
-				m.lastSeqID = sendMsg.Event.SeqId
+				log.Error("skipping event", zap.Error(pushErr), zap.Any("seqId", sendMsg.Event.SeqId))
+				source.lastSeqID.Store(sendMsg.Event.SeqId)
 				continue
 			}
-			m.lastSeqID = sendMsg.Event.SeqId
+			source.lastSeqID.Store(sendMsg.Event.SeqId)
 			if droppedSeqID != nil && !loggedDroppedEvent {
 				// Outside actual scenarios where an event could not be sent to a subscriber before
 				// the buffer wraps around, dropped events can happen when Watch initially starts
@@ -379,39 +374,53 @@ func (m *Manager) handleV2Connection(conn net.Conn, connMutex *sync.Mutex, cance
 				// since pushing and popping events happen independently (by design) there is not a
 				// good way to tell here if the overflow actually dropped an event for a subscriber.
 				loggedDroppedEvent = true
-				m.log.Warn("event buffer overflow detected: the oldest event was dropped (further occurrences will not log additional warnings until the buffer recovers)", zap.Any("droppedSeqID", *droppedSeqID), zap.Any("pushedSeqID", sendMsg.Event.SeqId), zap.String("hint", "if Watch just started this likely indicates the metadata has more events than fit in the event-buffer-size, subscribers will not see dropped events if they are reading beyond the dropped sequence ID"))
+				log.Warn("event buffer overflow detected: the oldest event was dropped (further occurrences will not log additional warnings until the buffer recovers)", zap.Any("droppedSeqID", *droppedSeqID), zap.Any("pushedSeqID", sendMsg.Event.SeqId), zap.String("hint", "if Watch just started this likely indicates the metadata has more events than fit in the event-buffer-size, subscribers will not see dropped events if they are reading beyond the dropped sequence ID"))
 			} else if droppedSeqID == nil {
 				if loggedDroppedEvent {
-					m.log.Info("event buffer overflow resolved: pushing an event to the buffer did not require dropping an unacknowledged event", zap.Any("pushedSeqID", sendMsg.Event.SeqId))
+					log.Info("event buffer overflow resolved: pushing an event to the buffer did not require dropping an unacknowledged event", zap.Any("pushedSeqID", sendMsg.Event.SeqId))
 				}
 				loggedDroppedEvent = false
 			}
 		} else {
-			m.log.Debug("discarding event that already exists in the buffer", zap.Any("event", sendMsg.Event))
+			log.Debug("discarding event that already exists in the buffer", zap.Any("event", sendMsg.Event))
 		}
 	}
 }
 
-func (m *Manager) Sample() {
+func (m *Manager) AllEventsAcknowledged() bool {
+	for _, source := range m.sourcesSnapshot() {
+		if !source.buffer.AllEventsAcknowledged() {
+			return false
+		}
+	}
+	return true
+}
 
+func (m *Manager) Sample() {
 	for {
+		sources := m.sourcesSnapshot()
+		startSeqIDs := make([]uint64, len(sources))
+		for i, source := range sources {
+			startSeqIDs[i] = source.lastSeqID.Load()
+		}
+		startTime := time.Now()
+
 		select {
 		case <-m.ctx.Done():
 			return
-		default:
-			// Since we're just reading we're not doing any locking.
-			// This means our sampling may be slightly off.
-			start := m.lastSeqID
-			startTime := time.Now()
-			time.Sleep(time.Second)
-			end := m.lastSeqID
-			endTime := time.Now()
+		case <-time.After(time.Second):
+		}
 
-			eventsReceived := end - start
-			duration := endTime.Sub(startTime).Seconds()
-
-			eventsPerSecond := float64(eventsReceived) / duration
-			m.log.Info("incoming events per second", zap.Any("EPS", eventsPerSecond))
+		duration := time.Since(startTime).Seconds()
+		for i, source := range sources {
+			eventsReceived := source.lastSeqID.Load() - startSeqIDs[i]
+			m.log.Info("incoming events per second", zap.Uint32("metaID", source.metaID), zap.Float64("EPS", float64(eventsReceived)/duration))
 		}
 	}
+}
+
+func (m *Manager) sourcesSnapshot() []*eventSource {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Collect(maps.Values(m.sources))
 }

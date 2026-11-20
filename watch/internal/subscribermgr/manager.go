@@ -24,6 +24,7 @@ import (
 )
 
 type Manager struct {
+	ctx context.Context
 	log *logger.Logger
 	wg  *sync.WaitGroup
 	// mu guards the fields below.
@@ -47,10 +48,14 @@ type subscription struct {
 var _ configmgr.Listener = &Manager{}
 
 // New returns a manager with no subscribers and no event buffers.
-func New(log *logger.Logger, wg *sync.WaitGroup) *Manager {
+func New(ctx context.Context, log *logger.Logger, wg *sync.WaitGroup) *Manager {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[Manager]().PkgPath())))
+	context.AfterFunc(ctx, func() {
+		log.Info("shutting down subscriber handlers because the app is shutting down")
+	})
 	return &Manager{
+		ctx:      ctx,
 		log:      log,
 		handlers: make(map[subscription]*Handler),
 		wg:       wg,
@@ -60,6 +65,10 @@ func New(log *logger.Logger, wg *sync.WaitGroup) *Manager {
 // AddEventBuffer starts serving the event buffer of one meta. Before it returns, it adds a cursor
 // for every configured subscriber and starts their handlers.
 func (sm *Manager) AddEventBuffer(buf *types.MultiCursorRingBuffer) {
+	if buf.GetRingID() == 0 {
+		sm.log.Error("ignoring an event buffer without a metadata node ID (most likely this indicates a bug and a report should be filed)")
+		return
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if slices.Contains(sm.buffers, buf) {
@@ -150,9 +159,9 @@ func (sm *Manager) startHandlers(buf *types.MultiCursorRingBuffer, configs []sub
 	for _, s := range subscribers {
 		key := subscription{subscriberID: s.ID, buffer: buf}
 		sm.stopHandler(key)
-		h := newHandler(sm.log.Logger, s, buf, sm.handlerConfig)
+		h := newHandler(sm.ctx, sm.log.Logger, s, buf, sm.handlerConfig)
 		sm.handlers[key] = h
-		go h.Handle(sm.wg)
+		sm.wg.Go(h.Handle)
 	}
 	return nil
 }
@@ -201,22 +210,4 @@ func planSubscriberChanges(appliedHandlerConfig, newHandlerConfig HandlerConfig,
 	}
 
 	return toAdd, toRestart, toRemove
-}
-
-// Manage handles shutting down all subscribers when the app is shutting down.
-// We set things up this way so we can use different contexts for the overall
-// manager versus individual subscribers. This allows us to selectively shutdown
-// all or individual subscribers as needed.
-func (sm *Manager) Manage(ctx context.Context, wg *sync.WaitGroup) {
-
-	defer wg.Done()
-
-	<-ctx.Done()
-	sm.log.Info("shutting down subscriber handlers because the app is shutting down")
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	for _, h := range sm.handlers {
-		h.Stop()
-	}
-
 }

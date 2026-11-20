@@ -25,18 +25,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/thinkparq/beegfs-go/common/beegfs"
 
 	// Step 0: Import the precompiled BeeWatch Protocol Buffers and gRPC Service
 	// Definitions. Refer to the documentation at
@@ -47,6 +52,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -99,11 +105,16 @@ func (s *EventSubscriberServer) ReceiveEvents(stream bw.Subscriber_ReceiveEvents
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	s.log.Info("gRPC client connected")
-
 	// This context will be cancelled when the server is stopped.
 	// We'll use it to know when to shutdown our end of the stream.
 	ctx := stream.Context()
+
+	metaID, err := metaIDOf(ctx)
+	if err != nil {
+		s.log.Error("rejecting event stream", zap.Error(err))
+		return err
+	}
+	s.log.Info("gRPC client connected", zap.Uint32("metaID", metaID))
 
 	// Responding to every event is very inefficient. For this reason BeeWatch
 	// intentionally allows us to selectively ack certain events. So we'll send
@@ -111,7 +122,14 @@ func (s *EventSubscriberServer) ReceiveEvents(stream bw.Subscriber_ReceiveEvents
 	// ever N seqIDs) because we want to ensure all events are eventually
 	// acknowledged even if we stop receiving new events.
 	if *ackFrequency != 0 {
-		go func() {
+		s.wg.Go(func() {
+			sendAck := func(seqID uint64) {
+				if err := stream.Send(&bw.Response{CompletedSeq: seqID}); err != nil {
+					s.log.Error("error sending response", zap.Error(err), zap.Any("event", seqID))
+				}
+			}
+			initialResponse, _ := db.GetSeqID(metaID)
+			sendAck(initialResponse)
 			ticker := time.NewTicker(*ackFrequency)
 			for {
 				select {
@@ -119,17 +137,12 @@ func (s *EventSubscriberServer) ReceiveEvents(stream bw.Subscriber_ReceiveEvents
 					s.log.Info("no longer sending responses because the stream was cancelled")
 					return
 				case <-ticker.C:
-					// We should always acknowledge the latest event we've received when starting up.
-					// This allows BeeWatch to avoid ever sending us duplicate events when reconnecting.
-					// BeeWatch will wait to send new events until we acknowledge the sequence ID or
-					// the BeeWatch `handler.max-wait-for-response-after-connect = 2` timer elapses.
-					seqID := db.GetSeqID()
-					if err := stream.Send(&bw.Response{CompletedSeq: seqID}); err != nil {
-						s.log.Error("error sending response", zap.Error(err), zap.Any("event", seqID))
+					if lastSeqID, stored := db.GetSeqID(metaID); stored {
+						sendAck(lastSeqID)
 					}
 				}
 			}
-		}()
+		})
 	}
 	// Listen for new events:
 	for {
@@ -159,8 +172,24 @@ func (s *EventSubscriberServer) ReceiveEvents(stream bw.Subscriber_ReceiveEvents
 		}
 
 		s.log.Debug("received event", zap.Any("event", event))
-		db.Add(event)
+		db.Add(metaID, event)
 	}
+}
+
+func metaIDOf(ctx context.Context) (uint32, error) {
+	nodeIDs := metadata.ValueFromIncomingContext(ctx, "node-id")
+	if len(nodeIDs) == 0 {
+		return 0, fmt.Errorf("event stream from watch does not include the metadata node-id")
+	}
+	entityID, err := beegfs.NewEntityIdParser(32, beegfs.Meta).Parse(nodeIDs[0])
+	if err != nil {
+		return 0, fmt.Errorf("unable to parse the metadata node-id %q: %w", nodeIDs[0], err)
+	}
+	legacyID, ok := entityID.(beegfs.LegacyId)
+	if !ok {
+		return 0, fmt.Errorf("the metadata node-id %q is not a numeric ID", nodeIDs[0])
+	}
+	return uint32(legacyID.NumId), nil
 }
 
 func main() {
@@ -261,19 +290,56 @@ func main() {
 
 // NOTE: The following code is not needed to create a gRPC subscriber.
 type MockDB struct {
-	ctx            context.Context
-	log            *zap.Logger
-	events         chan *bw.Event
+	ctx    context.Context
+	log    *zap.Logger
+	events chan metaEvent
+	mu     sync.Mutex
+	seqIDs map[uint32]metaSeqIDs
+}
+
+type metaEvent struct {
+	metaID uint32
+	event  *bw.Event
+}
+
+type metaSeqIDs struct {
 	lastSeqID      uint64
 	lastDroppedSeq uint64
 }
 
 func newDB(ctx context.Context, log *zap.Logger) *MockDB {
 	log = log.With(zap.String("component,", "database"))
-	return &MockDB{
+	db := &MockDB{
 		ctx:    ctx,
 		log:    log,
-		events: make(chan *bw.Event),
+		events: make(chan metaEvent),
+		seqIDs: make(map[uint32]metaSeqIDs),
+	}
+	db.load()
+	return db
+}
+
+func (db *MockDB) load() {
+	data, err := os.ReadFile(*mockDBFilename)
+	if errors.Is(err, os.ErrNotExist) {
+		db.log.Info("resetting sequence IDs (file not found)", zap.Any("mockDBFilename", *mockDBFilename))
+		return
+	}
+	if err != nil {
+		db.log.Fatal("unable to read db file", zap.Error(err))
+	}
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var metaID uint32
+		var seqIDs metaSeqIDs
+		if _, err := fmt.Sscanf(line, "%d,%d,%d", &metaID, &seqIDs.lastSeqID, &seqIDs.lastDroppedSeq); err != nil {
+			db.log.Fatal("unable to parse db file (each line must be meta,seq,dropped; delete the file to start over)", zap.String("line", line), zap.Error(err))
+		}
+		db.seqIDs[metaID] = seqIDs
+		db.log.Info("using sequence IDs from file", zap.Uint32("metaID", metaID), zap.Any("lastSeqID", seqIDs.lastSeqID), zap.Any("lastDroppedSequence", seqIDs.lastDroppedSeq))
 	}
 }
 
@@ -284,66 +350,39 @@ func (db *MockDB) Sample() {
 		case <-db.ctx.Done():
 			return
 		default:
-			// Since we're just reading we're not doing any locking.
-			// This means our sampling may be slightly off.
-			start := db.lastSeqID
+			start := db.snapshot()
 			startTime := time.Now()
 			time.Sleep(time.Second)
-			end := db.lastSeqID
-			endTime := time.Now()
+			end := db.snapshot()
+			duration := time.Since(startTime).Seconds()
 
-			eventsReceived := end - start
-			duration := endTime.Sub(startTime).Seconds()
-
-			eventsPerSecond := float64(eventsReceived) / duration
-			db.log.Info("events per second", zap.Any("EPS", eventsPerSecond))
+			for metaID, seqIDs := range end {
+				eventsReceived := seqIDs.lastSeqID - start[metaID].lastSeqID
+				db.log.Info("events per second", zap.Uint32("metaID", metaID), zap.Any("EPS", float64(eventsReceived)/duration))
+			}
 		}
 	}
 }
 
-// Add sends an event to the database.
-// It is not thread safe and should only be called by one goroutine at a time.
-func (db *MockDB) Add(event *bw.Event) {
-	db.events <- event
+func (db *MockDB) snapshot() map[uint32]metaSeqIDs {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return maps.Clone(db.seqIDs)
 }
 
-// GetSeqID gets the latest sequence ID from the database.
-// Since we're not doing any locking, this may be slightly behind the actual latest event.
-func (db *MockDB) GetSeqID() uint64 {
-	return db.lastSeqID
+func (db *MockDB) Add(metaID uint32, event *bw.Event) {
+	db.events <- metaEvent{metaID: metaID, event: event}
+}
+
+func (db *MockDB) GetSeqID(metaID uint32) (lastSeqID uint64, stored bool) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	seqIDs, stored := db.seqIDs[metaID]
+	return seqIDs.lastSeqID, stored
 }
 
 func (db *MockDB) Run(wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	file, err := os.OpenFile(*mockDBFilename, os.O_RDWR|os.O_CREATE, 0755)
-
-	if err != nil {
-		db.log.Fatal("unable to open db file", zap.Error(err))
-	}
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		db.log.Fatal("unable to read db file", zap.Error(err))
-	}
-
-	if err := file.Close(); err != nil {
-		db.log.Fatal("unable to close db file", zap.Error(err))
-	}
-
-	dataCleaned := strings.TrimSpace(string(data))
-
-	if dataCleaned != "" {
-		_, err := fmt.Sscanf(dataCleaned, "%d,%d", &db.lastSeqID, &db.lastDroppedSeq)
-		if err != nil {
-			db.log.Fatal("unable to parse file", zap.Error(err))
-		} else {
-			db.log.Info("using sequence IDs from file", zap.Any("lastSeqID", db.lastSeqID), zap.Any("lastDroppedSequence", db.lastDroppedSeq))
-		}
-	} else {
-		db.log.Info("resetting sequence IDs (file not found or empty)", zap.Any("mockDBFilename", *mockDBFilename))
-		db.lastSeqID, db.lastDroppedSeq = 0, 0
-	}
 
 	if *logIncomingEventRate {
 		go db.Sample()
@@ -354,13 +393,15 @@ readEvents:
 		select {
 		case <-db.ctx.Done():
 			break readEvents
-		case event := <-db.events:
+		case received := <-db.events:
+			event := received.event
+			lastSeqID, _ := db.GetSeqID(received.metaID)
 
-			if event.SeqId != db.lastSeqID+1 && db.lastSeqID != 0 {
-				if event.SeqId > db.lastSeqID+1 {
-					db.log.Error("warning: client dropped event(s) or sent events out of order", zap.Any("expectedSeqID", db.lastSeqID+1), zap.Any("actualSeqID", event.SeqId))
+			if event.SeqId != lastSeqID+1 && lastSeqID != 0 {
+				if event.SeqId > lastSeqID+1 {
+					db.log.Error("warning: client dropped event(s) or sent events out of order", zap.Uint32("metaID", received.metaID), zap.Any("expectedSeqID", lastSeqID+1), zap.Any("actualSeqID", event.SeqId))
 				} else {
-					db.log.Info("detected duplicate event", zap.Any("expectedSeqID", db.lastSeqID+1), zap.Any("actualSeqID", event.SeqId))
+					db.log.Info("detected duplicate event", zap.Uint32("metaID", received.metaID), zap.Any("expectedSeqID", lastSeqID+1), zap.Any("actualSeqID", event.SeqId))
 					// TODO: Think about how to handle this.
 					// If we just reset the lastSeqID then we don't know about any additional duplicates.
 					// If we just continue, we can have problems if the uint64 sequence ID rolls over.
@@ -369,18 +410,28 @@ readEvents:
 				}
 			}
 
-			db.lastSeqID = event.SeqId
+			db.mu.Lock()
+			seqIDs := db.seqIDs[received.metaID]
+			seqIDs.lastSeqID = event.SeqId
+			db.seqIDs[received.metaID] = seqIDs
+			db.mu.Unlock()
 		}
 	}
 
-	db.log.Info("writing out sequence IDs and shutting down", zap.Any("lastSeq", db.lastSeqID), zap.Any("lastDroppedSequence", db.lastDroppedSeq))
+	seqIDs := db.snapshot()
+	db.log.Info("writing out sequence IDs and shutting down", zap.Any("seqIDsByMeta", seqIDs))
 
-	file, err = os.OpenFile(*mockDBFilename, os.O_RDWR|os.O_TRUNC, 0755)
+	file, err := os.OpenFile(*mockDBFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 	if err != nil {
 		db.log.Error("unable to open file to write out sequence ID", zap.Error(err))
+		return
 	}
 
-	_, err = file.WriteString(fmt.Sprintf("%d,%d", db.lastSeqID, db.lastDroppedSeq))
+	var lines strings.Builder
+	for _, metaID := range slices.Sorted(maps.Keys(seqIDs)) {
+		fmt.Fprintf(&lines, "%d,%d,%d\n", metaID, seqIDs[metaID].lastSeqID, seqIDs[metaID].lastDroppedSeq)
+	}
+	_, err = file.WriteString(lines.String())
 	if err != nil {
 		db.log.Error("error writing out updated sequence IDs", zap.Error(err))
 	}

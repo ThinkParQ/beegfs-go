@@ -206,22 +206,18 @@ Using environment variables:
 	}
 	defer metaCleanup()
 
-	// Setup the subscriber manager:
-	sm := subscribermgr.New(logger, &wg)
-	sm.AddEventBuffer(metaMgr.EventBuffer)
-
 	// Using a different context for subscribers is important so we can coordinate shutdown.
-	// Notably we want to wait to disconnect until the buffer is empty.
+	// Notably we want to wait to disconnect until the buffers are empty.
 	subscribersCtx, subscribersCancel := context.WithCancel(context.Background())
 	defer subscribersCancel()
-	go sm.Manage(subscribersCtx, &wg)
-	wg.Add(1)
+	sm := subscribermgr.New(subscribersCtx, logger, &wg)
 	cfgMgr.AddListener(sm)
 
 	// We do this last so we don't start reading events from the metadata server until we're sure everything is ready.
 	// If for some reason the subscriber configuration is bad it can be updated without restarting the app and potentially dropping events.
-	go metaMgr.Manage(&wg)
-	wg.Add(1)
+	var metaWG sync.WaitGroup
+	metaWG.Add(1)
+	go metaMgr.Serve(&metaWG, sm.AddEventBuffer)
 
 	if initialCfg.Log.IncomingEventRate {
 		go metaMgr.Sample() // We don't care about adding this to the wg. It'll just stop when the meta service is cancelled.
@@ -233,7 +229,8 @@ Using environment variables:
 
 	<-ctx.Done() // Block here and wait for a signal to shutdown.
 	logger.Info("shutdown signal received, no longer accepting events from the metadata service and waiting for outstanding events to be sent to subscribers before exiting (send another SIGINT or SIGTERM to shutdown immediately)")
-	metaCancel() // When shutting down first stop adding events to the metadata buffer.
+	metaCancel() // When shutting down first stop adding events to the metadata buffers.
+	metaWG.Wait()
 
 shutdownLoop:
 	for {
@@ -244,12 +241,12 @@ shutdownLoop:
 			subscribersCancel()
 			break shutdownLoop
 		case <-time.After(1 * time.Second):
-			// Otherwise wait for subscribers to send all events and the buffer to be empty. If
+			// Otherwise wait for subscribers to send all events and every buffer to be empty. If
 			// there are any disconnected subscribers, or subscribers that are partially connected
 			// (e.g., stream is established but they haven't ack'd the last event they saw), then
 			// shutdown will hang until they reconnect and receive all events. We might want to
 			// change this so disconnected/partially connected subscribers don't block shutdown.
-			if metaMgr.EventBuffer.AllEventsAcknowledged() {
+			if metaMgr.AllEventsAcknowledged() {
 				subscribersCancel()
 				break shutdownLoop
 			}

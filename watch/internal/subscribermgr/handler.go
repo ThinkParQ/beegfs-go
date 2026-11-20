@@ -70,10 +70,10 @@ type HandlerConfig struct {
 	PollFrequency                  int `mapstructure:"poll-frequency"`
 }
 
-func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuffer *types.MultiCursorRingBuffer, config HandlerConfig) *Handler {
-	log = log.With(zap.Int("subscriberID", subscriber.ID), zap.String("subscriberName", subscriber.Name))
+func newHandler(appCtx context.Context, log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuffer *types.MultiCursorRingBuffer, config HandlerConfig) *Handler {
+	log = log.With(zap.Int("subscriberID", subscriber.ID), zap.String("subscriberName", subscriber.Name), zap.Uint64("metaID", metaEventBuffer.GetRingID()))
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(appCtx)
 
 	// Add cursor is idempotent so always ensure there is a cursor for this subscriber.
 	metaEventBuffer.AddCursor(subscriber.ID)
@@ -97,9 +97,7 @@ func newHandler(log *zap.Logger, subscriber *subscriber.Subscriber, metaEventBuf
 // Handles the connection with a particular Subscriber.
 // It determines the next state a subscriber should transition to in response to external and internal factors.
 // It is the only place that should update the state of the subscriber.
-func (h *Handler) Handle(wg *sync.WaitGroup) {
-	wg.Add(1)
-	defer wg.Done()
+func (h *Handler) Handle() {
 	defer close(h.done)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -182,25 +180,7 @@ func (h *Handler) doDisconnect() bool {
 func (h *Handler) connectLoop() bool {
 	h.log.Info("connecting to subscriber")
 	reconnectDelay := minReconnectDelay
-
-	ringID := h.metaEventBuffer.GetRingID()
-	if ringID == 0 {
-		h.log.Info("waiting for metadata node ID to be available")
-	waitForRingID:
-		for {
-			select {
-			case <-h.ctx.Done():
-				h.log.Info("not attempting to detect metadata node ID for subscriber because the handler is shutting down")
-				return false
-			case <-time.After(time.Second):
-				if ringID = h.metaEventBuffer.GetRingID(); ringID != 0 {
-					break waitForRingID
-				}
-			}
-		}
-	}
-	metaID := beegfs.NumId(ringID)
-	h.log.Info("detected metadata node ID for subscriber", zap.Any("metaID", metaID))
+	metaID := beegfs.NumId(h.metaEventBuffer.GetRingID())
 
 	for {
 		select {

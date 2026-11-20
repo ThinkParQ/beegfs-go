@@ -14,6 +14,7 @@ import (
 	"github.com/thinkparq/beegfs-go/watch/internal/types"
 	bw "github.com/thinkparq/protobuf/go/beewatch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 const (
@@ -64,8 +65,8 @@ func grpcSubscriber(id int, name string) subscriber.Config {
 	}
 }
 
-// newEventBuffer returns a buffer for one meta. Its ring ID is set, as the meta's handshake would
-// set it, so handlers go on to connect to their subscriber instead of waiting for the meta ID.
+// newEventBuffer returns a buffer for one meta. Its ring ID is the meta ID, as the metadata manager
+// sets it at the meta's first handshake.
 func newEventBuffer(metaID uint64) *types.MultiCursorRingBuffer {
 	buf := types.NewMultiCursorRingBuffer(testBufferSize, testGCFrequency)
 	buf.SetRingID(metaID)
@@ -74,8 +75,14 @@ func newEventBuffer(metaID uint64) *types.MultiCursorRingBuffer {
 
 // newTestManager returns a manager whose handlers are all stopped when the test ends.
 func newTestManager(t *testing.T) *Manager {
+	return newTestManagerWithContext(t, context.Background())
+}
+
+// newTestManagerWithContext returns a manager whose handlers are all stopped when the test ends.
+// Cancelling ctx shuts the manager down, as main does at shutdown.
+func newTestManagerWithContext(t *testing.T, ctx context.Context) *Manager {
 	var wg sync.WaitGroup
-	sm := New(&logger.Logger{Logger: zap.NewNop()}, &wg)
+	sm := New(ctx, &logger.Logger{Logger: zap.NewNop()}, &wg)
 	t.Cleanup(func() {
 		sm.mu.Lock()
 		defer sm.mu.Unlock()
@@ -171,8 +178,8 @@ func TestManagerRunsOneHandlerPerSubscriberAndBuffer(t *testing.T) {
 }
 
 // A caller adds a meta's buffer before it fills it. The cursors must already exist when
-// AddEventBuffer returns, or the first events could be garbage-collected before a subscriber has a
-// cursor to hold them.
+// AddEventBuffer returns. With a cursor, garbage collection frees only events the subscriber
+// acknowledged. Without one, a full buffer drops its oldest event on each push.
 func TestManagerAddEventBufferAddsCursorsBeforeReturning(t *testing.T) {
 	sm := newTestManager(t)
 	require.NoError(t, sm.UpdateConfiguration(testConfig{
@@ -414,10 +421,11 @@ func TestManagerInvalidConfigurationChangesNothing(t *testing.T) {
 	assert.NotContains(t, handlers, subscription{subscriberID: 3, buffer: bufB})
 }
 
-// When the app shuts down, Manage stops every handler on every buffer. The handlers here have not
-// connected, so each one returns as soon as it is stopped.
-func TestManagerManageStopsEveryHandlerOnShutdown(t *testing.T) {
-	sm := newTestManager(t)
+// When the app shuts down, cancelling the manager's context stops every handler on every buffer.
+// The handlers here have not connected, so each one returns as soon as it is stopped.
+func TestManagerStopsEveryHandlerOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sm := newTestManagerWithContext(t, ctx)
 	sm.AddEventBuffer(newEventBuffer(1))
 	sm.AddEventBuffer(newEventBuffer(2))
 	require.NoError(t, sm.UpdateConfiguration(testConfig{
@@ -427,12 +435,7 @@ func TestManagerManageStopsEveryHandlerOnShutdown(t *testing.T) {
 	handlers := handlersOf(sm)
 	require.Len(t, handlers, 4)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go sm.Manage(ctx, &wg)
 	cancel()
-	wg.Wait()
 
 	allStopped := func() bool {
 		for _, h := range handlers {
@@ -443,4 +446,94 @@ func TestManagerManageStopsEveryHandlerOnShutdown(t *testing.T) {
 		return true
 	}
 	assert.Eventually(t, allStopped, shutdownTimeout, 10*time.Millisecond, "a handler still runs after shutdown")
+}
+
+func startSubscriberManager(t *testing.T, log *zap.Logger) (*Manager, context.CancelFunc, *sync.WaitGroup) {
+	t.Helper()
+	ctx, shutdown := context.WithCancel(context.Background())
+	var handlers sync.WaitGroup
+	sm := New(ctx, &logger.Logger{Logger: log}, &handlers)
+	t.Cleanup(func() {
+		shutdown()
+		assert.True(t, returnsWithin(&handlers, shutdownTimeout), "a handler still runs after the test shut the manager down")
+	})
+	return sm, shutdown, &handlers
+}
+
+func returnsWithin(wg *sync.WaitGroup, timeout time.Duration) bool {
+	returned := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func configureOneSubscriber(t *testing.T, sm *Manager) {
+	t.Helper()
+	require.NoError(t, sm.UpdateConfiguration(testConfig{
+		handler:     testHandlerConfig,
+		subscribers: []subscriber.Config{grpcSubscriber(1, "one")},
+	}))
+}
+
+func TestEachHandlerLogsTheMetaOfItsBuffer(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	sm, _, _ := startSubscriberManager(t, zap.New(core))
+	sm.AddEventBuffer(newEventBuffer(7))
+	sm.AddEventBuffer(newEventBuffer(20))
+
+	configureOneSubscriber(t, sm)
+
+	connectLogsFor := func(metaID uint64) int {
+		return logs.FilterMessage("connecting to subscriber").FilterField(zap.Uint64("metaID", metaID)).Len()
+	}
+	assert.Eventually(t, func() bool { return connectLogsFor(7) == 1 && connectLogsFor(20) == 1 },
+		5*time.Second, 10*time.Millisecond, "subscriber 1's handlers for meta 7 and meta 20 must each name their meta")
+}
+
+func TestBufferWithoutMetaIDGetsNoSubscriberCursor(t *testing.T) {
+	sm, _, _ := startSubscriberManager(t, zap.NewNop())
+	configureOneSubscriber(t, sm)
+	buf := newEventBuffer(0)
+
+	sm.AddEventBuffer(buf)
+
+	assert.False(t, hasCursor(buf, 1))
+}
+
+func TestRunningHandlerIsCountedInTheWaitGroupWhenUpdateConfigurationReturns(t *testing.T) {
+	for round := range 20 {
+		sm, _, handlers := startSubscriberManager(t, zap.NewNop())
+		sm.AddEventBuffer(newEventBuffer(1))
+
+		configureOneSubscriber(t, sm)
+
+		require.False(t, returnsWithin(handlers, 50*time.Millisecond), "round %d: the WaitGroup let main exit while a handler runs", round)
+	}
+}
+
+func TestHandlerStartedByABufferAddedAfterShutdownStops(t *testing.T) {
+	sm, shutdown, handlers := startSubscriberManager(t, zap.NewNop())
+	configureOneSubscriber(t, sm)
+	shutdown()
+
+	sm.AddEventBuffer(newEventBuffer(1))
+
+	assert.True(t, returnsWithin(handlers, time.Second))
+}
+
+func TestHandlerStartedByAReloadAfterShutdownStops(t *testing.T) {
+	sm, shutdown, handlers := startSubscriberManager(t, zap.NewNop())
+	sm.AddEventBuffer(newEventBuffer(1))
+	shutdown()
+
+	configureOneSubscriber(t, sm)
+
+	assert.True(t, returnsWithin(handlers, time.Second))
 }
