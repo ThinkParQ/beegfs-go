@@ -1,5 +1,10 @@
 # This is a config file for BeeGFS Remote.
 # http://www.beegfs.com
+#
+# Upgrading: upgrade every Sync node and Watch first, then Remote, in one maintenance window.
+# Remote refuses Sync nodes too old to take target changes while running. When connection
+# authentication is on, older versions also cannot reach newer ones in either direction (see
+# mount-point in Section 3).
 
 
 # --- [Table of Contents] ---
@@ -239,9 +244,9 @@ rate-limit-event-types = ["*"]
 #   - If Remote cannot read the client's settings, it refuses to start unless [auth] says what to
 #     do (see below).
 # Sync nodes follow the same rule with their own client, so the clients of Remote and of every Sync
-# node must use the same secret. Every Watch subscriber
-# entry for Remote must set grpc-send-auth-secret = true. Sync and Watch versions that do not send
-# the hash cannot reach a Remote that requires it, so upgrade them together with Remote.
+# node must use the same secret. Every Watch subscriber entry for Remote must set
+# grpc-send-auth-secret = true. Older Sync and Watch versions do not send the hash, and an older
+# Remote does not send it to Sync nodes. The upgrade order is at the top of this file.
 
 # [auth]: Optional. Only for environments where Remote cannot read the client's settings or its
 # auth file, such as a container. Both settings are unset by default and can be set in this file

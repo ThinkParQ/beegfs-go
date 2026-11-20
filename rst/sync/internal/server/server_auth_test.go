@@ -102,6 +102,8 @@ func TestServerRequiresAuth(t *testing.T) {
 				assert.Equal(t, codes.Unauthenticated, status.Code(err), "SubmitWork: %v", err)
 				_, err = client.Heartbeat(ctx, &flex.HeartbeatRequest{})
 				assert.Equal(t, codes.Unauthenticated, status.Code(err), "Heartbeat: %v", err)
+				_, err = client.VerifyBackend(ctx, &flex.VerifyBackendRequest{})
+				assert.Equal(t, codes.Unauthenticated, status.Code(err), "VerifyBackend: %v", err)
 			}
 		})
 	}
