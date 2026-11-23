@@ -11,8 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/logger"
 	"github.com/thinkparq/beegfs-go/common/registry"
+	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/workmgr"
 	"github.com/thinkparq/protobuf/go/flex"
@@ -47,8 +49,9 @@ type WorkerNodeServer struct {
 	draining atomic.Bool
 }
 
-// New() creates a new WorkerNodeServer that can be used with ListenAndServe().
-func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature) (*WorkerNodeServer, error) {
+// New() creates a new WorkerNodeServer that can be used with ListenAndServe(). When authSecret is
+// not nil every call to the server must carry it. Rejected calls are logged, at most once a minute.
+func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo *flex.BuildInfo, features map[string]*flex.Feature, authSecret []byte) (*WorkerNodeServer, error) {
 
 	log = log.With(zap.String("component", path.Base(reflect.TypeFor[WorkerNodeServer]().PkgPath())))
 
@@ -71,6 +74,7 @@ func New(log *logger.Logger, config Config, workMgr *workmgr.Manager, buildInfo 
 	} else {
 		s.log.Warn("not using TLS because it was explicitly disabled or a certificate and/or key were not specified")
 	}
+	grpcServerOpts = append(grpcServerOpts, beegrpc.AuthServerOptions(authSecret, s.log.Logger)...)
 	s.grpcServer = grpc.NewServer(grpcServerOpts...)
 	flex.RegisterWorkerNodeServer(s.grpcServer, &s)
 
@@ -149,6 +153,29 @@ func (s *WorkerNodeServer) UpdateConfig(ctx context.Context, request *flex.Updat
 		Message: "successfully applied updated configuration",
 	}.Build(), nil
 
+}
+
+// verifyReplyMargin is how much of the caller's deadline the node keeps for its answer. Without it,
+// a store that never answers would use up the whole deadline, and Remote would see only that
+// the RPC timed out, not why.
+const verifyReplyMargin = time.Second
+
+// VerifyBackend checks that this node reaches the store of the backend in the request, and that the
+// store accepts its credentials (see rst.VerifyBackend). It reads and changes no state of the node,
+// so it also runs while the node is paused after rejecting a configuration. A failed check is an
+// answer, not an RPC error, so Remote can tell it from a node it could not reach.
+func (s *WorkerNodeServer) VerifyBackend(ctx context.Context, request *flex.VerifyBackendRequest) (*flex.VerifyBackendResponse, error) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 2*verifyReplyMargin {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-verifyReplyMargin))
+		defer cancel()
+	}
+	note, err := rst.VerifyBackend(ctx, request.GetBackend())
+	if err != nil {
+		s.log.Warn("unable to verify a remote storage backend", zap.String("backend", request.GetBackend().GetName()), zap.Error(err))
+		return &flex.VerifyBackendResponse{Ok: false, Message: err.Error()}, nil
+	}
+	return &flex.VerifyBackendResponse{Ok: true, Message: note}, nil
 }
 
 func (s *WorkerNodeServer) BulkUpdateWork(ctx context.Context, request *flex.BulkUpdateWorkRequest) (*flex.BulkUpdateWorkResponse, error) {

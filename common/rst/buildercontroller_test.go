@@ -836,7 +836,7 @@ func (s *testSubmitter) len() int {
 
 func newTestRequestBuildController(t *testing.T, ctx context.Context, submissions *testSubmitter) *requestBuildController {
 	t.Helper()
-	client := NewJobBuilderClient(ctx, map[uint32]Provider{1: &MockClient{}}, filesystem.NewMockFS(), DefaultStateRoot)
+	client := NewJobBuilderClient(ctx, ProviderMap{1: &MockClient{}}, filesystem.NewMockFS(), DefaultStateRoot)
 	// newRequestBuildController takes the work request rather than the config, and rejects one that
 	// carries no builder. The builder is the only field it reads, so the rest is left unset.
 	workRequest := &flex.WorkRequest{

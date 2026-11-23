@@ -46,8 +46,18 @@ type Config struct {
 	MockConfig                             // Allow mocking worker node behavior from other packages. We could add a map structure tag here if we wanted to be able to setup expectations using a TOML file.
 }
 
+// SetAuthSecret sets the BeeGFS connection authentication secret Remote sends with every call to
+// this node, as a hash in the call metadata. The secret is the content of the auth file of Remote's
+// BeeGFS client, or nil when the client does not use connection authentication. It is never sent
+// inside a message.
+func (c *Config) SetAuthSecret(secret []byte) {
+	c.authSecret = secret
+}
+
 // Configuration specific to BeeSync nodes.
 type BeeSyncConfig struct {
+	// authSecret is set with Config.SetAuthSecret, never from the configuration file.
+	authSecret []byte
 }
 
 // Mock worker nodes represent simulated worker nodes. They are configured just
@@ -111,23 +121,23 @@ func newWorkerNodeFromConfig(log *zap.Logger, config Config) (Worker, error) {
 	// default values (which should be set using flags). For now just ensure these are not set to
 	// zero here, otherwise weird things can happen.
 
-	if config.MaxReconnectBackOff == 0 {
+	if config.MaxReconnectBackOff <= 0 {
 		config.MaxReconnectBackOff = 60
 	}
 
-	if config.DisconnectTimeout == 0 {
+	if config.DisconnectTimeout <= 0 {
 		config.DisconnectTimeout = 30
 	}
 
-	if config.SendRetries == 0 {
+	if config.SendRetries <= 0 {
 		config.SendRetries = 10
 	}
 
-	if config.RetryInterval == 0 {
+	if config.RetryInterval <= 0 {
 		config.RetryInterval = 1
 	}
 
-	if config.HeartbeatInterval == 0 {
+	if config.HeartbeatInterval <= 0 {
 		config.HeartbeatInterval = 10
 	}
 

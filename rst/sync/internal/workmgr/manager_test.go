@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/thinkparq/beegfs-go/common/beegfs/beegrpc"
 	"github.com/thinkparq/beegfs-go/common/filesystem"
 	"github.com/thinkparq/beegfs-go/common/kvstore"
 	"github.com/thinkparq/beegfs-go/common/logger"
@@ -21,11 +22,14 @@ import (
 	"github.com/thinkparq/beegfs-go/rst/sync/internal/beeremote"
 	pbr "github.com/thinkparq/protobuf/go/beeremote"
 	"github.com/thinkparq/protobuf/go/flex"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -92,6 +96,8 @@ type testConfig struct {
 	Config
 	logLevel   int8
 	rstConfigs []*flex.RemoteStorageTarget
+	// authSecret is the secret of the node's own BeeGFS client, or nil for none.
+	authSecret []byte
 }
 
 type getTestMgrOpt func(*testConfig)
@@ -122,6 +128,14 @@ func WithLogLevel(l int8) getTestMgrOpt {
 func WithRSTs(rstConfigs []*flex.RemoteStorageTarget) getTestMgrOpt {
 	return func(cfg *testConfig) {
 		cfg.rstConfigs = rstConfigs
+	}
+}
+
+// WithAuthSecret gives the node's BeeRemote client secret, as if the node's BeeGFS client used
+// connection authentication with that secret.
+func WithAuthSecret(secret []byte) getTestMgrOpt {
+	return func(cfg *testConfig) {
+		cfg.authSecret = secret
 	}
 }
 
@@ -160,7 +174,9 @@ func getTestManager(tb testing.TB, opts ...getTestMgrOpt) (*Manager, []func(test
 		config.rstConfigs = []*flex.RemoteStorageTarget{flex.RemoteStorageTarget_builder{Id: 1, Mock: new("test")}.Build()}
 	}
 
-	beeRemoteClient, err := beeremote.New(beeremote.Config{})
+	beeRemoteCfg := beeremote.Config{TlsDisable: true}
+	beeRemoteCfg.SetAuth(config.authSecret, "/unused")
+	beeRemoteClient, err := beeremote.New(beeRemoteCfg)
 	if err != nil {
 		return nil, deferredFuncs, err
 	}
@@ -229,6 +245,66 @@ func TestUpdateConfig(t *testing.T) {
 	err = mgr.UpdateConfig(context.Background(), rstConfigs, unreachableBRConfig, "", rst.DefaultStateRoot)
 	assert.ErrorIs(t, err, beeremote.ErrUnavailable)
 	assert.True(t, mgr.beeRemoteClient.CompareConfig(notEqualBRConfig), "the previous remote configuration must be kept")
+}
+
+// TestUpdateConfigRemoteRejectsSecret checks a Remote that rejects the node's secret. The node must
+// refuse the configuration and keep the previous one, because it could never report back to that
+// Remote. The error is not ErrUnavailable, so the node does not wait for Remote to retry as if
+// Remote were down, and it carries a hint for the operator.
+func TestUpdateConfigRemoteRejectsSecret(t *testing.T) {
+	rstConfigs := []*flex.RemoteStorageTarget{{Id: 1, Type: &flex.RemoteStorageTarget_Mock{Mock: "test"}}}
+	mgr, deferredFuncs, err := getTestManager(t, WithRSTs(rstConfigs), WithAuthSecret([]byte("node secret")))
+	defer func() {
+		for i := len(deferredFuncs) - 1; i >= 0; i-- {
+			deferredFuncs[i](t)
+		}
+	}()
+	require.NoError(t, err)
+	defer mgr.Stop()
+	// getTestManager configures the mock Remote.
+	before := &flex.BeeRemoteNode{Id: "0", Address: "mock:0"}
+	require.True(t, mgr.beeRemoteClient.CompareConfig(before))
+
+	features := map[string]*flex.Feature{}
+	for _, f := range requiredRemoteFeatures {
+		features[f] = nil
+	}
+	remoteSecret := []byte("remote secret")
+	addr := startAuthRemote(t, features, beegrpc.AuthServerOptions(remoteSecret, zap.NewNop())...)
+
+	err = mgr.UpdateConfig(context.Background(), rstConfigs, &flex.BeeRemoteNode{Id: "2", Address: addr}, "", rst.DefaultStateRoot)
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.NotErrorIs(t, err, beeremote.ErrUnavailable)
+	assert.ErrorContains(t, err, "connAuthFile")
+	assert.True(t, mgr.beeRemoteClient.CompareConfig(before), "the previous remote configuration must be kept")
+}
+
+// authRemote is a Remote that only answers GetCapabilities.
+type authRemote struct {
+	pbr.UnimplementedBeeRemoteServer
+	features map[string]*flex.Feature
+}
+
+func (s *authRemote) GetCapabilities(context.Context, *flex.GetCapabilitiesRequest) (*flex.GetCapabilitiesResponse, error) {
+	return &flex.GetCapabilitiesResponse{
+		BuildInfo:      &flex.BuildInfo{BinaryName: "beegfs-remote", Version: "test"},
+		Features:       s.features,
+		StartTimestamp: timestamppb.Now(),
+	}, nil
+}
+
+// startAuthRemote serves a Remote with features on a local port without TLS, with server opts, and
+// returns its address.
+func startAuthRemote(t *testing.T, features map[string]*flex.Feature, opts ...grpc.ServerOption) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer(opts...)
+	pbr.RegisterBeeRemoteServer(server, &authRemote{features: features})
+	go server.Serve(lis)
+	t.Cleanup(server.Stop)
+	return lis.Addr().String()
 }
 
 func TestSubmitWorkRequest(t *testing.T) {

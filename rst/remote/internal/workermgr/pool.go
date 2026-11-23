@@ -28,11 +28,12 @@ type Pool struct {
 	next int
 	// The mutex should be locked when interacting with the pool.
 	mu *sync.Mutex
-	// All worker nodes in a particular pool share the same configuration.
-	workerConfig *flex.UpdateConfigRequest
 }
 
-func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.Feature) {
+// HandleAll starts every node in the pool. All nodes share config, which builds a node's
+// configuration on every connect attempt, so a node always receives the RSTs Remote serves at that
+// moment.
+func (p *Pool) HandleAll(wg *sync.WaitGroup, config worker.ConfigFn, requiredFeatures map[string]*flex.Feature) {
 
 	// TODO: https://github.com/ThinkParQ/bee-remote/issues/12
 	// When initially connecting to a node we need to tell it what to do
@@ -44,7 +45,7 @@ func (p *Pool) HandleAll(wg *sync.WaitGroup, requiredFeatures map[string]*flex.F
 	}.Build()
 
 	for _, node := range p.nodes {
-		go node.Handle(wg, p.workerConfig, wrUpdates, requiredFeatures)
+		go node.Handle(wg, config, wrUpdates, requiredFeatures)
 	}
 }
 
@@ -173,10 +174,10 @@ func (p *Pool) assignmentCandidates(originNodeID string) (candidates []worker.Wo
 				draining = append(draining, node)
 			}
 		case worker.UNKNOWN:
-			// Technically, workers that are offline could also come back online but don't retry for
-			// them since their connection handler's retry is based on an exponential backoff delay
-			// which is mostly likely MaxReconnectBackoff (user configurable) and likely on the
-			// order of minutes.
+			// UNKNOWN nodes have not finished their first connect attempt, so they may come online
+			// in a moment. OFFLINE nodes are not waited for. They have failed at least one attempt,
+			// and their next one follows an exponential backoff of up to MaxReconnectBackoff (user
+			// configurable), which is likely on the order of minutes.
 			stillStarting = true
 		}
 	}

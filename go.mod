@@ -1,6 +1,6 @@
 module github.com/thinkparq/beegfs-go
 
-go 1.27.3
+go 1.27.4
 
 tool (
 	github.com/google/go-licenses/v2
@@ -22,13 +22,14 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jedib0t/go-pretty/v6 v6.6.7
 	github.com/mitchellh/go-wordwrap v1.0.1
+	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/afero v1.14.0
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thinkparq/protobuf v0.8.5-0.20261028175822-1fe1e05bd956
+	github.com/thinkparq/protobuf v0.8.5-0.20261116133234-fcd0a6b35149
 	go.opentelemetry.io/contrib/bridges/otelzap v0.20.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.21.0
@@ -77,7 +78,7 @@ require (
 	github.com/google/licenseclassifier/v2 v2.0.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.18.7 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/otiai10/copy v1.14.1 // indirect
 	github.com/otiai10/mint v1.6.3 // indirect

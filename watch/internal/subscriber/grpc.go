@@ -2,6 +2,7 @@ package subscriber
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,16 @@ import (
 	"github.com/thinkparq/beegfs-go/common/types"
 	pb "github.com/thinkparq/protobuf/go/beewatch"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+const (
+	// streamProbeTimeout bounds how long Connect waits to learn whether the subscriber accepted the
+	// event stream (see probeStream). A rejection arrives within one round trip, so this only needs
+	// to cover a slow network or a busy subscriber. A subscriber that sends nothing until its first
+	// response delays every connect by this long.
+	streamProbeTimeout = 2 * time.Second
 )
 
 // A GRPCSubscriber implements a gRPC client that sends messages to a subscriber over gRPC.
@@ -24,19 +34,30 @@ import (
 // Otherwise duplicate events may be retransmitted to avoid dropped events.
 type GRPCSubscriber struct {
 	GrpcConfig
+	// authSecret is sent to the subscriber with every call. It is nil unless the subscriber sets
+	// grpc-send-auth-secret.
+	authSecret []byte
 	conn       *grpc.ClientConn
 	client     pb.SubscriberClient
 	stream     pb.Subscriber_ReceiveEventsClient
+	// headerDone closes when the Header() call that probeStream started on stream returns. Receive
+	// waits for it before its first Recv, so the two never read from the stream at once. It is nil
+	// until Connect opens a stream.
+	headerDone chan struct{}
 	recvStream chan *pb.Response
 	// recvStreamActive is used to ensure there is only ever one goroutine receiving responses.
 	recvStreamActive bool
-	// recvStreamActiveMu coordinates access to recvStreamActive.
+	// recvErr is the error that ended the most recent receive goroutine, or nil if it ended cleanly
+	// or is still running.
+	recvErr error
+	// recvStreamActiveMu coordinates access to recvStreamActive and recvErr.
 	recvStreamActiveMu *sync.Mutex
 }
 
 var _ Interface = &GRPCSubscriber{} // Verify type satisfies interface.
 
-func newGRPCSubscriber(config GrpcConfig) *GRPCSubscriber {
+// newGRPCSubscriber keeps authSecret only when config opts in with SendAuthSecret.
+func newGRPCSubscriber(config GrpcConfig, authSecret []byte) *GRPCSubscriber {
 	var mutex sync.Mutex
 
 	// Time we'll wait after closing our end of the connection for the subscriber to disconnect.
@@ -44,8 +65,13 @@ func newGRPCSubscriber(config GrpcConfig) *GRPCSubscriber {
 		config.DisconnectTimeout = 30
 	}
 
+	if !config.SendAuthSecret {
+		authSecret = nil
+	}
+
 	return &GRPCSubscriber{
 		GrpcConfig:         config,
+		authSecret:         authSecret,
 		recvStreamActive:   false,
 		recvStreamActiveMu: &mutex,
 	}
@@ -72,6 +98,7 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 		beegrpc.WithTLSDisableVerification(s.TLSDisableVerification),
 		beegrpc.WithTLSDisable(s.TlsDisable),
 		beegrpc.WithProxy(s.UseProxy),
+		beegrpc.WithAuthSecret(s.authSecret),
 		beegrpc.WithNode(&beegfs.LegacyId{
 			NodeType: beegfs.Meta,
 			// This will be zero if node ID detection is skipped. That is an invalid NumId which
@@ -107,7 +134,67 @@ func (s *GRPCSubscriber) Connect(forMetaID beegfs.NumId) (retry bool, err error)
 		return true, fmt.Errorf("unable to setup gRPC client stream: %w", err)
 	}
 
+	if err := s.probeStream(); err != nil {
+		return true, err
+	}
 	return false, nil
+}
+
+// probeStream runs in Connect, right after the event stream opens. It decides whether the
+// subscriber rejected the stream, so Connect can fail and the handler retries with backoff.
+// Without it, a rejected stream looks connected, and the handler only sees a bare io.EOF when it
+// next sends an event.
+//
+// Two facts about grpc-go make the probe necessary and make it work:
+//   - Opening a bidi stream does not wait for the server. A server that rejects the stream, for
+//     example in an authentication interceptor, ends it with a status and no headers.
+//   - A server that accepts the stream sends headers with its first message, or earlier if it
+//     calls SendHeader. Header() blocks until headers arrive or the stream ends. It returns nil
+//     when the stream ended without headers, and the status is then read with Recv.
+//
+// The subscriber library in watch/pkg/subscriber calls SendHeader as soon as it accepts a stream.
+// probeStream applies these rules:
+//   - Headers arrive: the subscriber accepted the stream.
+//   - The stream ends without headers: return its status as an error.
+//   - Nothing arrives within streamProbeTimeout: treat the stream as accepted. A subscriber that
+//     stays silent until its first response lands here, so it behaves as it did before the probe.
+//
+// After a timeout, Header() keeps running until headers arrive or the stream ends. It closes
+// s.headerDone when it returns.
+func (s *GRPCSubscriber) probeStream() error {
+	headerDone := make(chan struct{})
+	s.headerDone = headerDone
+	// accepted is written before headerDone closes and read only after, so it needs no lock.
+	accepted := false
+	go func() {
+		defer close(headerDone)
+		md, _ := s.stream.Header()
+		accepted = md != nil
+	}()
+
+	select {
+	case <-headerDone:
+		if accepted {
+			return nil
+		}
+		_, err := s.stream.Recv()
+		if err == io.EOF {
+			return errors.New("subscriber ended the event stream as soon as it was opened")
+		}
+		return fmt.Errorf("subscriber rejected the event stream: %w", streamError(err))
+	case <-time.After(streamProbeTimeout):
+		return nil
+	}
+}
+
+// streamError adds an operator hint to the status that ended an event stream. It runs on the status
+// that probeStream reads and on the error that ends the receive goroutine. It returns err unchanged
+// for codes that need no hint.
+func streamError(err error) error {
+	if status.Code(err) == codes.Unauthenticated {
+		return fmt.Errorf("%w (hint: the subscriber requires BeeGFS connection authentication: set grpc-send-auth-secret = true for this subscriber, and make sure management.auth-file holds the same secret as the subscriber's BeeGFS client)", err)
+	}
+	return err
 }
 
 // Send attempts to transmit a pre-marshaled event to a remote subscriber. It is expected to
@@ -140,8 +227,10 @@ func (s *GRPCSubscriber) Receive() (recvStream chan *pb.Response) {
 	// If the channel was not yet initialized or closed we'll reinitialize it:
 	s.recvStream = make(chan *pb.Response)
 	s.recvStreamActive = true
+	s.recvErr = nil
 	s.recvStreamActiveMu.Unlock()
 
+	headerDone := s.headerDone
 	go func() {
 		defer close(s.recvStream)
 		defer func() {
@@ -150,20 +239,22 @@ func (s *GRPCSubscriber) Receive() (recvStream chan *pb.Response) {
 			s.recvStreamActiveMu.Unlock()
 		}()
 
+		// Wait for the Header() call probeStream started. Recv could not return a response before
+		// the headers anyway, so this delays nothing.
+		if headerDone != nil {
+			<-headerDone
+		}
+
 		for {
 			in, err := s.stream.Recv()
 			if err == io.EOF {
 				return
 			} else if err != nil {
-				// TODO: Now that we don't have a logger on the subscribers anymore, figure out how to handle.
-				// One option is to have the recvStream channel actually send back a struct with a pb.Response and an error.
-				// Then if the response is nil whatever is reading from recvStream can handle the error.
-				// s.log.Error("failed to receive response", zap.Error(err))
-
-				// TODO: Figure out if/how we want to handle this scenario better.
-				// For example retry a few times or parse the error.
-				// For now we'll treat it as a remote disconnect which will try to reconnect.
-				// Ideally we don't log anything here (as is standard for the other methods).
+				// Keep the error for the handler, which logs it once the channel closes (see
+				// ReceiveErr). The handler then treats it as a remote disconnect and reconnects.
+				s.recvStreamActiveMu.Lock()
+				s.recvErr = streamError(err)
+				s.recvStreamActiveMu.Unlock()
 				return
 			}
 			s.recvStream <- in
@@ -176,6 +267,15 @@ func (s *GRPCSubscriber) Receive() (recvStream chan *pb.Response) {
 	}()
 
 	return s.recvStream
+}
+
+// ReceiveErr returns the error that ended the most recent receive goroutine. It is nil when the
+// subscriber closed the stream cleanly, or while the goroutine still runs. The handler calls it
+// after the channel from Receive closes, and the close orders it after the goroutine set the error.
+func (s *GRPCSubscriber) ReceiveErr() error {
+	s.recvStreamActiveMu.Lock()
+	defer s.recvStreamActiveMu.Unlock()
+	return s.recvErr
 }
 
 // Disconnect handles cleaning up all resources used for the gRPC connection.
