@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -28,14 +30,20 @@ the same invocation.
 Two modes are supported:
 
   rescan (non-recursive, default)
-    Reindexes only the specified directory (--max-level 0).
-    Files and subdirectory entries in that single directory are updated.
+    Reindexes the specified directory (--max-level 0). Child directories that
+    no longer exist are removed from the index, and new child directories are
+    indexed with everything below them.
 
   rescan --recurse
-    Reindexes the full subtree rooted at the specified directory.
+    Reindexes the full subtree rooted at the specified directory, then removes
+    the index of directories that no longer exist at any depth.
 
 Multiple paths may be passed in a single invocation; each must be within the
 indexed mount and is reindexed in turn.
+
+Stale index directories are removed only from an index outside BeeGFS. A
+remote index (--index-addr ssh:<host>) is rescanned by this command on the
+index host, which needs beegfs-tools of the same version and root ssh.
 
 Example: rescan a single subdirectory (non-recursive)
 
@@ -70,14 +78,21 @@ Example: rescan the entire filesystem index
 
 			targets := make([]indexPkg.RescanTarget, 0, len(paths))
 			for _, p := range paths {
-				idx, err := resolveFSPathToIndex(cfg, p)
+				abs, err := filepath.Abs(p)
+				if err != nil {
+					return fmt.Errorf("resolving %q: %w", p, err)
+				}
+				if mount := filepath.Clean(cfg.MountPath); abs != mount && !strings.HasPrefix(abs, mount+string(filepath.Separator)) {
+					return fmt.Errorf("%q is not inside the BeeGFS mount %q", p, cfg.MountPath)
+				}
+				idx, err := resolveFSPathToIndex(cfg, abs)
 				if err != nil {
 					return fmt.Errorf("resolving index path for %q: %w", p, err)
 				}
 				if err := checkIndexExists(cfg, idx); err != nil && !errors.Is(err, errLegacyIndex) {
 					return err
 				}
-				targets = append(targets, indexPkg.RescanTarget{FSPath: p, IndexPath: idx})
+				targets = append(targets, indexPkg.RescanTarget{FSPath: abs, IndexPath: idx})
 			}
 			backendCfg.Targets = targets
 
@@ -101,6 +116,8 @@ Example: rescan the entire filesystem index
 	cmd.Flags().BoolVar(&backendCfg.Recurse, "recurse", false, "Recursively rescan all subdirectories beneath the specified path.")
 	cmd.Flags().BoolVar(&backendCfg.SkipTreesummary, "skip-treesummary", false, "Skip computing tree summary after rescan.")
 	cmd.Flags().BoolVarP(&backendCfg.Xattrs, "xattrs", "x", false, "Index extended attributes.")
+	cmd.Flags().Bool(indexPkg.OnIndexHostFlag, false, "Set by a rescan of a remote index. Has no effect.")
+	cmd.Flags().MarkHidden(indexPkg.OnIndexHostFlag)
 
 	return cmd
 }
