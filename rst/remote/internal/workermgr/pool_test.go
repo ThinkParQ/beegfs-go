@@ -1,6 +1,7 @@
 package workermgr
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func drainingWorkerConfig(id, name string) worker.Config {
 		ID: id, Name: name, Type: worker.Mock, MaxReconnectBackOff: 5,
 		MockConfig: worker.MockConfig{
 			Expectations: []worker.MockExpectation{
-				{MethodName: "connect", ReturnArgs: []any{false, nil}},
+				{MethodName: "connect", ReturnArgs: []any{nil}},
 				{
 					MethodName: "SubmitWork", Args: []any{mock.Anything},
 					ReturnArgs: []any{(*flex.Work_Status)(nil), worker.ErrNodeDraining},
@@ -160,4 +161,33 @@ func TestAssignFailsFastWhenAllWorkersDraining(t *testing.T) {
 		"a draining node that declines is now offered work and its refusal reported, so the operator can see why the request was not placed")
 	assert.Less(t, elapsed, assignRetryInterval,
 		"assignment must fail immediately once every node has connected, not sleep and retry")
+}
+
+// TestAssignFailsFastWhenNodeFailedToConnect verifies a node that failed its first connect attempt
+// is not waited for as if it were still starting. Its next attempt only comes after a backoff, so
+// waiting would delay every assignment without making it more likely to succeed.
+func TestAssignFailsFastWhenNodeFailedToConnect(t *testing.T) {
+	mgr, _, cleanup := newWorkTestManager(t, []worker.Config{{
+		ID: "0", Name: "unreachable-node", Type: worker.Mock, MaxReconnectBackOff: 60,
+		MockConfig: worker.MockConfig{
+			Expectations: []worker.MockExpectation{
+				{MethodName: "connect", ReturnArgs: []any{errors.New("simulated connect failure")}},
+				{MethodName: "disconnect", ReturnArgs: []any{nil}},
+			},
+		},
+	}})
+	defer cleanup()
+
+	pool := mgr.nodePools[worker.Mock]
+	node := pool.nodes[0]
+	require.Eventually(t, func() bool { return node.GetState() == worker.OFFLINE }, 5*time.Second,
+		10*time.Millisecond, "node should be offline after its first connect attempt failed")
+
+	_, _, _, stillStarting := pool.assignmentCandidates("")
+	assert.False(t, stillStarting, "a node that failed to connect is not still starting")
+
+	start := time.Now()
+	_, _, err := pool.assignToLeastBusyWorker(mockWR("job-1", "req-0"), "")
+	assert.ErrorIs(t, err, ErrNoWorkersConnected)
+	assert.Less(t, time.Since(start), assignRetryInterval, "assignment must not wait for startup retries")
 }
