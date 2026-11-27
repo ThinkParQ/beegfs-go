@@ -11,6 +11,7 @@ import (
 	"github.com/thinkparq/beegfs-go/common/rst"
 	"github.com/thinkparq/beegfs-go/common/telemetry"
 	"github.com/thinkparq/beegfs-go/common/types"
+	"github.com/thinkparq/beegfs-go/rst/internal/connauth"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/job"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/server"
 	"github.com/thinkparq/beegfs-go/rst/remote/internal/worker"
@@ -30,6 +31,7 @@ type AppConfig struct {
 	MountPoint           string                      `mapstructure:"mount-point"`
 	ServiceName          string                      `mapstructure:"service-name"`
 	Management           MgmtdConfig                 `mapstructure:"management"`
+	Auth                 connauth.Settings           `mapstructure:"auth"`
 	Server               server.Config               `mapstructure:"server"`
 	Log                  logger.Config               `mapstructure:"log"`
 	Telemetry            telemetry.Config            `mapstructure:"telemetry"`
@@ -52,8 +54,12 @@ type MgmtdConfig struct {
 	TLSDisableVerification bool   `mapstructure:"tls-disable-verification"`
 	TLSDisable             bool   `mapstructure:"tls-disable"`
 	UseProxy               bool   `mapstructure:"use-http-proxy"`
-	AuthFile               string `mapstructure:"auth-file"`
-	AuthDisable            bool   `mapstructure:"auth-disable"`
+	// Deprecated: has no effect. Connection authentication follows the BeeGFS client of
+	// mount-point. Kept so existing configuration files still parse.
+	AuthFile string `mapstructure:"auth-file"`
+	// Deprecated: has no effect. Connection authentication follows the BeeGFS client of
+	// mount-point. Kept so existing configuration files still parse.
+	AuthDisable bool `mapstructure:"auth-disable"`
 }
 
 func (c *AppConfig) GetLoggingConfig() logger.Config {

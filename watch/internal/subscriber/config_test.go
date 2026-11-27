@@ -32,7 +32,7 @@ var testConfig = []Config{
 // See the inline notes before adding tests for new/existing subscriber types.
 func TestNewSubscribersFromConfig(t *testing.T) {
 
-	configuredSubscribers, err := NewSubscribersFromConfig(testConfig)
+	configuredSubscribers, err := NewSubscribersFromConfig(testConfig, nil)
 	assert.NoError(t, err)
 
 	// The order of expectedSubscribers matters because we will use that to determine which expected subscriber
@@ -103,5 +103,31 @@ func TestNewSubscribersFromConfig(t *testing.T) {
 		default:
 			assert.Fail(t, "unable to determine subscriber type")
 		}
+	}
+}
+
+func TestNewSubscriberAuthSecret(t *testing.T) {
+	secret := []byte("secret")
+	optIn := Config{Type: "grpc", ID: 1, Name: "remote", GrpcConfig: GrpcConfig{SendAuthSecret: true}}
+	optOut := Config{Type: "grpc", ID: 2, Name: "other"}
+
+	s, err := newSubscriberFromConfig(optIn, secret)
+	if err != nil {
+		t.Fatalf("opt-in with a secret: unexpected error: %v", err)
+	}
+	if got := s.Interface.(*GRPCSubscriber).authSecret; string(got) != string(secret) {
+		t.Errorf("opt-in subscriber holds secret %q, want %q", got, secret)
+	}
+
+	s, err = newSubscriberFromConfig(optOut, secret)
+	if err != nil {
+		t.Fatalf("opt-out: unexpected error: %v", err)
+	}
+	if got := s.Interface.(*GRPCSubscriber).authSecret; got != nil {
+		t.Errorf("opt-out subscriber holds secret %q, want none", got)
+	}
+
+	if _, err := newSubscriberFromConfig(optIn, nil); err == nil {
+		t.Error("opt-in without a secret: expected an error")
 	}
 }

@@ -119,13 +119,14 @@ func NewClientConn(address string, cOpts ...connOpt) (*grpc.ClientConn, error) {
 	// https://github.com/grpc/grpc-go/tree/master/examples/features/metadata_interceptor and
 	// https://github.com/grpc/grpc-go/blob/master/examples/features/interceptor/README.md#client-side
 	if config.AuthSecret != nil {
+		hashedAuthSecret := fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret))
 		connAuthUnaryInterceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-			newCtx := metadata.AppendToOutgoingContext(ctx, "auth-secret", fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret)))
+			newCtx := metadata.AppendToOutgoingContext(ctx, AuthSecretMetadataKey, hashedAuthSecret)
 			return invoker(newCtx, method, req, reply, cc, opts...)
 		}
 		opts = append(opts, grpc.WithChainUnaryInterceptor(connAuthUnaryInterceptor))
 		connAuthStreamInterceptor := func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-			newCtx := metadata.AppendToOutgoingContext(ctx, "auth-secret", fmt.Sprint(util.GenerateAuthSecret(config.AuthSecret)))
+			newCtx := metadata.AppendToOutgoingContext(ctx, AuthSecretMetadataKey, hashedAuthSecret)
 			return streamer(newCtx, desc, cc, method, opts...)
 		}
 		opts = append(opts, grpc.WithChainStreamInterceptor(connAuthStreamInterceptor))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"runtime"
 	"strings"
@@ -28,8 +29,21 @@ var _ Provider = &grpcProvider{}
 
 const (
 	syncMgmtdTLSCertFile = "/etc/beegfs/.beegfs-sync-mgmtd-tls-cert"
-	syncAuthFile         = "/etc/beegfs/.beegfs-sync-auth-file"
 )
+
+// legacySyncAuthFile is where earlier versions wrote the raw auth secret Remote pushed to them.
+// Remote no longer pushes it, so RemoveLegacyAuthFile deletes any copy left behind. It is a
+// variable only so tests can point it at a temporary directory.
+var legacySyncAuthFile = "/etc/beegfs/.beegfs-sync-auth-file"
+
+// RemoveLegacyAuthFile deletes the copy of the auth secret earlier versions wrote, if any. A file
+// that does not exist is not an error.
+func RemoveLegacyAuthFile() error {
+	if err := os.Remove(legacySyncAuthFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
 
 // newClientConn opens a connection to the remote cfg names, with cfg's TLS and proxy settings. It
 // has no other side effects, so it can also open a short-lived connection to check a remote before
@@ -49,6 +63,7 @@ func newClientConn(cfg Config) (*grpc.ClientConn, error) {
 		beegrpc.WithTLSDisableVerification(cfg.TLSDisableVerification),
 		beegrpc.WithTLSDisable(cfg.TlsDisable),
 		beegrpc.WithProxy(cfg.UseProxy),
+		beegrpc.WithAuthSecret(cfg.authSecret),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnableToConnect, err)
@@ -72,12 +87,6 @@ func (c *grpcProvider) init(cfg Config) error {
 		}
 	}
 
-	if !cfg.dynamic.AuthDisable && len(cfg.dynamic.AuthSecret) > 0 {
-		if err := os.WriteFile(syncAuthFile, cfg.dynamic.AuthSecret, 0600); err != nil {
-			return fmt.Errorf("unable to update beegfs authentication secret: %w", err)
-		}
-	}
-
 	err = config.InitViperFromExternal(
 		config.GlobalConfig{
 			MgmtdAddress:                cfg.dynamic.MgmtdAddress,
@@ -85,11 +94,12 @@ func (c *grpcProvider) init(cfg Config) error {
 			MgmtdTLSDisableVerification: cfg.dynamic.MgmtdTlsDisableVerification,
 			MgmtdTLSDisable:             cfg.dynamic.MgmtdTlsDisable,
 			MgmtdUseProxy:               cfg.dynamic.MgmtdUseProxy,
-			AuthFile:                    syncAuthFile,
-			AuthDisable:                 cfg.dynamic.AuthDisable,
-			RemoteAddress:               cfg.dynamic.Address,
-			NumWorkers:                  runtime.GOMAXPROCS(0),
-			ConnTimeoutMs:               500,
+			// CTL uses the same auth file as this node's BeeGFS client (see package connauth).
+			AuthFile:      cfg.authFile,
+			AuthDisable:   cfg.authSecret == nil,
+			RemoteAddress: cfg.dynamic.Address,
+			NumWorkers:    runtime.GOMAXPROCS(0),
+			ConnTimeoutMs: 500,
 		},
 	)
 	if errors.Is(err, config.ErrViperAlreadyInit) {
@@ -139,6 +149,8 @@ func classifyRPCError(err error) error {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	case codes.Canceled:
 		return fmt.Errorf("%w: %w", context.Canceled, err)
+	case codes.Unauthenticated:
+		return fmt.Errorf("%w (hint: the BeeGFS clients of Remote and this Sync node must use the same connAuthFile)", err)
 	}
 	return err
 }
